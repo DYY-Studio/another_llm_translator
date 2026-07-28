@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import tempfile
 import unicodedata
 import uuid
 from collections import Counter
@@ -18,6 +20,7 @@ from .errors import (
     FatalExternalError,
     IncompleteError,
     StorageError,
+    UsageError,
 )
 from .execution import (
     ChunkPlan,
@@ -1198,3 +1201,691 @@ async def run_translation(
 def require_success(summary: dict[str, Any]) -> None:
     if summary.get("failed") or summary.get("pending"):
         raise IncompleteError("选定范围仍有 pending 或 failed")
+
+
+def _base_results(
+    project: Path,
+    stage: str,
+    *,
+    repair_tail: bool,
+) -> dict[str, dict[str, Any]]:
+    translations = {
+        str(key): value
+        for key, value in classify_stage(
+            [],
+            load_stage_history(
+                project, "translation", repair_tail=repair_tail
+            ),
+            force=False,
+        ).latest_completed.items()
+    }
+    if stage == "proofreading":
+        return translations
+    applied = classify_stage(
+        [],
+        load_stage_history(
+            project, "proofreading_applied", repair_tail=repair_tail
+        ),
+        force=False,
+    ).latest_completed
+    return {**translations, **{str(key): value for key, value in applied.items()}}
+
+
+def _parse_review_items(
+    content: str, expected_ids: list[str]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    value = json.loads(content)
+    if not isinstance(value, dict) or not isinstance(value.get("segments"), list):
+        raise ValueError("校对/润色响应必须包含 segments 数组")
+    counts = Counter(
+        item.get("id")
+        for item in value["segments"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    expected = set(expected_ids)
+    valid: dict[str, dict[str, Any]] = {}
+    for item in value["segments"]:
+        if not isinstance(item, dict):
+            continue
+        segment_id = item.get("id")
+        review_status = item.get("status")
+        suggested = item.get("suggested_text")
+        reason = item.get("reason")
+        if segment_id not in expected or counts[segment_id] != 1:
+            continue
+        if review_status not in {"accepted", "suggested"}:
+            continue
+        if review_status == "accepted" and suggested is not None:
+            continue
+        if review_status == "suggested" and (
+            not isinstance(suggested, str) or not suggested
+        ):
+            continue
+        if reason is not None and not isinstance(reason, str):
+            continue
+        valid[str(segment_id)] = {
+            "review_status": review_status,
+            "suggested_text": suggested,
+            "reason": reason,
+        }
+    unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
+    return valid, unresolved
+
+
+async def run_review(
+    project: Path,
+    stage: str,
+    scope: Scope,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    if stage not in {"proofreading", "polishing"}:
+        raise ValueError(f"unsupported review stage: {stage}")
+    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    prompt = _prompt(project, stage)
+    library = load_terms(project)
+    terms_revision = int(library["terms_revision"]) if library else None
+    fingerprint = stage_fingerprint(
+        config, stage, prompt, terms_revision=terms_revision
+    )
+    selected_segments = select_scope(segments, files, scope)
+    bases = _base_results(project, stage, repair_tail=not scope.dry_run)
+    missing_base = [
+        str(segment["segment_id"])
+        for segment in selected_segments
+        if str(segment["segment_id"]) not in bases
+    ]
+    if missing_base:
+        raise IncompleteError(
+            f"{stage} 缺少上游结果，整个阶段未启动：{', '.join(missing_base[:10])}"
+        )
+    history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
+    selection = classify_stage(selected_segments, history, force=scope.force)
+    warnings: list[str] = []
+    if selection.fingerprints and selection.fingerprints != {fingerprint}:
+        warnings.append(f"{stage} 结果包含不同设置指纹；继续复用并处理 pending")
+    context_config = config["context"][stage]
+
+    def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
+        resolver = None
+        if config["execution"]["scheduling_mode"] == "ordered_by_file":
+            resolver = lambda segment_id: (
+                str(bases[segment_id]["text"]) if segment_id in bases else None
+            )
+        context = (
+            previous_context(
+                segments,
+                items[0],
+                context_config["previous_segments"],
+                target_resolver=resolver,
+            )
+            if context_config["enabled"]
+            else []
+        )
+        terms_by_source: dict[str, dict[str, Any]] = {}
+        for item in items:
+            for term in match_terms(
+                str(item["source"]),
+                library,
+                config["terminology"]["max_terms_per_segment"],
+            ):
+                terms_by_source[str(term["source"])] = term
+        return {
+            "target_language": config["project"]["target_language"],
+            "reference_context": context,
+            "terms": list(terms_by_source.values()),
+            "segments": [
+                {
+                    "id": item["segment_id"],
+                    "source": item["source"],
+                    "current_text": bases[str(item["segment_id"])]["text"],
+                }
+                for item in items
+            ],
+        }
+
+    plans = build_chunk_plans(
+        selection.work,
+        config=config,
+        prompt=prompt,
+        payload_builder=payload_builder,
+    )
+    if scope.dry_run:
+        return {
+            "stage": stage,
+            "dry_run": True,
+            "selected": len(selection.selected),
+            "requested": len(selection.work),
+            "reused": len(selection.reusable),
+            "chunks": len(plans),
+            "estimated_input_tokens": sum(
+                plan.estimated_input_tokens for plan in plans
+            ),
+            "warnings": warnings,
+        }
+    run_id, run_dir = create_run(
+        project,
+        stage=stage,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        selected_count=len(selection.selected),
+        requested_count=len(selection.work),
+        reused_count=len(selection.reusable),
+    )
+    chunks = materialize_chunks(run_id, stage, plans)
+    if config["debug"]["enabled"]:
+        save_debug_chunks(
+            run_dir,
+            str(metadata["project_id"]),
+            run_id,
+            stage,
+            chunks,
+        )
+    limiter = SlidingWindowLimiter(
+        config["execution"]["requests_per_minute"],
+        config["execution"]["input_tokens_per_minute"],
+    )
+    result_path = stage_result_path(project, stage)
+    write_lock = asyncio.Lock()
+    completed_ids: set[str] = set()
+    failed_ids: set[str] = set()
+    by_id = {str(item["segment_id"]): item for item in segments}
+
+    async def save_result(
+        segment_id: str,
+        request_id: str,
+        *,
+        parsed: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        base = bases[segment_id]
+        async with write_lock:
+            if parsed is not None:
+                append_jsonl(
+                    result_path,
+                    record_header(
+                        "stage_result",
+                        str(metadata["project_id"]),
+                        stage=stage,
+                        segment_id=segment_id,
+                        status="completed",
+                        review_status=parsed["review_status"],
+                        suggested_text=parsed["suggested_text"],
+                        reason=parsed["reason"],
+                        base_result_id=base["record_id"],
+                        stage_fingerprint=fingerprint,
+                        terms_revision=terms_revision,
+                        run_id=run_id,
+                        request_id=request_id,
+                    ),
+                )
+                completed_ids.add(segment_id)
+            else:
+                append_jsonl(
+                    result_path,
+                    record_header(
+                        "stage_result",
+                        str(metadata["project_id"]),
+                        stage=stage,
+                        segment_id=segment_id,
+                        status="failed",
+                        base_result_id=base["record_id"],
+                        error_class="stage_error",
+                        error_message=error,
+                        stage_fingerprint=fingerprint,
+                        terms_revision=terms_revision,
+                        run_id=run_id,
+                        request_id=request_id,
+                    ),
+                )
+                failed_ids.add(segment_id)
+
+    async def process(chunk: ChunkPlan) -> None:
+        unresolved = [str(item["segment_id"]) for item in chunk.segments]
+        parent_request_id: str | None = None
+        for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
+            items = [by_id[segment_id] for segment_id in unresolved]
+            payload = payload_builder(items)
+            if format_attempt:
+                payload["format_correction"] = (
+                    "上一次响应格式错误或缺少 Segment。只返回全部未决 ID。"
+                )
+            messages = render_messages(prompt, payload)
+            estimated = estimate_messages(
+                messages, config["execution"]["token_safety_factor"]
+            )
+            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+            try:
+                content, _ = await llm.chat(
+                    messages=messages,
+                    temperature=config["llm"][f"temperature_{stage}"],
+                    estimated_input_tokens=estimated,
+                    request_id=request_id,
+                    parent_request_id=parent_request_id,
+                )
+                valid, unresolved = _parse_review_items(content, unresolved)
+            except FatalExternalError:
+                raise
+            except ExternalError as exc:
+                for segment_id in unresolved:
+                    await save_result(segment_id, request_id, error=str(exc))
+                return
+            except (ValueError, json.JSONDecodeError):
+                valid = {}
+            for segment_id, parsed in valid.items():
+                await save_result(segment_id, request_id, parsed=parsed)
+            if not unresolved:
+                return
+            parent_request_id = request_id
+        for segment_id in unresolved:
+            await save_result(segment_id, parent_request_id or "REQ-NONE", error="格式修正次数耗尽")
+
+    try:
+        async with LLMClient(
+            config,
+            limiter,
+            run_dir=run_dir,
+            project_id=str(metadata["project_id"]),
+            run_id=run_id,
+            stage=stage,
+            client=http_client,
+        ) as llm:
+            await dispatch_chunks(
+                chunks,
+                process,
+                mode=config["execution"]["scheduling_mode"],
+                max_parallel=config["execution"]["max_parallel"],
+            )
+    except FatalExternalError:
+        finalize_run(
+            run_dir,
+            status="failed",
+            completed=len(completed_ids),
+            failed=len(selection.work) - len(completed_ids),
+            warnings=warnings,
+        )
+        raise
+    finalize_run(
+        run_dir,
+        status="completed" if not failed_ids else "failed",
+        completed=len(completed_ids),
+        failed=len(failed_ids),
+        warnings=warnings,
+    )
+    _log(
+        project,
+        "INFO",
+        f"{stage} run={run_id} completed={len(completed_ids)} failed={len(failed_ids)}",
+    )
+    return {
+        "stage": stage,
+        "run_id": run_id,
+        "selected": len(selection.selected),
+        "requested": len(selection.work),
+        "reused": len(selection.reusable),
+        "completed": len(completed_ids),
+        "failed": len(failed_ids),
+        "warnings": warnings,
+    }
+
+
+def run_apply(
+    project: Path,
+    review_stage: str,
+    scope: Scope,
+    *,
+    allow_outdated_base: bool,
+    confirmed_all: bool,
+) -> dict[str, Any]:
+    if review_stage not in {"proofreading", "polishing"}:
+        raise ValueError(f"unsupported apply stage: {review_stage}")
+    if not confirmed_all:
+        raise UsageError("apply 必须显式传入 --all")
+    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    selected = select_scope(segments, files, scope)
+    suggestions = classify_stage(
+        selected,
+        load_stage_history(
+            project, review_stage, repair_tail=not scope.dry_run
+        ),
+        force=False,
+    ).latest_completed
+    bases = _base_results(project, review_stage, repair_tail=not scope.dry_run)
+    missing = [
+        str(item["segment_id"])
+        for item in selected
+        if str(item["segment_id"]) not in suggestions
+        or str(item["segment_id"]) not in bases
+    ]
+    if missing:
+        raise IncompleteError(
+            f"apply 缺少建议或基准，整个范围未应用：{', '.join(missing[:10])}"
+        )
+    outdated = [
+        str(item["segment_id"])
+        for item in selected
+        if suggestions[str(item["segment_id"])].get("base_result_id")
+        != bases[str(item["segment_id"])]["record_id"]
+    ]
+    if outdated and not allow_outdated_base:
+        raise IncompleteError(
+            "建议基于旧上游结果；使用 --allow-outdated-base 才可强制"
+        )
+    applied_stage = f"{review_stage}_applied"
+    fingerprint = stage_fingerprint(
+        config,
+        applied_stage,
+        None,
+        apply_semantics={
+            "review_stage": review_stage,
+            "allow_outdated_base": allow_outdated_base,
+        },
+    )
+    if scope.dry_run:
+        return {
+            "stage": applied_stage,
+            "dry_run": True,
+            "selected": len(selected),
+            "outdated_base": len(outdated),
+            "warnings": ["存在旧基准建议"] if outdated else [],
+        }
+    run_id, run_dir = create_run(
+        project,
+        stage=applied_stage,
+        fingerprint=fingerprint,
+        prompt=None,
+        selected_count=len(selected),
+        requested_count=len(selected),
+        reused_count=0,
+    )
+    result_path = stage_result_path(project, applied_stage)
+    for segment in selected:
+        segment_id = str(segment["segment_id"])
+        suggestion = suggestions[segment_id]
+        base = bases[segment_id]
+        text = (
+            suggestion["suggested_text"]
+            if suggestion["review_status"] == "suggested"
+            else base["text"]
+        )
+        append_jsonl(
+            result_path,
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage=applied_stage,
+                segment_id=segment_id,
+                status="completed",
+                text=text,
+                suggestion_result_id=suggestion["record_id"],
+                base_result_id=base["record_id"],
+                allowed_outdated_base=allow_outdated_base,
+                stage_fingerprint=fingerprint,
+                run_id=run_id,
+                request_id=None,
+            ),
+        )
+    warnings = ["已强制应用旧基准建议"] if outdated else []
+    finalize_run(
+        run_dir,
+        status="completed",
+        completed=len(selected),
+        failed=0,
+        warnings=warnings,
+    )
+    return {
+        "stage": applied_stage,
+        "run_id": run_id,
+        "completed": len(selected),
+        "failed": 0,
+        "warnings": warnings,
+    }
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def export_project(
+    project: Path,
+    export_stage: str,
+    *,
+    bilingual: bool,
+    allow_missing: bool,
+) -> dict[str, Any]:
+    if export_stage not in {"translated", "proofread", "polished"}:
+        raise ValueError(f"unsupported export stage: {export_stage}")
+    config, _, files, segments = _project_context(project, dry_run=False)
+    stage_name = {
+        "translated": "translation",
+        "proofread": "proofreading_applied",
+        "polished": "polishing_applied",
+    }[export_stage]
+    primary = classify_stage(
+        [],
+        load_stage_history(project, stage_name),
+        force=False,
+    ).latest_completed
+    translation = classify_stage(
+        [], load_stage_history(project, "translation"), force=False
+    ).latest_completed
+    proofread = classify_stage(
+        [], load_stage_history(project, "proofreading_applied"), force=False
+    ).latest_completed
+    fallback_records: list[str] = []
+    missing: list[str] = []
+    output_text: dict[str, str] = {}
+    validation_warnings = 0
+    used_fingerprints: set[str] = set()
+    for segment in segments:
+        if segment["is_empty"]:
+            continue
+        segment_id = str(segment["segment_id"])
+        record = primary.get(segment_id)
+        if record is None and allow_missing:
+            if export_stage == "polished":
+                record = proofread.get(segment_id) or translation.get(segment_id)
+            elif export_stage == "proofread":
+                record = translation.get(segment_id)
+            if record is None:
+                output_text[segment_id] = str(segment["source"])
+            else:
+                output_text[segment_id] = str(record["text"])
+            fallback_records.append(segment_id)
+        elif record is None:
+            missing.append(segment_id)
+        else:
+            output_text[segment_id] = str(record["text"])
+        if record is not None:
+            if record.get("validation_status") == "warning":
+                validation_warnings += 1
+            if record.get("stage_fingerprint"):
+                used_fingerprints.add(str(record["stage_fingerprint"]))
+    if missing:
+        raise IncompleteError(
+            f"导出缺少 {export_stage} 结果：{', '.join(missing[:10])}"
+        )
+
+    directory = (
+        project / "output" / "bilingual" / export_stage
+        if bilingual
+        else project / "output" / export_stage
+    )
+    by_file: dict[str, list[dict[str, Any]]] = {}
+    for segment in segments:
+        by_file.setdefault(str(segment["file_id"]), []).append(segment)
+    written: list[str] = []
+    encoding = config["project"]["output_encoding"]
+    for file_record in sorted(files, key=lambda item: int(item["file_order"])):
+        lines: list[str] = []
+        for segment in sorted(
+            by_file[str(file_record["file_id"])],
+            key=lambda item: int(item["line_index"]),
+        ):
+            if segment["is_empty"]:
+                lines.append("")
+            elif bilingual:
+                lines.append(str(segment["source"]))
+                lines.append(output_text[str(segment["segment_id"])])
+            else:
+                lines.append(output_text[str(segment["segment_id"])])
+        relative = Path(str(file_record["original_name"]))
+        destination = directory / relative
+        try:
+            payload = "\n".join(lines).encode(encoding, errors="strict")
+        except (LookupError, UnicodeEncodeError) as exc:
+            raise IncompleteError(
+                f"输出编码 {encoding} 无法表示 {relative}: {exc}"
+            ) from exc
+        _atomic_write_bytes(destination, payload)
+        written.append(str(destination.relative_to(project)))
+    return {
+        "stage": export_stage,
+        "bilingual": bilingual,
+        "files": len(written),
+        "written": written,
+        "fallback_segments": fallback_records,
+        "validation_warnings": validation_warnings,
+        "mixed_fingerprints": len(used_fingerprints) > 1,
+        "output_encoding": encoding,
+    }
+
+
+async def run_all(
+    project: Path,
+    scope: Scope,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    summaries: list[dict[str, Any]] = []
+    terms = load_terms(project)
+    active_path = project / "terminology" / "active_task.json"
+    active = read_json(active_path) if active_path.exists() else None
+    if scope.force or terms is None or (active and active.get("status") == "active"):
+        term_summary = await run_terminology(
+            project, scope, http_client=http_client
+        )
+        summaries.append(term_summary)
+        require_success(term_summary)
+    translation = await run_translation(project, scope, http_client=http_client)
+    summaries.append(translation)
+    require_success(translation)
+    proofreading = await run_review(
+        project, "proofreading", scope, http_client=http_client
+    )
+    summaries.append(proofreading)
+    require_success(proofreading)
+    polishing = await run_review(
+        project, "polishing", scope, http_client=http_client
+    )
+    summaries.append(polishing)
+    require_success(polishing)
+    return {"stage": "run-all", "steps": summaries, "failed": 0, "pending": 0}
+
+
+def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    config, metadata, files, segments = _project_context(project, dry_run=dry_run)
+    nonempty = [item for item in segments if not item["is_empty"]]
+    summary: dict[str, Any] = {
+        "name": metadata["name"],
+        "files": len(files),
+        "segments": len(segments),
+        "empty_segments": len(segments) - len(nonempty),
+        "terms_revision": None,
+        "terminology": {"completed": 0, "failed": 0, "pending": len(nonempty)},
+        "stages": {},
+        "outdated_suggestions": {},
+        "validation_warnings": 0,
+    }
+    library = load_terms(project)
+    if library:
+        summary["terms_revision"] = library["terms_revision"]
+    active_path = project / "terminology" / "active_task.json"
+    if active_path.exists():
+        active = read_json(active_path)
+        if active.get("status") == "active":
+            scans = [
+                item
+                for item in read_jsonl(
+                    project / "terminology" / "scans.jsonl",
+                    repair_tail=not dry_run,
+                )
+                if item.get("active_task_id") == active.get("active_task_id")
+            ]
+            completed = {
+                item["segment_id"] for item in scans if item["status"] == "completed"
+            }
+            failed = {
+                item["segment_id"]
+                for item in scans
+                if item["status"] == "failed" and item["segment_id"] not in completed
+            }
+            summary["terminology"] = {
+                "active_task_id": active["active_task_id"],
+                "completed": len(completed),
+                "failed": len(failed),
+                "pending": len(nonempty) - len(completed) - len(failed),
+            }
+    histories: dict[str, list[dict[str, Any]]] = {}
+    for stage in (
+        "translation",
+        "proofreading",
+        "proofreading_applied",
+        "polishing",
+        "polishing_applied",
+    ):
+        history = load_stage_history(project, stage, repair_tail=not dry_run)
+        histories[stage] = history
+        completed = classify_stage([], history, force=False).latest_completed
+        failed = {
+            str(item["segment_id"])
+            for item in history
+            if item.get("status") == "failed"
+            and str(item.get("segment_id")) not in completed
+        }
+        latest_failed_after_success = 0
+        by_segment: dict[str, list[dict[str, Any]]] = {}
+        for item in history:
+            by_segment.setdefault(str(item.get("segment_id")), []).append(item)
+        for segment_id in completed:
+            if by_segment[segment_id][-1].get("status") == "failed":
+                latest_failed_after_success += 1
+        fingerprints = {
+            str(item["stage_fingerprint"])
+            for item in completed.values()
+            if item.get("stage_fingerprint")
+        }
+        summary["stages"][stage] = {
+            "completed": len(completed),
+            "failed": len(failed),
+            "pending": len(nonempty) - len(completed) - len(failed),
+            "fingerprint_count": len(fingerprints),
+            "last_attempt_failed": latest_failed_after_success,
+        }
+    summary["validation_warnings"] = sum(
+        item.get("validation_status") == "warning"
+        for item in histories["translation"]
+        if item.get("status") == "completed"
+    )
+    for review_stage in ("proofreading", "polishing"):
+        suggestions = classify_stage(
+            [], histories[review_stage], force=False
+        ).latest_completed
+        bases = _base_results(project, review_stage, repair_tail=not dry_run)
+        summary["outdated_suggestions"][review_stage] = sum(
+            suggestion.get("base_result_id")
+            != bases.get(segment_id, {}).get("record_id")
+            for segment_id, suggestion in suggestions.items()
+        )
+    return summary

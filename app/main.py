@@ -8,7 +8,15 @@ import sys
 from .execution import Scope
 from .errors import AppError
 from .project import init_project, inspect_project, resolve_project, sync_global_templates
-from .stages import run_terminology, run_translation
+from .stages import (
+    export_project,
+    inspect_full,
+    run_all,
+    run_apply,
+    run_review,
+    run_terminology,
+    run_translation,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("terminology", "提取并发布术语"),
         ("translate", "翻译项目"),
+        ("proofread", "生成校对建议"),
+        ("polish", "生成润色建议"),
+        ("run-all", "运行完整建议流程"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("project")
@@ -37,6 +48,25 @@ def build_parser() -> argparse.ArgumentParser:
         selectors.add_argument("--from-file")
         selectors.add_argument("--only-file")
         selectors.add_argument("--only-segment")
+
+    apply = subparsers.add_parser("apply", help="应用校对或润色建议")
+    apply.add_argument("project")
+    apply.add_argument("--stage", choices=("proofreading", "polishing"), required=True)
+    apply.add_argument("--all", action="store_true")
+    apply.add_argument("--allow-outdated-base", action="store_true")
+    apply.add_argument("--dry-run", action="store_true")
+    apply_selectors = apply.add_mutually_exclusive_group()
+    apply_selectors.add_argument("--from-file")
+    apply_selectors.add_argument("--only-file")
+    apply_selectors.add_argument("--only-segment")
+
+    export = subparsers.add_parser("export", help="导出 TXT")
+    export.add_argument("project")
+    export.add_argument(
+        "--stage", choices=("translated", "proofread", "polished"), required=True
+    )
+    export.add_argument("--bilingual", action="store_true")
+    export.add_argument("--allow-missing", action="store_true")
     return parser
 
 
@@ -57,11 +87,17 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == "inspect":
         project = resolve_project(args.project)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
-        summary = inspect_project(project, repair_tail=not args.dry_run)
+        summary = inspect_full(project, dry_run=args.dry_run)
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
-    if args.command in {"terminology", "translate"}:
+    if args.command in {
+        "terminology",
+        "translate",
+        "proofread",
+        "polish",
+        "run-all",
+    }:
         project = resolve_project(args.project)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         scope = Scope(
@@ -73,12 +109,48 @@ def run(argv: list[str] | None = None) -> int:
         )
         if args.command == "terminology":
             summary = asyncio.run(run_terminology(project, scope))
-        else:
+        elif args.command == "translate":
             summary = asyncio.run(run_translation(project, scope))
+        elif args.command == "proofread":
+            summary = asyncio.run(run_review(project, "proofreading", scope))
+        elif args.command == "polish":
+            summary = asyncio.run(run_review(project, "polishing", scope))
+        else:
+            summary = asyncio.run(run_all(project, scope))
         summary.setdefault("warnings", [])
         summary["warnings"] = [*warnings, *summary["warnings"]]
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 5 if summary.get("failed") or summary.get("pending") else 0
+    if args.command == "apply":
+        project = resolve_project(args.project)
+        warnings = sync_global_templates(project, dry_run=args.dry_run)
+        summary = run_apply(
+            project,
+            args.stage,
+            Scope(
+                from_file=args.from_file,
+                only_file=args.only_file,
+                only_segment=args.only_segment,
+                dry_run=args.dry_run,
+            ),
+            allow_outdated_base=args.allow_outdated_base,
+            confirmed_all=args.all,
+        )
+        summary["warnings"] = [*warnings, *summary["warnings"]]
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "export":
+        project = resolve_project(args.project)
+        warnings = sync_global_templates(project)
+        summary = export_project(
+            project,
+            args.stage,
+            bilingual=args.bilingual,
+            allow_missing=args.allow_missing,
+        )
+        summary["warnings"] = warnings
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
     parser.error("unknown command")
     return 2
 
