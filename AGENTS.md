@@ -18,17 +18,18 @@ size and responsibilities.
 
 ## Build, Test, and Development Commands
 
-There is no build system, dependency file, or runnable package yet. Add only
-commands that have been implemented and locally verified.
-
-Planned CLI examples:
+Create the local environment and verify installed dependencies:
 
 ```bash
-python -m app.main init INPUT --name demo
-python -m app.main run-all demo
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
 ```
 
-Once tests exist, use `pytest` and document setup in `README.md`.
+There is no runnable package yet. Planned CLI behavior is defined in
+`docs/MINIMAL.md`. Once tests exist, use `pytest` and document setup in
+`README.md`.
 
 ## Coding Style & Naming Conventions
 
@@ -78,4 +79,6 @@ completed steps, and validation. Call out new complexity and link relevant issue
 
 ## Security & Configuration
 
-Read API keys only from the configured environment variable. Never commit secrets, generated project data, raw debug payloads, or translated source material.
+Copy `.env.example` for local secrets, but load `LLM_API_KEY` through the
+environment. Never commit secrets, generated projects, debug payloads, or source
+material.

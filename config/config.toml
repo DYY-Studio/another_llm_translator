@@ -1,0 +1,78 @@
+[project]
+target_language = "简体中文"
+output_encoding = "utf-8-sig"
+
+[input]
+encoding_confidence_threshold = 0.60
+fallback_encoding = "utf-8"
+
+[llm]
+# Replace these placeholders with the selected OpenAI-compatible endpoint and model.
+base_url = "https://example.com/v1"
+endpoint = "/chat/completions"
+model = "example-model"
+api_key_env = "LLM_API_KEY"
+
+temperature_terminology = 0.1
+temperature_translation = 0.2
+temperature_proofreading = 0.1
+temperature_polishing = 0.3
+
+max_output_tokens = 4096
+context_window_tokens = 16384
+context_safety_margin_tokens = 512
+
+[execution]
+max_parallel = 4
+requests_per_minute = 30
+input_tokens_per_minute = 50000
+request_timeout_seconds = 120
+scheduling_mode = "ordered_by_file"
+token_safety_factor = 1.25
+
+[chunking]
+target_chunk_input_tokens = 11000
+allow_split_oversized_segment = true
+
+[context.translation]
+enabled = true
+previous_segments = 3
+
+[context.proofreading]
+enabled = true
+previous_segments = 3
+
+[context.polishing]
+enabled = true
+previous_segments = 3
+
+[context.terminology]
+enabled = true
+previous_segments = 3
+
+[terminology]
+unicode_normalization = "NFKC"
+case_insensitive = true
+max_terms_per_segment = 100
+
+[validation.translation]
+japanese_kana = false
+korean_hangul = false
+max_retry_attempts = 2
+exhausted_mode = "fail"
+
+[retry]
+http_max_attempts = 6
+format_max_attempts = 2
+base_delay_seconds = 2.0
+max_delay_seconds = 60.0
+jitter_seconds = 1.0
+
+[debug]
+enabled = false
+inject_429_every = 0
+inject_500_every = 0
+inject_timeout_every = 0
+inject_invalid_json_every = 0
+inject_missing_segment_every = 0
+
