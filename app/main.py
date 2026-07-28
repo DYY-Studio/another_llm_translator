@@ -7,7 +7,7 @@ import sys
 
 from .execution import Scope
 from .errors import AppError
-from .project import init_project, inspect_project, resolve_project, sync_global_templates
+from .project import init_project, resolve_project, sync_global_templates
 from .stages import (
     export_project,
     inspect_full,

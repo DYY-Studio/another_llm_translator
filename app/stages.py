@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import tempfile
 import unicodedata
 import uuid
@@ -16,6 +17,7 @@ import httpx
 from .config import load_config
 from .errors import (
     ConfigError,
+    ContextLengthError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
@@ -82,6 +84,41 @@ def _project_context(
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
     return config, metadata, files, segments
+
+
+def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
+    return {
+        "all_nonempty": force_all
+        or not (scope.from_file or scope.only_file or scope.only_segment),
+        "from_file": None if force_all else scope.from_file,
+        "only_file": None if force_all else scope.only_file,
+        "only_segment": None if force_all else scope.only_segment,
+        "force": scope.force,
+    }
+
+
+def _request_estimate(
+    messages: list[dict[str, str]],
+    config: dict[str, Any],
+    request_id: str,
+) -> int:
+    estimated = estimate_messages(
+        messages,
+        config["execution"]["token_safety_factor"],
+    )
+    hard_limit = (
+        config["llm"]["context_window_tokens"]
+        - config["llm"]["max_output_tokens"]
+        - config["llm"]["context_safety_margin_tokens"]
+    )
+    if estimated > hard_limit:
+        raise ContextLengthError(
+            "渲染后的 Prompt 超过模型硬限制",
+            request_id=request_id,
+        )
+    if estimated > config["execution"]["input_tokens_per_minute"]:
+        raise ConfigError("单请求预测 Token 超过 ITPM")
+    return estimated
 
 
 def _prompt(project: Path, stage: str) -> str:
@@ -287,6 +324,9 @@ async def run_terminology(
         task_id = str(active.get("active_task_id", "none")) if active else "none"
 
     selected = select_scope(segments, files, scope)
+    if scope.force:
+        # A forced terminology run always starts a complete replacement scan.
+        selected = [segment for segment in segments if not segment["is_empty"]]
     scans = [
         record
         for record in read_jsonl(
@@ -316,7 +356,9 @@ async def run_terminology(
     }
     warnings: list[str] = []
     if existing_fingerprints and existing_fingerprints != {fingerprint}:
-        warnings.append("活动术语任务包含不同设置指纹；继续复用并处理 pending")
+        warnings.append(
+            "活动术语任务包含不同设置指纹；继续复用并处理 pending"
+        )
 
     context_config = config["context"]["terminology"]
 
@@ -418,6 +460,10 @@ async def run_terminology(
         selected_count=len(selected),
         requested_count=len(work),
         reused_count=len(selected) - len(work),
+        details={
+            "active_task_id": task_id,
+            "scope": _scope_record(scope, force_all=scope.force),
+        },
     )
     chunks = materialize_chunks(run_id, "terminology", plans)
     if config["debug"]["enabled"]:
@@ -436,9 +482,12 @@ async def run_terminology(
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
 
-    async def process(chunk: ChunkPlan) -> tuple[int, int]:
+    async def process_once(
+        chunk: ChunkPlan,
+        initial_parent_request_id: str | None = None,
+    ) -> tuple[int, int]:
         unresolved = list(chunk.segments)
-        parent_request_id: str | None = None
+        parent_request_id = initial_parent_request_id
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
@@ -446,10 +495,8 @@ async def run_terminology(
                     "上一次响应格式错误。只返回合法 JSON，不要解释。"
                 )
             messages = render_messages(prompt, payload)
-            estimated = estimate_messages(
-                messages, config["execution"]["token_safety_factor"]
-            )
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+            estimated = _request_estimate(messages, config, request_id)
             try:
                 content, _ = await llm.chat(
                     messages=messages,
@@ -460,6 +507,8 @@ async def run_terminology(
                 )
                 terms = _validate_term_items(json.loads(content))
             except FatalExternalError:
+                raise
+            except ContextLengthError:
                 raise
             except (ExternalError, ValueError, json.JSONDecodeError) as exc:
                 if format_attempt < config["retry"]["format_max_attempts"] and not isinstance(
@@ -487,7 +536,11 @@ async def run_terminology(
                                 request_id=request_id,
                                 active_task_id=task_id,
                                 stage_fingerprint=fingerprint,
-                                error_class=type(exc).__name__,
+                                error_class=(
+                                    "external_error"
+                                    if isinstance(exc, ExternalError)
+                                    else "format_error"
+                                ),
                                 error_message=str(exc),
                             ),
                         )
@@ -548,6 +601,69 @@ async def run_terminology(
                     )
             return len(completed_originals), 0
         return 0, len(unresolved)
+
+    async def process(
+        chunk: ChunkPlan,
+        split_parent_request_id: str | None = None,
+    ) -> tuple[int, int]:
+        try:
+            return await process_once(chunk, split_parent_request_id)
+        except ContextLengthError as exc:
+            items = list(chunk.segments)
+            if len(items) > 1:
+                midpoint = len(items) // 2
+                groups = (items[:midpoint], items[midpoint:])
+            elif (
+                config["chunking"]["allow_split_oversized_segment"]
+                and len(str(items[0]["source"])) > 1
+            ):
+                groups = tuple(
+                    [part]
+                    for part in _replace_with_runtime_parts(
+                        items[0],
+                        part_original=part_original,
+                        original_parts=original_parts,
+                    )
+                )
+            else:
+                groups = ()
+            if not groups:
+                original_id = part_original.get(
+                    str(items[0]["segment_id"]), str(items[0]["segment_id"])
+                )
+                async with write_lock:
+                    if original_id not in failed_originals:
+                        failed_originals.add(original_id)
+                        append_jsonl(
+                            project / "terminology" / "scans.jsonl",
+                            record_header(
+                                "terminology_scan",
+                                str(metadata["project_id"]),
+                                stage="terminology",
+                                segment_id=original_id,
+                                status="failed",
+                                run_id=run_id,
+                                request_id=None,
+                                active_task_id=task_id,
+                                stage_fingerprint=fingerprint,
+                                error_class="context_error",
+                                error_message="模型报告上下文过长",
+                            ),
+                        )
+                return 0, 1
+            values = [
+                await process(
+                    ChunkPlan(
+                        file_id=str(group[0]["file_id"]),
+                        segments=tuple(group),
+                        payload={},
+                        estimated_input_tokens=0,
+                    ),
+                    exc.request_id,
+                )
+                for group in groups
+            ]
+            return sum(item[0] for item in values), sum(item[1] for item in values)
 
     try:
         async with LLMClient(
@@ -640,21 +756,31 @@ def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list
     if library is None:
         return []
     normalized_source = normalize_term(source)
-    matched: list[tuple[int, int, dict[str, Any]]] = []
+    matched: list[tuple[int, int, int, dict[str, Any]]] = []
     for term in library.get("terms", []):
-        names = [term.get("source", ""), *term.get("aliases", [])]
-        normalized_names = [normalize_term(str(name)) for name in names if name]
-        hits = [name for name in normalized_names if name and name in normalized_source]
+        main_name = normalize_term(str(term.get("source", "")))
+        alias_names = [
+            normalize_term(str(name)) for name in term.get("aliases", []) if name
+        ]
+        main_hit = bool(main_name and main_name in normalized_source)
+        hits = [
+            name
+            for name in ([main_name] if main_hit else alias_names)
+            if name and name in normalized_source
+        ]
         if not hits:
             continue
         matched.append(
             (
+                1 if main_hit else 0,
                 max(len(name) for name in hits),
                 1 if term.get("preferred_translation") else 0,
                 term,
             )
         )
-    matched.sort(key=lambda item: (-item[0], -item[1], item[2].get("source", "")))
+    matched.sort(
+        key=lambda item: (-item[0], -item[1], -item[2], item[3].get("source", ""))
+    )
     return [
         {
             key: term.get(key)
@@ -666,7 +792,7 @@ def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list
                 "aliases",
             )
         }
-        for _, _, term in matched[:limit]
+        for _, _, _, term in matched[:limit]
     ]
 
 
@@ -708,6 +834,50 @@ def _split_source_once(source: str) -> tuple[str, str]:
     if split_at <= 0 or split_at >= len(source):
         split_at = midpoint
     return source[:split_at], source[split_at:]
+
+
+def _replace_with_runtime_parts(
+    segment: dict[str, Any],
+    *,
+    part_original: dict[str, str],
+    original_parts: dict[str, list[str]],
+    by_id: dict[str, dict[str, Any]] | None = None,
+    bases: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    segment_id = str(segment["segment_id"])
+    original_id = part_original.get(segment_id, segment_id)
+    left_source, right_source = _split_source_once(str(segment["source"]))
+    suffix = uuid.uuid4().hex[:6].upper()
+    part_ids = [
+        f"{segment_id}-R1-{suffix}",
+        f"{segment_id}-R2-{suffix}",
+    ]
+    parts = [
+        {**segment, "segment_id": part_ids[0], "source": left_source},
+        {**segment, "segment_id": part_ids[1], "source": right_source},
+    ]
+    expected = original_parts.setdefault(original_id, [segment_id])
+    index = expected.index(segment_id)
+    expected[index : index + 1] = part_ids
+    for part in parts:
+        part_id = str(part["segment_id"])
+        part_original[part_id] = original_id
+        if by_id is not None:
+            by_id[part_id] = part
+    if bases is not None:
+        base = bases.get(segment_id, bases[original_id])
+        text = str(base["text"])
+        split_at = round(len(text) * len(left_source) / len(str(segment["source"])))
+        for part_id, part_text in zip(
+            part_ids,
+            (text[:split_at], text[split_at:]),
+            strict=True,
+        ):
+            bases[part_id] = {
+                "record_id": base["record_id"],
+                "text": part_text,
+            }
+    return parts
 
 
 def _parse_translation_items(
@@ -884,6 +1054,10 @@ async def run_translation(
         selected_count=len(selection.selected),
         requested_count=len(selection.work),
         reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+        },
     )
     chunks = materialize_chunks(run_id, "translation", plans)
     if config["debug"]["enabled"]:
@@ -1013,11 +1187,12 @@ async def run_translation(
         group: list[dict[str, Any]],
         *,
         repair_candidates: dict[str, dict[str, Any]] | None = None,
+        initial_parent_request_id: str | None = None,
     ) -> tuple[dict[str, tuple[str, str]], list[str]]:
         expected = [str(item["segment_id"]) for item in group]
         unresolved = expected
         valid_total: dict[str, tuple[str, str]] = {}
-        parent_request_id: str | None = None
+        parent_request_id = initial_parent_request_id
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             unresolved_items = [by_id[segment_id] for segment_id in unresolved]
             payload = payload_builder(unresolved_items)
@@ -1043,10 +1218,8 @@ async def run_translation(
                     "上一次响应格式错误或缺少 Segment。只返回全部未决 ID。"
                 )
             messages = render_messages(prompt, payload)
-            estimated = estimate_messages(
-                messages, config["execution"]["token_safety_factor"]
-            )
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+            estimated = _request_estimate(messages, config, request_id)
             try:
                 content, _ = await llm.chat(
                     messages=messages,
@@ -1058,10 +1231,15 @@ async def run_translation(
                 valid, unresolved, _ = _parse_translation_items(content, unresolved)
             except FatalExternalError:
                 raise
+            except ContextLengthError:
+                raise
             except ExternalError as exc:
                 for segment_id in unresolved:
                     await save_failed(
-                        segment_id, request_id, type(exc).__name__, str(exc)
+                        segment_id,
+                        request_id,
+                        "external_error",
+                        str(exc),
                     )
                 return valid_total, []
             except (ValueError, json.JSONDecodeError):
@@ -1073,9 +1251,15 @@ async def run_translation(
             parent_request_id = request_id
         return valid_total, unresolved
 
-    async def process(chunk: ChunkPlan) -> None:
+    async def process_once(
+        chunk: ChunkPlan,
+        initial_parent_request_id: str | None = None,
+    ) -> None:
         group = list(chunk.segments)
-        valid, unresolved = await request_translations(group)
+        valid, unresolved = await request_translations(
+            group,
+            initial_parent_request_id=initial_parent_request_id,
+        )
         for segment_id, (text, request_id) in valid.items():
             await accept_candidate(segment_id, text, request_id)
         for segment_id in unresolved:
@@ -1085,6 +1269,115 @@ async def run_translation(
                 "format_error",
                 "格式修正次数耗尽",
             )
+
+    async def process(
+        chunk: ChunkPlan,
+        split_parent_request_id: str | None = None,
+    ) -> None:
+        try:
+            await process_once(chunk, split_parent_request_id)
+            return
+        except ContextLengthError as exc:
+            items = list(chunk.segments)
+            if len(items) > 1:
+                midpoint = len(items) // 2
+                groups = (items[:midpoint], items[midpoint:])
+            elif (
+                config["chunking"]["allow_split_oversized_segment"]
+                and len(str(items[0]["source"])) > 1
+            ):
+                groups = tuple(
+                    [part]
+                    for part in _replace_with_runtime_parts(
+                        items[0],
+                        part_original=part_original,
+                        original_parts=original_parts,
+                        by_id=by_id,
+                    )
+                )
+            else:
+                groups = ()
+            if not groups:
+                await save_failed(
+                    str(items[0]["segment_id"]),
+                    "REQ-NONE",
+                    "context_error",
+                    "模型报告上下文过长",
+                )
+                return
+            for group in groups:
+                await process(
+                    ChunkPlan(
+                        file_id=str(group[0]["file_id"]),
+                        segments=tuple(group),
+                        payload={},
+                        estimated_input_tokens=0,
+                    ),
+                    exc.request_id,
+                )
+
+    async def repair_group(
+        group: list[dict[str, Any]],
+        subset: dict[str, dict[str, Any]],
+        parent_request_id: str | None = None,
+    ) -> None:
+        try:
+            valid, unresolved = await request_translations(
+                group,
+                repair_candidates=subset,
+                initial_parent_request_id=parent_request_id,
+            )
+        except ContextLengthError as exc:
+            if len(group) > 1:
+                midpoint = len(group) // 2
+                child_groups = (group[:midpoint], group[midpoint:])
+                for child_group in child_groups:
+                    child_subset = {
+                        str(item["segment_id"]): subset[str(item["segment_id"])]
+                        for item in child_group
+                    }
+                    await repair_group(child_group, child_subset, exc.request_id)
+                return
+            item = group[0]
+            segment_id = str(item["segment_id"])
+            if (
+                not config["chunking"]["allow_split_oversized_segment"]
+                or len(str(item["source"])) < 2
+            ):
+                validation_pending[segment_id] = subset[segment_id]
+                return
+            parts = _replace_with_runtime_parts(
+                item,
+                part_original=part_original,
+                original_parts=original_parts,
+                by_id=by_id,
+            )
+            candidate = str(subset[segment_id]["candidate"])
+            left_length = round(
+                len(candidate)
+                * len(str(parts[0]["source"]))
+                / len(str(item["source"]))
+            )
+            candidate_parts = (candidate[:left_length], candidate[left_length:])
+            for part, candidate_part in zip(parts, candidate_parts, strict=True):
+                part_id = str(part["segment_id"])
+                child_subset = {
+                    part_id: {
+                        "segment": part,
+                        "candidate": candidate_part,
+                        "findings": validate_translation_text(
+                            candidate_part,
+                            config["validation"]["translation"],
+                        ),
+                        "request_id": subset[segment_id]["request_id"],
+                    }
+                }
+                await repair_group([part], child_subset, exc.request_id)
+            return
+        for segment_id, (text, request_id) in valid.items():
+            await accept_candidate(segment_id, text, request_id)
+        for segment_id in unresolved:
+            validation_pending[segment_id] = subset[segment_id]
 
     try:
         async with LLMClient(
@@ -1125,24 +1418,7 @@ async def run_translation(
                         ]
                         for item in group
                     }
-                    valid, unresolved = await request_translations(
-                        group, repair_candidates=subset
-                    )
-                    for segment_id, (text, request_id) in valid.items():
-                        findings = validate_translation_text(
-                            text, config["validation"]["translation"]
-                        )
-                        if findings:
-                            validation_pending[segment_id] = {
-                                "segment": by_id[segment_id],
-                                "candidate": text,
-                                "findings": findings,
-                                "request_id": request_id,
-                            }
-                        else:
-                            await save_completed(segment_id, text, request_id)
-                    for segment_id in unresolved:
-                        validation_pending[segment_id] = subset[segment_id]
+                    await repair_group(group, subset)
     except FatalExternalError:
         finalize_run(
             run_dir,
@@ -1154,6 +1430,40 @@ async def run_translation(
         raise
 
     exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
+    if exhausted_mode == "warning":
+        pending_part_originals = {
+            part_original[segment_id]
+            for segment_id in validation_pending
+            if segment_id in part_original
+        }
+        for original_id in pending_part_originals:
+            expected = original_parts[original_id]
+            combined_parts: list[str] = []
+            request_id = "REQ-NONE"
+            for part_id in expected:
+                if part_id in validation_pending:
+                    item = validation_pending[part_id]
+                    combined_parts.append(str(item["candidate"]))
+                    request_id = str(item["request_id"])
+                elif part_id in part_results.get(original_id, {}):
+                    text, request_id = part_results[original_id][part_id]
+                    combined_parts.append(text)
+                else:
+                    break
+            else:
+                combined = "".join(combined_parts)
+                await save_completed(
+                    original_id,
+                    combined,
+                    request_id,
+                    validation_status="warning",
+                    findings=validate_translation_text(
+                        combined,
+                        config["validation"]["translation"],
+                    ),
+                )
+                for part_id in expected:
+                    validation_pending.pop(part_id, None)
     for segment_id, item in validation_pending.items():
         if exhausted_mode == "warning":
             await save_completed(
@@ -1295,13 +1605,28 @@ async def run_review(
         for segment in selected_segments
         if str(segment["segment_id"]) not in bases
     ]
-    if missing_base:
+    if missing_base and not scope.dry_run:
         raise IncompleteError(
             f"{stage} 缺少上游结果，整个阶段未启动：{', '.join(missing_base[:10])}"
         )
+    if scope.dry_run:
+        for segment in selected_segments:
+            segment_id = str(segment["segment_id"])
+            bases.setdefault(
+                segment_id,
+                {
+                    "record_id": f"DRY-BASE-{segment_id}",
+                    "text": str(segment["source"]),
+                },
+            )
     history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    if missing_base:
+        warnings.append(
+            f"{stage} dry-run 使用源文占位估算；"
+            f"实际运行仍缺少 {len(missing_base)} 条上游结果"
+        )
     if selection.fingerprints and selection.fingerprints != {fingerprint}:
         warnings.append(f"{stage} 结果包含不同设置指纹；继续复用并处理 pending")
     context_config = config["context"][stage]
@@ -1344,8 +1669,73 @@ async def run_review(
             ],
         }
 
+    request_segments: list[dict[str, Any]] = []
+    part_original: dict[str, str] = {}
+    original_parts: dict[str, list[str]] = {}
+    preflight_failed: list[dict[str, Any]] = []
+    for segment in selection.work:
+        try:
+            build_chunk_plans(
+                [segment],
+                config=config,
+                prompt=prompt,
+                payload_builder=payload_builder,
+            )
+            request_segments.append(segment)
+            continue
+        except ConfigError as exc:
+            if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+                raise
+            if not config["chunking"]["allow_split_oversized_segment"]:
+                preflight_failed.append(segment)
+                continue
+        pending_parts = [
+            (str(segment["source"]), str(bases[str(segment["segment_id"])]["text"]))
+        ]
+        accepted_parts: list[tuple[str, str]] = []
+        while pending_parts:
+            source_part, text_part = pending_parts.pop(0)
+            probe_id = f"{segment['segment_id']}-PROBE"
+            probe = {**segment, "segment_id": probe_id, "source": source_part}
+            bases[probe_id] = {
+                "record_id": bases[str(segment["segment_id"])]["record_id"],
+                "text": text_part,
+            }
+            try:
+                build_chunk_plans(
+                    [probe],
+                    config=config,
+                    prompt=prompt,
+                    payload_builder=payload_builder,
+                )
+                accepted_parts.append((source_part, text_part))
+            except ConfigError as exc:
+                if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+                    raise
+                left_source, right_source = _split_source_once(source_part)
+                split_at = round(len(text_part) * len(left_source) / len(source_part))
+                pending_parts[0:0] = [
+                    (left_source, text_part[:split_at]),
+                    (right_source, text_part[split_at:]),
+                ]
+            finally:
+                bases.pop(probe_id, None)
+        part_ids: list[str] = []
+        for index, (source_part, text_part) in enumerate(accepted_parts, start=1):
+            part_id = f"{segment['segment_id']}-P{index:03d}"
+            request_segments.append(
+                {**segment, "segment_id": part_id, "source": source_part}
+            )
+            bases[part_id] = {
+                "record_id": bases[str(segment["segment_id"])]["record_id"],
+                "text": text_part,
+            }
+            part_original[part_id] = str(segment["segment_id"])
+            part_ids.append(part_id)
+        original_parts[str(segment["segment_id"])] = part_ids
+
     plans = build_chunk_plans(
-        selection.work,
+        request_segments,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
@@ -1371,6 +1761,10 @@ async def run_review(
         selected_count=len(selection.selected),
         requested_count=len(selection.work),
         reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+        },
     )
     chunks = materialize_chunks(run_id, stage, plans)
     if config["debug"]["enabled"]:
@@ -1390,6 +1784,10 @@ async def run_review(
     completed_ids: set[str] = set()
     failed_ids: set[str] = set()
     by_id = {str(item["segment_id"]): item for item in segments}
+    by_id.update(
+        {str(item["segment_id"]): item for item in request_segments}
+    )
+    part_results: dict[str, dict[str, tuple[dict[str, Any], str]]] = {}
 
     async def save_result(
         segment_id: str,
@@ -1398,6 +1796,9 @@ async def run_review(
         parsed: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
+        segment_id = part_original.get(segment_id, segment_id)
+        if parsed is None and segment_id in failed_ids:
+            return
         base = bases[segment_id]
         async with write_lock:
             if parsed is not None:
@@ -1440,9 +1841,48 @@ async def run_review(
                 )
                 failed_ids.add(segment_id)
 
-    async def process(chunk: ChunkPlan) -> None:
+    async def accept_result(
+        segment_id: str,
+        request_id: str,
+        parsed: dict[str, Any],
+    ) -> None:
+        original_id = part_original.get(segment_id)
+        if original_id is None:
+            await save_result(segment_id, request_id, parsed=parsed)
+            return
+        part_results.setdefault(original_id, {})[segment_id] = (parsed, request_id)
+        expected = original_parts[original_id]
+        if not all(part_id in part_results[original_id] for part_id in expected):
+            return
+        values = [part_results[original_id][part_id][0] for part_id in expected]
+        suggested = any(item["review_status"] == "suggested" for item in values)
+        combined_text = "".join(
+            (
+                str(item["suggested_text"])
+                if item["review_status"] == "suggested"
+                else str(bases[part_id]["text"])
+            )
+            for part_id, item in zip(expected, values, strict=True)
+        )
+        reasons = [
+            str(item["reason"]) for item in values if item.get("reason")
+        ]
+        await save_result(
+            original_id,
+            part_results[original_id][expected[-1]][1],
+            parsed={
+                "review_status": "suggested" if suggested else "accepted",
+                "suggested_text": combined_text if suggested else None,
+                "reason": "；".join(reasons) or None,
+            },
+        )
+
+    async def process_once(
+        chunk: ChunkPlan,
+        initial_parent_request_id: str | None = None,
+    ) -> None:
         unresolved = [str(item["segment_id"]) for item in chunk.segments]
-        parent_request_id: str | None = None
+        parent_request_id = initial_parent_request_id
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             items = [by_id[segment_id] for segment_id in unresolved]
             payload = payload_builder(items)
@@ -1451,10 +1891,8 @@ async def run_review(
                     "上一次响应格式错误或缺少 Segment。只返回全部未决 ID。"
                 )
             messages = render_messages(prompt, payload)
-            estimated = estimate_messages(
-                messages, config["execution"]["token_safety_factor"]
-            )
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+            estimated = _request_estimate(messages, config, request_id)
             try:
                 content, _ = await llm.chat(
                     messages=messages,
@@ -1466,6 +1904,8 @@ async def run_review(
                 valid, unresolved = _parse_review_items(content, unresolved)
             except FatalExternalError:
                 raise
+            except ContextLengthError:
+                raise
             except ExternalError as exc:
                 for segment_id in unresolved:
                     await save_result(segment_id, request_id, error=str(exc))
@@ -1473,12 +1913,62 @@ async def run_review(
             except (ValueError, json.JSONDecodeError):
                 valid = {}
             for segment_id, parsed in valid.items():
-                await save_result(segment_id, request_id, parsed=parsed)
+                await accept_result(segment_id, request_id, parsed)
             if not unresolved:
                 return
             parent_request_id = request_id
         for segment_id in unresolved:
-            await save_result(segment_id, parent_request_id or "REQ-NONE", error="格式修正次数耗尽")
+            await save_result(
+                segment_id,
+                parent_request_id or "REQ-NONE",
+                error="格式修正次数耗尽",
+            )
+
+    async def process(
+        chunk: ChunkPlan,
+        split_parent_request_id: str | None = None,
+    ) -> None:
+        try:
+            await process_once(chunk, split_parent_request_id)
+            return
+        except ContextLengthError as exc:
+            items = list(chunk.segments)
+            if len(items) > 1:
+                midpoint = len(items) // 2
+                groups = (items[:midpoint], items[midpoint:])
+            elif (
+                config["chunking"]["allow_split_oversized_segment"]
+                and len(str(items[0]["source"])) > 1
+            ):
+                groups = tuple(
+                    [part]
+                    for part in _replace_with_runtime_parts(
+                        items[0],
+                        part_original=part_original,
+                        original_parts=original_parts,
+                        by_id=by_id,
+                        bases=bases,
+                    )
+                )
+            else:
+                groups = ()
+            if not groups:
+                await save_result(
+                    str(items[0]["segment_id"]),
+                    "REQ-NONE",
+                    error="模型报告上下文过长",
+                )
+                return
+            for group in groups:
+                await process(
+                    ChunkPlan(
+                        file_id=str(group[0]["file_id"]),
+                        segments=tuple(group),
+                        payload={},
+                        estimated_input_tokens=0,
+                    ),
+                    exc.request_id,
+                )
 
     try:
         async with LLMClient(
@@ -1490,6 +1980,12 @@ async def run_review(
             stage=stage,
             client=http_client,
         ) as llm:
+            for segment in preflight_failed:
+                await save_result(
+                    str(segment["segment_id"]),
+                    "REQ-NONE",
+                    error="单 Segment 超过模型限制且内部拆分已关闭",
+                )
             await dispatch_chunks(
                 chunks,
                 process,
@@ -1597,6 +2093,10 @@ def run_apply(
         selected_count=len(selected),
         requested_count=len(selected),
         reused_count=0,
+        details={
+            "review_stage": review_stage,
+            "scope": _scope_record(scope),
+        },
     )
     result_path = stage_result_path(project, applied_stage)
     for segment in selected:
@@ -1672,17 +2172,51 @@ def export_project(
         "proofread": "proofreading_applied",
         "polished": "polishing_applied",
     }[export_stage]
+    histories = {
+        stage: load_stage_history(project, stage)
+        for stage in (
+            "translation",
+            "proofreading",
+            "proofreading_applied",
+            "polishing",
+            "polishing_applied",
+        )
+    }
     primary = classify_stage(
         [],
-        load_stage_history(project, stage_name),
+        histories[stage_name],
         force=False,
     ).latest_completed
     translation = classify_stage(
-        [], load_stage_history(project, "translation"), force=False
+        [], histories["translation"], force=False
     ).latest_completed
     proofread = classify_stage(
-        [], load_stage_history(project, "proofreading_applied"), force=False
+        [], histories["proofreading_applied"], force=False
     ).latest_completed
+    records_by_id = {
+        str(record["record_id"]): record
+        for history in histories.values()
+        for record in history
+        if record.get("record_id")
+    }
+
+    def result_lineage(record: dict[str, Any]) -> list[dict[str, Any]]:
+        lineage: list[dict[str, Any]] = []
+        pending = [record]
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            record_id = str(current.get("record_id", ""))
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            lineage.append(current)
+            for key in ("base_result_id", "suggestion_result_id"):
+                parent = records_by_id.get(str(current.get(key, "")))
+                if parent is not None:
+                    pending.append(parent)
+        return lineage
+
     fallback_records: list[str] = []
     missing: list[str] = []
     output_text: dict[str, str] = {}
@@ -1708,10 +2242,16 @@ def export_project(
         else:
             output_text[segment_id] = str(record["text"])
         if record is not None:
-            if record.get("validation_status") == "warning":
+            lineage = result_lineage(record)
+            if any(
+                item.get("validation_status") == "warning" for item in lineage
+            ):
                 validation_warnings += 1
-            if record.get("stage_fingerprint"):
-                used_fingerprints.add(str(record["stage_fingerprint"]))
+            used_fingerprints.update(
+                str(item["stage_fingerprint"])
+                for item in lineage
+                if item.get("stage_fingerprint")
+            )
     if missing:
         raise IncompleteError(
             f"导出缺少 {export_stage} 结果：{', '.join(missing[:10])}"
@@ -1803,12 +2343,25 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         "segments": len(segments),
         "empty_segments": len(segments) - len(nonempty),
         "terms_revision": None,
-        "terminology": {"completed": 0, "failed": 0, "pending": len(nonempty)},
+        "terminology": {
+            "completed": 0,
+            "failed": 0,
+            "pending": len(nonempty),
+            "fingerprint_count": 0,
+            "current_fingerprint_completed": 0,
+        },
         "stages": {},
         "outdated_suggestions": {},
         "validation_warnings": 0,
     }
     library = load_terms(project)
+    terms_revision = int(library["terms_revision"]) if library else None
+    current_term_fingerprint = stage_fingerprint(
+        config,
+        "terminology",
+        _prompt(project, "terminology"),
+    )
+    summary["terminology"]["current_fingerprint"] = current_term_fingerprint
     if library:
         summary["terms_revision"] = library["terms_revision"]
     active_path = project / "terminology" / "active_task.json"
@@ -1836,6 +2389,19 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
                 "completed": len(completed),
                 "failed": len(failed),
                 "pending": len(nonempty) - len(completed) - len(failed),
+                "fingerprint_count": len(
+                    {
+                        str(item["stage_fingerprint"])
+                        for item in scans
+                        if item.get("stage_fingerprint")
+                    }
+                ),
+                "current_fingerprint": current_term_fingerprint,
+                "current_fingerprint_completed": sum(
+                    item.get("status") == "completed"
+                    and item.get("stage_fingerprint") == current_term_fingerprint
+                    for item in scans
+                ),
             }
     histories: dict[str, list[dict[str, Any]]] = {}
     for stage in (
@@ -1866,17 +2432,41 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
             for item in completed.values()
             if item.get("stage_fingerprint")
         }
+        if stage in {"translation", "proofreading", "polishing"}:
+            current_fingerprint = stage_fingerprint(
+                config,
+                stage,
+                _prompt(project, stage),
+                terms_revision=terms_revision,
+            )
+        else:
+            current_fingerprint = stage_fingerprint(
+                config,
+                stage,
+                None,
+                apply_semantics={
+                    "review_stage": stage.removesuffix("_applied"),
+                    "allow_outdated_base": False,
+                },
+            )
         summary["stages"][stage] = {
             "completed": len(completed),
             "failed": len(failed),
             "pending": len(nonempty) - len(completed) - len(failed),
             "fingerprint_count": len(fingerprints),
+            "current_fingerprint": current_fingerprint,
+            "current_fingerprint_completed": sum(
+                record.get("stage_fingerprint") == current_fingerprint
+                for record in completed.values()
+            ),
             "last_attempt_failed": latest_failed_after_success,
         }
+    latest_translations = classify_stage(
+        [], histories["translation"], force=False
+    ).latest_completed
     summary["validation_warnings"] = sum(
         item.get("validation_status") == "warning"
-        for item in histories["translation"]
-        if item.get("status") == "completed"
+        for item in latest_translations.values()
     )
     for review_stage in ("proofreading", "polishing"):
         suggestions = classify_stage(
@@ -1887,5 +2477,30 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
             suggestion.get("base_result_id")
             != bases.get(segment_id, {}).get("record_id")
             for segment_id, suggestion in suggestions.items()
+        )
+    project_arg = shlex.quote(str(project))
+    if summary["terminology"]["pending"] or summary["terminology"]["failed"]:
+        summary["next_command"] = (
+            f"python -m app.main terminology {project_arg}"
+        )
+    elif summary["terms_revision"] is None:
+        summary["next_command"] = (
+            f"python -m app.main terminology {project_arg}"
+        )
+    elif summary["stages"]["translation"]["pending"] or summary["stages"][
+        "translation"
+    ]["failed"]:
+        summary["next_command"] = f"python -m app.main translate {project_arg}"
+    elif summary["stages"]["proofreading"]["pending"] or summary["stages"][
+        "proofreading"
+    ]["failed"]:
+        summary["next_command"] = f"python -m app.main proofread {project_arg}"
+    elif summary["stages"]["polishing"]["pending"] or summary["stages"][
+        "polishing"
+    ]["failed"]:
+        summary["next_command"] = f"python -m app.main polish {project_arg}"
+    else:
+        summary["next_command"] = (
+            f"python -m app.main export {project_arg} --stage translated"
         )
     return summary

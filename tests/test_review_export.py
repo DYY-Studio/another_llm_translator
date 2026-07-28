@@ -7,10 +7,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.errors import IncompleteError
+from app.errors import IncompleteError, UsageError
 from app.execution import Scope
+from app.main import run
 from app.stages import (
     export_project,
+    inspect_full,
     run_all,
     run_apply,
     run_review,
@@ -143,6 +145,18 @@ async def test_apply_rejects_outdated_base(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_missing_upstream_creates_no_run(tmp_path: Path) -> None:
+    project = await create_project(tmp_path, "one")
+    before = list((project / "runs").iterdir())
+    try:
+        with pytest.raises(IncompleteError, match="缺少上游结果"):
+            await run_review(project, "proofreading", Scope())
+    finally:
+        del os.environ["LLM_API_KEY"]
+    assert list((project / "runs").iterdir()) == before
+
+
+@pytest.mark.asyncio
 async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "one\ntwo")
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
@@ -164,6 +178,139 @@ async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_run_all_dry_run_plans_without_writing(tmp_path: Path) -> None:
+    project = await create_project(tmp_path, "one\ntwo")
+    before = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    summary = await run_all(project, Scope(dry_run=True))
+    after = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    assert [step["stage"] for step in summary["steps"]] == [
+        "terminology",
+        "translation",
+        "proofreading",
+        "polishing",
+    ]
+    assert before == after
+    del os.environ["LLM_API_KEY"]
+
+
+@pytest.mark.asyncio
+async def test_oversized_review_segment_is_combined_once(tmp_path: Path) -> None:
+    project = await create_project(tmp_path, "A" * 5000)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
+    try:
+        await run_translation(project, Scope(), http_client=client)
+        config_path = project / "config.toml"
+        text = config_path.read_text(encoding="utf-8")
+        text = text.replace("context_window_tokens = 16384", "context_window_tokens = 1200")
+        text = text.replace("max_output_tokens = 4096", "max_output_tokens = 300")
+        text = text.replace(
+            "context_safety_margin_tokens = 512",
+            "context_safety_margin_tokens = 100",
+        )
+        text = text.replace(
+            "target_chunk_input_tokens = 11000",
+            "target_chunk_input_tokens = 700",
+        )
+        config_path.write_text(text, encoding="utf-8")
+        summary = await run_review(
+            project, "proofreading", Scope(), http_client=client
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 1
+    completed = [
+        item
+        for item in read_jsonl(project / "stages" / "proofreading.jsonl")
+        if item["status"] == "completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["segment_id"] == "F0001-S000001"
+    assert len(completed[0]["suggested_text"]) > 5000
+
+
+@pytest.mark.asyncio
+async def test_applied_export_reports_translation_validation_warning(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        .replace("japanese_kana = false", "japanese_kana = true")
+        .replace('exhausted_mode = "fail"', 'exhausted_mode = "warning"')
+        .replace("max_retry_attempts = 2", "max_retry_attempts = 0"),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        if "完整 translation" in system:
+            content = {
+                "segments": [
+                    {"id": item["id"], "translation": "候选カ"}
+                    for item in payload["segments"]
+                ]
+            }
+        else:
+            content = {
+                "segments": [
+                    {
+                        "id": item["id"],
+                        "status": "accepted",
+                        "suggested_text": None,
+                        "reason": None,
+                    }
+                    for item in payload["segments"]
+                ]
+            }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    run_apply(
+        project,
+        "proofreading",
+        Scope(),
+        allow_outdated_base=False,
+        confirmed_all=True,
+    )
+    summary = export_project(
+        project, "proofread", bilingual=False, allow_missing=False
+    )
+    assert summary["validation_warnings"] == 1
+    assert inspect_full(project)["validation_warnings"] == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_requires_all_as_usage_error(tmp_path: Path) -> None:
+    project = await create_project(tmp_path, "one")
+    try:
+        with pytest.raises(UsageError, match="--all"):
+            run(["apply", str(project), "--stage", "proofreading"])
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+
+@pytest.mark.asyncio
 async def test_export_allow_missing_falls_back_and_reports(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "one")
     summary = export_project(
@@ -173,3 +320,24 @@ async def test_export_allow_missing_falls_back_and_reports(tmp_path: Path) -> No
     output = project / "output" / "translated" / "source.txt"
     assert output.read_text(encoding="utf-8-sig") == "one"
     del os.environ["LLM_API_KEY"]
+
+
+@pytest.mark.asyncio
+async def test_export_fails_when_output_encoding_cannot_represent_text(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "中文")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'output_encoding = "utf-8-sig"', 'output_encoding = "ascii"'
+        ),
+        encoding="utf-8",
+    )
+    try:
+        with pytest.raises(IncompleteError, match="无法表示"):
+            export_project(
+                project, "translated", bilingual=False, allow_missing=True
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]

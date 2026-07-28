@@ -24,6 +24,14 @@ class ExternalError(AppError):
     exit_code = 4
 
 
+class ContextLengthError(ExternalError):
+    """The remote model rejected a request as too large."""
+
+    def __init__(self, message: str, *, request_id: str) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+
+
 class FatalExternalError(ExternalError):
     """Authentication or endpoint failure that stops the whole stage."""
 
