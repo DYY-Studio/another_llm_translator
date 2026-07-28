@@ -18,7 +18,13 @@ from typing import Any
 
 import httpx
 
-from .errors import ConfigError, ExternalError, IncompleteError, UsageError
+from .errors import (
+    ConfigError,
+    ExternalError,
+    FatalExternalError,
+    IncompleteError,
+    UsageError,
+)
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -725,7 +731,11 @@ class LLMClient:
                 parent_request_id=parent_request_id,
             )
             if response.status_code in {401, 403}:
-                raise ExternalError(f"鉴权失败：HTTP {response.status_code}")
+                raise FatalExternalError(f"鉴权失败：HTTP {response.status_code}")
+            if response.status_code in {400, 404}:
+                raise FatalExternalError(
+                    f"请求或端点配置错误：HTTP {response.status_code}"
+                )
             if not retryable or attempt == attempts:
                 raise ExternalError(f"LLM 请求失败：HTTP {response.status_code}")
             retry_after = response.headers.get("Retry-After")

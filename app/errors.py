@@ -24,6 +24,9 @@ class ExternalError(AppError):
     exit_code = 4
 
 
+class FatalExternalError(ExternalError):
+    """Authentication or endpoint failure that stops the whole stage."""
+
+
 class IncompleteError(AppError):
     exit_code = 5
-

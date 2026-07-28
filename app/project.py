@@ -273,6 +273,15 @@ def init_project(
         (temp / "logs").mkdir(parents=True, exist_ok=True)
         (temp / "output").mkdir(parents=True, exist_ok=True)
         atomic_write_json(
+            temp / "terminology" / "overrides.json",
+            record_header(
+                "terminology_overrides",
+                project_id,
+                record_id="TERMINOLOGY-OVERRIDES",
+                overrides=[],
+            ),
+        )
+        atomic_write_json(
             temp / "project.json",
             record_header(
                 "project",
