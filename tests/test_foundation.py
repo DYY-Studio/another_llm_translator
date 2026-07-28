@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from app.config import ConfigError, load_config
+from app.errors import StorageError, UsageError
 from app.project import (
     bundle_hash,
     decode_txt,
+    discover_inputs,
     init_project,
     inspect_project,
     sync_global_templates,
@@ -41,6 +43,17 @@ def test_config_rejects_unknown_key(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match="未知配置键"):
+        load_config(path)
+
+
+def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "config" / "config.toml"
+    text = config.read_text(encoding="utf-8").replace(
+        "max_parallel = 4", "max_parallel = 1.5"
+    )
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match="max_parallel 必须是整数"):
         load_config(path)
 
 
@@ -89,6 +102,19 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
     ]
     assert (project / "prompts" / "translation.middle.txt").is_file()
     assert load_config(project / "config.toml")["project"]["target_language"]
+
+
+def test_explicit_inputs_reject_case_insensitive_output_collision(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first" / "A.txt"
+    second = tmp_path / "second" / "a.txt"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    with pytest.raises(UsageError, match="重复导出相对路径"):
+        discover_inputs([str(first), str(second)], recursive=False)
 
 
 def test_init_dry_run_writes_nothing(tmp_path: Path) -> None:
@@ -141,6 +167,50 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
     assert list((project / "snapshots" / "template_updates").iterdir())
 
 
+def test_invalid_global_template_does_not_block_project_copy(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    original = (project / "config.toml").read_text(encoding="utf-8")
+    (app_root / "config" / "config.toml").write_text(
+        original + "\nunknown = true\n", encoding="utf-8"
+    )
+
+    warnings = sync_global_templates(project, app_root=app_root)
+
+    assert warnings and "全局模板无效" in warnings[0]
+    assert (project / "config.toml").read_text(encoding="utf-8") == original
+
+
+def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    before = read_json(project / "project.json")["global_bundle_hash_seen"]
+    (app_root / "prompts" / "translation.middle.txt").write_text(
+        "changed", encoding="utf-8"
+    )
+    warnings = sync_global_templates(
+        project, app_root=app_root, interactive=False
+    )
+    assert any("非交互环境" in warning for warning in warnings)
+    assert read_json(project / "project.json")["global_bundle_hash_seen"] == before
+
+
 def test_jsonl_tail_repair(tmp_path: Path) -> None:
     path = tmp_path / "records.jsonl"
     append_jsonl(path, record_header("test", "PRJ", value=1))
@@ -150,3 +220,17 @@ def test_jsonl_tail_repair(tmp_path: Path) -> None:
     assert [item["value"] for item in records] == [1]
     assert list(tmp_path.glob("records.jsonl.*.corrupt-tail"))
     assert json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_jsonl_middle_corruption_stops_without_repair(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        '{"schema_version":1,"value":1}\n'
+        '{"schema_version":\n'
+        '{"schema_version":1,"value":2}\n',
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    with pytest.raises(StorageError, match="中间行损坏"):
+        read_jsonl(path)
+    assert path.read_bytes() == original

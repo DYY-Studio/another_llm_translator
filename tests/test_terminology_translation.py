@@ -9,7 +9,7 @@ import pytest
 
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
-from app.stages import load_terms, run_terminology, run_translation
+from app.stages import load_terms, match_terms, run_terminology, run_translation
 from app.storage import read_jsonl
 from tests.test_foundation import make_app_root
 
@@ -121,6 +121,56 @@ async def test_completed_terminology_command_does_not_republish(tmp_path: Path) 
     assert second["published"] is False
     assert second["terms_revision"] == 1
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) -> None:
+    project = await create_project(tmp_path, "Alice\nBob")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requested.extend(item["id"] for item in payload["segments"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"terms": []})}}
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(
+            project,
+            Scope(only_segment="F0001-S000001", force=True),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert set(requested) == {"F0001-S000001", "F0001-S000002"}
+    assert summary["published"] is True
+
+
+def test_term_matching_prefers_main_name_over_alias() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": [],
+                "preferred_translation": "爱丽丝",
+            },
+            {
+                "source": "Other",
+                "aliases": ["Alice Wonderland"],
+                "preferred_translation": "其他",
+            },
+        ]
+    }
+    matched = match_terms("Alice Wonderland arrived.", library, 10)
+    assert [item["source"] for item in matched] == ["Alice", "Other"]
 
 
 @pytest.mark.asyncio
@@ -261,3 +311,114 @@ async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
     assert completed[0]["text"] == "a" * 5000
+
+
+@pytest.mark.asyncio
+async def test_model_context_error_triggers_runtime_segment_split(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "ABCDEFGH")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "enabled = false\ninject_429_every",
+            "enabled = true\ninject_429_every",
+        ),
+        encoding="utf-8",
+    )
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["segments"][0]["source"]
+        requested.append(source)
+        if len(source) > 3:
+            return httpx.Response(
+                400,
+                text="context_length_exceeded: maximum context tokens",
+            )
+        content = {
+            "segments": [
+                {"id": payload["segments"][0]["id"], "translation": source.lower()}
+            ]
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 1
+    assert any(len(source) > 3 for source in requested)
+    assert sum(len(source) <= 3 for source in requested) == 4
+    completed = latest_completed_by_segment(
+        load_stage_history(project, "translation")
+    )
+    assert completed["F0001-S000001"]["text"] == "abcdefgh"
+    run_dir = next((project / "runs").iterdir())
+    attempts = read_jsonl(run_dir / "attempts.jsonl")
+    assert any(item.get("parent_request_id") for item in attempts)
+
+
+@pytest.mark.asyncio
+async def test_validation_repair_context_error_splits_without_part_results(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "ABCDEFGH")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "japanese_kana = false", "japanese_kana = true"
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        item = payload["segments"][0]
+        if "validation_repair" in payload and len(item["source"]) > 2:
+            return httpx.Response(
+                400,
+                text="context_length_exceeded: maximum context tokens",
+            )
+        translation = (
+            "好" * len(item["source"])
+            if "validation_repair" in payload
+            else "カ" * len(item["source"])
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "segments": [
+                                        {"id": item["id"], "translation": translation}
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 1
+    records = read_jsonl(project / "stages" / "translation.jsonl")
+    completed = [item for item in records if item["status"] == "completed"]
+    assert len(completed) == 1
+    assert completed[0]["segment_id"] == "F0001-S000001"
+    assert completed[0]["text"] == "好" * 8

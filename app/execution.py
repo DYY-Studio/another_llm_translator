@@ -20,6 +20,7 @@ import httpx
 
 from .errors import (
     ConfigError,
+    ContextLengthError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
@@ -343,7 +344,11 @@ def build_chunk_plans(
         - config["llm"]["max_output_tokens"]
         - config["llm"]["context_safety_margin_tokens"]
     )
-    target = min(config["chunking"]["target_chunk_input_tokens"], hard_limit)
+    target = min(
+        config["chunking"]["target_chunk_input_tokens"],
+        hard_limit,
+        config["execution"]["input_tokens_per_minute"],
+    )
     factor = config["execution"]["token_safety_factor"]
     plans: list[ChunkPlan] = []
     for group in contiguous_groups(work):
@@ -415,6 +420,7 @@ def create_run(
     selected_count: int,
     requested_count: int,
     reused_count: int,
+    details: dict[str, Any] | None = None,
 ) -> tuple[str, Path]:
     project_metadata = read_json(project / "project.json")
     suffix = uuid.uuid4().hex[:6].upper()
@@ -436,6 +442,7 @@ def create_run(
         selected_segment_count=selected_count,
         requested_segment_count=requested_count,
         reused_segment_count=reused_count,
+        **(details or {}),
         started_at=utc_now(),
         completed_at=None,
     )
@@ -732,6 +739,18 @@ class LLMClient:
             )
             if response.status_code in {401, 403}:
                 raise FatalExternalError(f"鉴权失败：HTTP {response.status_code}")
+            response_hint = response.text.casefold()
+            if response.status_code == 400 and (
+                "context_length" in response_hint
+                or (
+                    "context" in response_hint
+                    and ("token" in response_hint or "maximum" in response_hint)
+                )
+            ):
+                raise ContextLengthError(
+                    "模型报告上下文过长",
+                    request_id=request_id,
+                )
             if response.status_code in {400, 404}:
                 raise FatalExternalError(
                     f"请求或端点配置错误：HTTP {response.status_code}"

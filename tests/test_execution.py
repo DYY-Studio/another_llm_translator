@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.config import load_config
+from app.errors import FatalExternalError
 from app.execution import (
     LLMClient,
     Scope,
@@ -200,3 +201,41 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     assert calls == 2
     assert len(list((tmp_path / "payloads").glob(f"{request_id}-A*.request.json"))) == 2
     assert (tmp_path / "attempts.jsonl").is_file()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_stops_on_auth_and_normal_mode_has_no_payloads(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, text="unauthorized")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(100, 100000),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            with pytest.raises(FatalExternalError, match="鉴权失败"):
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert calls == 1
+    assert not (tmp_path / "payloads").exists()
+    assert not (tmp_path / "attempts.jsonl").exists()

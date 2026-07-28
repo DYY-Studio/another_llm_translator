@@ -10,6 +10,46 @@ from typing import Any
 
 from .errors import StorageError
 
+STAGES = frozenset(
+    {
+        "terminology",
+        "translation",
+        "proofreading",
+        "proofreading_applied",
+        "polishing",
+        "polishing_applied",
+    }
+)
+RECORD_STATUSES = frozenset(
+    {"active", "running", "completed", "failed", "interrupted"}
+)
+REVIEW_STATUSES = frozenset({"accepted", "suggested"})
+VALIDATION_STATUSES = frozenset({"passed", "warning"})
+ERROR_CATEGORIES = frozenset(
+    {
+        "context_error",
+        "external_error",
+        "format_error",
+        "validation_error",
+        "stage_error",
+    }
+)
+
+
+def _validate_record(value: Any, location: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise StorageError(f"不支持或缺少 schema_version：{location}")
+    for key, allowed in (
+        ("stage", STAGES),
+        ("status", RECORD_STATUSES),
+        ("review_status", REVIEW_STATUSES),
+        ("validation_status", VALIDATION_STATUSES),
+        ("error_class", ERROR_CATEGORIES),
+    ):
+        if key in value and value[key] is not None and value[key] not in allowed:
+            raise StorageError(f"不支持的 {key}：{location}: {value[key]}")
+    return value
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -26,6 +66,15 @@ def record_header(
     record_id: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
+    for key, allowed in (
+        ("stage", STAGES),
+        ("status", RECORD_STATUSES),
+        ("review_status", REVIEW_STATUSES),
+        ("validation_status", VALIDATION_STATUSES),
+        ("error_class", ERROR_CATEGORIES),
+    ):
+        if key in fields and fields[key] is not None and fields[key] not in allowed:
+            raise ValueError(f"不支持的 {key}：{fields[key]}")
     return {
         "schema_version": 1,
         "record_type": record_type,
@@ -85,9 +134,7 @@ def read_json(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取 JSON：{path}: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise StorageError(f"不支持或缺少 schema_version：{path}")
-    return value
+    return _validate_record(value, str(path))
 
 
 def read_jsonl(path: Path, *, repair_tail: bool = True) -> list[dict[str, Any]]:
@@ -123,9 +170,6 @@ def read_jsonl(path: Path, *, repair_tail: bool = True) -> list[dict[str, Any]]:
                 handle.flush()
                 os.fsync(handle.fileno())
             break
-        if not isinstance(record, dict) or record.get("schema_version") != 1:
-            raise StorageError(f"不支持或缺少 schema_version：{path}:{index + 1}")
-        records.append(record)
+        records.append(_validate_record(record, f"{path}:{index + 1}"))
         offset += len(raw_line)
     return records
-

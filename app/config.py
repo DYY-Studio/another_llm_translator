@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,26 @@ def _positive(config: dict[str, Any], section: str, key: str) -> float:
 def validate_config(config: dict[str, Any]) -> None:
     _reject_unknown(config, SCHEMA, "config")
     for section, key in (
+        ("project", "target_language"),
+        ("project", "output_encoding"),
+        ("input", "fallback_encoding"),
+        ("llm", "base_url"),
+        ("llm", "endpoint"),
+        ("llm", "model"),
+        ("llm", "api_key_env"),
+    ):
+        value = config[section][key]
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{section}.{key} 必须是非空字符串")
+    for section, key in (
+        ("project", "output_encoding"),
+        ("input", "fallback_encoding"),
+    ):
+        try:
+            codecs.lookup(config[section][key])
+        except LookupError as exc:
+            raise ConfigError(f"{section}.{key} 不是可用编码") from exc
+    for section, key in (
         ("llm", "max_output_tokens"),
         ("llm", "context_window_tokens"),
         ("execution", "max_parallel"),
@@ -109,10 +130,48 @@ def validate_config(config: dict[str, Any]) -> None:
         ("execution", "token_safety_factor"),
         ("chunking", "target_chunk_input_tokens"),
         ("retry", "http_max_attempts"),
-        ("retry", "format_max_attempts"),
     ):
         _positive(config, section, key)
+    for section, key in (
+        ("llm", "max_output_tokens"),
+        ("llm", "context_window_tokens"),
+        ("execution", "max_parallel"),
+        ("execution", "requests_per_minute"),
+        ("execution", "input_tokens_per_minute"),
+        ("chunking", "target_chunk_input_tokens"),
+        ("retry", "http_max_attempts"),
+    ):
+        value = config[section][key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConfigError(f"{section}.{key} 必须是整数")
+    format_attempts = config["retry"]["format_max_attempts"]
+    if (
+        not isinstance(format_attempts, int)
+        or isinstance(format_attempts, bool)
+        or format_attempts < 0
+    ):
+        raise ConfigError("retry.format_max_attempts 必须是非负整数")
 
+    confidence = config["input"]["encoding_confidence_threshold"]
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not 0 <= confidence <= 1
+    ):
+        raise ConfigError("input.encoding_confidence_threshold 必须在 0 到 1 之间")
+    for key in (
+        "temperature_terminology",
+        "temperature_translation",
+        "temperature_proofreading",
+        "temperature_polishing",
+    ):
+        value = config["llm"][key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ConfigError(f"llm.{key} 必须是非负数")
     margin = config["llm"]["context_safety_margin_tokens"]
     if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
         raise ConfigError("llm.context_safety_margin_tokens 必须是非负整数")
@@ -135,6 +194,60 @@ def validate_config(config: dict[str, Any]) -> None:
         "warning",
     }:
         raise ConfigError("validation.translation.exhausted_mode 必须是 fail 或 warning")
+    for key in ("japanese_kana", "korean_hangul"):
+        if not isinstance(config["validation"]["translation"][key], bool):
+            raise ConfigError(f"validation.translation.{key} 必须是布尔值")
+    validation_attempts = config["validation"]["translation"]["max_retry_attempts"]
+    if (
+        not isinstance(validation_attempts, int)
+        or isinstance(validation_attempts, bool)
+        or validation_attempts < 0
+    ):
+        raise ConfigError(
+            "validation.translation.max_retry_attempts 必须是非负整数"
+        )
+    for key in ("base_delay_seconds", "max_delay_seconds", "jitter_seconds"):
+        value = config["retry"][key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ConfigError(f"retry.{key} 必须是非负数")
+    if config["retry"]["max_delay_seconds"] < config["retry"]["base_delay_seconds"]:
+        raise ConfigError("retry.max_delay_seconds 不能小于 base_delay_seconds")
+    if not isinstance(config["chunking"]["allow_split_oversized_segment"], bool):
+        raise ConfigError("chunking.allow_split_oversized_segment 必须是布尔值")
+    if not isinstance(config["terminology"]["unicode_normalization"], str):
+        raise ConfigError("terminology.unicode_normalization 必须是字符串")
+    if config["terminology"]["unicode_normalization"] != "NFKC":
+        raise ConfigError("MVP 仅支持 terminology.unicode_normalization = NFKC")
+    if not isinstance(config["terminology"]["case_insensitive"], bool):
+        raise ConfigError("terminology.case_insensitive 必须是布尔值")
+    if not config["terminology"]["case_insensitive"]:
+        raise ConfigError("MVP 仅支持 terminology.case_insensitive = true")
+    _positive(config, "terminology", "max_terms_per_segment")
+    if (
+        not isinstance(config["terminology"]["max_terms_per_segment"], int)
+        or isinstance(config["terminology"]["max_terms_per_segment"], bool)
+    ):
+        raise ConfigError("terminology.max_terms_per_segment 必须是整数")
+    if not isinstance(config["debug"]["enabled"], bool):
+        raise ConfigError("debug.enabled 必须是布尔值")
+    for key in (
+        "inject_429_every",
+        "inject_500_every",
+        "inject_timeout_every",
+        "inject_invalid_json_every",
+        "inject_missing_segment_every",
+    ):
+        value = config["debug"][key]
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ConfigError(f"debug.{key} 必须是非负整数")
     for stage, context in config["context"].items():
         if not isinstance(context["enabled"], bool):
             raise ConfigError(f"context.{stage}.enabled 必须是布尔值")
@@ -153,4 +266,3 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
     validate_config(config)
     return config
-

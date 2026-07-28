@@ -13,7 +13,7 @@ from typing import Iterable
 import chardet
 
 from .config import load_config
-from .errors import ProjectError, UsageError
+from .errors import ConfigError, ProjectError, UsageError
 from .storage import (
     atomic_write_json,
     new_record_id,
@@ -90,8 +90,19 @@ def discover_inputs(values: Iterable[str], recursive: bool) -> list[InputFile]:
             raise UsageError(f"输入不是有效 TXT 文件或目录：{path}")
     if not discovered:
         raise UsageError("没有发现 TXT 输入文件")
-    names = [item.original_name for item in discovered]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
+    names_by_key: dict[str, list[str]] = {}
+    for item in discovered:
+        names_by_key.setdefault(item.original_name.casefold(), []).append(
+            item.original_name
+        )
+    duplicates = sorted(
+        {
+            name
+            for values in names_by_key.values()
+            if len(values) > 1
+            for name in values
+        }
+    )
     if duplicates:
         raise UsageError(f"重复导出相对路径：{', '.join(duplicates)}")
     return discovered
@@ -150,7 +161,7 @@ def bundle_hash(app_root: Path = APP_ROOT) -> str:
     digest = hashlib.sha256()
     for path in paths:
         if not path.is_file():
-            raise ProjectError(f"全局模板缺失：{path}")
+            raise ConfigError(f"全局模板缺失：{path}")
         relative = path.relative_to(app_root).as_posix().encode()
         payload = path.read_bytes()
         digest.update(len(relative).to_bytes(4, "big"))
@@ -185,6 +196,7 @@ def init_project(
     _safe_project_name(name)
     projects_root = projects_root or app_root / "projects"
     global_config = load_config(app_root / "config" / "config.toml")
+    global_hash = bundle_hash(app_root)
     files = discover_inputs(inputs, recursive)
     decoded: list[tuple[InputFile, str, str, str, float, list[str]]] = []
     for item in files:
@@ -288,7 +300,7 @@ def init_project(
                 project_id,
                 record_id=project_id,
                 name=name,
-                global_bundle_hash_seen=bundle_hash(app_root),
+                global_bundle_hash_seen=global_hash,
                 file_count=len(file_records),
                 segment_count=len(segment_records),
                 status="active",
@@ -318,10 +330,30 @@ def sync_global_templates(
     choice: str | None = None,
 ) -> list[str]:
     metadata = read_json(project / "project.json")
-    current_hash = bundle_hash(app_root)
+    try:
+        load_config(app_root / "config" / "config.toml")
+        current_hash = bundle_hash(app_root)
+    except (ConfigError, ProjectError) as exc:
+        return [f"全局模板无效，继续使用项目副本：{exc}"]
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
-    warnings = ["发现新的全局配置或提示词模板"]
+    bundle_files = [Path("config.toml")] + [
+        Path("prompts") / name for name in PROMPT_NAMES
+    ]
+    changed = []
+    for relative in bundle_files:
+        global_path = (
+            app_root / "config" / "config.toml"
+            if relative == Path("config.toml")
+            else app_root / relative
+        )
+        project_path = project / relative
+        if (
+            not project_path.is_file()
+            or project_path.read_bytes() != global_path.read_bytes()
+        ):
+            changed.append(relative.as_posix())
+    warnings = [f"发现新的全局模板：{', '.join(changed) or '内容版本变化'}"]
     if dry_run:
         return warnings
     interactive = os.isatty(0) if interactive is None else interactive
@@ -329,17 +361,19 @@ def sync_global_templates(
         warnings.append("非交互环境保留项目副本；未更新 seen Hash")
         return warnings
     if choice is None:
-        answer = input("更新项目模板？[u]pdate/[k]eep: ").strip().casefold()
+        answer = input(
+            f"{warnings[0]}\n更新项目模板？[u]pdate/[k]eep: "
+        ).strip().casefold()
         choice = "update" if answer in {"u", "update"} else "keep"
     if choice not in {"update", "keep"}:
         raise UsageError("模板选择必须是 update 或 keep")
     if choice == "update":
+        load_config(app_root / "config" / "config.toml")
         timestamp = utc_now().replace(":", "").replace("-", "")
         backup = project / "snapshots" / "template_updates" / timestamp
         backup.mkdir(parents=True, exist_ok=False)
         shutil.copy2(project / "config.toml", backup / "config.toml")
         shutil.copytree(project / "prompts", backup / "prompts")
-        load_config(app_root / "config" / "config.toml")
         _copy_bundle(app_root, project)
         warnings.append(f"已更新项目模板；备份位于 {backup}")
     else:
