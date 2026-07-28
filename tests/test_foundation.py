@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from app.config import ConfigError, load_config
+from app.project import (
+    bundle_hash,
+    decode_txt,
+    init_project,
+    inspect_project,
+    sync_global_templates,
+)
+from app.storage import append_jsonl, read_json, read_jsonl, record_header
+
+
+def make_app_root(tmp_path: Path) -> Path:
+    root = tmp_path / "app-root"
+    (root / "config").mkdir(parents=True)
+    (root / "prompts").mkdir()
+    source_root = Path(__file__).parents[1]
+    (root / "config" / "config.toml").write_text(
+        (source_root / "config" / "config.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    for source in (source_root / "prompts").glob("*.middle.txt"):
+        (root / "prompts" / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    return root
+
+
+def test_config_rejects_unknown_key(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "config" / "config.toml"
+    text = config.read_text(encoding="utf-8").replace(
+        'output_encoding = "utf-8-sig"',
+        'output_encoding = "utf-8-sig"\nunknown = true',
+    )
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match="未知配置键"):
+        load_config(path)
+
+
+def test_decode_gbk_as_gb18030() -> None:
+    source = "你好，世界。这是一段用于编码探测的简体中文测试文本。"
+    text, detected, used, _, _ = decode_txt(
+        source.encode("gb18030"),
+        confidence_threshold=0.0,
+        fallback_encoding="utf-8",
+    )
+    assert text == source
+    assert detected
+    assert used.casefold() in {"gb18030", "gb2312"}
+
+
+def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = tmp_path / "inputs"
+    (inputs / "chapter").mkdir(parents=True)
+    (inputs / "10.txt").write_text("first\n\nlast", encoding="utf-8")
+    (inputs / "2.txt").write_text("second\n", encoding="utf-8")
+    (inputs / "chapter" / "1.txt").write_text("\ninside", encoding="utf-8")
+
+    project, summary = init_project(
+        [str(inputs)],
+        name="demo",
+        recursive=True,
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+
+    assert project is not None
+    assert summary["file_count"] == 3
+    state = inspect_project(project)
+    assert state == {
+        "name": "demo",
+        "files": 3,
+        "segments": 7,
+        "empty_segments": 3,
+    }
+    files = read_jsonl(project / "source" / "files.jsonl")
+    assert [item["original_name"] for item in files] == [
+        "2.txt",
+        "10.txt",
+        "chapter/1.txt",
+    ]
+    assert (project / "prompts" / "translation.middle.txt").is_file()
+    assert load_config(project / "config.toml")["project"]["target_language"]
+
+
+def test_init_dry_run_writes_nothing(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one\ntwo", encoding="utf-8")
+    project, summary = init_project(
+        [str(source)],
+        name="demo",
+        dry_run=True,
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is None
+    assert summary["segment_count"] == 2
+    assert not (tmp_path / "projects").exists()
+
+
+def test_template_sync_keep_and_update(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    project_prompt = project / "prompts" / "translation.middle.txt"
+    project_prompt.write_text("project custom", encoding="utf-8")
+    global_prompt = app_root / "prompts" / "translation.middle.txt"
+    global_prompt.write_text("global changed", encoding="utf-8")
+
+    warnings = sync_global_templates(
+        project, app_root=app_root, interactive=True, choice="keep"
+    )
+    assert "已保留项目模板" in warnings
+    assert project_prompt.read_text(encoding="utf-8") == "project custom"
+    assert read_json(project / "project.json")["global_bundle_hash_seen"] == bundle_hash(
+        app_root
+    )
+
+    global_prompt.write_text("global changed again", encoding="utf-8")
+    warnings = sync_global_templates(
+        project, app_root=app_root, interactive=True, choice="update"
+    )
+    assert any("已更新项目模板" in item for item in warnings)
+    assert project_prompt.read_text(encoding="utf-8") == "global changed again"
+    assert list((project / "snapshots" / "template_updates").iterdir())
+
+
+def test_jsonl_tail_repair(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    append_jsonl(path, record_header("test", "PRJ", value=1))
+    with path.open("ab") as handle:
+        handle.write(b'{"schema_version":1')
+    records = read_jsonl(path)
+    assert [item["value"] for item in records] == [1]
+    assert list(tmp_path.glob("records.jsonl.*.corrupt-tail"))
+    assert json.loads(path.read_text(encoding="utf-8"))
