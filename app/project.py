@@ -353,3 +353,14 @@ def inspect_project(project: Path, *, repair_tail: bool = True) -> dict[str, obj
         "empty_segments": sum(bool(item["is_empty"]) for item in segments),
     }
 
+
+def load_source_files(
+    project: Path, *, repair_tail: bool = True
+) -> list[dict[str, object]]:
+    return read_jsonl(project / "source" / "files.jsonl", repair_tail=repair_tail)
+
+
+def load_segments(
+    project: Path, *, repair_tail: bool = True
+) -> list[dict[str, object]]:
+    return read_jsonl(project / "source" / "segments.jsonl", repair_tail=repair_tail)
