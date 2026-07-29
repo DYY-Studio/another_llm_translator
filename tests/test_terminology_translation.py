@@ -321,8 +321,8 @@ async def test_model_context_error_triggers_runtime_segment_split(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "enabled = false\ninject_429_every",
-            "enabled = true\ninject_429_every",
+            "enabled = false",
+            "enabled = true",
         ),
         encoding="utf-8",
     )
