@@ -37,11 +37,24 @@ python -m app.main export novel --stage proofread --bilingual
 完整行为和 MVP 边界见 [`docs/MINIMAL.md`](docs/MINIMAL.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
+## 开发期结果编辑器
+
+需要人工检查或修正测试项目结果时，可启动独立的本地编辑器：
+
+```bash
+python -m app.editor novel
+```
+
+编辑器只绑定 `127.0.0.1`，直接编辑术语、翻译、校对和润色结果，不调用 LLM
+或主 CLI 流程。使用期间不要同时运行会写入同一项目的 CLI 命令。它是开发辅助
+工具，不用于修改源 Segment、配置或 Prompt。
+
 ## 验证
 
 ```bash
 python -m pytest -q
 python -m app.main --help
+python -m app.editor --help
 ```
 
 测试使用模拟 HTTP 响应，不会调用真实模型。
