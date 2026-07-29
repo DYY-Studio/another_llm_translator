@@ -201,6 +201,33 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
     assert list((project / "snapshots" / "template_updates").iterdir())
 
 
+def test_template_sync_interactive_prompt_uses_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    (app_root / "prompts" / "translation.middle.txt").write_text(
+        "changed", encoding="utf-8"
+    )
+    monkeypatch.setattr("builtins.input", lambda: "keep")
+
+    sync_global_templates(project, app_root=app_root, interactive=True)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "更新项目模板" in captured.err
+
+
 def test_invalid_global_template_does_not_block_project_copy(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "source.txt"

@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -361,9 +362,13 @@ def sync_global_templates(
         warnings.append("非交互环境保留项目副本；未更新 seen Hash")
         return warnings
     if choice is None:
-        answer = input(
-            f"{warnings[0]}\n更新项目模板？[u]pdate/[k]eep: "
-        ).strip().casefold()
+        print(
+            f"{warnings[0]}\n更新项目模板？[u]pdate/[k]eep: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = input().strip().casefold()
         choice = "update" if answer in {"u", "update"} else "keep"
     if choice not in {"update", "keep"}:
         raise UsageError("模板选择必须是 update 或 keep")

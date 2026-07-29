@@ -12,6 +12,7 @@ from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import load_terms, match_terms, run_terminology, run_translation
 from app.storage import read_jsonl
+from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
 
@@ -42,29 +43,30 @@ async def test_terminology_publishes_and_translation_uses_terms(
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
-        if "提取 terms 数组" in system:
-            content = {
-                "terms": [
-                    {
-                        "source": "Alice",
-                        "category": "女性人名",
-                        "description": "人物",
-                        "preferred_translation": "爱丽丝",
-                        "aliases": [],
-                    }
-                ]
-            }
+        if 'type="term"' in system:
+            records = [
+                {
+                    "type": "term",
+                    "source": "Alice",
+                    "category": "女性人名",
+                    "description": "人物",
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                }
+            ]
         else:
             seen_translation_payload = payload
-            content = {
-                "segments": [
-                    {"id": item["id"], "translation": f"译文:{item['source']}"}
-                    for item in payload["segments"]
-                ]
-            }
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": f"译文:{item['source']}",
+                }
+                for item in payload["segments"]
+            ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -95,20 +97,19 @@ async def test_completed_terminology_command_does_not_republish(tmp_path: Path) 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        content = {
-            "terms": [
-                {
-                    "source": "Alice",
-                    "category": "人物",
-                    "description": "人物",
-                    "preferred_translation": "爱丽丝",
-                    "aliases": [],
-                }
-            ]
-        }
+        records = [
+            {
+                "type": "term",
+                "source": "Alice",
+                "category": "人物",
+                "description": "人物",
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+            }
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -136,7 +137,7 @@ async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) ->
             200,
             json={
                 "choices": [
-                    {"message": {"content": json.dumps({"terms": []})}}
+                    {"message": {"content": llm_jsonl([])}}
                 ]
             },
         )
@@ -186,15 +187,17 @@ async def test_translation_partial_response_retries_only_missing(
         ids = [item["id"] for item in payload["segments"]]
         calls.append(ids)
         returned = ids[:1]
-        content = {
-            "segments": [
-                {"id": segment_id, "translation": f"ok:{segment_id}"}
-                for segment_id in returned
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": segment_id,
+                "translation": f"ok:{segment_id}",
+            }
+            for segment_id in returned
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -231,15 +234,13 @@ async def test_translation_reports_dynamic_output_budget_warning(
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        content = {
-            "segments": [
-                {"id": item["id"], "translation": "译文"}
-                for item in payload["segments"]
-            ]
-        }
+        records = [
+            {"type": "segment", "id": item["id"], "translation": "译文"}
+            for item in payload["segments"]
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -270,22 +271,21 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         calls.append(payload)
         repairing = "validation_repair" in payload
-        content = {
-            "segments": [
-                {
-                    "id": item["id"],
-                    "translation": (
-                        f"修复:{item['source']}"
-                        if repairing
-                        else f"候选カ:{item['source']}"
-                    ),
-                }
-                for item in payload["segments"]
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": (
+                    f"修复:{item['source']}"
+                    if repairing
+                    else f"候选カ:{item['source']}"
+                ),
+            }
+            for item in payload["segments"]
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -324,15 +324,17 @@ async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requested_ids.extend(item["id"] for item in payload["segments"])
-        content = {
-            "segments": [
-                {"id": item["id"], "translation": item["source"].lower()}
-                for item in payload["segments"]
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": item["source"].lower(),
+            }
+            for item in payload["segments"]
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -375,14 +377,16 @@ async def test_model_context_error_triggers_runtime_segment_split(
                 400,
                 text="context_length_exceeded: maximum context tokens",
             )
-        content = {
-            "segments": [
-                {"id": payload["segments"][0]["id"], "translation": source.lower()}
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": payload["segments"][0]["id"],
+                "translation": source.lower(),
+            }
+        ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -435,12 +439,14 @@ async def test_validation_repair_context_error_splits_without_part_results(
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                {
-                                    "segments": [
-                                        {"id": item["id"], "translation": translation}
-                                    ]
-                                }
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": item["id"],
+                                        "translation": translation,
+                                    }
+                                ]
                             )
                         }
                     }

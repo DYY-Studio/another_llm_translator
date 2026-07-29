@@ -26,6 +26,7 @@ from .errors import (
     IncompleteError,
     UsageError,
 )
+from .logging_utils import get_logger
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -91,6 +92,13 @@ class StageSelection:
     latest_completed: dict[str, dict[str, Any]]
     last_attempt_failed: tuple[str, ...]
     fingerprints: frozenset[str]
+
+
+@dataclass(frozen=True)
+class JSONLDocument:
+    records: tuple[dict[str, Any], ...]
+    errors: tuple[str, ...]
+    complete: bool
 
 
 def select_scope(
@@ -195,24 +203,37 @@ def classify_stage(
 def full_prompt(stage: str, middle: str) -> str:
     common = (
         "只处理 user 消息 segments 中的内容。reference_context 仅供理解，"
-        "不得输出或计入进度。保持 Segment ID 不变。只返回合法 JSON，"
-        "不要使用 Markdown 代码块或解释文字。"
+        "不得输出或计入进度。保持 Segment ID 不变。严格使用 JSONL："
+        "每个非空物理行只能包含一个紧凑 JSON 对象，不得跨行格式化，"
+        "不要使用 Markdown 代码块或解释文字。最后一行必须是"
+        '{"type":"end"}。'
     )
     stage_rules = {
         "terminology": (
-            "提取 terms 数组。每项包含 source、category、description，"
-            "preferred_translation 和 aliases 可选。"
+            '每个术语输出一条 type="term" 记录，包含 source、category、'
+            "description，preferred_translation 和 aliases 可选。没有术语时"
+            "直接输出 end。记录格式："
+            '{"type":"term","source":"Alice","category":"女性人名",'
+            '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
         "translation": (
-            "返回 segments 数组，每项只包含 id 和完整 translation。"
+            '每个 Segment 输出一条 type="segment" 记录，只包含 type、id '
+            "和完整 translation。记录格式："
+            '{"type":"segment","id":"F0001-S000001","translation":"完整译文"}。'
         ),
         "proofreading": (
-            "返回 segments 数组，每项包含 id、status、suggested_text、reason；"
-            "status 只能是 accepted 或 suggested。"
+            '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
+            "suggested_text、reason；status 只能是 accepted 或 suggested。"
+            "记录格式："
+            '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+            '"suggested_text":"完整建议","reason":"原因"}。'
         ),
         "polishing": (
-            "返回 segments 数组，每项包含 id、status、suggested_text、reason；"
-            "status 只能是 accepted 或 suggested。"
+            '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
+            "suggested_text、reason；status 只能是 accepted 或 suggested。"
+            "记录格式："
+            '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+            '"suggested_text":"完整建议","reason":"原因"}。'
         ),
     }
     if stage not in stage_rules:
@@ -515,9 +536,10 @@ class SlidingWindowLimiter:
         self.records: deque[tuple[float, int]] = deque()
         self.lock = asyncio.Lock()
 
-    async def acquire(self, estimated_tokens: int) -> None:
+    async def acquire(self, estimated_tokens: int) -> float:
+        waited = 0.0
         if self.requests_per_minute == 0 and self.input_tokens_per_minute == 0:
-            return
+            return waited
         if (
             self.input_tokens_per_minute > 0
             and estimated_tokens > self.input_tokens_per_minute
@@ -542,9 +564,10 @@ class SlidingWindowLimiter:
                 )
                 if not request_full and not token_full:
                     self.records.append((now, estimated_tokens))
-                    return
+                    return waited
                 wait = max(0.01, 60 - (now - self.records[0][0]))
             await self.sleeper(wait)
+            waited += wait
 
 
 class LLMClient:
@@ -573,6 +596,7 @@ class LLMClient:
         self.send_count = 0
         self.warnings: list[str] = []
         self._reported_output_clamp = False
+        self.logger = get_logger(stage)
 
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
@@ -656,11 +680,13 @@ class LLMClient:
         )
         effective_output = min(configured_output, available_output)
         if effective_output < configured_output and not self._reported_output_clamp:
-            self.warnings.append(
+            warning = (
                 "max_output_tokens "
                 f"已从配置上限 {configured_output} 按本次剩余上下文"
                 f"自动收窄为 {effective_output}"
             )
+            self.warnings.append(warning)
+            self.logger.warning("%s request=%s", warning, request_id)
             self._reported_output_clamp = True
         payload = {
             "model": self.config["llm"]["model"],
@@ -676,8 +702,24 @@ class LLMClient:
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
         for attempt in range(1, attempts + 1):
-            await self.limiter.acquire(estimated_input_tokens)
+            waited = await self.limiter.acquire(estimated_input_tokens)
+            if waited:
+                self.logger.info(
+                    "rate-limit wait=%.2fs request=%s attempt=%d",
+                    waited,
+                    request_id,
+                    attempt,
+                )
             self.send_count += 1
+            self.logger.info(
+                "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
+                request_id,
+                attempt,
+                attempts,
+                estimated_input_tokens,
+                effective_output,
+            )
+            started = time.monotonic()
             try:
                 debug = self.config["debug"]
                 if (
@@ -705,6 +747,14 @@ class LLMClient:
                         json=payload,
                     )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                elapsed = time.monotonic() - started
+                self.logger.warning(
+                    "request network-error request=%s attempt=%d elapsed=%.2fs kind=%s",
+                    request_id,
+                    attempt,
+                    elapsed,
+                    type(exc).__name__,
+                )
                 await self._debug_attempt(
                     request_id,
                     attempt,
@@ -716,6 +766,7 @@ class LLMClient:
                     raise ExternalError(f"HTTP 请求重试耗尽：{exc}") from exc
                 await self._backoff(attempt)
                 continue
+            elapsed = time.monotonic() - started
             try:
                 response_data = response.json()
             except ValueError:
@@ -736,15 +787,25 @@ class LLMClient:
                     and self.send_count % debug["inject_missing_segment_every"] == 0
                 ):
                     try:
-                        parsed_content = json.loads(
-                            response_data["choices"][0]["message"]["content"]
-                        )
-                        if parsed_content.get("segments"):
-                            parsed_content["segments"].pop()
-                            response_data["choices"][0]["message"]["content"] = (
-                                json.dumps(parsed_content, ensure_ascii=False)
+                        content = response_data["choices"][0]["message"]["content"]
+                        lines = extract_jsonl_content(str(content)).splitlines()
+                        segment_indexes = []
+                        for index, line in enumerate(lines):
+                            value = json.loads(line)
+                            if isinstance(value, dict) and value.get("type") == "segment":
+                                segment_indexes.append(index)
+                        if segment_indexes:
+                            lines.pop(segment_indexes[-1])
+                            response_data["choices"][0]["message"]["content"] = "\n".join(
+                                lines
                             )
-                    except (KeyError, IndexError, TypeError, ValueError):
+                    except (
+                        KeyError,
+                        IndexError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
                         pass
                 await self._debug_attempt(
                     request_id,
@@ -760,6 +821,13 @@ class LLMClient:
                     raise ExternalError("响应缺少 choices[0].message.content") from exc
                 if not isinstance(content, str):
                     raise ExternalError("LLM 响应正文不是字符串")
+                self.logger.info(
+                    "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
+                    request_id,
+                    attempt,
+                    response.status_code,
+                    elapsed,
+                )
                 return content, request_id
             retryable = response.status_code in {408, 429} or response.status_code >= 500
             await self._debug_attempt(
@@ -771,6 +839,13 @@ class LLMClient:
                 parent_request_id=parent_request_id,
             )
             if response.status_code in {401, 403}:
+                self.logger.error(
+                    "request fatal request=%s attempt=%d status=%d elapsed=%.2fs",
+                    request_id,
+                    attempt,
+                    response.status_code,
+                    elapsed,
+                )
                 raise FatalExternalError(f"鉴权失败：HTTP {response.status_code}")
             response_hint = response.text.casefold()
             if response.status_code == 400 and (
@@ -780,20 +855,51 @@ class LLMClient:
                     and ("token" in response_hint or "maximum" in response_hint)
                 )
             ):
+                self.logger.warning(
+                    "request context-too-long request=%s attempt=%d elapsed=%.2fs",
+                    request_id,
+                    attempt,
+                    elapsed,
+                )
                 raise ContextLengthError(
                     "模型报告上下文过长",
                     request_id=request_id,
                 )
             if response.status_code in {400, 404}:
+                self.logger.error(
+                    "request fatal request=%s attempt=%d status=%d elapsed=%.2fs",
+                    request_id,
+                    attempt,
+                    response.status_code,
+                    elapsed,
+                )
                 raise FatalExternalError(
                     f"请求或端点配置错误：HTTP {response.status_code}"
                 )
             if not retryable or attempt == attempts:
+                self.logger.error(
+                    "request failed request=%s attempt=%d status=%d elapsed=%.2fs",
+                    request_id,
+                    attempt,
+                    response.status_code,
+                    elapsed,
+                )
                 raise ExternalError(f"LLM 请求失败：HTTP {response.status_code}")
+            self.logger.warning(
+                "request retry request=%s attempt=%d status=%d elapsed=%.2fs",
+                request_id,
+                attempt,
+                response.status_code,
+                elapsed,
+            )
             retry_after = response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    await self.sleeper(float(retry_after))
+                    delay = float(retry_after)
+                    self.logger.info(
+                        "retry-after request=%s wait=%.2fs", request_id, delay
+                    )
+                    await self.sleeper(delay)
                     continue
                 except ValueError:
                     pass
@@ -806,6 +912,7 @@ class LLMClient:
             float(self.config["retry"]["base_delay_seconds"]) * (2 ** (attempt - 1)),
         )
         delay += random.uniform(0, float(self.config["retry"]["jitter_seconds"]))
+        self.logger.info("retry backoff attempt=%d wait=%.2fs", attempt, delay)
         await self.sleeper(delay)
 
 
@@ -840,14 +947,58 @@ async def dispatch_chunks(
     return [item for group in nested for item in group]
 
 
-def parse_json_object(content: str) -> dict[str, Any]:
-    try:
-        value = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM 返回的不是合法 JSON：{exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("LLM 返回 JSON 顶层必须是对象")
-    return value
+_SUPPORTED_FENCE_LABELS = {"", "jsonl", "ndjson", "json"}
+_FENCE_RE = re.compile(
+    r"```[ \t]*(?P<label>[^\r\n`]*)\r?\n(?P<body>.*?)```",
+    re.DOTALL,
+)
+
+
+def extract_jsonl_content(content: str) -> str:
+    normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    for match in _FENCE_RE.finditer(normalized):
+        label = match.group("label").strip().casefold()
+        body = match.group("body").strip()
+        if label in _SUPPORTED_FENCE_LABELS and body:
+            return body
+    return normalized.strip()
+
+
+def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
+    body = extract_jsonl_content(content)
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen_end = False
+    for line_number, raw_line in enumerate(body.split("\n"), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if seen_end:
+            errors.append(f"第 {line_number} 行位于 end 之后")
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            errors.append(f"第 {line_number} 行不是合法 JSON 对象")
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"第 {line_number} 行必须是 JSON 对象")
+            continue
+        item_type = value.get("type")
+        if item_type == "end":
+            seen_end = True
+            continue
+        if item_type != record_type:
+            errors.append(f"第 {line_number} 行包含未知 type")
+            continue
+        records.append(value)
+    if not seen_end:
+        errors.append("响应缺少最终 end 记录")
+    return JSONLDocument(
+        records=tuple(records),
+        errors=tuple(errors),
+        complete=seen_end and not errors,
+    )
 
 
 def ensure_complete_or_raise(selection: StageSelection) -> None:

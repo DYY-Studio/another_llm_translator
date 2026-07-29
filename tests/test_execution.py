@@ -196,7 +196,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
             return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": '{"segments":[]}'}}]},
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -220,7 +220,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     finally:
         del os.environ["LLM_API_KEY"]
         await client.aclose()
-    assert json.loads(content) == {"segments": []}
+    assert content == '{"type":"end"}'
     assert calls == 2
     assert len(list((tmp_path / "payloads").glob(f"{request_id}-A*.request.json"))) == 2
     assert (tmp_path / "attempts.jsonl").is_file()
@@ -281,7 +281,7 @@ async def test_llm_client_clamps_max_tokens_to_remaining_context(
         sent_payload = json.loads(request.content)
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": '{"segments":[]}'}}]},
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

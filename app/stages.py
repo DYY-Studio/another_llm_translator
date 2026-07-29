@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import shlex
@@ -39,6 +38,7 @@ from .execution import (
     full_prompt,
     load_stage_history,
     materialize_chunks,
+    parse_jsonl_document,
     previous_context,
     render_messages,
     save_debug_chunks,
@@ -46,6 +46,7 @@ from .execution import (
     stage_fingerprint,
     stage_result_path,
 )
+from .logging_utils import get_logger
 from .project import load_segments, load_source_files
 from .storage import (
     append_jsonl,
@@ -62,13 +63,6 @@ JAPANESE_RE = re.compile(
     "\U0001b130-\U0001b16f\U0001aff0-\U0001afff]"
 )
 KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
-
-
-def _log(project: Path, level: str, message: str) -> None:
-    path = project / "logs" / "app.log"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{level} {message}\n")
 
 
 def _project_context(
@@ -164,24 +158,30 @@ def normalize_term(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold().strip()
 
 
-def _validate_term_items(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, dict) or not isinstance(value.get("terms"), list):
-        raise ValueError("术语响应必须包含 terms 数组")
+def _validate_term_items(
+    content: str,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    document = parse_jsonl_document(content, record_type="term")
     terms: list[dict[str, Any]] = []
-    for item in value["terms"]:
-        if not isinstance(item, dict):
-            raise ValueError("术语项必须是对象")
+    errors = list(document.errors)
+    for index, item in enumerate(document.records, start=1):
+        item_errors: list[str] = []
         for key in ("source", "category", "description"):
             if not isinstance(item.get(key), str) or not item[key].strip():
-                raise ValueError(f"术语项缺少有效 {key}")
+                item_errors.append(f"术语记录 {index} 缺少有效 {key}")
         preferred = item.get("preferred_translation")
         if preferred is not None and not isinstance(preferred, str):
-            raise ValueError("preferred_translation 必须是字符串或 null")
+            item_errors.append(
+                f"术语记录 {index} 的 preferred_translation 类型错误"
+            )
         aliases = item.get("aliases", [])
         if not isinstance(aliases, list) or not all(
             isinstance(alias, str) for alias in aliases
         ):
-            raise ValueError("aliases 必须是字符串数组")
+            item_errors.append(f"术语记录 {index} 的 aliases 类型错误")
+        if item_errors:
+            errors.extend(item_errors)
+            continue
         terms.append(
             {
                 "source": item["source"].strip(),
@@ -191,7 +191,7 @@ def _validate_term_items(value: Any) -> list[dict[str, Any]]:
                 "aliases": [alias.strip() for alias in aliases if alias.strip()],
             }
         )
-    return terms
+    return terms, errors, document.complete and not errors
 
 
 def _merge_and_publish_terms(
@@ -314,6 +314,7 @@ async def run_terminology(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
+    logger = get_logger("terminology")
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
@@ -461,6 +462,13 @@ async def run_terminology(
         prompt=prompt,
         payload_builder=payload_builder,
     )
+    logger.info(
+        "stage plan selected=%d requested=%d reused=%d chunks=%d",
+        len(selected),
+        len(work),
+        len(selected) - len(work),
+        len(plans),
+    )
     if scope.dry_run:
         return {
             "stage": "terminology",
@@ -488,6 +496,7 @@ async def run_terminology(
             "scope": _scope_record(scope, force_all=scope.force),
         },
     )
+    logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, "terminology", plans)
     if config["debug"]["enabled"]:
         save_debug_chunks(
@@ -515,7 +524,8 @@ async def run_terminology(
             payload = payload_builder(unresolved)
             if format_attempt:
                 payload["format_correction"] = (
-                    "上一次响应格式错误。只返回合法 JSON，不要解释。"
+                    "上一次响应不符合 JSONL 协议。每行只输出一个紧凑 JSON "
+                    "对象，不要解释，最后一行输出 {\"type\":\"end\"}。"
                 )
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -528,17 +538,14 @@ async def run_terminology(
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                 )
-                terms = _validate_term_items(json.loads(content))
+                terms, parse_errors, response_complete = _validate_term_items(
+                    content
+                )
             except FatalExternalError:
                 raise
             except ContextLengthError:
                 raise
-            except (ExternalError, ValueError, json.JSONDecodeError) as exc:
-                if format_attempt < config["retry"]["format_max_attempts"] and not isinstance(
-                    exc, ExternalError
-                ):
-                    parent_request_id = request_id
-                    continue
+            except ExternalError as exc:
                 async with write_lock:
                     for segment in unresolved:
                         segment_id = part_original.get(
@@ -561,8 +568,6 @@ async def run_terminology(
                                 stage_fingerprint=fingerprint,
                                 error_class=(
                                     "external_error"
-                                    if isinstance(exc, ExternalError)
-                                    else "format_error"
                                 ),
                                 error_message=str(exc),
                             ),
@@ -576,23 +581,68 @@ async def run_terminology(
                     }
                 )
             async with write_lock:
-                append_jsonl(
-                    project / "terminology" / "candidates.jsonl",
-                    record_header(
-                        "terminology_candidates",
-                        str(metadata["project_id"]),
-                        stage="terminology",
-                        status="completed",
-                        run_id=run_id,
-                        request_id=request_id,
-                        active_task_id=task_id,
-                        stage_fingerprint=fingerprint,
-                        segment_ids=[
-                            segment["segment_id"] for segment in unresolved
-                        ],
-                        terms=terms,
-                    ),
+                if terms:
+                    append_jsonl(
+                        project / "terminology" / "candidates.jsonl",
+                        record_header(
+                            "terminology_candidates",
+                            str(metadata["project_id"]),
+                            stage="terminology",
+                            status="completed",
+                            run_id=run_id,
+                            request_id=request_id,
+                            active_task_id=task_id,
+                            stage_fingerprint=fingerprint,
+                            segment_ids=[
+                                segment["segment_id"] for segment in unresolved
+                            ],
+                            terms=terms,
+                        ),
+                    )
+            if not response_complete:
+                logger.warning(
+                    "format correction request=%s attempt=%d errors=%d",
+                    request_id,
+                    format_attempt + 1,
+                    len(parse_errors),
                 )
+                if format_attempt < config["retry"]["format_max_attempts"]:
+                    parent_request_id = request_id
+                    continue
+                exc = ValueError("; ".join(parse_errors[:3]))
+                async with write_lock:
+                    for segment in unresolved:
+                        segment_id = part_original.get(
+                            str(segment["segment_id"]), str(segment["segment_id"])
+                        )
+                        if segment_id in failed_originals:
+                            continue
+                        failed_originals.add(segment_id)
+                        append_jsonl(
+                            project / "terminology" / "scans.jsonl",
+                            record_header(
+                                "terminology_scan",
+                                str(metadata["project_id"]),
+                                stage="terminology",
+                                segment_id=segment_id,
+                                status="failed",
+                                run_id=run_id,
+                                request_id=request_id,
+                                active_task_id=task_id,
+                                stage_fingerprint=fingerprint,
+                                error_class="format_error",
+                                error_message=str(exc),
+                            ),
+                        )
+                return 0, len(
+                    {
+                        part_original.get(
+                            str(segment["segment_id"]), str(segment["segment_id"])
+                        )
+                        for segment in unresolved
+                    }
+                )
+            async with write_lock:
                 completed_originals: list[str] = []
                 for segment in unresolved:
                     request_segment_id = str(segment["segment_id"])
@@ -622,6 +672,11 @@ async def run_terminology(
                             stage_fingerprint=fingerprint,
                         ),
                     )
+            logger.info(
+                "chunk complete chunk=%s completed=%d",
+                chunk.chunk_id or "runtime",
+                len(completed_originals),
+            )
             return len(completed_originals), 0
         return 0, len(unresolved)
 
@@ -632,6 +687,11 @@ async def run_terminology(
         try:
             return await process_once(chunk, split_parent_request_id)
         except ContextLengthError as exc:
+            logger.warning(
+                "context split parent_request=%s segments=%d",
+                exc.request_id,
+                len(chunk.segments),
+            )
             items = list(chunk.segments)
             if len(items) > 1:
                 midpoint = len(items) // 2
@@ -729,6 +789,7 @@ async def run_terminology(
         _extend_unique(warnings, llm.warnings)
     except FatalExternalError:
         finalize_run(run_dir, status="failed", completed=0, failed=len(work))
+        logger.error("run failed run=%s fatal_external_error=true", run_id)
         raise
 
     completed = sum(value[0] for value in results)
@@ -762,7 +823,13 @@ async def run_terminology(
         failed=failed,
         warnings=warnings,
     )
-    _log(project, "INFO", f"terminology run={run_id} completed={completed} failed={failed}")
+    logger.info(
+        "run complete run=%s completed=%d failed=%d pending=%d",
+        run_id,
+        completed,
+        failed,
+        len(all_nonempty) - len(task_completed_ids),
+    )
     return {
         "stage": "terminology",
         "run_id": run_id,
@@ -906,22 +973,17 @@ def _replace_with_runtime_parts(
 
 def _parse_translation_items(
     content: str, expected_ids: list[str]
-) -> tuple[dict[str, str], list[str], list[str]]:
-    value = json.loads(content)
-    if not isinstance(value, dict) or not isinstance(value.get("segments"), list):
-        raise ValueError("翻译响应必须包含 segments 数组")
+) -> tuple[dict[str, str], list[str], list[str], bool]:
+    document = parse_jsonl_document(content, record_type="segment")
     counts = Counter(
         item.get("id")
-        for item in value["segments"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        for item in document.records
+        if isinstance(item.get("id"), str)
     )
     expected = set(expected_ids)
     valid: dict[str, str] = {}
-    errors: list[str] = []
-    for item in value["segments"]:
-        if not isinstance(item, dict):
-            errors.append("非对象 Segment")
-            continue
+    errors: list[str] = list(document.errors)
+    for item in document.records:
         segment_id = item.get("id")
         translation = item.get("translation")
         if segment_id not in expected:
@@ -932,7 +994,7 @@ def _parse_translation_items(
             continue
         valid[segment_id] = translation
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
-    return valid, unresolved, errors
+    return valid, unresolved, errors, document.complete and not errors
 
 
 async def run_translation(
@@ -941,6 +1003,7 @@ async def run_translation(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
+    logger = get_logger("translation")
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, "translation")
     library = load_terms(project)
@@ -1059,6 +1122,13 @@ async def run_translation(
         prompt=prompt,
         payload_builder=payload_builder,
     )
+    logger.info(
+        "stage plan selected=%d requested=%d reused=%d chunks=%d",
+        len(selection.selected),
+        len(selection.work),
+        len(selection.reusable),
+        len(plans),
+    )
     if scope.dry_run:
         return {
             "stage": "translation",
@@ -1086,6 +1156,7 @@ async def run_translation(
             "scope": _scope_record(scope),
         },
     )
+    logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, "translation", plans)
     if config["debug"]["enabled"]:
         save_debug_chunks(
@@ -1138,6 +1209,12 @@ async def run_translation(
             )
         completed_ids.add(segment_id)
         latest_text[segment_id] = text
+        logger.info(
+            "segment complete segment=%s completed=%d failed=%d",
+            segment_id,
+            len(completed_ids),
+            len(failed_ids),
+        )
 
     async def save_failed(
         segment_id: str,
@@ -1172,6 +1249,13 @@ async def run_translation(
                 ),
             )
         failed_ids.add(segment_id)
+        logger.warning(
+            "segment failed segment=%s class=%s completed=%d failed=%d",
+            segment_id,
+            error_class,
+            len(completed_ids),
+            len(failed_ids),
+        )
 
     async def accept_candidate(
         segment_id: str, text: str, request_id: str
@@ -1222,7 +1306,9 @@ async def run_translation(
         parent_request_id = initial_parent_request_id
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             unresolved_items = [by_id[segment_id] for segment_id in unresolved]
-            payload = payload_builder(unresolved_items)
+            payload = payload_builder(unresolved_items or group[:1])
+            if not unresolved_items:
+                payload["segments"] = []
             if repair_candidates is not None:
                 payload["segments"] = [
                     {
@@ -1242,7 +1328,8 @@ async def run_translation(
                 )
             if format_attempt:
                 payload["format_correction"] = (
-                    "上一次响应格式错误或缺少 Segment。只返回全部未决 ID。"
+                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
                 )
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -1255,7 +1342,9 @@ async def run_translation(
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                 )
-                valid, unresolved, _ = _parse_translation_items(content, unresolved)
+                valid, unresolved, parse_errors, response_complete = (
+                    _parse_translation_items(content, unresolved)
+                )
             except FatalExternalError:
                 raise
             except ContextLengthError:
@@ -1269,12 +1358,18 @@ async def run_translation(
                         str(exc),
                     )
                 return valid_total, []
-            except (ValueError, json.JSONDecodeError):
-                valid = {}
             for segment_id, text in valid.items():
                 valid_total[segment_id] = (text, request_id)
-            if not unresolved:
+                await accept_candidate(segment_id, text, request_id)
+            if response_complete and not unresolved:
                 return valid_total, []
+            logger.warning(
+                "format correction request=%s attempt=%d unresolved=%d errors=%d",
+                request_id,
+                format_attempt + 1,
+                len(unresolved),
+                len(parse_errors),
+            )
             parent_request_id = request_id
         return valid_total, unresolved
 
@@ -1287,8 +1382,6 @@ async def run_translation(
             group,
             initial_parent_request_id=initial_parent_request_id,
         )
-        for segment_id, (text, request_id) in valid.items():
-            await accept_candidate(segment_id, text, request_id)
         for segment_id in unresolved:
             await save_failed(
                 segment_id,
@@ -1305,6 +1398,11 @@ async def run_translation(
             await process_once(chunk, split_parent_request_id)
             return
         except ContextLengthError as exc:
+            logger.warning(
+                "context split parent_request=%s segments=%d",
+                exc.request_id,
+                len(chunk.segments),
+            )
             items = list(chunk.segments)
             if len(items) > 1:
                 midpoint = len(items) // 2
@@ -1401,8 +1499,6 @@ async def run_translation(
                 }
                 await repair_group([part], child_subset, exc.request_id)
             return
-        for segment_id, (text, request_id) in valid.items():
-            await accept_candidate(segment_id, text, request_id)
         for segment_id in unresolved:
             validation_pending[segment_id] = subset[segment_id]
 
@@ -1430,13 +1526,19 @@ async def run_translation(
                 max_parallel=config["execution"]["max_parallel"],
             )
             max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-            for _ in range(max_repairs):
+            for repair_attempt in range(1, max_repairs + 1):
                 if not validation_pending:
                     break
                 current_pending = dict(validation_pending)
                 validation_pending.clear()
                 groups = contiguous_groups(
                     item["segment"] for item in current_pending.values()
+                )
+                logger.warning(
+                    "validation repair attempt=%d segments=%d chunks=%d",
+                    repair_attempt,
+                    len(current_pending),
+                    len(groups),
                 )
                 for group in groups:
                     subset = {
@@ -1454,6 +1556,11 @@ async def run_translation(
             completed=len(completed_ids),
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
+        )
+        logger.error(
+            "run failed run=%s completed=%d fatal_external_error=true",
+            run_id,
+            len(completed_ids),
         )
         raise
 
@@ -1518,10 +1625,11 @@ async def run_translation(
         failed=failed_count,
         warnings=warnings,
     )
-    _log(
-        project,
-        "INFO",
-        f"translation run={run_id} completed={len(completed_ids)} failed={failed_count}",
+    logger.info(
+        "run complete run=%s completed=%d failed=%d",
+        run_id,
+        len(completed_ids),
+        failed_count,
     )
     return {
         "stage": "translation",
@@ -1571,35 +1679,37 @@ def _base_results(
 
 def _parse_review_items(
     content: str, expected_ids: list[str]
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    value = json.loads(content)
-    if not isinstance(value, dict) or not isinstance(value.get("segments"), list):
-        raise ValueError("校对/润色响应必须包含 segments 数组")
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str], bool]:
+    document = parse_jsonl_document(content, record_type="segment")
     counts = Counter(
         item.get("id")
-        for item in value["segments"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        for item in document.records
+        if isinstance(item.get("id"), str)
     )
     expected = set(expected_ids)
     valid: dict[str, dict[str, Any]] = {}
-    for item in value["segments"]:
-        if not isinstance(item, dict):
-            continue
+    errors: list[str] = list(document.errors)
+    for item in document.records:
         segment_id = item.get("id")
         review_status = item.get("status")
         suggested = item.get("suggested_text")
         reason = item.get("reason")
         if segment_id not in expected or counts[segment_id] != 1:
+            errors.append(f"未知或重复 ID：{segment_id}")
             continue
         if review_status not in {"accepted", "suggested"}:
+            errors.append(f"status 字段错误：{segment_id}")
             continue
         if review_status == "accepted" and suggested is not None:
+            errors.append(f"accepted 不应包含建议文本：{segment_id}")
             continue
         if review_status == "suggested" and (
             not isinstance(suggested, str) or not suggested
         ):
+            errors.append(f"suggested 缺少建议文本：{segment_id}")
             continue
         if reason is not None and not isinstance(reason, str):
+            errors.append(f"reason 字段错误：{segment_id}")
             continue
         valid[str(segment_id)] = {
             "review_status": review_status,
@@ -1607,7 +1717,7 @@ def _parse_review_items(
             "reason": reason,
         }
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
-    return valid, unresolved
+    return valid, unresolved, errors, document.complete and not errors
 
 
 async def run_review(
@@ -1619,6 +1729,7 @@ async def run_review(
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
+    logger = get_logger(stage)
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, stage)
     library = load_terms(project)
@@ -1771,6 +1882,13 @@ async def run_review(
         prompt=prompt,
         payload_builder=payload_builder,
     )
+    logger.info(
+        "stage plan selected=%d requested=%d reused=%d chunks=%d",
+        len(selection.selected),
+        len(selection.work),
+        len(selection.reusable),
+        len(plans),
+    )
     if scope.dry_run:
         return {
             "stage": stage,
@@ -1797,6 +1915,7 @@ async def run_review(
             "scope": _scope_record(scope),
         },
     )
+    logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, stage, plans)
     if config["debug"]["enabled"]:
         save_debug_chunks(
@@ -1852,6 +1971,12 @@ async def run_review(
                     ),
                 )
                 completed_ids.add(segment_id)
+                logger.info(
+                    "segment complete segment=%s completed=%d failed=%d",
+                    segment_id,
+                    len(completed_ids),
+                    len(failed_ids),
+                )
             else:
                 append_jsonl(
                     result_path,
@@ -1871,6 +1996,12 @@ async def run_review(
                     ),
                 )
                 failed_ids.add(segment_id)
+                logger.warning(
+                    "segment failed segment=%s completed=%d failed=%d",
+                    segment_id,
+                    len(completed_ids),
+                    len(failed_ids),
+                )
 
     async def accept_result(
         segment_id: str,
@@ -1916,10 +2047,13 @@ async def run_review(
         parent_request_id = initial_parent_request_id
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             items = [by_id[segment_id] for segment_id in unresolved]
-            payload = payload_builder(items)
+            payload = payload_builder(items or list(chunk.segments[:1]))
+            if not items:
+                payload["segments"] = []
             if format_attempt:
                 payload["format_correction"] = (
-                    "上一次响应格式错误或缺少 Segment。只返回全部未决 ID。"
+                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
                 )
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -1932,7 +2066,9 @@ async def run_review(
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                 )
-                valid, unresolved = _parse_review_items(content, unresolved)
+                valid, unresolved, parse_errors, response_complete = (
+                    _parse_review_items(content, unresolved)
+                )
             except FatalExternalError:
                 raise
             except ContextLengthError:
@@ -1941,12 +2077,17 @@ async def run_review(
                 for segment_id in unresolved:
                     await save_result(segment_id, request_id, error=str(exc))
                 return
-            except (ValueError, json.JSONDecodeError):
-                valid = {}
             for segment_id, parsed in valid.items():
                 await accept_result(segment_id, request_id, parsed)
-            if not unresolved:
+            if response_complete and not unresolved:
                 return
+            logger.warning(
+                "format correction request=%s attempt=%d unresolved=%d errors=%d",
+                request_id,
+                format_attempt + 1,
+                len(unresolved),
+                len(parse_errors),
+            )
             parent_request_id = request_id
         for segment_id in unresolved:
             await save_result(
@@ -1963,6 +2104,11 @@ async def run_review(
             await process_once(chunk, split_parent_request_id)
             return
         except ContextLengthError as exc:
+            logger.warning(
+                "context split parent_request=%s segments=%d",
+                exc.request_id,
+                len(chunk.segments),
+            )
             items = list(chunk.segments)
             if len(items) > 1:
                 midpoint = len(items) // 2
@@ -2032,6 +2178,11 @@ async def run_review(
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
         )
+        logger.error(
+            "run failed run=%s completed=%d fatal_external_error=true",
+            run_id,
+            len(completed_ids),
+        )
         raise
     finalize_run(
         run_dir,
@@ -2040,10 +2191,11 @@ async def run_review(
         failed=len(failed_ids),
         warnings=warnings,
     )
-    _log(
-        project,
-        "INFO",
-        f"{stage} run={run_id} completed={len(completed_ids)} failed={len(failed_ids)}",
+    logger.info(
+        "run complete run=%s completed=%d failed=%d",
+        run_id,
+        len(completed_ids),
+        len(failed_ids),
     )
     return {
         "stage": stage,
@@ -2069,6 +2221,7 @@ def run_apply(
         raise ValueError(f"unsupported apply stage: {review_stage}")
     if not confirmed_all:
         raise UsageError("apply 必须显式传入 --all")
+    logger = get_logger("apply")
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     selected = select_scope(segments, files, scope)
     suggestions = classify_stage(
@@ -2130,6 +2283,12 @@ def run_apply(
             "scope": _scope_record(scope),
         },
     )
+    logger.info(
+        "run start run=%s review_stage=%s selected=%d",
+        run_id,
+        review_stage,
+        len(selected),
+    )
     result_path = stage_result_path(project, applied_stage)
     for segment in selected:
         segment_id = str(segment["segment_id"])
@@ -2165,6 +2324,12 @@ def run_apply(
         failed=0,
         warnings=warnings,
     )
+    logger.info(
+        "run complete run=%s completed=%d outdated_base=%d",
+        run_id,
+        len(selected),
+        len(outdated),
+    )
     return {
         "stage": applied_stage,
         "run_id": run_id,
@@ -2198,6 +2363,7 @@ def export_project(
 ) -> dict[str, Any]:
     if export_stage not in {"translated", "proofread", "polished"}:
         raise ValueError(f"unsupported export stage: {export_stage}")
+    logger = get_logger("export")
     config, _, files, segments = _project_context(project, dry_run=False)
     stage_name = {
         "translated": "translation",
@@ -2322,6 +2488,13 @@ def export_project(
             ) from exc
         _atomic_write_bytes(destination, payload)
         written.append(str(destination.relative_to(project)))
+        logger.info("file written path=%s", destination.relative_to(project))
+    logger.info(
+        "export complete stage=%s files=%d fallback_segments=%d",
+        export_stage,
+        len(written),
+        len(fallback_records),
+    )
     return {
         "stage": export_stage,
         "bilingual": bilingual,
