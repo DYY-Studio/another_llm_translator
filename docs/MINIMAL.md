@@ -576,7 +576,7 @@ applied 结果保存：
 + 代码内固定 Suffix
 ```
 
-固定部分定义角色、输入输出结构、Segment ID 约束、参考上文边界和只返回 JSON 的要求。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+固定部分定义角色、输入输出结构、Segment ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
 
 四阶段分别读取自己的：
 
@@ -651,23 +651,14 @@ previous_segments = 3
 
 ### 候选和合并
 
-LLM 返回：
+LLM 返回 JSONL；每个术语一行：
 
-```json
-{
-  "terms": [
-    {
-      "source": "Silver Knight",
-      "category": "人物称号",
-      "description": "银发骑士的称号",
-      "preferred_translation": "白银骑士",
-      "aliases": ["The Silver Knight"]
-    }
-  ]
-}
+```jsonl
+{"type":"term","source":"Silver Knight","category":"人物称号","description":"银发骑士的称号","preferred_translation":"白银骑士","aliases":["The Silver Knight"]}
+{"type":"end"}
 ```
 
-LLM 不需要声明术语属于哪个 Segment。一次响应成功解析后，请求覆盖的每个 Segment 都记录扫描 completed；失败时对应 Segment 记录 failed。
+LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。否则格式修正仍重试原请求范围。
 
 归一化：
 
@@ -737,14 +728,11 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 }
 ```
 
-输出：
+输出 JSONL：
 
-```json
-{
-  "segments": [
-    {"id": "F0001-S000101", "translation": "..."}
-  ]
-}
+```jsonl
+{"type":"segment","id":"F0001-S000101","translation":"..."}
+{"type":"end"}
 ```
 
 映射规则：
@@ -753,7 +741,7 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 - 不根据返回顺序或数量猜测对应关系。
 - 未知或多余 ID 忽略并记录。
 - 重复 ID、缺少 ID 或字段错误只使对应 Segment 保持未决。
-- JSON 合法时，结构有效的 Segment 立即逐条保存。
+- end 前结构有效的 Segment 立即逐条保存，即使响应随后截断也不回滚。
 - 后续格式修正只请求未决 Segment。
 
 没有已发布术语库时允许直接 translate，但必须醒目警告，并在 Run 中记录 `terms_revision = null`。`run-all` 会先完成术语任务再翻译。
@@ -802,25 +790,12 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 - 允许的同文件上文。
 - 校对 Prompt。
 
-输出：
+输出 JSONL：
 
-```json
-{
-  "segments": [
-    {
-      "id": "F0001-S000101",
-      "status": "accepted",
-      "suggested_text": null,
-      "reason": null
-    },
-    {
-      "id": "F0001-S000102",
-      "status": "suggested",
-      "suggested_text": "完整建议译文",
-      "reason": "遗漏否定含义"
-    }
-  ]
-}
+```jsonl
+{"type":"segment","id":"F0001-S000101","status":"accepted","suggested_text":null,"reason":null}
+{"type":"segment","id":"F0001-S000102","status":"suggested","suggested_text":"完整建议译文","reason":"遗漏否定含义"}
+{"type":"end"}
 ```
 
 每条结果保存本次使用的翻译 `base_result_id`。
@@ -928,7 +903,7 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 - 上文。
 - 术语。
 - 当前 Segment。
-- JSON 包装字符。
+- JSONL 记录结构字符。
 
 每次尝试加入 Segment 后重新渲染并估算完整 Prompt。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
 
@@ -982,10 +957,13 @@ HTTP 重试：
 
 格式修正：
 
-- JSON 整体无法解析时，本次请求全部保持未决。
-- JSON 可解析时，立即保存 ID 唯一、字段有效且通过校验的 Segment。
+- 原始正文或受支持 Markdown 围栏内部必须是一行一个 JSON 对象；围栏外说明文字忽略。
+- 接受 `jsonl`、`ndjson`、`json` 和无标签围栏，不接受旧顶层 JSON 对象或数组协议。
+- 每行独立解析；立即保存 end 前 ID 唯一、字段有效且通过校验的 Segment。
+- end 必须存在且为最后一条记录；缺少或提前 end 会进入格式修正，但已保存 Segment 不回滚。
 - 缺失、重复或字段错误的 Segment 按同文件连续行重新分组。
 - 新请求只包含未决 Segment。
+- 术语响应只有在无行级错误且以 end 结束时才推进扫描完成状态。
 - 格式修正最多 `format_max_attempts` 轮。
 
 模型报告上下文过长时，Chunk 对半拆分；单 Segment Chunk 进入内部 part 切分。
@@ -1024,6 +1002,8 @@ HTTP 重试：
 - Segment 阶段结果。
 - 术语任务进度与候选。
 - 人类可读 `app.log`。
+
+CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写入 stderr，并把相同基本日志写入 `app.log`；最终命令汇总单独以 JSON 写入 stdout。日志不得包含正文、译文、Prompt、API Key 或完整 Payload。
 
 普通模式不保存：
 
@@ -1241,10 +1221,14 @@ polished   → proofreading_applied → translation → source
 - 中断后 completed 不重复请求，pending 和无成功结果的 failed 继续处理。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。
 - 合法部分响应立即保存有效 Segment。
+- 原始 JSONL、CRLF、BOM、空行和受支持 Markdown 围栏均可解析。
+- 缺失、重复或提前 end、非法行、重复或未知 ID 会进入格式修正。
+- 旧顶层 JSON 对象或数组不再接受。
 - 格式修正和校验修复只请求连续分组后的未决 Segment。
 - HTTP、格式和校验重试均不会超过各自总上限。
 - 401/403 停止尚未发送的任务。
 - JSONL 尾行损坏可恢复，中间行损坏明确停止。
+- debug 开关两种状态下 stderr 和 `app.log` 都有基本运行日志，stdout 仍是可独立解析的最终 JSON。
 
 ## 7.4 用户设置决策
 

@@ -20,6 +20,7 @@ from app.stages import (
     run_translation,
 )
 from app.storage import read_jsonl
+from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
 
@@ -27,34 +28,35 @@ def workflow_handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content)
     system = body["messages"][0]["content"]
     payload = json.loads(body["messages"][1]["content"])
-    if "提取 terms 数组" in system:
-        content = {"terms": []}
+    if 'type="term"' in system:
+        records = []
     elif "完整 translation" in system:
-        content = {
-            "segments": [
-                {"id": item["id"], "translation": f"译:{item['source']}"}
-                for item in payload["segments"]
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": f"译:{item['source']}",
+            }
+            for item in payload["segments"]
+        ]
     else:
-        content = {
-            "segments": [
-                {
-                    "id": item["id"],
-                    "status": "suggested",
-                    "suggested_text": (
-                        f"润:{item['current_text']}"
-                        if "改善译文表达" in system
-                        else f"校:{item['current_text']}"
-                    ),
-                    "reason": "test",
-                }
-                for item in payload["segments"]
-            ]
-        }
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "status": "suggested",
+                "suggested_text": (
+                    f"润:{item['current_text']}"
+                    if "改善译文表达" in system
+                    else f"校:{item['current_text']}"
+                ),
+                "reason": "test",
+            }
+            for item in payload["segments"]
+        ]
     return httpx.Response(
         200,
-        json={"choices": [{"message": {"content": json.dumps(content)}}]},
+        json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
     )
 
 
@@ -254,27 +256,28 @@ async def test_applied_export_reports_translation_validation_warning(
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
         if "完整 translation" in system:
-            content = {
-                "segments": [
-                    {"id": item["id"], "translation": "候选カ"}
-                    for item in payload["segments"]
-                ]
-            }
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": "候选カ",
+                }
+                for item in payload["segments"]
+            ]
         else:
-            content = {
-                "segments": [
-                    {
-                        "id": item["id"],
-                        "status": "accepted",
-                        "suggested_text": None,
-                        "reason": None,
-                    }
-                    for item in payload["segments"]
-                ]
-            }
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "status": "accepted",
+                    "suggested_text": None,
+                    "reason": None,
+                }
+                for item in payload["segments"]
+            ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

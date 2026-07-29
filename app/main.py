@@ -7,6 +7,7 @@ import sys
 
 from .execution import Scope
 from .errors import AppError
+from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .project import init_project, resolve_project, sync_global_templates
 from .stages import (
     export_project,
@@ -71,8 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(argv: list[str] | None = None) -> int:
+    configure_cli_logging()
+    logger = get_logger()
     parser = build_parser()
     args = parser.parse_args(argv)
+    logger.info("command start command=%s", args.command)
     if args.command == "init":
         path, summary = init_project(
             args.inputs,
@@ -81,15 +85,33 @@ def run(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
         if path is not None:
+            attach_project_log(path)
             summary["project_path"] = str(path)
+            logger.info(
+                "project initialized project=%s files=%d segments=%d",
+                path.name,
+                summary["file_count"],
+                summary["segment_count"],
+            )
+        for warning in summary.get("warnings", []):
+            logger.warning("%s", warning)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info("command complete command=init")
         return 0
     if args.command == "inspect":
         project = resolve_project(args.project)
+        attach_project_log(project)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
+        for warning in warnings:
+            logger.warning("%s", warning)
         summary = inspect_full(project, dry_run=args.dry_run)
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=inspect files=%d segments=%d",
+            summary["files"],
+            summary["segments"],
+        )
         return 0
     if args.command in {
         "terminology",
@@ -99,7 +121,10 @@ def run(argv: list[str] | None = None) -> int:
         "run-all",
     }:
         project = resolve_project(args.project)
+        attach_project_log(project)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
+        for warning in warnings:
+            logger.warning("%s", warning)
         scope = Scope(
             from_file=args.from_file,
             only_file=args.only_file,
@@ -119,11 +144,24 @@ def run(argv: list[str] | None = None) -> int:
             summary = asyncio.run(run_all(project, scope))
         summary.setdefault("warnings", [])
         summary["warnings"] = [*warnings, *summary["warnings"]]
+        for warning in summary["warnings"]:
+            if warning not in warnings:
+                logger.warning("%s", warning)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=%s completed=%s failed=%s pending=%s",
+            args.command,
+            summary.get("completed", "-"),
+            summary.get("failed", "-"),
+            summary.get("pending", "-"),
+        )
         return 5 if summary.get("failed") or summary.get("pending") else 0
     if args.command == "apply":
         project = resolve_project(args.project)
+        attach_project_log(project)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
+        for warning in warnings:
+            logger.warning("%s", warning)
         summary = run_apply(
             project,
             args.stage,
@@ -137,11 +175,22 @@ def run(argv: list[str] | None = None) -> int:
             confirmed_all=args.all,
         )
         summary["warnings"] = [*warnings, *summary["warnings"]]
+        for warning in summary["warnings"]:
+            if warning not in warnings:
+                logger.warning("%s", warning)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=apply stage=%s completed=%d",
+            args.stage,
+            summary["completed"],
+        )
         return 0
     if args.command == "export":
         project = resolve_project(args.project)
+        attach_project_log(project)
         warnings = sync_global_templates(project)
+        for warning in warnings:
+            logger.warning("%s", warning)
         summary = export_project(
             project,
             args.stage,
@@ -150,6 +199,11 @@ def run(argv: list[str] | None = None) -> int:
         )
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=export stage=%s files=%d",
+            args.stage,
+            summary["files"],
+        )
         return 0
     parser.error("unknown command")
     return 2
@@ -159,9 +213,13 @@ def main() -> None:
     try:
         raise SystemExit(run())
     except KeyboardInterrupt:
+        get_logger().warning("command interrupted")
         raise SystemExit(130) from None
     except AppError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        if not get_logger().logger.handlers:
+            print(f"error: {exc}", file=sys.stderr)
+        else:
+            get_logger().error("%s", exc)
         raise SystemExit(exc.exit_code) from exc
 
 
