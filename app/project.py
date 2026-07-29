@@ -274,7 +274,7 @@ def init_project(
                         file_id=file_id,
                         line_index=line_index,
                         source=source,
-                        is_empty=source == "",
+                        is_empty=source == "" or source.isspace(),
                     )
                 )
 

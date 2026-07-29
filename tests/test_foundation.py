@@ -107,7 +107,9 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
     inputs = tmp_path / "inputs"
     (inputs / "chapter").mkdir(parents=True)
-    (inputs / "10.txt").write_text("first\n\nlast", encoding="utf-8")
+    (inputs / "10.txt").write_text(
+        "first\n\u3000\n \t\n  text  \nlast", encoding="utf-8-sig"
+    )
     (inputs / "2.txt").write_text("second\n", encoding="utf-8")
     (inputs / "chapter" / "1.txt").write_text("\ninside", encoding="utf-8")
 
@@ -125,8 +127,8 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
     assert state == {
         "name": "demo",
         "files": 3,
-        "segments": 7,
-        "empty_segments": 3,
+        "segments": 9,
+        "empty_segments": 4,
     }
     files = read_jsonl(project / "source" / "files.jsonl")
     assert [item["original_name"] for item in files] == [
@@ -134,6 +136,12 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
         "10.txt",
         "chapter/1.txt",
     ]
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+    by_source = {str(item["source"]): bool(item["is_empty"]) for item in segments}
+    assert by_source[""] is True
+    assert by_source["\u3000"] is True
+    assert by_source[" \t"] is True
+    assert by_source["  text  "] is False
     assert (project / "prompts" / "translation.middle.txt").is_file()
     assert load_config(project / "config.toml")["project"]["target_language"]
 

@@ -16,10 +16,12 @@ from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
 
-async def create_project(tmp_path: Path, text: str) -> Path:
+async def create_project(
+    tmp_path: Path, text: str, *, encoding: str = "utf-8"
+) -> Path:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "source.txt"
-    source.write_text(text, encoding="utf-8")
+    source.write_text(text, encoding=encoding)
     project, _ = init_project(
         [str(source)],
         name="demo",
@@ -35,7 +37,11 @@ async def create_project(tmp_path: Path, text: str) -> Path:
 async def test_terminology_publishes_and_translation_uses_terms(
     tmp_path: Path,
 ) -> None:
-    project = await create_project(tmp_path, "Alice entered.\nAlice waved.")
+    project = await create_project(
+        tmp_path,
+        "Alice entered.\n\u3000\n \t\nAlice waved.",
+        encoding="utf-8-sig",
+    )
     seen_translation_payload: dict | None = None
     seen_terminology_payload: dict | None = None
 

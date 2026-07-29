@@ -120,9 +120,9 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
             "file_id": "F0001",
             "line_index": index,
             "source": value,
-            "is_empty": value == "",
+            "is_empty": value == "" or value.isspace(),
         }
-        for index, value in enumerate(["one", "", "", "four", "five"])
+        for index, value in enumerate(["one", "\u3000", " \t", "four", "five"])
     ]
     source.append(
         {
