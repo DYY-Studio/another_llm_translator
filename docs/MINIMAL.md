@@ -65,10 +65,10 @@ Segment 对应源文件中的一个逻辑行。术语扫描、翻译、校对和
 Chunk 由当前 Run 动态生成，只能包含：
 
 - 同一个 `file_id`。
-- 按 `line_index` 连续的 Segment。
+- 按 `line_index` 保持顺序的非空 Segment。
 - 当前命令选定范围内仍需处理的 Segment。
 
-已完成 Segment、空 Segment、筛选边界或其他不在待处理集合中的行都会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须先将未决 Segment 按同文件连续行重新分组。
+两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空 Segment 本身仍不提交 LLM。已完成、筛选范围外或其他不在待处理集合中的非空 Segment 会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
 
 Chunk 没有长期业务身份，不能用于判断进度或恢复。只有启用调试模式时才持久化 Chunk Manifest。
 
@@ -576,7 +576,7 @@ applied 结果保存：
 + 代码内固定 Suffix
 ```
 
-固定部分定义角色、输入输出结构、Segment ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+固定部分定义角色、输入输出结构、适用阶段的 Segment ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
 
 四阶段分别读取自己的：
 
@@ -650,6 +650,22 @@ previous_segments = 3
 每条 scan 和 candidate 都记录 `active_task_id`；读取和发布时只使用 `active_task.json` 当前指向的任务记录。
 
 ### 候选和合并
+
+术语请求不向 LLM 暴露 Segment ID：
+
+```json
+{
+  "target_language": "简体中文",
+  "reference_context": [
+    {"source": "此前原文"}
+  ],
+  "source_segments": [
+    {"source": "当前待扫描原文"}
+  ]
+}
+```
+
+`reference_context` 和 `source_segments` 都只含 source。扫描范围与 Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment 引用。term 记录的 source 必须填写 `source_segments` 原文中实际出现的术语文本。
 
 LLM 返回 JSONL；每个术语一行：
 
@@ -767,8 +783,8 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 修复流程：
 
 1. 汇总当前轮校验失败 Segment。
-2. 同一文件连续失败行组成一个修复 Chunk。
-3. 空行、正常行或筛选边界中断分组。
+2. 同一文件内按源文顺序分组；中间只有空行时仍可组成一个修复 Chunk。
+3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
 6. 每轮修复后重新执行全部已启用校验器。
@@ -907,6 +923,8 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 
 每次尝试加入 Segment 后重新渲染并估算完整 Prompt。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
 
+`target_chunk_input_tokens` 是软目标。贪心累计时，加入下一个 Segment 将超过目标便结束当前 Chunk；单个 Segment 自身超过目标但仍低于模型输入硬限制时，可以单独发送。文件末尾和范围末尾的短尾 Chunk 允许明显低于目标。
+
 配置或请求在发送前失败的情况：
 
 - 固定 Prompt 已超过硬限制。
@@ -961,7 +979,7 @@ HTTP 重试：
 - 接受 `jsonl`、`ndjson`、`json` 和无标签围栏，不接受旧顶层 JSON 对象或数组协议。
 - 每行独立解析；立即保存 end 前 ID 唯一、字段有效且通过校验的 Segment。
 - end 必须存在且为最后一条记录；缺少或提前 end 会进入格式修正，但已保存 Segment 不回滚。
-- 缺失、重复或字段错误的 Segment 按同文件连续行重新分组。
+- 缺失、重复或字段错误的 Segment 按共享 Chunk 规则重新分组；空行不切断，已成功的非空 Segment 会切断其两侧未决项。
 - 新请求只包含未决 Segment。
 - 术语响应只有在无行级错误且以 end 结束时才推进扫描完成状态。
 - 格式修正最多 `format_max_attempts` 轮。
@@ -1215,8 +1233,9 @@ polished   → proofreading_applied → translation → source
 
 验收：
 
-- 每个 Chunk 只含同文件连续待处理 Segment。
-- 已完成、空行、筛选边界和部分响应都会切断新 Chunk。
+- 每个 Chunk 只含同文件、保持源文顺序的待处理非空 Segment。
+- Chunk 可以跨空行，但不能跨已完成、范围外或其他未处理的非空 Segment。
+- 部分响应保存中间 Segment 后，其两侧未决项重新拆成独立 Chunk。
 - 修改 Chunk 大小、并发、限流或调度后不丢失 Segment 进度。
 - 中断后 completed 不重复请求，pending 和无成功结果的 failed 继续处理。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。

@@ -205,6 +205,62 @@ async def test_run_all_dry_run_plans_without_writing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_format_retry_regroups_around_valid_nonempty_segment(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree")
+    review_calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        ids = [item["id"] for item in payload["segments"]]
+        if "完整 translation" in system:
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": f"译:{item['source']}",
+                }
+                for item in payload["segments"]
+            ]
+        else:
+            review_calls.append(ids)
+            returned = [ids[1]] if len(ids) == 3 else ids
+            records = [
+                {
+                    "type": "segment",
+                    "id": segment_id,
+                    "status": "accepted",
+                    "suggested_text": None,
+                    "reason": None,
+                }
+                for segment_id in returned
+            ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(project, Scope(), http_client=client)
+        summary = await run_review(
+            project, "proofreading", Scope(), http_client=client
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 3
+    assert review_calls == [
+        ["F0001-S000001", "F0001-S000002", "F0001-S000003"],
+        ["F0001-S000001"],
+        ["F0001-S000003"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_oversized_review_segment_is_combined_once(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "A" * 5000)
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
