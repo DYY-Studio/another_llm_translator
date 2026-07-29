@@ -387,7 +387,7 @@ async def run_terminology(
     context_config = config["context"]["terminology"]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
-        context = (
+        raw_context = (
             previous_context(
                 segments,
                 items[0],
@@ -398,9 +398,11 @@ async def run_terminology(
         )
         return {
             "target_language": config["project"]["target_language"],
-            "reference_context": context,
-            "segments": [
-                {"id": item["segment_id"], "source": item["source"]} for item in items
+            "reference_context": [
+                {"source": item["source"]} for item in raw_context
+            ],
+            "source_segments": [
+                {"source": item["source"]} for item in items
             ],
         }
 
@@ -412,6 +414,7 @@ async def run_terminology(
         try:
             build_chunk_plans(
                 [segment],
+                all_segments=segments,
                 config=config,
                 prompt=prompt,
                 payload_builder=payload_builder,
@@ -436,6 +439,7 @@ async def run_terminology(
             try:
                 build_chunk_plans(
                     [probe],
+                    all_segments=segments,
                     config=config,
                     prompt=prompt,
                     payload_builder=payload_builder,
@@ -458,6 +462,7 @@ async def run_terminology(
 
     plans = build_chunk_plans(
         request_segments,
+        all_segments=segments,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
@@ -1069,6 +1074,7 @@ async def run_translation(
         try:
             build_chunk_plans(
                 [segment],
+                all_segments=segments,
                 config=config,
                 prompt=prompt,
                 payload_builder=payload_builder,
@@ -1093,6 +1099,7 @@ async def run_translation(
             try:
                 build_chunk_plans(
                     [probe],
+                    all_segments=segments,
                     config=config,
                     prompt=prompt,
                     payload_builder=payload_builder,
@@ -1118,6 +1125,7 @@ async def run_translation(
 
     plans = build_chunk_plans(
         request_segments,
+        all_segments=segments,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
@@ -1300,14 +1308,21 @@ async def run_translation(
         repair_candidates: dict[str, dict[str, Any]] | None = None,
         initial_parent_request_id: str | None = None,
     ) -> tuple[dict[str, tuple[str, str]], list[str]]:
-        expected = [str(item["segment_id"]) for item in group]
-        unresolved = expected
         valid_total: dict[str, tuple[str, str]] = {}
-        parent_request_id = initial_parent_request_id
-        for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
-            unresolved_items = [by_id[segment_id] for segment_id in unresolved]
-            payload = payload_builder(unresolved_items or group[:1])
-            if not unresolved_items:
+        exhausted: list[str] = []
+        tasks: list[
+            tuple[
+                list[dict[str, Any]],
+                str | None,
+                int,
+                list[dict[str, Any]],
+            ]
+        ] = [(group, initial_parent_request_id, 0, group[:1])]
+        while tasks:
+            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
+            expected = [str(item["segment_id"]) for item in items]
+            payload = payload_builder(items or anchor)
+            if not items:
                 payload["segments"] = []
             if repair_candidates is not None:
                 payload["segments"] = [
@@ -1321,7 +1336,7 @@ async def run_translation(
                             str(item["segment_id"])
                         ]["findings"],
                     }
-                    for item in unresolved_items
+                    for item in items
                 ]
                 payload["validation_repair"] = (
                     "返回不含所列残留字符的完整修正版译文。"
@@ -1343,26 +1358,26 @@ async def run_translation(
                     parent_request_id=parent_request_id,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_translation_items(content, unresolved)
+                    _parse_translation_items(content, expected)
                 )
             except FatalExternalError:
                 raise
             except ContextLengthError:
                 raise
             except ExternalError as exc:
-                for segment_id in unresolved:
+                for segment_id in expected:
                     await save_failed(
                         segment_id,
                         request_id,
                         "external_error",
                         str(exc),
                     )
-                return valid_total, []
+                continue
             for segment_id, text in valid.items():
                 valid_total[segment_id] = (text, request_id)
                 await accept_candidate(segment_id, text, request_id)
             if response_complete and not unresolved:
-                return valid_total, []
+                continue
             logger.warning(
                 "format correction request=%s attempt=%d unresolved=%d errors=%d",
                 request_id,
@@ -1370,8 +1385,26 @@ async def run_translation(
                 len(unresolved),
                 len(parse_errors),
             )
-            parent_request_id = request_id
-        return valid_total, unresolved
+            if format_attempt >= config["retry"]["format_max_attempts"]:
+                exhausted.extend(unresolved)
+                continue
+            if not unresolved:
+                tasks.append(([], request_id, format_attempt + 1, anchor))
+                continue
+            unresolved_groups = contiguous_groups(
+                (by_id[segment_id] for segment_id in unresolved),
+                all_segments=segments,
+            )
+            tasks.extend(
+                (
+                    unresolved_group,
+                    request_id,
+                    format_attempt + 1,
+                    unresolved_group[:1],
+                )
+                for unresolved_group in unresolved_groups
+            )
+        return valid_total, list(dict.fromkeys(exhausted))
 
     async def process_once(
         chunk: ChunkPlan,
@@ -1532,7 +1565,8 @@ async def run_translation(
                 current_pending = dict(validation_pending)
                 validation_pending.clear()
                 groups = contiguous_groups(
-                    item["segment"] for item in current_pending.values()
+                    (item["segment"] for item in current_pending.values()),
+                    all_segments=segments,
                 )
                 logger.warning(
                     "validation repair attempt=%d segments=%d chunks=%d",
@@ -1819,6 +1853,7 @@ async def run_review(
         try:
             build_chunk_plans(
                 [segment],
+                all_segments=segments,
                 config=config,
                 prompt=prompt,
                 payload_builder=payload_builder,
@@ -1846,6 +1881,7 @@ async def run_review(
             try:
                 build_chunk_plans(
                     [probe],
+                    all_segments=segments,
                     config=config,
                     prompt=prompt,
                     payload_builder=payload_builder,
@@ -1878,6 +1914,7 @@ async def run_review(
 
     plans = build_chunk_plans(
         request_segments,
+        all_segments=segments,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
@@ -2043,11 +2080,26 @@ async def run_review(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> None:
-        unresolved = [str(item["segment_id"]) for item in chunk.segments]
-        parent_request_id = initial_parent_request_id
-        for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
-            items = [by_id[segment_id] for segment_id in unresolved]
-            payload = payload_builder(items or list(chunk.segments[:1]))
+        exhausted: list[str] = []
+        tasks: list[
+            tuple[
+                list[dict[str, Any]],
+                str | None,
+                int,
+                list[dict[str, Any]],
+            ]
+        ] = [
+            (
+                list(chunk.segments),
+                initial_parent_request_id,
+                0,
+                list(chunk.segments[:1]),
+            )
+        ]
+        while tasks:
+            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
+            expected = [str(item["segment_id"]) for item in items]
+            payload = payload_builder(items or anchor)
             if not items:
                 payload["segments"] = []
             if format_attempt:
@@ -2067,20 +2119,20 @@ async def run_review(
                     parent_request_id=parent_request_id,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_review_items(content, unresolved)
+                    _parse_review_items(content, expected)
                 )
             except FatalExternalError:
                 raise
             except ContextLengthError:
                 raise
             except ExternalError as exc:
-                for segment_id in unresolved:
+                for segment_id in expected:
                     await save_result(segment_id, request_id, error=str(exc))
-                return
+                continue
             for segment_id, parsed in valid.items():
                 await accept_result(segment_id, request_id, parsed)
             if response_complete and not unresolved:
-                return
+                continue
             logger.warning(
                 "format correction request=%s attempt=%d unresolved=%d errors=%d",
                 request_id,
@@ -2088,11 +2140,29 @@ async def run_review(
                 len(unresolved),
                 len(parse_errors),
             )
-            parent_request_id = request_id
-        for segment_id in unresolved:
+            if format_attempt >= config["retry"]["format_max_attempts"]:
+                exhausted.extend(unresolved)
+                continue
+            if not unresolved:
+                tasks.append(([], request_id, format_attempt + 1, anchor))
+                continue
+            unresolved_groups = contiguous_groups(
+                (by_id[segment_id] for segment_id in unresolved),
+                all_segments=segments,
+            )
+            tasks.extend(
+                (
+                    unresolved_group,
+                    request_id,
+                    format_attempt + 1,
+                    unresolved_group[:1],
+                )
+                for unresolved_group in unresolved_groups
+            )
+        for segment_id in dict.fromkeys(exhausted):
             await save_result(
                 segment_id,
-                parent_request_id or "REQ-NONE",
+                "REQ-NONE",
                 error="格式修正次数耗尽",
             )
 

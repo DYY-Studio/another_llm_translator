@@ -37,13 +37,15 @@ async def test_terminology_publishes_and_translation_uses_terms(
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nAlice waved.")
     seen_translation_payload: dict | None = None
+    seen_terminology_payload: dict | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal seen_translation_payload
+        nonlocal seen_terminology_payload, seen_translation_payload
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
         if 'type="term"' in system:
+            seen_terminology_payload = payload
             records = [
                 {
                     "type": "term",
@@ -83,6 +85,14 @@ async def test_terminology_publishes_and_translation_uses_terms(
 
     assert term_summary["published"] is True
     assert term_summary["terms_revision"] == 1
+    assert seen_terminology_payload == {
+        "target_language": "简体中文",
+        "reference_context": [],
+        "source_segments": [
+            {"source": "Alice entered."},
+            {"source": "Alice waved."},
+        ],
+    }
     assert load_terms(project)["terms"][0]["preferred_translation"] == "爱丽丝"
     assert translation_summary["completed"] == 2
     assert seen_translation_payload is not None
@@ -132,7 +142,9 @@ async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        requested.extend(item["id"] for item in payload["segments"])
+        assert all(set(item) == {"source"} for item in payload["source_segments"])
+        assert all(set(item) == {"source"} for item in payload["reference_context"])
+        requested.extend(item["source"] for item in payload["source_segments"])
         return httpx.Response(
             200,
             json={
@@ -152,8 +164,37 @@ async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) ->
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
-    assert set(requested) == {"F0001-S000001", "F0001-S000002"}
+    assert set(requested) == {"Alice", "Bob"}
     assert summary["published"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminology_context_and_sources_never_expose_segment_ids(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "before\ncurrent")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        assert payload["reference_context"] == [{"source": "before"}]
+        assert payload["source_segments"] == [{"source": "current"}]
+        assert "id" not in json.dumps(payload)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl([])}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(
+            project,
+            Scope(only_segment="F0001-S000002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 1
 
 
 def test_term_matching_prefers_main_name_over_alias() -> None:
@@ -299,8 +340,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     assert [
         [item["id"] for item in payload["segments"]] for payload in repair_payloads
     ] == [
-        ["F0001-S000001", "F0001-S000002"],
-        ["F0001-S000004"],
+        ["F0001-S000001", "F0001-S000002", "F0001-S000004"],
     ]
     records = read_jsonl(project / "stages" / "translation.jsonl")
     assert all(record["validation_status"] == "passed" for record in records)

@@ -87,7 +87,7 @@ def test_scope_and_result_selection_preserve_old_success() -> None:
     assert len(forced.work) == 4
 
 
-def test_chunk_builder_respects_gaps_and_materializes_run_ids() -> None:
+def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:
     current = config()
     prompt = full_prompt("translation", "Translate faithfully.")
     work = [segments()[0], segments()[2], segments()[3]]
@@ -100,14 +100,125 @@ def test_chunk_builder_respects_gaps_and_materializes_run_ids() -> None:
         }
 
     plans = build_chunk_plans(
-        work, config=current, prompt=prompt, payload_builder=payload_builder
+        work,
+        all_segments=segments(),
+        config=current,
+        prompt=prompt,
+        payload_builder=payload_builder,
     )
     assert [[item["line_index"] for item in plan.segments] for plan in plans] == [
-        [0],
-        [2, 3],
+        [0, 2, 3],
     ]
     chunks = materialize_chunks("RUN-X", "translation", plans)
     assert all(chunk.chunk_id and "RUN-X" in chunk.chunk_id for chunk in chunks)
+
+
+def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> None:
+    source = [
+        {
+            "segment_id": f"F0001-S{index + 1:06d}",
+            "file_id": "F0001",
+            "line_index": index,
+            "source": value,
+            "is_empty": value == "",
+        }
+        for index, value in enumerate(["one", "", "", "four", "five"])
+    ]
+    source.append(
+        {
+            "segment_id": "F0002-S000001",
+            "file_id": "F0002",
+            "line_index": 0,
+            "source": "other",
+            "is_empty": False,
+        }
+    )
+    work = [source[0], source[3], source[5]]
+    plans = build_chunk_plans(
+        work,
+        all_segments=source,
+        config=config(),
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert [[item["segment_id"] for item in plan.segments] for plan in plans] == [
+        ["F0001-S000001", "F0001-S000004"],
+        ["F0002-S000001"],
+    ]
+
+    plans = build_chunk_plans(
+        [source[0], source[4]],
+        all_segments=source,
+        config=config(),
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert [len(plan.segments) for plan in plans] == [1, 1]
+
+
+def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
+    source: list[dict] = []
+    for index in range(80):
+        for value in (f"source text number {index:03d}", ""):
+            line_index = len(source)
+            source.append(
+                {
+                    "segment_id": f"F0001-S{line_index + 1:06d}",
+                    "file_id": "F0001",
+                    "line_index": line_index,
+                    "source": value,
+                    "is_empty": value == "",
+                }
+            )
+    current = config()
+    current["chunking"]["target_chunk_input_tokens"] = 600
+    work = [item for item in source if not item["is_empty"]]
+    plans = build_chunk_plans(
+        work,
+        all_segments=source,
+        config=current,
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert len(plans) < 10
+    assert any(plan.estimated_input_tokens >= 480 for plan in plans)
+    assert all(plan.estimated_input_tokens <= 600 for plan in plans)
+    assert plans[-1].estimated_input_tokens <= 600
+
+
+def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
+    current = config()
+    current["chunking"]["target_chunk_input_tokens"] = 50
+    source = [segments()[0]]
+    plans = build_chunk_plans(
+        source,
+        all_segments=source,
+        config=current,
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert len(plans) == 1
+    assert plans[0].estimated_input_tokens > 50
 
 
 def test_chunk_builder_splits_without_duplicating_segments() -> None:
@@ -128,7 +239,11 @@ def test_chunk_builder_splits_without_duplicating_segments() -> None:
         }
 
     plans = build_chunk_plans(
-        work, config=current, prompt=prompt, payload_builder=payload_builder
+        work,
+        all_segments=segments(),
+        config=current,
+        prompt=prompt,
+        payload_builder=payload_builder,
     )
     ids = [
         item["segment_id"]
@@ -144,6 +259,7 @@ def test_chunk_builder_ignores_disabled_itpm() -> None:
     prompt = full_prompt("translation", "Translate.")
     plans = build_chunk_plans(
         [segments()[0]],
+        all_segments=segments(),
         config=current,
         prompt=prompt,
         payload_builder=lambda items: {

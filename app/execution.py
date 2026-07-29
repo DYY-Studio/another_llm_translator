@@ -202,14 +202,17 @@ def classify_stage(
 
 def full_prompt(stage: str, middle: str) -> str:
     common = (
-        "只处理 user 消息 segments 中的内容。reference_context 仅供理解，"
-        "不得输出或计入进度。保持 Segment ID 不变。严格使用 JSONL："
+        "只处理 user 消息中的待处理内容。reference_context 仅供理解，"
+        "不得输出或计入进度。严格使用 JSONL："
         "每个非空物理行只能包含一个紧凑 JSON 对象，不得跨行格式化，"
         "不要使用 Markdown 代码块或解释文字。最后一行必须是"
         '{"type":"end"}。'
     )
     stage_rules = {
         "terminology": (
+            "只从 source_segments[].source 提取术语；reference_context 中的"
+            "内容不得单独触发提取。term 记录的 source 必须填写原文中实际"
+            "出现的术语文本。"
             '每个术语输出一条 type="term" 记录，包含 source、category、'
             "description，preferred_translation 和 aliases 可选。没有术语时"
             "直接输出 end。记录格式："
@@ -217,11 +220,13 @@ def full_prompt(stage: str, middle: str) -> str:
             '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
         "translation": (
+            "保持 Segment ID 不变。"
             '每个 Segment 输出一条 type="segment" 记录，只包含 type、id '
             "和完整 translation。记录格式："
             '{"type":"segment","id":"F0001-S000001","translation":"完整译文"}。'
         ),
         "proofreading": (
+            "保持 Segment ID 不变。"
             '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
             "suggested_text、reason；status 只能是 accepted 或 suggested。"
             "记录格式："
@@ -229,6 +234,7 @@ def full_prompt(stage: str, middle: str) -> str:
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
         "polishing": (
+            "保持 Segment ID 不变。"
             '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
             "suggested_text、reason；status 只能是 accepted 或 suggested。"
             "记录格式："
@@ -335,27 +341,41 @@ def previous_context(
 
 def contiguous_groups(
     segments: Iterable[dict[str, Any]],
+    *,
+    all_segments: Iterable[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
+    empty_positions = {
+        (str(item["file_id"]), int(item["line_index"]))
+        for item in all_segments
+        if item["is_empty"]
+    }
     ordered = sorted(
         segments, key=lambda item: (str(item["file_id"]), int(item["line_index"]))
     )
     groups: list[list[dict[str, Any]]] = []
     for segment in ordered:
-        if (
-            not groups
-            or groups[-1][-1]["file_id"] != segment["file_id"]
-            or int(segment["line_index"])
-            != int(groups[-1][-1]["line_index"]) + 1
-        ):
+        if not groups:
             groups.append([segment])
-        else:
+            continue
+        previous = groups[-1][-1]
+        same_file = previous["file_id"] == segment["file_id"]
+        previous_index = int(previous["line_index"])
+        current_index = int(segment["line_index"])
+        gap_is_empty = same_file and current_index > previous_index and all(
+            (str(segment["file_id"]), line_index) in empty_positions
+            for line_index in range(previous_index + 1, current_index)
+        )
+        if gap_is_empty:
             groups[-1].append(segment)
+        else:
+            groups.append([segment])
     return groups
 
 
 def build_chunk_plans(
     work: Iterable[dict[str, Any]],
     *,
+    all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
@@ -373,7 +393,7 @@ def build_chunk_plans(
     target = min(target_limits)
     factor = config["execution"]["token_safety_factor"]
     plans: list[ChunkPlan] = []
-    for group in contiguous_groups(work):
+    for group in contiguous_groups(work, all_segments=all_segments):
         current: list[dict[str, Any]] = []
         for segment in group:
             candidate = [*current, segment]
