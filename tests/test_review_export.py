@@ -62,7 +62,9 @@ def workflow_handler(request: httpx.Request) -> httpx.Response:
 
 @pytest.mark.asyncio
 async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one\n\ntwo")
+    project = await create_project(
+        tmp_path, "one\n\u3000\n \t\ntwo", encoding="utf-8-sig"
+    )
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
     try:
         await run_translation(project, Scope(), http_client=client)
@@ -107,10 +109,11 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
     bilingual_text = (
         project / "output" / "bilingual" / "polished" / "source.txt"
     ).read_text(encoding="utf-8-sig")
-    assert mono_text.splitlines() == ["校:译:one", "", "校:译:two"]
+    assert mono_text.splitlines() == ["校:译:one", "", "", "校:译:two"]
     assert bilingual_text.splitlines() == [
         "one",
         "润:校:译:one",
+        "",
         "",
         "two",
         "润:校:译:two",
