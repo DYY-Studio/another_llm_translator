@@ -12,7 +12,7 @@ from app.errors import UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import export_project, load_terms, match_terms
-from app.storage import read_json
+from app.storage import atomic_write_json, read_json, record_header
 from tests.test_foundation import make_app_root
 
 
@@ -28,6 +28,63 @@ def create_editor_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def seed_conflicted_terms(project: Path) -> None:
+    project_id = str(read_json(project / "project.json")["project_id"])
+    terms = [
+        {
+            "record_id": "TERM-000001",
+            "source": "Alpha",
+            "normalized": "alpha",
+            "category": None,
+            "description": "category conflict",
+            "preferred_translation": "阿尔法",
+            "aliases": [],
+            "conflicts": {
+                "categories": ["人物", "地点"],
+                "preferred_translations": [],
+            },
+        },
+        {
+            "record_id": "TERM-000002",
+            "source": "Beta",
+            "normalized": "beta",
+            "category": "人物",
+            "description": "translation conflict",
+            "preferred_translation": None,
+            "aliases": [],
+            "conflicts": {
+                "categories": [],
+                "preferred_translations": ["贝塔", "比塔"],
+            },
+        },
+        {
+            "record_id": "TERM-000003",
+            "source": "Gamma",
+            "normalized": "gamma",
+            "category": None,
+            "description": "both conflicts",
+            "preferred_translation": None,
+            "aliases": [],
+            "conflicts": {
+                "categories": ["人物", "组织"],
+                "preferred_translations": ["伽马", "加玛"],
+            },
+        },
+    ]
+    atomic_write_json(
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-1",
+            terms_revision=1,
+            published_run_id="RUN-TEST",
+            active_task_id="TERM-TASK-TEST",
+            terms=terms,
+        ),
+    )
 
 
 def test_editor_overview_excludes_empty_segments_and_preserves_order(
@@ -195,6 +252,124 @@ def test_editor_terms_update_library_and_overrides_immediately(tmp_path: Path) -
     )
     assert disabled["terms_revision"] == 3
     assert load_terms(project)["terms"] == []
+    assert match_terms("Alicia arrived", load_terms(project), 10) == []
+
+    restored = store.save_term(
+        {
+            "old_normalized": "alicia",
+            "source": "Alicia",
+            "preferred_translation": "艾丽西亚",
+            "category": "人名",
+            "description": "主角",
+            "aliases": [],
+            "disabled": False,
+        }
+    )
+    assert restored["terms_revision"] == 4
+    assert restored["terms"][0]["disabled"] is False
+    assert match_terms("Alicia arrived", load_terms(project), 10)[0][
+        "preferred_translation"
+    ] == "艾丽西亚"
+
+
+def test_editor_exposes_and_resolves_term_conflicts_independently(
+    tmp_path: Path,
+) -> None:
+    project = create_editor_project(tmp_path)
+    seed_conflicted_terms(project)
+    store = EditorStore(project)
+
+    result = store.terms()
+    assert result["conflict_count"] == 3
+    assert [item["normalized"] for item in result["terms"]] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+    assert result["terms"][0]["conflicts"]["categories"] == ["人物", "地点"]
+    assert result["terms"][1]["conflicts"]["preferred_translations"] == [
+        "贝塔",
+        "比塔",
+    ]
+
+    with pytest.raises(UsageError, match="类别冲突"):
+        store.save_term(
+            {
+                "old_normalized": "alpha",
+                "source": "Alpha",
+                "preferred_translation": "阿尔法",
+                "category": "",
+                "description": "category conflict",
+                "aliases": [],
+                "disabled": False,
+            }
+        )
+    resolved = store.save_term(
+        {
+            "old_normalized": "alpha",
+            "source": "Alpha",
+            "preferred_translation": "阿尔法",
+            "category": "自定义类别",
+            "description": "category conflict",
+            "aliases": [],
+            "disabled": False,
+        }
+    )
+    assert resolved["terms_revision"] == 2
+    assert resolved["conflict_count"] == 2
+    alpha = next(item for item in resolved["terms"] if item["normalized"] == "alpha")
+    assert alpha["category"] == "自定义类别"
+    assert alpha["has_conflicts"] is False
+    assert next(
+        item for item in resolved["terms"] if item["normalized"] == "gamma"
+    )["has_conflicts"]
+
+    with pytest.raises(UsageError, match="推荐译名冲突"):
+        store.save_term(
+            {
+                "old_normalized": "beta",
+                "source": "Beta",
+                "preferred_translation": "",
+                "category": "人物",
+                "description": "translation conflict",
+                "aliases": [],
+                "disabled": False,
+            }
+        )
+
+
+def test_editor_can_remove_conflicted_term_without_resolving_it(
+    tmp_path: Path,
+) -> None:
+    project = create_editor_project(tmp_path)
+    seed_conflicted_terms(project)
+    store = EditorStore(project)
+    removed = store.save_term(
+        {
+            "old_normalized": "gamma",
+            "source": "Gamma",
+            "preferred_translation": "",
+            "category": "",
+            "description": "both conflicts",
+            "aliases": [],
+            "disabled": True,
+        }
+    )
+    assert removed["conflict_count"] == 2
+    gamma = next(item for item in removed["terms"] if item["normalized"] == "gamma")
+    assert gamma["disabled"] is True
+    assert gamma["has_conflicts"] is False
+    assert all(
+        item["normalized"] != "gamma" for item in load_terms(project)["terms"]
+    )
+    override = next(
+        item
+        for item in read_json(project / "terminology" / "overrides.json")[
+            "overrides"
+        ]
+        if item["normalized"] == "gamma"
+    )
+    assert override["disabled"] is True
 
 
 def test_editor_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) -> None:
