@@ -303,6 +303,14 @@ class EditorStore:
         for normalized in sorted(set(current) | set(overrides)):
             term = current.get(normalized, {})
             override = overrides.get(normalized, {})
+            raw_conflicts = term.get("conflicts", {})
+            conflicts = {
+                "categories": list(raw_conflicts.get("categories", [])),
+                "preferred_translations": list(
+                    raw_conflicts.get("preferred_translations", [])
+                ),
+            }
+            disabled = bool(override.get("disabled", False))
             rows.append(
                 {
                     "normalized": normalized,
@@ -315,13 +323,27 @@ class EditorStore:
                         "preferred_translation", term.get("preferred_translation")
                     ),
                     "aliases": override.get("aliases", term.get("aliases", [])),
-                    "disabled": bool(override.get("disabled", False)),
+                    "disabled": disabled,
+                    "conflicts": conflicts,
+                    "has_conflicts": not disabled
+                    and bool(
+                        conflicts["categories"]
+                        or conflicts["preferred_translations"]
+                    ),
                 }
             )
+        rows.sort(
+            key=lambda item: (
+                not item["has_conflicts"],
+                item["disabled"],
+                item["normalized"],
+            )
+        )
         return {
             "terms_revision": (
                 int(library["terms_revision"]) if library is not None else None
             ),
+            "conflict_count": sum(bool(item["has_conflicts"]) for item in rows),
             "terms": rows,
         }
 
@@ -368,6 +390,21 @@ class EditorStore:
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
         }
+        conflict_source = current.get(str(old_normalized or normalized), {}).get(
+            "conflicts", {}
+        )
+        if (
+            not disabled
+            and conflict_source.get("categories")
+            and not category
+        ):
+            raise UsageError("类别冲突尚未裁决")
+        if (
+            not disabled
+            and conflict_source.get("preferred_translations")
+            and not preferred
+        ):
+            raise UsageError("推荐译名冲突尚未裁决")
         if (
             normalized != old_normalized
             and normalized in set(current) | set(overrides)

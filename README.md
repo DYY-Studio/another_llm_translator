@@ -45,9 +45,10 @@ python -m app.main export novel --stage proofread --bilingual
 python -m app.editor novel
 ```
 
-编辑器只绑定 `127.0.0.1`，直接编辑术语、翻译、校对和润色结果，不调用 LLM
-或主 CLI 流程。使用期间不要同时运行会写入同一项目的 CLI 命令。它是开发辅助
-工具，不用于修改源 Segment、配置或 Prompt。
+编辑器只绑定 `127.0.0.1`，可裁决术语冲突、移除或恢复误提术语，并直接编辑
+翻译、校对和润色结果；它不调用 LLM 或主 CLI 流程。使用期间不要同时运行会
+写入同一项目的 CLI 命令。它是开发辅助工具，不用于修改源 Segment、配置或
+Prompt。
 
 ## 验证
 

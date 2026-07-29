@@ -19,6 +19,7 @@
     .panel { background: white; border: 1px solid #d4d4d0; padding: 12px; min-width: 0; }
     .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
     .toolbar input, .toolbar select { padding: 6px; min-width: 120px; }
+    .toolbar .inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: 400; }
     .list { height: calc(100vh - 210px); overflow: auto; border: 1px solid #ddd; }
     .row { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #eee; background: white; padding: 8px; }
     .row.active { background: #e7f1f8; }
@@ -30,6 +31,10 @@
     .muted { color: #777; }
     .warning { color: #a34200; font-weight: 600; }
     .success { color: #176b38; }
+    .conflict-box { margin: 8px 0; padding: 8px; border-left: 3px solid #c46a00; background: #fff6e8; }
+    .choices { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .choices button { padding: 4px 8px; }
+    .danger { color: #8b1d1d; }
     #message { min-height: 24px; margin: 8px 0; }
     .hidden { display: none !important; }
     .term-form { max-width: 760px; }
@@ -59,6 +64,9 @@
           <input id="term-search" placeholder="筛选术语">
           <button id="new-term">新增</button>
           <span id="term-revision" class="muted"></span>
+          <span id="conflict-count" class="warning"></span>
+          <label class="inline"><input id="only-conflicts" type="checkbox"> 只看冲突</label>
+          <label class="inline"><input id="show-disabled" type="checkbox"> 显示已移除</label>
         </div>
         <div id="term-list" class="list"></div>
       </div>
@@ -67,14 +75,25 @@
         <input id="term-source" type="text">
         <label>推荐译名</label>
         <input id="term-preferred" type="text">
+        <div id="preferred-conflict" class="conflict-box hidden">
+          <strong>推荐译名冲突</strong>
+          <div id="preferred-choices" class="choices"></div>
+        </div>
         <label>类别</label>
         <input id="term-category" type="text">
+        <div id="category-conflict" class="conflict-box hidden">
+          <strong>类别冲突</strong>
+          <div id="category-choices" class="choices"></div>
+        </div>
         <label>说明</label>
         <textarea id="term-description"></textarea>
         <label>别名（每行一个）</label>
         <textarea id="term-aliases"></textarea>
-        <label><input id="term-disabled" type="checkbox"> 禁用</label>
-        <div class="actions"><button id="save-term">保存术语</button></div>
+        <div class="actions">
+          <button id="save-term">保存术语</button>
+          <button id="remove-term" class="danger hidden">移除术语</button>
+          <button id="restore-term" class="hidden">恢复术语</button>
+        </div>
       </div>
     </section>
     <section id="stage-view" class="layout">
@@ -125,7 +144,7 @@
   <script>
     const state = {
       tab: "translation", project: null, detail: null, terms: [],
-      selectedSegment: null, selectedTerm: null
+      selectedSegment: null, selectedTerm: null, selectedTermData: null
     };
     const $ = id => document.getElementById(id);
 
@@ -230,32 +249,58 @@
       const value = await api("/api/terms");
       state.terms = value.terms;
       $("term-revision").textContent = `revision ${value.terms_revision ?? "无"}`;
+      $("conflict-count").textContent = `待裁决 ${value.conflict_count}`;
       renderTerms();
     }
     function renderTerms() {
       const query = $("term-search").value.toLocaleLowerCase();
+      const onlyConflicts = $("only-conflicts").checked;
+      const showDisabled = $("show-disabled").checked;
       $("term-list").innerHTML = "";
       for (const term of state.terms.filter(item =>
-        !query || `${item.source} ${item.preferred_translation ?? ""}`.toLocaleLowerCase().includes(query)
+        (!query || `${item.source} ${item.preferred_translation ?? ""}`.toLocaleLowerCase().includes(query)) &&
+        (!onlyConflicts || item.has_conflicts) &&
+        (showDisabled || !item.disabled)
       )) {
         const button = document.createElement("button");
         button.className = "row" + (term.normalized === state.selectedTerm ? " active" : "");
-        button.textContent = `${term.disabled ? "×" : "·"} ${term.source} → ${term.preferred_translation ?? ""}`;
+        const marker = term.disabled ? "×" : term.has_conflicts ? "⚠" : "·";
+        button.textContent = `${marker} ${term.source} → ${term.preferred_translation ?? ""}`;
         button.onclick = () => selectTerm(term);
         $("term-list").appendChild(button);
       }
     }
+    function renderChoices(containerId, values, targetId) {
+      const container = $(containerId);
+      container.innerHTML = "";
+      for (const value of values) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = value;
+        button.onclick = () => { $(targetId).value = value; };
+        container.appendChild(button);
+      }
+    }
     function selectTerm(term) {
       state.selectedTerm = term?.normalized ?? null;
+      state.selectedTermData = term;
       $("term-source").value = term?.source ?? "";
       $("term-preferred").value = term?.preferred_translation ?? "";
       $("term-category").value = term?.category ?? "";
       $("term-description").value = term?.description ?? "";
       $("term-aliases").value = (term?.aliases ?? []).join("\n");
-      $("term-disabled").checked = Boolean(term?.disabled);
+      const categories = term?.conflicts?.categories ?? [];
+      const translations = term?.conflicts?.preferred_translations ?? [];
+      $("category-conflict").classList.toggle("hidden", categories.length === 0);
+      $("preferred-conflict").classList.toggle("hidden", translations.length === 0);
+      renderChoices("category-choices", categories, "term-category");
+      renderChoices("preferred-choices", translations, "term-preferred");
+      $("save-term").classList.toggle("hidden", Boolean(term?.disabled));
+      $("remove-term").classList.toggle("hidden", !term || Boolean(term.disabled));
+      $("restore-term").classList.toggle("hidden", !term?.disabled);
       renderTerms();
     }
-    async function saveTerm() {
+    async function saveTerm(disabled = false) {
       await api("/api/terms/save", {
         method: "POST",
         body: JSON.stringify({
@@ -265,11 +310,13 @@
           category: $("term-category").value,
           description: $("term-description").value,
           aliases: $("term-aliases").value.split("\n").filter(Boolean),
-          disabled: $("term-disabled").checked
+          disabled
         })
       });
-      message("术语已保存并发布为新 revision");
+      message(disabled ? "术语已移除" : state.selectedTermData?.disabled ? "术语已恢复" : "术语已保存并发布为新 revision");
       state.selectedTerm = null;
+      state.selectedTermData = null;
+      selectTerm(null);
       await loadTerms();
     }
     async function reloadProject() {
@@ -312,13 +359,17 @@
     $("file-filter").onchange = renderSegments;
     $("segment-search").oninput = renderSegments;
     $("term-search").oninput = renderTerms;
+    $("only-conflicts").onchange = renderTerms;
+    $("show-disabled").onchange = renderTerms;
     $("previous").onclick = () => move(-1);
     $("next").onclick = () => move(1);
     $("save-translation").onclick = guard(saveTranslation);
     $("save-review").onclick = guard(() => saveReview(false));
     $("apply-review").onclick = guard(() => saveReview(true));
     $("new-term").onclick = () => selectTerm(null);
-    $("save-term").onclick = guard(saveTerm);
+    $("save-term").onclick = guard(() => saveTerm(false));
+    $("remove-term").onclick = guard(() => saveTerm(true));
+    $("restore-term").onclick = guard(() => saveTerm(false));
     guard(async () => {
       await reloadProject();
       const first = state.project.segments[0];
