@@ -1,78 +1,140 @@
+# 全局配置模板。
+# 创建项目时，本文件会被复制为项目自己的 config.toml；项目运行时只读取项目副本。
+# 修改本文件不会直接改变已有项目，已有项目会在下次命令执行前收到模板更新提示。
+
 [project]
+# LLM 应生成的目标语言名称；会写入四个阶段的请求和阶段设置指纹。
 target_language = "简体中文"
+# TXT 导出的字符编码。默认 utf-8-sig，便于常见 Windows 查看器识别 UTF-8。
+# 导出使用严格编码；目标文本含有该编码无法表示的字符时会明确失败。
 output_encoding = "utf-8-sig"
 
 [input]
+# chardet 编码探测的置信度警告阈值，取值范围为 0 到 1。
+# 低于此值时仍尝试按探测结果严格解码，但会在初始化摘要中产生警告。
 encoding_confidence_threshold = 0.60
+# 探测所得编码无法严格解码输入时，唯一一次备用解码所使用的编码。
+# fallback 仍失败时拒绝该输入文件，不会使用替换字符。
 fallback_encoding = "utf-8"
 
 [llm]
-# Replace these placeholders with the selected OpenAI-compatible endpoint and model.
+# OpenAI-compatible 服务的基础 URL；发送请求时会与 endpoint 拼接。
 base_url = "https://example.com/v1"
+# Chat Completions 端点路径。
 endpoint = "/chat/completions"
+# 四个 LLM 阶段共同使用的模型标识。
 model = "example-model"
+# 保存 API Key 的环境变量名称。这里只写变量名，不能填写真实密钥。
 api_key_env = "LLM_API_KEY"
 
+# 术语提取阶段的采样温度。
 temperature_terminology = 0.1
+# 翻译阶段的采样温度。
 temperature_translation = 0.2
+# 校对建议阶段的采样温度。
 temperature_proofreading = 0.1
+# 润色建议阶段的采样温度。
 temperature_polishing = 0.3
 
+# 单次 Chat Completions 请求允许模型生成的最大 Token 数，对应 max_tokens。
 max_output_tokens = 4096
+# 所选模型的总上下文窗口 Token 数，包含输入 Prompt 和模型输出。
 context_window_tokens = 16384
+# 从可用输入预算中额外扣除的安全余量，用于降低估算误差导致的超限风险。
 context_safety_margin_tokens = 512
 
 [execution]
+# 同时在途的最大 LLM 请求数，也用于设置 HTTP 连接池上限。
 max_parallel = 4
+# 每 60 秒允许的实际 HTTP 尝试次数；重试也计数。设为 0 可禁用 RPM 限速。
 requests_per_minute = 30
+# 每 60 秒允许的估算输入 Token 总量；每次 HTTP 尝试都会计数。
+# 设为 0 可禁用 ITPM 限速，并取消 ITPM 对 Chunk 和单请求输入的限制。
 input_tokens_per_minute = 50000
-# Set either value to 0 to disable that limiter independently.
+# 单次 HTTP 请求的超时时间（秒），统一用于连接、读取、写入和连接池等待。
 request_timeout_seconds = 120
+# Chunk 调度方式：ordered_by_file 为文件内顺序、文件间并发；
+# parallel 为所有 Chunk 并发，且参考上文只携带源文。
 scheduling_mode = "ordered_by_file"
+# Token 安全估算乘数。值越大越保守，会生成更小的 Chunk。
 token_safety_factor = 1.25
 
 [chunking]
+# 单个请求完整输入 Prompt 的期望 Token 上限；这是软目标。
+# 实际值还会受模型输入硬限制以及启用时的 ITPM 限制约束。
 target_chunk_input_tokens = 11000
+# 单个 Segment 超过输入硬限制时，是否允许内部切分并在完成后重新合并。
+# false 表示不切分，直接将该 Segment 记录为 failed。
 allow_split_oversized_segment = true
 
 [context.translation]
+# 是否为翻译请求附带同一文件内的前文 Segment。
 enabled = true
+# 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。
 previous_segments = 3
 
 [context.proofreading]
+# 是否为校对请求附带同一文件内的前文 Segment。
 enabled = true
+# 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。
 previous_segments = 3
 
 [context.polishing]
+# 是否为润色请求附带同一文件内的前文 Segment。
 enabled = true
+# 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。
 previous_segments = 3
 
 [context.terminology]
+# 是否为术语提取请求附带同一文件内的源文前文。
+# 术语上文只帮助判断性别、指代和语义，不属于扫描进度。
 enabled = true
+# 携带当前 Chunk 之前最近多少个非空源 Segment；不会跨文件。
 previous_segments = 3
 
 [terminology]
+# 术语主名称、别名和匹配文本使用的 Unicode 归一化形式；MVP 仅支持 NFKC。
 unicode_normalization = "NFKC"
+# 是否对术语归一化结果执行 casefold；MVP 仅支持 true。
 case_insensitive = true
+# 每个 Segment 最多向 LLM 注入多少条确定性匹配到的术语。
 max_terms_per_segment = 100
 
 [validation.translation]
+# 是否检查翻译结果中残留的日语平假名、片假名及相关 Kana Unicode 区块。
 japanese_kana = false
+# 是否检查翻译结果中残留的韩语音节、Jamo 及兼容/扩展 Unicode 区块。
 korean_hangul = false
+# 初始翻译通过结构校验后，文字校验失败时最多执行多少轮定向修复。
+# 设为 0 表示不发起文字修复，直接按 exhausted_mode 处理首次失败候选。
 max_retry_attempts = 2
+# 文字修复耗尽后的处理方式：fail 将 Segment 标记为失败；
+# warning 接受候选为 completed，但在 inspect 和导出摘要中报告警告。
 exhausted_mode = "fail"
 
 [retry]
+# 一次 LLM 请求遇到 408、429、5xx、网络错误或超时时的 HTTP 总尝试上限。
 http_max_attempts = 6
+# 初始响应之后允许进行的格式修正请求轮数；设为 0 表示不修正格式。
 format_max_attempts = 2
+# HTTP 重试指数退避的初始等待时间（秒）。
 base_delay_seconds = 2.0
+# HTTP 重试退避等待时间的上限（秒），不得小于 base_delay_seconds。
 max_delay_seconds = 60.0
+# 每次 HTTP 重试额外加入的随机抖动上限（秒）；设为 0 可关闭抖动。
 jitter_seconds = 1.0
 
 [debug]
+# 是否保存 Chunk、逐次 Attempt、完整请求/响应，并允许下列故障注入。
+# false 为普通运行模式；下列注入参数即使非 0 也不会生效。
 enabled = false
+# 每第 N 次实际发送模拟一次 HTTP 429；0 表示关闭。
 inject_429_every = 0
+# 每第 N 次实际发送模拟一次 HTTP 500；0 表示关闭。
 inject_500_every = 0
+# 每第 N 次实际发送模拟一次读取超时；0 表示关闭。
 inject_timeout_every = 0
+# 每第 N 次成功 HTTP 响应将 LLM 正文替换为非法 JSON；0 表示关闭。
 inject_invalid_json_every = 0
+# 每第 N 次成功 HTTP 响应从 segments 数组移除一项；0 表示关闭。
 inject_missing_segment_every = 0
