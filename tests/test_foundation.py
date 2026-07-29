@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -48,13 +49,32 @@ def test_config_rejects_unknown_key(tmp_path: Path) -> None:
 
 def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
     config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = config.read_text(encoding="utf-8").replace(
-        "max_parallel = 4", "max_parallel = 1.5"
+    text = re.sub(
+        r"(?m)^max_parallel\s*=.*$",
+        "max_parallel = 1.5",
+        config.read_text(encoding="utf-8"),
     )
     path = tmp_path / "config.toml"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match="max_parallel 必须是整数"):
         load_config(path)
+
+
+def test_config_allows_output_cap_larger_than_context(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "config" / "config.toml"
+    text = config.read_text(encoding="utf-8")
+    for key, value in (
+        ("max_output_tokens", "65536"),
+        ("context_window_tokens", "8192"),
+        ("context_safety_margin_tokens", "0"),
+        ("target_chunk_input_tokens", "11000"),
+    ):
+        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    loaded = load_config(path)
+    assert loaded["llm"]["max_output_tokens"] == 65536
+    assert loaded["llm"]["context_window_tokens"] == 8192
 
 
 def test_config_accepts_disabled_rate_limits(tmp_path: Path) -> None:

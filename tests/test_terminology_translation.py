@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -214,6 +215,46 @@ async def test_translation_partial_response_retries_only_missing(
 
 
 @pytest.mark.asyncio
+async def test_translation_reports_dynamic_output_budget_warning(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    config_path = project / "config.toml"
+    text = config_path.read_text(encoding="utf-8")
+    for key, value in (
+        ("context_window_tokens", "1000"),
+        ("context_safety_margin_tokens", "100"),
+        ("max_output_tokens", "5000"),
+    ):
+        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
+    config_path.write_text(text, encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        content = {
+            "segments": [
+                {"id": item["id"], "translation": "译文"}
+                for item in payload["segments"]
+            ]
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(content)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert any("自动收窄" in warning for warning in summary["warnings"])
+    run_dir = project / "runs" / summary["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert any("自动收窄" in warning for warning in manifest["warnings"])
+
+
+@pytest.mark.asyncio
 async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "first\nsecond\n\nthird")
     config_path = project / "config.toml"
@@ -270,16 +311,13 @@ async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None
     project = await create_project(tmp_path, "A" * 5000)
     config_path = project / "config.toml"
     text = config_path.read_text(encoding="utf-8")
-    text = text.replace("context_window_tokens = 16384", "context_window_tokens = 1200")
-    text = text.replace("max_output_tokens = 4096", "max_output_tokens = 300")
-    text = text.replace(
-        "context_safety_margin_tokens = 512",
-        "context_safety_margin_tokens = 100",
-    )
-    text = text.replace(
-        "target_chunk_input_tokens = 11000",
-        "target_chunk_input_tokens = 700",
-    )
+    for key, value in (
+        ("context_window_tokens", "1200"),
+        ("max_output_tokens", "300"),
+        ("context_safety_margin_tokens", "100"),
+        ("target_chunk_input_tokens", "700"),
+    ):
+        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
     config_path.write_text(text, encoding="utf-8")
     requested_ids: list[str] = []
 

@@ -898,9 +898,26 @@ apply 前必须确认建议的 `base_result_id` 仍是该 Segment 当前选择�
 ```text
 safe_estimate(rendered_prompt)
 <= context_window_tokens
-   - max_output_tokens
    - context_safety_margin_tokens
 ```
+
+`max_output_tokens` 是提交给 Chat Completions 的输出上限，不作为每次请求必然
+占用的固定预留量。每次请求实际发送：
+
+```text
+effective_max_tokens
+= min(
+    max_output_tokens,
+    max(
+        1,
+        context_window_tokens
+        - safe_estimate(rendered_prompt)
+        - context_safety_margin_tokens
+    )
+  )
+```
+
+发生自动收窄时，本 Run 记录 warning，但不因配置的输出上限过大而拒绝启动。
 
 Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 
@@ -918,7 +935,7 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 配置或请求在发送前失败的情况：
 
 - 固定 Prompt 已超过硬限制。
-- 输出预算不合法。
+- 上下文窗口无法容纳输入和安全余量。
 - 单个实际请求的预测输入 Token 超过 ITPM。
 - 单 Segment 即使拆到最小 part 仍无法容纳。
 

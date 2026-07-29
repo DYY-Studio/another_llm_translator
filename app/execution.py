@@ -339,14 +339,13 @@ def build_chunk_plans(
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> list[ChunkPlan]:
-    hard_limit = (
+    input_limit = (
         config["llm"]["context_window_tokens"]
-        - config["llm"]["max_output_tokens"]
         - config["llm"]["context_safety_margin_tokens"]
     )
     target_limits = [
         config["chunking"]["target_chunk_input_tokens"],
-        hard_limit,
+        input_limit,
     ]
     if config["execution"]["input_tokens_per_minute"] > 0:
         target_limits.append(config["execution"]["input_tokens_per_minute"])
@@ -375,7 +374,7 @@ def build_chunk_plans(
                 current = [segment]
                 payload = payload_builder(current)
                 estimated = estimate_messages(render_messages(prompt, payload), factor)
-            if estimated > hard_limit:
+            if estimated > input_limit:
                 raise ConfigError(
                     f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}"
                 )
@@ -572,6 +571,8 @@ class LLMClient:
         self.sleeper = sleeper
         self.log_lock = asyncio.Lock()
         self.send_count = 0
+        self.warnings: list[str] = []
+        self._reported_output_clamp = False
 
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
@@ -646,11 +647,26 @@ class LLMClient:
                 f"缺少环境变量：{self.config['llm']['api_key_env']}"
             )
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
+        configured_output = int(self.config["llm"]["max_output_tokens"])
+        available_output = max(
+            1,
+            int(self.config["llm"]["context_window_tokens"])
+            - int(self.config["llm"]["context_safety_margin_tokens"])
+            - estimated_input_tokens,
+        )
+        effective_output = min(configured_output, available_output)
+        if effective_output < configured_output and not self._reported_output_clamp:
+            self.warnings.append(
+                "max_output_tokens "
+                f"已从配置上限 {configured_output} 按本次剩余上下文"
+                f"自动收窄为 {effective_output}"
+            )
+            self._reported_output_clamp = True
         payload = {
             "model": self.config["llm"]["model"],
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": self.config["llm"]["max_output_tokens"],
+            "max_tokens": effective_output,
             "stream": False,
         }
         url = (

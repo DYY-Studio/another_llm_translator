@@ -97,6 +97,24 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     }
 
 
+def _configured_output_warning(config: dict[str, Any]) -> str | None:
+    maximum_available = (
+        config["llm"]["context_window_tokens"]
+        - config["llm"]["context_safety_margin_tokens"]
+    )
+    configured = config["llm"]["max_output_tokens"]
+    if configured <= maximum_available:
+        return None
+    return (
+        f"max_output_tokens={configured} 超过上下文可用上限 "
+        f"{maximum_available}；实际请求将按剩余空间自动收窄"
+    )
+
+
+def _extend_unique(target: list[str], values: list[str]) -> None:
+    target.extend(value for value in values if value not in target)
+
+
 def _request_estimate(
     messages: list[dict[str, str]],
     config: dict[str, Any],
@@ -106,12 +124,11 @@ def _request_estimate(
         messages,
         config["execution"]["token_safety_factor"],
     )
-    hard_limit = (
+    input_limit = (
         config["llm"]["context_window_tokens"]
-        - config["llm"]["max_output_tokens"]
         - config["llm"]["context_safety_margin_tokens"]
     )
-    if estimated > hard_limit:
+    if estimated > input_limit:
         raise ContextLengthError(
             "渲染后的 Prompt 超过模型硬限制",
             request_id=request_id,
@@ -358,6 +375,9 @@ async def run_terminology(
         if record.get("stage_fingerprint")
     }
     warnings: list[str] = []
+    configured_output_warning = _configured_output_warning(config)
+    if configured_output_warning:
+        warnings.append(configured_output_warning)
     if existing_fingerprints and existing_fingerprints != {fingerprint}:
         warnings.append(
             "活动术语任务包含不同设置指纹；继续复用并处理 pending"
@@ -706,6 +726,7 @@ async def run_terminology(
                 mode=config["execution"]["scheduling_mode"],
                 max_parallel=config["execution"]["max_parallel"],
             )
+        _extend_unique(warnings, llm.warnings)
     except FatalExternalError:
         finalize_run(run_dir, status="failed", completed=0, failed=len(work))
         raise
@@ -933,6 +954,9 @@ async def run_translation(
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    configured_output_warning = _configured_output_warning(config)
+    if configured_output_warning:
+        warnings.append(configured_output_warning)
     if library is None:
         warnings.append("没有已发布术语库；本次翻译 terms_revision = null")
     if selection.fingerprints and selection.fingerprints != {fingerprint}:
@@ -1422,6 +1446,7 @@ async def run_translation(
                         for item in group
                     }
                     await repair_group(group, subset)
+        _extend_unique(warnings, llm.warnings)
     except FatalExternalError:
         finalize_run(
             run_dir,
@@ -1625,6 +1650,9 @@ async def run_review(
     history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    configured_output_warning = _configured_output_warning(config)
+    if configured_output_warning:
+        warnings.append(configured_output_warning)
     if missing_base:
         warnings.append(
             f"{stage} dry-run 使用源文占位估算；"
@@ -1995,6 +2023,7 @@ async def run_review(
                 mode=config["execution"]["scheduling_mode"],
                 max_parallel=config["execution"]["max_parallel"],
             )
+        _extend_unique(warnings, llm.warnings)
     except FatalExternalError:
         finalize_run(
             run_dir,

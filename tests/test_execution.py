@@ -53,7 +53,11 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
     original = stage_fingerprint(first, "translation", prompt, terms_revision=1)
     first["chunking"]["target_chunk_input_tokens"] = 100
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
-    first["execution"]["scheduling_mode"] = "parallel"
+    first["execution"]["scheduling_mode"] = (
+        "ordered_by_file"
+        if first["execution"]["scheduling_mode"] == "parallel"
+        else "parallel"
+    )
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) != original
 
 
@@ -227,6 +231,7 @@ async def test_llm_client_stops_on_auth_and_normal_mode_has_no_payloads(
     tmp_path: Path,
 ) -> None:
     current = config()
+    current["debug"]["enabled"] = False
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -258,6 +263,52 @@ async def test_llm_client_stops_on_auth_and_normal_mode_has_no_payloads(
     assert calls == 1
     assert not (tmp_path / "payloads").exists()
     assert not (tmp_path / "attempts.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_clamps_max_tokens_to_remaining_context(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    current["llm"]["context_window_tokens"] = 1000
+    current["llm"]["context_safety_margin_tokens"] = 100
+    current["llm"]["max_output_tokens"] = 5000
+    current["debug"]["enabled"] = False
+    sent_payload: dict | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_payload
+        sent_payload = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"segments":[]}'}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=250,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert sent_payload is not None
+    assert sent_payload["max_tokens"] == 650
+    assert len(llm.warnings) == 1
+    assert "5000" in llm.warnings[0]
+    assert "650" in llm.warnings[0]
 
 
 @pytest.mark.asyncio

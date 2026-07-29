@@ -177,15 +177,9 @@ def validate_config(config: dict[str, Any]) -> None:
     margin = config["llm"]["context_safety_margin_tokens"]
     if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
         raise ConfigError("llm.context_safety_margin_tokens 必须是非负整数")
-    hard_limit = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["max_output_tokens"]
-        - margin
-    )
-    if hard_limit <= 0:
-        raise ConfigError("模型上下文无法容纳输出预算和安全余量")
-    if config["chunking"]["target_chunk_input_tokens"] > hard_limit:
-        raise ConfigError("chunking.target_chunk_input_tokens 超过 Prompt 硬限制")
+    input_limit = config["llm"]["context_window_tokens"] - margin
+    if input_limit <= 0:
+        raise ConfigError("模型上下文无法容纳输入和安全余量")
     if config["execution"]["scheduling_mode"] not in {
         "ordered_by_file",
         "parallel",
