@@ -124,8 +124,6 @@ def validate_config(config: dict[str, Any]) -> None:
         ("llm", "max_output_tokens"),
         ("llm", "context_window_tokens"),
         ("execution", "max_parallel"),
-        ("execution", "requests_per_minute"),
-        ("execution", "input_tokens_per_minute"),
         ("execution", "request_timeout_seconds"),
         ("execution", "token_safety_factor"),
         ("chunking", "target_chunk_input_tokens"),
@@ -144,6 +142,10 @@ def validate_config(config: dict[str, Any]) -> None:
         value = config[section][key]
         if not isinstance(value, int) or isinstance(value, bool):
             raise ConfigError(f"{section}.{key} 必须是整数")
+    for key in ("requests_per_minute", "input_tokens_per_minute"):
+        value = config["execution"][key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(f"execution.{key} 必须是非负整数")
     format_attempts = config["retry"]["format_max_attempts"]
     if (
         not isinstance(format_attempts, int)

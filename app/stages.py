@@ -116,7 +116,10 @@ def _request_estimate(
             "渲染后的 Prompt 超过模型硬限制",
             request_id=request_id,
         )
-    if estimated > config["execution"]["input_tokens_per_minute"]:
+    if (
+        config["execution"]["input_tokens_per_minute"] > 0
+        and estimated > config["execution"]["input_tokens_per_minute"]
+    ):
         raise ConfigError("单请求预测 Token 超过 ITPM")
     return estimated
 
