@@ -323,6 +323,10 @@ inject_invalid_json_every = 0
 inject_missing_segment_every = 0
 ```
 
+`requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示禁用 RPM
+和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标及单请求
+Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
+
 API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
 
 允许的调度模式：

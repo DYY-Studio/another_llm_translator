@@ -134,6 +134,25 @@ def test_chunk_builder_splits_without_duplicating_segments() -> None:
     assert ids == [item["segment_id"] for item in work]
 
 
+def test_chunk_builder_ignores_disabled_itpm() -> None:
+    current = config()
+    current["execution"]["input_tokens_per_minute"] = 0
+    prompt = full_prompt("translation", "Translate.")
+    plans = build_chunk_plans(
+        [segments()[0]],
+        config=current,
+        prompt=prompt,
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert len(plans) == 1
+    assert plans[0].estimated_input_tokens > 0
+
+
 def test_context_is_same_file_and_optional_target() -> None:
     source = segments()
     source.append(
@@ -239,3 +258,45 @@ async def test_llm_client_stops_on_auth_and_normal_mode_has_no_payloads(
     assert calls == 1
     assert not (tmp_path / "payloads").exists()
     assert not (tmp_path / "attempts.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_rate_limits_can_be_disabled_independently() -> None:
+    now = [0.0]
+    waits: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+        now[0] += delay
+
+    no_limits = SlidingWindowLimiter(
+        0,
+        0,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    await no_limits.acquire(1000000)
+    await no_limits.acquire(1000000)
+    assert not no_limits.records
+    assert waits == []
+
+    itpm_only = SlidingWindowLimiter(
+        0,
+        5,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    await itpm_only.acquire(3)
+    await itpm_only.acquire(3)
+    assert waits == [60.0]
+
+    waits.clear()
+    rpm_only = SlidingWindowLimiter(
+        1,
+        0,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    await rpm_only.acquire(1000000)
+    await rpm_only.acquire(1000000)
+    assert waits == [60.0]

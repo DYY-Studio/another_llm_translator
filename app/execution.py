@@ -344,11 +344,13 @@ def build_chunk_plans(
         - config["llm"]["max_output_tokens"]
         - config["llm"]["context_safety_margin_tokens"]
     )
-    target = min(
+    target_limits = [
         config["chunking"]["target_chunk_input_tokens"],
         hard_limit,
-        config["execution"]["input_tokens_per_minute"],
-    )
+    ]
+    if config["execution"]["input_tokens_per_minute"] > 0:
+        target_limits.append(config["execution"]["input_tokens_per_minute"])
+    target = min(target_limits)
     factor = config["execution"]["token_safety_factor"]
     plans: list[ChunkPlan] = []
     for group in contiguous_groups(work):
@@ -377,7 +379,10 @@ def build_chunk_plans(
                 raise ConfigError(
                     f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}"
                 )
-            if estimated > config["execution"]["input_tokens_per_minute"]:
+            if (
+                config["execution"]["input_tokens_per_minute"] > 0
+                and estimated > config["execution"]["input_tokens_per_minute"]
+            ):
                 raise ConfigError(
                     f"单请求预测 Token 超过 ITPM：{segment['segment_id']}"
                 )
@@ -512,17 +517,29 @@ class SlidingWindowLimiter:
         self.lock = asyncio.Lock()
 
     async def acquire(self, estimated_tokens: int) -> None:
-        if estimated_tokens > self.input_tokens_per_minute:
+        if self.requests_per_minute == 0 and self.input_tokens_per_minute == 0:
+            return
+        if (
+            self.input_tokens_per_minute > 0
+            and estimated_tokens > self.input_tokens_per_minute
+        ):
             raise ConfigError("单请求预测 Token 超过 ITPM")
         while True:
             async with self.lock:
                 now = self.clock()
                 while self.records and now - self.records[0][0] >= 60:
                     self.records.popleft()
-                request_full = len(self.records) >= self.requests_per_minute
+                request_full = (
+                    self.requests_per_minute > 0
+                    and len(self.records) >= self.requests_per_minute
+                )
                 token_full = (
-                    sum(tokens for _, tokens in self.records) + estimated_tokens
-                    > self.input_tokens_per_minute
+                    self.input_tokens_per_minute > 0
+                    and (
+                        sum(tokens for _, tokens in self.records)
+                        + estimated_tokens
+                        > self.input_tokens_per_minute
+                    )
                 )
                 if not request_full and not token_full:
                     self.records.append((now, estimated_tokens))

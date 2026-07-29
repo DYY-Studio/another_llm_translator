@@ -26,6 +26,7 @@ context_safety_margin_tokens = 512
 max_parallel = 4
 requests_per_minute = 30
 input_tokens_per_minute = 50000
+# Set either value to 0 to disable that limiter independently.
 request_timeout_seconds = 120
 scheduling_mode = "ordered_by_file"
 token_safety_factor = 1.25
@@ -75,4 +76,3 @@ inject_500_every = 0
 inject_timeout_every = 0
 inject_invalid_json_every = 0
 inject_missing_segment_every = 0
-
