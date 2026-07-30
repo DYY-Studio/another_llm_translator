@@ -56,6 +56,7 @@
     }
     .term-filter input { margin: 0; }
     .list { height: calc(100vh - 210px); overflow: auto; border: 1px solid #ddd; }
+    .list-empty { padding: 16px 12px; color: var(--muted); text-align: center; }
     .row {
       display: block;
       width: 100%;
@@ -122,6 +123,28 @@
     .inline-note { min-height: 22px; margin-top: 5px; font-size: 13px; }
     #review-outdated { margin-top: 8px; }
     #review-applied-state { margin-top: 5px; font-size: 13px; }
+    .context-card {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface-soft);
+    }
+    .context-card summary {
+      padding: 8px 9px;
+      cursor: pointer;
+      color: #46515a;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .context-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1px;
+      border-top: 1px solid var(--border);
+      background: var(--border);
+    }
+    .context-row { min-width: 0; padding: 7px 9px 8px; background: white; }
+    .context-meta { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+    .context-empty { padding: 9px; background: white; color: var(--muted); font-size: 13px; }
     @media (max-width: 780px) {
       .layout { grid-template-columns: 1fr; }
       main { padding: 10px; }
@@ -197,6 +220,7 @@
       <div class="panel">
         <div class="toolbar">
           <select id="file-filter"></select>
+          <select id="status-filter" aria-label="状态筛选"></select>
           <input id="segment-search" placeholder="筛选当前阶段文本">
         </div>
         <div id="segment-list" class="list"></div>
@@ -207,6 +231,10 @@
       </div>
       <div class="panel">
         <div id="segment-meta" class="muted">请选择 Segment</div>
+        <details id="context-card" class="context-card" open>
+          <summary id="context-summary">邻近上下文</summary>
+          <div id="context-list" class="context-list"></div>
+        </details>
         <label>原文</label>
         <div id="source" class="source"></div>
         <div id="translation-form">
@@ -252,6 +280,24 @@
       tab: "translation", project: null, detail: null, terms: [],
       selectedSegment: null, selectedTerm: null, selectedTermData: null
     };
+    const STATUS_OPTIONS = {
+      translation: [
+        ["", "全部状态"],
+        ["missing", "未翻译"],
+        ["warning", "校验警告"],
+        ["completed", "已翻译"]
+      ],
+      review: [
+        ["", "全部状态"],
+        ["missing_base", "缺少基准"],
+        ["pending", "待审校"],
+        ["suggested", "建议修改"],
+        ["accepted", "接受基准"],
+        ["outdated", "基准已变"],
+        ["applied", "当前建议已应用"],
+        ["unapplied", "当前建议未应用"]
+      ]
+    };
     const $ = id => document.getElementById(id);
 
     async function api(path, options = {}) {
@@ -289,9 +335,11 @@
     function currentSegments() {
       if (!state.project) return [];
       const file = $("file-filter").value;
+      const status = $("status-filter").value;
       const query = $("segment-search").value.toLocaleLowerCase();
       return state.project.segments.filter(item =>
         (!file || item.file_id === file) &&
+        matchesStatus(item, status) &&
         (!query || searchText(item).includes(query))
       );
     }
@@ -308,20 +356,57 @@
       button.appendChild(line);
     }
     function translationStatus(item) {
-      if (!item.translation) return ["未翻译", "danger"];
-      if (item.translation.validation_status === "warning") return ["校验警告", "warning"];
-      return ["已翻译", "success"];
+      if (!item.translation) return ["missing", "未翻译", "danger"];
+      if (item.translation.validation_status === "warning") {
+        return ["warning", "校验警告", "warning"];
+      }
+      return ["completed", "已翻译", "success"];
     }
     function reviewStatus(review) {
-      if (!review.base) return ["缺少基准", "danger"];
-      if (review.outdated) return ["基准已变", "warning"];
-      if (!review.suggestion) return ["待审校", ""];
-      if (review.suggestion.review_status === "accepted") return ["接受基准", "success"];
-      return ["建议修改", "warning"];
+      if (!review.base) return ["missing_base", "缺少基准", "danger"];
+      if (review.outdated) return ["outdated", "基准已变", "warning"];
+      if (!review.suggestion) return ["pending", "待审校", ""];
+      if (review.suggestion.review_status === "accepted") {
+        return ["accepted", "接受基准", "success"];
+      }
+      return ["suggested", "建议修改", "warning"];
+    }
+    function matchesStatus(item, status) {
+      if (!status) return true;
+      if (state.tab === "translation") {
+        return translationStatus(item)[0] === status;
+      }
+      const review = reviewFor(item);
+      if (status === "applied") {
+        return Boolean(review.suggestion && review.applied_current);
+      }
+      if (status === "unapplied") {
+        return Boolean(review.suggestion && !review.applied_current);
+      }
+      return reviewStatus(review)[0] === status;
+    }
+    function renderStatusFilter() {
+      const options = state.tab === "translation"
+        ? STATUS_OPTIONS.translation
+        : STATUS_OPTIONS.review;
+      $("status-filter").innerHTML = "";
+      for (const [value, label] of options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        $("status-filter").appendChild(option);
+      }
     }
     function renderSegments() {
       const items = currentSegments();
       $("segment-list").innerHTML = "";
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "list-empty";
+        empty.textContent = "没有符合当前筛选条件的 Segment";
+        $("segment-list").appendChild(empty);
+        return;
+      }
       for (const item of items) {
         const button = document.createElement("button");
         button.className = "row" + (item.segment_id === state.selectedSegment ? " active" : "");
@@ -337,7 +422,7 @@
           applied.textContent = "已应用";
           meta.appendChild(applied);
         }
-        const [statusText, statusClass] = state.tab === "translation"
+        const [, statusText, statusClass] = state.tab === "translation"
           ? translationStatus(item)
           : reviewStatus(review);
         const status = document.createElement("span");
@@ -370,10 +455,55 @@
       renderSegments();
       renderDetail();
     }
+    function renderContext() {
+      $("context-list").innerHTML = "";
+      if (!state.project || !state.detail) {
+        $("context-summary").textContent = "邻近上下文";
+        return;
+      }
+      const sameFile = state.project.segments.filter(
+        item => item.file_id === state.detail.file_id
+      );
+      const index = sameFile.findIndex(
+        item => item.segment_id === state.detail.segment_id
+      );
+      const before = index < 0 ? [] : sameFile.slice(Math.max(0, index - 2), index);
+      const after = index < 0 ? [] : sameFile.slice(index + 1, index + 3);
+      $("context-summary").textContent =
+        `邻近上下文 · 上文 ${before.length} / 下文 ${after.length}`;
+      const neighbors = [
+        ...before.map(item => ["上文", item]),
+        ...after.map(item => ["下文", item])
+      ];
+      if (!neighbors.length) {
+        const empty = document.createElement("div");
+        empty.className = "context-empty";
+        empty.textContent = "当前文件没有其他非空 Segment";
+        $("context-list").appendChild(empty);
+        return;
+      }
+      for (const [relation, item] of neighbors) {
+        const row = document.createElement("section");
+        row.className = "context-row";
+        const meta = document.createElement("div");
+        meta.className = "context-meta";
+        meta.textContent = `${relation} · 行 ${Number(item.line_index) + 1}`;
+        row.appendChild(meta);
+        addPreview(row, "原", item.source, "无原文");
+        if (state.tab === "translation") {
+          addPreview(row, "译", item.translation?.text, "尚无译文");
+        } else {
+          const base = reviewFor(item).base;
+          addPreview(row, "基", base?.text, "缺少基准");
+        }
+        $("context-list").appendChild(row);
+      }
+    }
     function renderDetail() {
       const detail = state.detail;
       if (!detail) return;
       $("segment-meta").textContent = `${detail.segment_id} · 行 ${Number(detail.line_index) + 1}`;
+      renderContext();
       $("source").textContent = detail.source;
       const translating = state.tab === "translation";
       $("translation-form").classList.toggle("hidden", !translating);
@@ -543,6 +673,7 @@
       $("stage-view").classList.toggle("hidden", tab === "terms");
       if (tab === "terms") await loadTerms();
       else {
+        renderStatusFilter();
         renderSegments();
         renderDetail();
       }
@@ -557,6 +688,7 @@
       button.onclick = guard(() => setTab(button.dataset.tab))
     );
     $("file-filter").onchange = renderSegments;
+    $("status-filter").onchange = renderSegments;
     $("segment-search").oninput = renderSegments;
     $("term-search").oninput = renderTerms;
     $("only-conflicts").onchange = renderTerms;
@@ -572,6 +704,7 @@
     $("remove-term").onclick = guard(() => saveTerm(true));
     $("restore-term").onclick = guard(() => saveTerm(false));
     guard(async () => {
+      renderStatusFilter();
       await reloadProject();
       const first = state.project.segments[0];
       if (first) await selectSegment(first.segment_id);
