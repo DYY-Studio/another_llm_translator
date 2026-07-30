@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 import zipfile
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
+from app.documents import publish_document_export
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -43,7 +45,9 @@ def make_epub(path: Path, *, xhtml: bytes | None = None) -> None:
         b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
         b'<spine><itemref idref="c1"/></spine></package>'
     )
-    with zipfile.ZipFile(path, "w") as archive:
+    with zipfile.ZipFile(
+        path, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
         archive.writestr(
             "mimetype",
             b"application/epub+zip",
@@ -144,6 +148,22 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
         get_document_adapter("missing")
 
 
+def test_epub_adapter_version_mismatch_fails_explicitly(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    metadata_path = project / "project.json"
+    metadata = read_json(metadata_path)
+    metadata["document_adapter_version"] = "future"
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(IncompleteError, match="版本不兼容"):
+        export_project(
+            project, "translated", bilingual=False, allow_missing=True
+        )
+
+
 def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
     source = tmp_path / "bad.epub"
     make_epub(source)
@@ -182,6 +202,50 @@ def test_epub_rejects_zip_symlink(tmp_path: Path) -> None:
         get_document_adapter("epub").import_sources(
             [str(source)], recursive=False, config={}
         )
+
+
+def test_epub_rejects_abnormal_compression_ratio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "bad.epub"
+    make_epub(source)
+    with zipfile.ZipFile(
+        source, "a", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        archive.writestr("OEBPS/repeated.bin", b"x" * 10_000)
+    monkeypatch.setattr("app.epub_adapter.MAX_EPUB_COMPRESSION_RATIO", 2)
+    with pytest.raises(ProjectError, match="压缩比异常"):
+        get_document_adapter("epub").import_sources(
+            [str(source)], recursive=False, config={}
+        )
+
+
+class FailingExportAdapter:
+    adapter_id = "failing"
+    version = "1"
+    capabilities = frozenset({"translated_export"})
+
+    def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
+        (staging_dir / "partial.txt").write_text("partial", encoding="utf-8")
+        raise ProjectError("fixture failure")
+
+
+def test_document_export_failure_publishes_nothing(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    directory = project / "output" / "translated"
+    with pytest.raises(ProjectError, match="fixture failure"):
+        publish_document_export(
+            FailingExportAdapter(),  # type: ignore[arg-type]
+            project=project,
+            directory=directory,
+            files=[],
+            segments=[],
+            output_text={},
+            bilingual=False,
+            output_encoding="utf-8",
+            opaque_state=None,
+        )
+    assert not directory.exists()
 
 
 class FakeEntryPoint:
