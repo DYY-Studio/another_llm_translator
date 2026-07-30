@@ -63,6 +63,21 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) != original
 
 
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+def test_review_prompt_uses_conditional_fields(stage: str) -> None:
+    prompt = full_prompt(stage, "Review carefully.")
+    assert (
+        '{"type":"segment","id":"F0001-S000001","status":"accepted"}'
+        in prompt
+    )
+    assert (
+        '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+        '"suggested_text":"完整建议","reason":"原因"}'
+        in prompt
+    )
+    assert "即使附带 suggested_text 或 reason 也不会采用" in prompt
+
+
 def test_scope_and_result_selection_preserve_old_success() -> None:
     source = segments()
     files = [{"file_id": "F0001", "file_order": 1}]

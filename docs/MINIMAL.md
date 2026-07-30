@@ -585,6 +585,7 @@ Prompt，并在 manifest 追加本次指纹、原始范围和请求/复用数量
 - `base_result_id`
 
 `review_status` 是阶段 payload，不等于记录的 `status`。结构有效的 accepted 和 suggested 都保存为 completed。
+accepted 的持久化记录将 `suggested_text` 和 `reason` 规范化保存为 `null`。
 
 applied 结果保存：
 
@@ -840,10 +841,15 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 输出 JSONL：
 
 ```jsonl
-{"type":"segment","id":"F0001-S000101","status":"accepted","suggested_text":null,"reason":null}
+{"type":"segment","id":"F0001-S000101","status":"accepted"}
 {"type":"segment","id":"F0001-S000102","status":"suggested","suggested_text":"完整建议译文","reason":"遗漏否定含义"}
 {"type":"end"}
 ```
+
+accepted 表示无条件保留当前基准，模型输出无需包含 `suggested_text` 和
+`reason`；端点若返回这两个字段，本地无论其值和类型如何均直接忽略，并在
+持久化时规范化为 `null`。suggested 必须包含非空字符串 `suggested_text`，
+`reason` 只允许字符串或 `null`。
 
 每条结果保存本次使用的翻译 `base_result_id`。
 
