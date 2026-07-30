@@ -24,13 +24,20 @@ from app.execution import (
     select_scope,
     stage_fingerprint,
 )
+from app.llm_adapter import load_json_adapter
 
 
 ROOT = Path(__file__).parents[1]
 
 
 def config() -> dict:
-    return load_config(ROOT / "config" / "config.toml")
+    value = load_config(ROOT / "config" / "config.toml")
+    adapter = load_json_adapter(
+        ROOT / "llm_adapters" / f"{value['llm']['adapter']}.json"
+    )
+    value["_llm_adapter"] = adapter
+    value["_llm_adapter_hash"] = adapter.digest
+    return value
 
 
 def segments() -> list[dict]:

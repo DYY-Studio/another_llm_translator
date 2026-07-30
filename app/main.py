@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import nullcontext
 
 from .execution import Scope, choose_running_run
 from .errors import AppError
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
+from .locking import project_write_lock
 from .project import init_project, resolve_project, sync_global_templates
 from .stages import (
     export_project,
@@ -28,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("inputs", nargs="+")
     init.add_argument("--name", required=True)
     init.add_argument("--recursive", action="store_true")
+    init.add_argument(
+        "--document-adapter",
+        default="txt",
+        help="输入输出格式 Adapter ID（默认：txt）",
+    )
     init.add_argument("--dry-run", action="store_true")
 
     inspect = subparsers.add_parser("inspect", help="检查项目状态")
@@ -79,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply_selectors.add_argument("--only-file")
     apply_selectors.add_argument("--only-segment")
 
-    export = subparsers.add_parser("export", help="导出 TXT")
+    export = subparsers.add_parser("export", help="按项目文档格式导出")
     export.add_argument("project")
     export.add_argument(
         "--stage", choices=("translated", "proofread", "polished"), required=True
@@ -100,6 +107,7 @@ def run(argv: list[str] | None = None) -> int:
             args.inputs,
             name=args.name,
             recursive=args.recursive,
+            document_adapter_id=args.document_adapter,
             dry_run=args.dry_run,
         )
         if path is not None:
@@ -172,52 +180,54 @@ def run(argv: list[str] | None = None) -> int:
             )
             for warning in run_warnings:
                 logger.warning("%s", warning)
-        if args.command == "terminology":
-            summary = asyncio.run(
-                run_terminology(
-                    project,
-                    scope,
-                    resume_run_id=resume_run_id,
-                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+        lock = nullcontext() if args.dry_run else project_write_lock(project)
+        with lock:
+            if args.command == "terminology":
+                summary = asyncio.run(
+                    run_terminology(
+                        project,
+                        scope,
+                        resume_run_id=resume_run_id,
+                        reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                    )
                 )
-            )
-        elif args.command == "translate":
-            summary = asyncio.run(
-                run_translation(
-                    project,
-                    scope,
-                    resume_run_id=resume_run_id,
-                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+            elif args.command == "translate":
+                summary = asyncio.run(
+                    run_translation(
+                        project,
+                        scope,
+                        resume_run_id=resume_run_id,
+                        reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                    )
                 )
-            )
-        elif args.command == "proofread":
-            summary = asyncio.run(
-                run_review(
-                    project,
-                    "proofreading",
-                    scope,
-                    resume_run_id=resume_run_id,
-                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+            elif args.command == "proofread":
+                summary = asyncio.run(
+                    run_review(
+                        project,
+                        "proofreading",
+                        scope,
+                        resume_run_id=resume_run_id,
+                        reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                    )
                 )
-            )
-        elif args.command == "polish":
-            summary = asyncio.run(
-                run_review(
-                    project,
-                    "polishing",
-                    scope,
-                    resume_run_id=resume_run_id,
-                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+            elif args.command == "polish":
+                summary = asyncio.run(
+                    run_review(
+                        project,
+                        "polishing",
+                        scope,
+                        resume_run_id=resume_run_id,
+                        reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                    )
                 )
-            )
-        else:
-            summary = asyncio.run(
-                run_all(
-                    project,
-                    scope,
-                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+            else:
+                summary = asyncio.run(
+                    run_all(
+                        project,
+                        scope,
+                        reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                    )
                 )
-            )
         summary.setdefault("warnings", [])
         summary["warnings"] = [
             *warnings,
@@ -242,18 +252,20 @@ def run(argv: list[str] | None = None) -> int:
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
-        summary = run_apply(
-            project,
-            args.stage,
-            Scope(
-                from_file=args.from_file,
-                only_file=args.only_file,
-                only_segment=args.only_segment,
-                dry_run=args.dry_run,
-            ),
-            allow_outdated_base=args.allow_outdated_base,
-            confirmed_all=args.all,
-        )
+        lock = nullcontext() if args.dry_run else project_write_lock(project)
+        with lock:
+            summary = run_apply(
+                project,
+                args.stage,
+                Scope(
+                    from_file=args.from_file,
+                    only_file=args.only_file,
+                    only_segment=args.only_segment,
+                    dry_run=args.dry_run,
+                ),
+                allow_outdated_base=args.allow_outdated_base,
+                confirmed_all=args.all,
+            )
         summary["warnings"] = [*warnings, *summary["warnings"]]
         for warning in summary["warnings"]:
             if warning not in warnings:
@@ -271,12 +283,13 @@ def run(argv: list[str] | None = None) -> int:
         warnings = sync_global_templates(project)
         for warning in warnings:
             logger.warning("%s", warning)
-        summary = export_project(
-            project,
-            args.stage,
-            bilingual=args.bilingual,
-            allow_missing=args.allow_missing,
-        )
+        with project_write_lock(project):
+            summary = export_project(
+                project,
+                args.stage,
+                bilingual=args.bilingual,
+                allow_missing=args.allow_missing,
+            )
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         logger.info(

@@ -30,6 +30,7 @@ from .errors import (
     UsageError,
 )
 from .logging_utils import get_logger
+from .llm_adapter import JSONLLMAdapter, adapter_path
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -278,6 +279,8 @@ def stage_fingerprint(
             "stage": stage,
             "target_language": config["project"]["target_language"],
             "model": config["llm"]["model"],
+            "llm_adapter": config["llm"]["adapter"],
+            "llm_adapter_hash": config.get("_llm_adapter_hash"),
             "prompt": prompt,
             "temperature": config["llm"][temperature_key],
             "context": config["context"][stage],
@@ -487,6 +490,11 @@ def create_run(
     run_dir = project / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", run_dir / "config.toml")
+    config = load_config(project / "config.toml")
+    shutil.copy2(
+        adapter_path(project, str(config["llm"]["adapter"])),
+        run_dir / "llm_adapter.json",
+    )
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = record_header(
@@ -660,6 +668,11 @@ def continue_run(
     snapshot_dir = run_dir / relative
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", snapshot_dir / "config.toml")
+    config = load_config(project / "config.toml")
+    shutil.copy2(
+        adapter_path(project, str(config["llm"]["adapter"])),
+        snapshot_dir / "llm_adapter.json",
+    )
     (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     continuations.append(
         {
@@ -806,6 +819,10 @@ class LLMClient:
         self.warnings: list[str] = []
         self._reported_output_clamp = False
         self.logger = get_logger(stage)
+        adapter = config.get("_llm_adapter")
+        if not isinstance(adapter, JSONLLMAdapter):
+            raise ConfigError("项目配置缺少已加载的 LLM Adapter")
+        self.adapter = adapter
 
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
@@ -901,13 +918,14 @@ class LLMClient:
             self.warnings.append(warning)
             self.logger.warning("%s request=%s", warning, request_id)
             self._reported_output_clamp = True
-        payload = {
-            "model": self.config["llm"]["model"],
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": effective_output,
-            "stream": False,
-        }
+        headers, payload = self.adapter.build_request(
+            api_key=api_key,
+            model=str(self.config["llm"]["model"]),
+            messages=messages,
+            temperature=temperature,
+            max_output_tokens=effective_output,
+            stream=False,
+        )
         url = (
             self.config["llm"]["base_url"].rstrip("/")
             + "/"
@@ -956,7 +974,7 @@ class LLMClient:
                 else:
                     response = await self.client.post(
                         url,
-                        headers={"Authorization": f"Bearer {api_key}"},
+                        headers=headers,
                         json=payload,
                     )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -991,16 +1009,14 @@ class LLMClient:
                     and debug["inject_invalid_json_every"]
                     and self.send_count % debug["inject_invalid_json_every"] == 0
                 ):
-                    response_data = {
-                        "choices": [{"message": {"content": "{invalid json"}}]
-                    }
+                    self.adapter.replace_content(response_data, "{invalid json")
                 elif (
                     debug["enabled"]
                     and debug["inject_missing_segment_every"]
                     and self.send_count % debug["inject_missing_segment_every"] == 0
                 ):
                     try:
-                        content = response_data["choices"][0]["message"]["content"]
+                        content = self.adapter.parse_content(response_data)
                         lines = extract_jsonl_content(str(content)).splitlines()
                         segment_indexes = []
                         for index, line in enumerate(lines):
@@ -1009,8 +1025,8 @@ class LLMClient:
                                 segment_indexes.append(index)
                         if segment_indexes:
                             lines.pop(segment_indexes[-1])
-                            response_data["choices"][0]["message"]["content"] = "\n".join(
-                                lines
+                            self.adapter.replace_content(
+                                response_data, "\n".join(lines)
                             )
                     except (
                         KeyError,
@@ -1028,12 +1044,7 @@ class LLMClient:
                     status=response.status_code,
                     parent_request_id=parent_request_id,
                 )
-                try:
-                    content = response_data["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError) as exc:
-                    raise ExternalError("响应缺少 choices[0].message.content") from exc
-                if not isinstance(content, str):
-                    raise ExternalError("LLM 响应正文不是字符串")
+                content = self.adapter.parse_content(response_data)
                 self.logger.info(
                     "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
                     request_id,

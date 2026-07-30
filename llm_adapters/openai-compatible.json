@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "adapter_id": "openai-compatible",
+  "headers": {
+    "Authorization": "Bearer ${api_key}"
+  },
+  "body": {
+    "model": "${model}",
+    "messages": "${messages}",
+    "temperature": "${temperature}",
+    "max_tokens": "${max_output_tokens}",
+    "stream": "${stream}"
+  },
+  "response_content_pointer": "/choices/0/message/content"
+}

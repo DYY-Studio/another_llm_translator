@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shlex
 import sys
-import tempfile
 import unicodedata
 import uuid
 from collections import Counter
@@ -14,7 +12,8 @@ from typing import Any
 
 import httpx
 
-from .config import load_config
+from .config import load_project_config
+from .documents import publish_document_export
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -53,6 +52,7 @@ from .execution import (
 )
 from .logging_utils import get_logger
 from .project import load_segments, load_source_files
+from .plugins import get_document_adapter
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -78,7 +78,7 @@ def _project_context(
     list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
-    config = load_config(project / "config.toml")
+    config = load_project_config(project)
     metadata = read_json(project / "project.json")
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
@@ -955,6 +955,15 @@ async def run_terminology(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(len(selected) - len(work)) if resume_run_id else 0,
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
@@ -1830,6 +1839,19 @@ async def run_translation(
                     }
                     await repair_group(group, subset)
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
@@ -2571,6 +2593,19 @@ async def run_review(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
@@ -2753,21 +2788,6 @@ def run_apply(
     }
 
 
-def _atomic_write_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
 def export_project(
     project: Path,
     export_stage: str,
@@ -2778,7 +2798,7 @@ def export_project(
     if export_stage not in {"translated", "proofread", "polished"}:
         raise ValueError(f"unsupported export stage: {export_stage}")
     logger = get_logger("export")
-    config, _, files, segments = _project_context(project, dry_run=False)
+    config, metadata, files, segments = _project_context(project, dry_run=False)
     stage_name = {
         "translated": "translation",
         "proofread": "proofreading_applied",
@@ -2879,35 +2899,49 @@ def export_project(
         if bilingual
         else project / "output" / export_stage
     )
-    by_file: dict[str, list[dict[str, Any]]] = {}
-    for segment in segments:
-        by_file.setdefault(str(segment["file_id"]), []).append(segment)
-    written: list[str] = []
-    encoding = config["project"]["output_encoding"]
-    for file_record in sorted(files, key=lambda item: int(item["file_order"])):
-        lines: list[str] = []
-        for segment in sorted(
-            by_file[str(file_record["file_id"])],
-            key=lambda item: int(item["line_index"]),
+    adapter_id = str(metadata.get("document_adapter_id") or "txt")
+    adapter = get_document_adapter(adapter_id)
+    required_capability = (
+        "bilingual_export" if bilingual else "translated_export"
+    )
+    if required_capability not in adapter.capabilities:
+        raise IncompleteError(
+            f"Document Adapter 不支持此导出模式：{adapter_id} "
+            f"{required_capability}"
+        )
+    project_version = str(
+        metadata.get("document_adapter_version") or adapter.version
+    )
+    if project_version != adapter.version:
+        raise IncompleteError(
+            f"Document Adapter 版本不兼容：项目 {project_version}，"
+            f"当前 {adapter.version}"
+        )
+    state_path = metadata.get("document_adapter_state")
+    opaque_state = None
+    if state_path is not None:
+        state_record = read_json(project / str(state_path))
+        if (
+            state_record.get("adapter_id") != adapter_id
+            or str(state_record.get("adapter_version")) != project_version
+            or not isinstance(state_record.get("state"), dict)
         ):
-            if segment["is_empty"]:
-                lines.append("")
-            elif bilingual:
-                lines.append(str(segment["source"]))
-                lines.append(output_text[str(segment["segment_id"])])
-            else:
-                lines.append(output_text[str(segment["segment_id"])])
-        relative = Path(str(file_record["original_name"]))
-        destination = directory / relative
-        try:
-            payload = "\n".join(lines).encode(encoding, errors="strict")
-        except UnicodeEncodeError as exc:
-            raise IncompleteError(
-                f"输出编码 {encoding} 无法表示 {relative}: {exc}"
-            ) from exc
-        _atomic_write_bytes(destination, payload)
-        written.append(str(destination.relative_to(project)))
-        logger.info("file written path=%s", destination.relative_to(project))
+            raise IncompleteError("Document Adapter 状态损坏或版本不匹配")
+        opaque_state = state_record["state"]
+    encoding = str(config["project"]["output_encoding"])
+    written = publish_document_export(
+        adapter,
+        project=project,
+        directory=directory,
+        files=files,
+        segments=segments,
+        output_text=output_text,
+        bilingual=bilingual,
+        output_encoding=encoding,
+        opaque_state=opaque_state,
+    )
+    for path in written:
+        logger.info("file written path=%s", path)
     logger.info(
         "export complete stage=%s files=%d fallback_segments=%d",
         export_stage,
@@ -2933,7 +2967,7 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
-    config = load_config(project / "config.toml")
+    config = load_project_config(project)
     limiter = SlidingWindowLimiter(
         config["execution"]["requests_per_minute"],
         config["execution"]["input_tokens_per_minute"],

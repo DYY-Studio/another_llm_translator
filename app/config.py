@@ -7,12 +7,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .errors import ConfigError
+from .llm_adapter import adapter_path, load_json_adapter
 
 
 SCHEMA: dict[str, Any] = {
     "project": {"target_language": None, "output_encoding": None},
     "input": {"encoding_confidence_threshold": None, "fallback_encoding": None},
     "llm": {
+        "adapter": None,
         "base_url": None,
         "endpoint": None,
         "model": None,
@@ -99,6 +101,7 @@ def validate_config(config: dict[str, Any]) -> None:
         ("project", "target_language"),
         ("project", "output_encoding"),
         ("input", "fallback_encoding"),
+        ("llm", "adapter"),
         ("llm", "base_url"),
         ("llm", "endpoint"),
         ("llm", "model"),
@@ -271,4 +274,17 @@ def load_config(path: Path) -> dict[str, Any]:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
     validate_config(config)
+    return config
+
+
+def load_project_config(project: Path) -> dict[str, Any]:
+    config = load_config(project / "config.toml")
+    adapter_id = str(config["llm"]["adapter"])
+    adapter = load_json_adapter(adapter_path(project, adapter_id))
+    if adapter.adapter_id != adapter_id:
+        raise ConfigError(
+            "LLM Adapter 文件中的 adapter_id 与项目配置不一致"
+        )
+    config["_llm_adapter"] = adapter
+    config["_llm_adapter_hash"] = adapter.digest
     return config

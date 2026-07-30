@@ -1,7 +1,8 @@
 # Minimal LLM Translator
 
-面向多个 TXT 文件的最小工程化翻译验证工具。实现以 Segment 为恢复和进度单位，
-支持术语、翻译、校对建议、润色建议、应用建议及单语/双语导出。
+本地工程化翻译工具。实现以 Segment 为恢复和进度单位，支持 TXT/EPUB、
+声明式 LLM Adapter、术语、翻译、校对建议、润色建议、应用建议及单语/双语
+文档导出。
 
 ## 安装
 
@@ -48,8 +49,33 @@ python -m app.main export novel --stage proofread --bilingual
 `--resume-run` 或 `--decline-run`；续作沿用旧范围，但使用当前项目配置和
 Prompt。
 
-完整行为和 MVP 边界见 [`docs/MINIMAL.md`](docs/MINIMAL.md)，贡献与分支流程见
+EPUB 项目使用：
+
+```bash
+python -m app.main init book.epub --name book --document-adapter epub
+python -m app.main export book --stage translated --bilingual
+```
+
+完整行为见 [`docs/MINIMAL.md`](docs/MINIMAL.md)，后续阶段见
+[`docs/ROADMAP.md`](docs/ROADMAP.md)，扩展边界见
+[`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
+
+## 本地 Web Alpha
+
+构建前端后启动只监听回环地址的完整工作台：
+
+```bash
+cd web
+npm ci
+npm run build
+cd ..
+python -m app.web
+```
+
+打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
+限速与恢复逻辑，不建立第二套数据库。可创建 TXT/EPUB 项目、编辑配置、Prompt
+和 JSON LLM Adapter，运行或取消阶段任务，并审校、apply 与导出。
 
 ## 开发期结果编辑器
 
@@ -72,6 +98,8 @@ Prompt。
 python -m pytest -q
 python -m app.main --help
 python -m app.editor --help
+python -m app.web --help
+cd web && npm run typecheck && npm run build
 ```
 
 测试使用模拟 HTTP 响应，不会调用真实模型。
