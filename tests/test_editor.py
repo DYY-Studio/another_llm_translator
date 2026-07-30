@@ -467,8 +467,18 @@ def test_editor_http_serves_page_and_json_errors(tmp_path: Path) -> None:
     assert b"200 OK" in page
     page_text = page.decode("utf-8")
     assert "项目结果编辑器" in page_text
+    assert '<div class="stage-toolbar">' in page_text
+    assert (
+        '<select id="file-filter"></select>\n'
+        '          <div class="stage-filter-row">'
+    ) in page_text
+    assert 'class="toolbar"' not in page_text
     assert 'id="status-filter"' in page_text
-    assert 'id="context-card" class="context-card" open' in page_text
+    assert '<details id="context-card" class="context-card">' in page_text
+    assert 'window.matchMedia("(max-width: 780px)")' in page_text
+    assert 'addContextGroup("上文", before, "无更多上文")' in page_text
+    assert 'addContextGroup("下文", after, "无更多下文")' in page_text
+    assert "context-row" not in page_text
     assert "当前建议未应用" in page_text
     assert "没有符合当前筛选条件的 Segment" in page_text
 

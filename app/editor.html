@@ -28,11 +28,15 @@
     main { padding: 14px 20px; }
     .layout { display: grid; grid-template-columns: minmax(380px, 44%) minmax(0, 1fr); gap: 14px; }
     .panel { background: white; border: 1px solid var(--border); padding: 12px; min-width: 0; }
-    .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
-    .toolbar input, .toolbar select { padding: 7px 8px; min-width: 140px; font-size: 14px; }
-    .toolbar input { flex: 1; }
-    .toolbar select { max-width: 100%; }
-    .toolbar .inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: 400; }
+    .stage-toolbar { display: grid; gap: 8px; margin-bottom: 10px; }
+    .stage-toolbar input, .stage-toolbar select { padding: 7px 8px; min-width: 0; font-size: 14px; }
+    #file-filter { width: 100%; }
+    .stage-filter-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 8px;
+    }
+    #segment-search { width: 100%; }
     .term-toolbar { display: grid; gap: 9px; margin-bottom: 10px; }
     .term-primary { display: flex; align-items: center; gap: 8px; }
     .term-primary input { flex: 1; min-width: 0; }
@@ -137,14 +141,31 @@
     }
     .context-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 1px;
       border-top: 1px solid var(--border);
       background: var(--border);
     }
-    .context-row { min-width: 0; padding: 7px 9px 8px; background: white; }
+    .context-group { min-width: 0; height: 100%; background: white; }
+    .context-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 9px;
+      border-bottom: 1px solid #e6e8ea;
+      color: #46515a;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .context-entry { padding: 7px 9px 8px; }
+    .context-entry + .context-entry { border-top: 1px solid #e6e8ea; }
     .context-meta { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
-    .context-empty { padding: 9px; background: white; color: var(--muted); font-size: 13px; }
+    .context-entry .preview-text {
+      display: block;
+      overflow: visible;
+      -webkit-line-clamp: unset;
+    }
+    .context-empty { padding: 9px; color: var(--muted); font-size: 13px; }
     @media (max-width: 780px) {
       .layout { grid-template-columns: 1fr; }
       main { padding: 10px; }
@@ -218,10 +239,12 @@
     </section>
     <section id="stage-view" class="layout">
       <div class="panel">
-        <div class="toolbar">
+        <div class="stage-toolbar">
           <select id="file-filter"></select>
-          <select id="status-filter" aria-label="状态筛选"></select>
-          <input id="segment-search" placeholder="筛选当前阶段文本">
+          <div class="stage-filter-row">
+            <select id="status-filter" aria-label="状态筛选"></select>
+            <input id="segment-search" placeholder="筛选当前阶段文本">
+          </div>
         </div>
         <div id="segment-list" class="list"></div>
         <div class="actions">
@@ -231,7 +254,7 @@
       </div>
       <div class="panel">
         <div id="segment-meta" class="muted">请选择 Segment</div>
-        <details id="context-card" class="context-card" open>
+        <details id="context-card" class="context-card">
           <summary id="context-summary">邻近上下文</summary>
           <div id="context-list" class="context-list"></div>
         </details>
@@ -455,6 +478,42 @@
       renderSegments();
       renderDetail();
     }
+    function addContextGroup(label, items, emptyText) {
+      const group = document.createElement("section");
+      group.className = "context-group";
+      const heading = document.createElement("div");
+      heading.className = "context-heading";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const count = document.createElement("span");
+      count.className = "muted";
+      count.textContent = `${items.length} 条`;
+      heading.append(title, count);
+      group.appendChild(heading);
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "context-empty";
+        empty.textContent = emptyText;
+        group.appendChild(empty);
+      }
+      for (const item of items) {
+        const entry = document.createElement("div");
+        entry.className = "context-entry";
+        const meta = document.createElement("div");
+        meta.className = "context-meta";
+        meta.textContent = `行 ${Number(item.line_index) + 1}`;
+        entry.appendChild(meta);
+        addPreview(entry, "原", item.source, "无原文");
+        if (state.tab === "translation") {
+          addPreview(entry, "译", item.translation?.text, "尚无译文");
+        } else {
+          const base = reviewFor(item).base;
+          addPreview(entry, "基", base?.text, "缺少基准");
+        }
+        group.appendChild(entry);
+      }
+      $("context-list").appendChild(group);
+    }
     function renderContext() {
       $("context-list").innerHTML = "";
       if (!state.project || !state.detail) {
@@ -471,33 +530,8 @@
       const after = index < 0 ? [] : sameFile.slice(index + 1, index + 3);
       $("context-summary").textContent =
         `邻近上下文 · 上文 ${before.length} / 下文 ${after.length}`;
-      const neighbors = [
-        ...before.map(item => ["上文", item]),
-        ...after.map(item => ["下文", item])
-      ];
-      if (!neighbors.length) {
-        const empty = document.createElement("div");
-        empty.className = "context-empty";
-        empty.textContent = "当前文件没有其他非空 Segment";
-        $("context-list").appendChild(empty);
-        return;
-      }
-      for (const [relation, item] of neighbors) {
-        const row = document.createElement("section");
-        row.className = "context-row";
-        const meta = document.createElement("div");
-        meta.className = "context-meta";
-        meta.textContent = `${relation} · 行 ${Number(item.line_index) + 1}`;
-        row.appendChild(meta);
-        addPreview(row, "原", item.source, "无原文");
-        if (state.tab === "translation") {
-          addPreview(row, "译", item.translation?.text, "尚无译文");
-        } else {
-          const base = reviewFor(item).base;
-          addPreview(row, "基", base?.text, "缺少基准");
-        }
-        $("context-list").appendChild(row);
-      }
+      addContextGroup("上文", before, "无更多上文");
+      addContextGroup("下文", after, "无更多下文");
     }
     function renderDetail() {
       const detail = state.detail;
@@ -704,6 +738,8 @@
     $("remove-term").onclick = guard(() => saveTerm(true));
     $("restore-term").onclick = guard(() => saveTerm(false));
     guard(async () => {
+      $("context-card").open =
+        !window.matchMedia("(max-width: 780px)").matches;
       renderStatusFilter();
       await reloadProject();
       const first = state.project.segments[0];
