@@ -4,6 +4,7 @@ import codecs
 import tomllib
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
@@ -16,6 +17,7 @@ SCHEMA: dict[str, Any] = {
         "endpoint": None,
         "model": None,
         "api_key_env": None,
+        "proxy_url": None,
         "temperature_terminology": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
@@ -112,6 +114,18 @@ def validate_config(config: dict[str, Any]) -> None:
         value = config[section][key]
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"{section}.{key} 必须是非空字符串")
+    proxy_url = config["llm"]["proxy_url"]
+    if not isinstance(proxy_url, str):
+        raise ConfigError("llm.proxy_url 必须是字符串")
+    if proxy_url:
+        parsed_proxy = urlsplit(proxy_url)
+        if (
+            parsed_proxy.scheme not in {"http", "https"}
+            or not parsed_proxy.hostname
+        ):
+            raise ConfigError(
+                "llm.proxy_url 必须是有效的 http:// 或 https:// URL"
+            )
     for section, key in (
         ("project", "output_encoding"),
         ("input", "fallback_encoding"),

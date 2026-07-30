@@ -21,6 +21,15 @@ python -m pip check
 export LLM_API_KEY="..."
 ```
 
+如需为 LLM 请求使用显式 HTTP/HTTPS 代理，在全局配置或项目副本中设置：
+
+```toml
+[llm]
+proxy_url = "http://127.0.0.1:7890"
+```
+
+留空时仍允许 HTTPX 使用标准代理环境变量。
+
 ## 基本流程
 
 ```bash
@@ -33,6 +42,11 @@ python -m app.main export novel --stage proofread --bilingual
 
 项目默认保存在 `projects/<name>/`。`run-all` 只生成校对和润色建议，不会自动
 应用。可先为任一阶段加入 `--dry-run` 查看范围、Chunk 数和 Token 估算。
+
+独立运行 `terminology`、`translate`、`proofread` 或 `polish` 时，如发现同阶段
+未完成 Run，交互终端会询问继续还是新建。脚本或 CI 中需明确使用
+`--resume-run` 或 `--decline-run`；续作沿用旧范围，但使用当前项目配置和
+Prompt。
 
 完整行为和 MVP 边界见 [`docs/MINIMAL.md`](docs/MINIMAL.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。

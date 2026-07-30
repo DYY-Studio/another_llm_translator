@@ -26,6 +26,10 @@ endpoint = "/chat/completions"
 model = "example-model"
 # 保存 API Key 的环境变量名称。这里只写变量名，不能填写真实密钥。
 api_key_env = "LLM_API_KEY"
+# LLM 请求使用的 HTTP/HTTPS 代理 URL；空字符串表示不显式设置，
+# 此时仍允许 HTTPX 使用 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 环境变量。
+# 示例：http://127.0.0.1:7890
+proxy_url = ""
 
 # 术语提取阶段的采样温度。
 temperature_terminology = 0.1

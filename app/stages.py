@@ -30,10 +30,12 @@ from .execution import (
     SlidingWindowLimiter,
     build_chunk_plans,
     classify_stage,
+    continue_run,
     contiguous_groups,
     create_run,
     dispatch_chunks,
     estimate_messages,
+    find_running_runs,
     finalize_run,
     full_prompt,
     load_stage_history,
@@ -43,6 +45,7 @@ from .execution import (
     render_messages,
     save_debug_chunks,
     select_scope,
+    scope_from_run,
     stage_fingerprint,
     stage_result_path,
 )
@@ -313,8 +316,26 @@ async def run_terminology(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
+    resume_arguments_ignored = False
+    if resume_run_id is not None:
+        resumed_scope = scope_from_run(
+            project, resume_run_id, dry_run=scope.dry_run
+        )
+        resume_arguments_ignored = (
+            scope.from_file,
+            scope.only_file,
+            scope.only_segment,
+            scope.force,
+        ) != (
+            resumed_scope.from_file,
+            resumed_scope.only_file,
+            resumed_scope.only_segment,
+            resumed_scope.force,
+        )
+        scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
@@ -322,11 +343,24 @@ async def run_terminology(
     active = read_json(active_path) if active_path.exists() else None
     published = load_terms(project)
 
-    create_task = (
+    resume_manifest = (
+        read_json(project / "runs" / resume_run_id / "manifest.json")
+        if resume_run_id is not None
+        else None
+    )
+    create_task = resume_run_id is None and (
         scope.force
         or active is None
         or (active.get("status") != "active" and published is None)
     )
+    if resume_manifest is not None:
+        task_id = str(resume_manifest.get("active_task_id", ""))
+        if not task_id:
+            raise StorageError(f"术语 Run 缺少 active_task_id：{resume_run_id}")
+        if active is None or active.get("active_task_id") != task_id:
+            raise StorageError(
+                f"术语 Run 的 active task 不再可用：{resume_run_id}"
+            )
     if create_task:
         task_id = f"TERM-TASK-{uuid.uuid4().hex[:10].upper()}"
         active = record_header(
@@ -376,6 +410,13 @@ async def run_terminology(
         if record.get("stage_fingerprint")
     }
     warnings: list[str] = []
+    if resume_run_id is not None:
+        warnings.append(
+            f"续用 Run {resume_run_id} 的原始范围和术语任务；"
+            "本次使用当前 config 和 Prompt"
+        )
+        if resume_arguments_ignored:
+            warnings.append("续作已忽略本次命令的范围参数或 --force")
     configured_output_warning = _configured_output_warning(config)
     if configured_output_warning:
         warnings.append(configured_output_warning)
@@ -478,6 +519,7 @@ async def run_terminology(
         return {
             "stage": "terminology",
             "dry_run": True,
+            "resume_run_id": resume_run_id,
             "active_task_id": task_id,
             "selected": len(selected),
             "requested": len(work),
@@ -488,19 +530,32 @@ async def run_terminology(
             "warnings": warnings,
         }
 
-    run_id, run_dir = create_run(
-        project,
-        stage="terminology",
-        fingerprint=fingerprint,
-        prompt=prompt,
-        selected_count=len(selected),
-        requested_count=len(work),
-        reused_count=len(selected) - len(work),
-        details={
-            "active_task_id": task_id,
-            "scope": _scope_record(scope, force_all=scope.force),
-        },
-    )
+    if resume_run_id is not None:
+        run_id, run_dir = continue_run(
+            project,
+            resume_run_id,
+            stage="terminology",
+            fingerprint=fingerprint,
+            prompt=prompt,
+            scope=scope,
+            selected_count=len(selected),
+            requested_count=len(work),
+            reused_count=len(selected) - len(work),
+        )
+    else:
+        run_id, run_dir = create_run(
+            project,
+            stage="terminology",
+            fingerprint=fingerprint,
+            prompt=prompt,
+            selected_count=len(selected),
+            requested_count=len(work),
+            reused_count=len(selected) - len(work),
+            details={
+                "active_task_id": task_id,
+                "scope": _scope_record(scope, force_all=scope.force),
+            },
+        )
     logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, "terminology", plans)
     if config["debug"]["enabled"]:
@@ -793,7 +848,12 @@ async def run_terminology(
             )
         _extend_unique(warnings, llm.warnings)
     except FatalExternalError:
-        finalize_run(run_dir, status="failed", completed=0, failed=len(work))
+        finalize_run(
+            run_dir,
+            status="failed",
+            completed=(len(selected) - len(work)) if resume_run_id else 0,
+            failed=len(work),
+        )
         logger.error("run failed run=%s fatal_external_error=true", run_id)
         raise
 
@@ -824,7 +884,14 @@ async def run_terminology(
     finalize_run(
         run_dir,
         status="completed" if failed == 0 else "failed",
-        completed=completed,
+        completed=(
+            sum(
+                str(segment["segment_id"]) in task_completed_ids
+                for segment in selected
+            )
+            if resume_run_id
+            else completed
+        ),
         failed=failed,
         warnings=warnings,
     )
@@ -1007,8 +1074,26 @@ async def run_translation(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
+    resume_arguments_ignored = False
+    if resume_run_id is not None:
+        resumed_scope = scope_from_run(
+            project, resume_run_id, dry_run=scope.dry_run
+        )
+        resume_arguments_ignored = (
+            scope.from_file,
+            scope.only_file,
+            scope.only_segment,
+            scope.force,
+        ) != (
+            resumed_scope.from_file,
+            resumed_scope.only_file,
+            resumed_scope.only_segment,
+            resumed_scope.force,
+        )
+        scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, "translation")
     library = load_terms(project)
@@ -1022,6 +1107,12 @@ async def run_translation(
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    if resume_run_id is not None:
+        warnings.append(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        )
+        if resume_arguments_ignored:
+            warnings.append("续作已忽略本次命令的范围参数或 --force")
     configured_output_warning = _configured_output_warning(config)
     if configured_output_warning:
         warnings.append(configured_output_warning)
@@ -1141,6 +1232,7 @@ async def run_translation(
         return {
             "stage": "translation",
             "dry_run": True,
+            "resume_run_id": resume_run_id,
             "selected": len(selection.selected),
             "requested": len(selection.work),
             "reused": len(selection.reusable),
@@ -1151,19 +1243,32 @@ async def run_translation(
             "warnings": warnings,
         }
 
-    run_id, run_dir = create_run(
-        project,
-        stage="translation",
-        fingerprint=fingerprint,
-        prompt=prompt,
-        selected_count=len(selection.selected),
-        requested_count=len(selection.work),
-        reused_count=len(selection.reusable),
-        details={
-            "terms_revision": terms_revision,
-            "scope": _scope_record(scope),
-        },
-    )
+    if resume_run_id is not None:
+        run_id, run_dir = continue_run(
+            project,
+            resume_run_id,
+            stage="translation",
+            fingerprint=fingerprint,
+            prompt=prompt,
+            scope=scope,
+            selected_count=len(selection.selected),
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+        )
+    else:
+        run_id, run_dir = create_run(
+            project,
+            stage="translation",
+            fingerprint=fingerprint,
+            prompt=prompt,
+            selected_count=len(selection.selected),
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            details={
+                "terms_revision": terms_revision,
+                "scope": _scope_record(scope),
+            },
+        )
     logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, "translation", plans)
     if config["debug"]["enabled"]:
@@ -1587,7 +1692,11 @@ async def run_translation(
         finalize_run(
             run_dir,
             status="failed",
-            completed=len(completed_ids),
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
         )
@@ -1655,7 +1764,11 @@ async def run_translation(
     finalize_run(
         run_dir,
         status="completed" if failed_count == 0 else "failed",
-        completed=len(completed_ids),
+        completed=(
+            len(selection.reusable) + len(completed_ids)
+            if resume_run_id
+            else len(completed_ids)
+        ),
         failed=failed_count,
         warnings=warnings,
     )
@@ -1760,10 +1873,28 @@ async def run_review(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
     logger = get_logger(stage)
+    resume_arguments_ignored = False
+    if resume_run_id is not None:
+        resumed_scope = scope_from_run(
+            project, resume_run_id, dry_run=scope.dry_run
+        )
+        resume_arguments_ignored = (
+            scope.from_file,
+            scope.only_file,
+            scope.only_segment,
+            scope.force,
+        ) != (
+            resumed_scope.from_file,
+            resumed_scope.only_file,
+            resumed_scope.only_segment,
+            resumed_scope.force,
+        )
+        scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
     prompt = _prompt(project, stage)
     library = load_terms(project)
@@ -1795,6 +1926,12 @@ async def run_review(
     history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    if resume_run_id is not None:
+        warnings.append(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        )
+        if resume_arguments_ignored:
+            warnings.append("续作已忽略本次命令的范围参数或 --force")
     configured_output_warning = _configured_output_warning(config)
     if configured_output_warning:
         warnings.append(configured_output_warning)
@@ -1930,6 +2067,7 @@ async def run_review(
         return {
             "stage": stage,
             "dry_run": True,
+            "resume_run_id": resume_run_id,
             "selected": len(selection.selected),
             "requested": len(selection.work),
             "reused": len(selection.reusable),
@@ -1939,19 +2077,32 @@ async def run_review(
             ),
             "warnings": warnings,
         }
-    run_id, run_dir = create_run(
-        project,
-        stage=stage,
-        fingerprint=fingerprint,
-        prompt=prompt,
-        selected_count=len(selection.selected),
-        requested_count=len(selection.work),
-        reused_count=len(selection.reusable),
-        details={
-            "terms_revision": terms_revision,
-            "scope": _scope_record(scope),
-        },
-    )
+    if resume_run_id is not None:
+        run_id, run_dir = continue_run(
+            project,
+            resume_run_id,
+            stage=stage,
+            fingerprint=fingerprint,
+            prompt=prompt,
+            scope=scope,
+            selected_count=len(selection.selected),
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+        )
+    else:
+        run_id, run_dir = create_run(
+            project,
+            stage=stage,
+            fingerprint=fingerprint,
+            prompt=prompt,
+            selected_count=len(selection.selected),
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            details={
+                "terms_revision": terms_revision,
+                "scope": _scope_record(scope),
+            },
+        )
     logger.info("run start run=%s", run_id)
     chunks = materialize_chunks(run_id, stage, plans)
     if config["debug"]["enabled"]:
@@ -2244,7 +2395,11 @@ async def run_review(
         finalize_run(
             run_dir,
             status="failed",
-            completed=len(completed_ids),
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
         )
@@ -2257,7 +2412,11 @@ async def run_review(
     finalize_run(
         run_dir,
         status="completed" if not failed_ids else "failed",
-        completed=len(completed_ids),
+        completed=(
+            len(selection.reusable) + len(completed_ids)
+            if resume_run_id
+            else len(completed_ids)
+        ),
         failed=len(failed_ids),
         warnings=warnings,
     )
@@ -2628,6 +2787,16 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         "stages": {},
         "outdated_suggestions": {},
         "validation_warnings": 0,
+        "running_runs": [
+            {
+                "run_id": item["run_id"],
+                "stage": item["stage"],
+                "started_at": item.get("started_at"),
+                "scope": item.get("scope"),
+            }
+            for stage in ("terminology", "translation", "proofreading", "polishing")
+            for item in find_running_runs(project, stage)
+        ],
     }
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None

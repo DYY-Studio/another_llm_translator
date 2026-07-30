@@ -5,7 +5,7 @@ import asyncio
 import json
 import sys
 
-from .execution import Scope
+from .execution import Scope, choose_running_run
 from .errors import AppError
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .project import init_project, resolve_project, sync_global_templates
@@ -49,6 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
         selectors.add_argument("--from-file")
         selectors.add_argument("--only-file")
         selectors.add_argument("--only-segment")
+        if name != "run-all":
+            run_choice = command.add_mutually_exclusive_group()
+            run_choice.add_argument(
+                "--resume-run",
+                action="store_true",
+                help="续用最近的同阶段未完成 Run",
+            )
+            run_choice.add_argument(
+                "--decline-run",
+                action="store_true",
+                help="拒绝最近的同阶段未完成 Run 并开始新 Run",
+            )
 
     apply = subparsers.add_parser("apply", help="应用校对或润色建议")
     apply.add_argument("project")
@@ -132,18 +144,62 @@ def run(argv: list[str] | None = None) -> int:
             force=args.force,
             dry_run=args.dry_run,
         )
+        resume_run_id = None
+        run_warnings: list[str] = []
+        if args.command != "run-all":
+            stage = {
+                "terminology": "terminology",
+                "translate": "translation",
+                "proofread": "proofreading",
+                "polish": "polishing",
+            }[args.command]
+            action = (
+                "resume"
+                if args.resume_run
+                else "decline" if args.decline_run else None
+            )
+            resume_run_id, run_warnings = choose_running_run(
+                project,
+                stage,
+                action=action,
+                dry_run=args.dry_run,
+            )
+            for warning in run_warnings:
+                logger.warning("%s", warning)
         if args.command == "terminology":
-            summary = asyncio.run(run_terminology(project, scope))
+            summary = asyncio.run(
+                run_terminology(project, scope, resume_run_id=resume_run_id)
+            )
         elif args.command == "translate":
-            summary = asyncio.run(run_translation(project, scope))
+            summary = asyncio.run(
+                run_translation(project, scope, resume_run_id=resume_run_id)
+            )
         elif args.command == "proofread":
-            summary = asyncio.run(run_review(project, "proofreading", scope))
+            summary = asyncio.run(
+                run_review(
+                    project,
+                    "proofreading",
+                    scope,
+                    resume_run_id=resume_run_id,
+                )
+            )
         elif args.command == "polish":
-            summary = asyncio.run(run_review(project, "polishing", scope))
+            summary = asyncio.run(
+                run_review(
+                    project,
+                    "polishing",
+                    scope,
+                    resume_run_id=resume_run_id,
+                )
+            )
         else:
             summary = asyncio.run(run_all(project, scope))
         summary.setdefault("warnings", [])
-        summary["warnings"] = [*warnings, *summary["warnings"]]
+        summary["warnings"] = [
+            *warnings,
+            *run_warnings,
+            *summary["warnings"],
+        ]
         for warning in summary["warnings"]:
             if warning not in warnings:
                 logger.warning("%s", warning)

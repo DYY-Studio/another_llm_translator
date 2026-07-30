@@ -75,7 +75,8 @@ Chunk 没有长期业务身份，不能用于判断进度或恢复。只有启�
 
 ### Run 是一次执行记录
 
-除 `--dry-run` 外，术语、翻译、校对、润色和 apply 每次执行都创建 Run。
+除 `--dry-run` 外，术语、翻译、校对、润色和 apply 通常创建 Run。四个独立
+LLM 阶段命令也可以续用同阶段最近的未完成 Run；`run-all` 不参与续作。
 
 Run 保存：
 
@@ -259,6 +260,7 @@ base_url = "https://example.com/v1"
 endpoint = "/chat/completions"
 model = "example-model"
 api_key_env = "LLM_API_KEY"
+proxy_url = ""
 
 temperature_terminology = 0.1
 temperature_translation = 0.2
@@ -329,6 +331,10 @@ inject_missing_segment_every = 0
 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
 
 API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
+
+`proxy_url` 为空时不显式设置代理，HTTPX 仍按默认行为读取 `HTTP_PROXY`、
+`HTTPS_PROXY` 和 `NO_PROXY`。非空值只接受 `http://` 或 `https://` URL；
+MVP 不增加 SOCKS 依赖。代理属于传输设置，不进入阶段指纹。
 
 允许的调度模式：
 
@@ -501,9 +507,20 @@ failed
 interrupted
 ```
 
-Run 创建时复制项目配置；LLM 阶段另保存本阶段实际完整 Prompt。运行中修改项目副本只影响下一 Run。
+Run 创建时复制项目配置；LLM 阶段另保存本阶段实际完整 Prompt。续作不覆盖
+原快照，而是在 `continuations/0001/` 等顺序目录保存本次当前项目配置和完整
+Prompt，并在 manifest 追加本次指纹、原始范围和请求/复用数量。续作结果仍引用
+原 `run_id`。
 
-遗留 running Run 可在下一命令或 inspect 时标记为 interrupted，但恢复仍只读取 Segment 结果和术语扫描记录。
+`terminology`、`translate`、`proofread`、`polish` 独立命令发现同阶段
+`running` Run 时，最新一个是续作候选，更旧者标记为 `interrupted` 和
+`superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选记录
+`resume_declined`，不再询问。非交互运行必须显式使用 `--resume-run` 或
+`--decline-run`。
+
+续作保留旧 Run ID、原始 scope 和术语 `active_task_id`，忽略本次范围参数与
+`--force`；它使用当前项目配置、Prompt、模型、端点及代理，只请求旧范围中
+尚无 completed 的 Segment。再次中断时 Run 保持 `running`。
 
 ## 3.5 阶段结果
 
@@ -960,6 +977,7 @@ Content-Type: application/json
 - connect、read、write 和 pool timeout 都使用 `request_timeout_seconds`。
 - 连接池上限从 `max_parallel` 派生。
 - `asyncio.Semaphore` 控制并发。
+- 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
 
 RPM 和 ITPM 使用单进程 60 秒滑动窗口。检查与预约由同一个异步锁保护。每次实际 HTTP 尝试都重新预约额度，失败后不返还。
 
@@ -1011,7 +1029,9 @@ HTTP 重试：
 - 没有 completed 时最近是否 failed。
 - 活动术语任务中的 Segment scan 状态。
 
-恢复不读取 Run 状态、Chunk ID、Chunk Manifest 或 Request 状态。
+Segment 进度恢复不读取 Chunk ID、Chunk Manifest 或 Request 状态。Run 状态
+只用于发现可续作的执行身份和旧 scope；实际 pending 仍完全由 Segment 结果或
+术语 scan 推导。
 
 ## 5.5 普通日志与调试模式
 
@@ -1054,6 +1074,8 @@ python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main inspect PROJECT
 python -m app.main terminology PROJECT
 python -m app.main translate PROJECT
+python -m app.main translate PROJECT --resume-run
+python -m app.main translate PROJECT --decline-run
 python -m app.main proofread PROJECT
 python -m app.main polish PROJECT
 python -m app.main apply PROJECT --stage proofreading --all
@@ -1084,6 +1106,8 @@ python -m app.main run-all PROJECT
 --allow-missing
 --bilingual
 --all
+--resume-run
+--decline-run
 ```
 
 语义：
@@ -1094,6 +1118,12 @@ python -m app.main run-all PROJECT
 - `--allow-missing`：仅用于 export，允许使用阶段回退。
 - `--bilingual`：仅用于 export。
 - `--all`：apply 的必需批量确认。
+- `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
+- `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
+
+两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
+`--decline-run` 直接按当前范围创建新 Run。`--dry-run` 不询问、不修改
+manifest；与 `--resume-run` 合用时按旧范围生成续作计划，但不写 continuation。
 
 删除：
 
@@ -1128,10 +1158,11 @@ inspect 至少报告：
 - 有旧 completed 但最近重做失败的 Segment 数。
 - validation warning 数。
 - 基于旧上游的校对或润色建议数。
+- 当前仍为 running 的 Run ID、阶段、开始时间和原始范围。
 - 是否存在新的全局模板。
 - 建议的下一条命令。
 
-inspect 不修改用户进度。只有遗留 Run 状态收尾和 JSONL 损坏尾行恢复属于存储维护。
+inspect 不修改 Run 状态或用户进度。JSONL 损坏尾行恢复属于存储维护。
 
 ## 6.3 导出
 
@@ -1239,6 +1270,10 @@ polished   → proofreading_applied → translation → source
 - 部分响应保存中间 Segment 后，其两侧未决项重新拆成独立 Chunk。
 - 修改 Chunk 大小、并发、限流或调度后不丢失 Segment 进度。
 - 中断后 completed 不重复请求，pending 和无成功结果的 failed 继续处理。
+- 四个独立 LLM 阶段能发现并续用相同 Run ID；旧 scope 和术语任务保持不变，
+  当前配置与 Prompt 写入新的 continuation 快照。
+- 拒绝候选后不再询问；非交互参数和 dry-run 零写入语义正确；多个 running
+  Run 中更旧者被 supersede。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。
 - 合法部分响应立即保存有效 Segment。
 - 原始 JSONL、CRLF、BOM、空行和受支持 Markdown 围栏均可解析。
@@ -1246,6 +1281,7 @@ polished   → proofreading_applied → translation → source
 - 旧顶层 JSON 对象或数组不再接受。
 - 格式修正和校验修复只请求连续分组后的未决 Segment。
 - HTTP、格式和校验重试均不会超过各自总上限。
+- 显式 HTTP/HTTPS 代理传给 HTTPX；空代理保留标准环境代理行为，非法协议拒绝。
 - 401/403 停止尚未发送的任务。
 - JSONL 尾行损坏可恢复，中间行损坏明确停止。
 - debug 开关两种状态下 stderr 和 `app.log` 都有基本运行日志，stdout 仍是可独立解析的最终 JSON。
@@ -1294,7 +1330,7 @@ polished   → proofreading_applied → translation → source
 项目配置与 Prompt 副本
           │
           ▼
-不可变 Run 快照
+Run 原始快照与续作快照
           │
           ▼
 同文件连续临时 Chunk
