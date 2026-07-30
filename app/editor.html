@@ -33,6 +33,28 @@
     .toolbar input { flex: 1; }
     .toolbar select { max-width: 100%; }
     .toolbar .inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: 400; }
+    .term-toolbar { display: grid; gap: 9px; margin-bottom: 10px; }
+    .term-primary { display: flex; align-items: center; gap: 8px; }
+    .term-primary input { flex: 1; min-width: 0; }
+    .term-secondary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px 14px;
+    }
+    .term-filters, .term-stats { display: flex; align-items: center; gap: 12px; }
+    .term-filters { flex-wrap: wrap; }
+    .term-stats { justify-content: flex-end; white-space: nowrap; }
+    .term-filter {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      font-weight: 400;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .term-filter input { margin: 0; }
     .list { height: calc(100vh - 210px); overflow: auto; border: 1px solid #ddd; }
     .row {
       display: block;
@@ -106,6 +128,10 @@
       .list { height: 320px; }
       .compare-grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 520px) {
+      .term-secondary { grid-template-columns: 1fr; }
+      .term-stats { justify-content: flex-start; }
+    }
   </style>
 </head>
 <body>
@@ -123,13 +149,21 @@
     <div id="message"></div>
     <section id="terms-view" class="hidden layout">
       <div class="panel">
-        <div class="toolbar">
-          <input id="term-search" placeholder="筛选术语">
-          <button id="new-term">新增</button>
-          <span id="term-revision" class="muted"></span>
-          <span id="conflict-count" class="warning"></span>
-          <label class="inline"><input id="only-conflicts" type="checkbox"> 只看冲突</label>
-          <label class="inline"><input id="show-disabled" type="checkbox"> 显示已移除</label>
+        <div class="term-toolbar">
+          <div class="term-primary">
+            <input id="term-search" placeholder="筛选术语">
+            <button id="new-term">新增</button>
+          </div>
+          <div class="term-secondary">
+            <div class="term-filters">
+              <label class="term-filter"><input id="only-conflicts" type="checkbox">只看冲突</label>
+              <label class="term-filter"><input id="show-disabled" type="checkbox">显示已移除</label>
+            </div>
+            <div class="term-stats">
+              <span id="term-revision" class="muted"></span>
+              <span id="conflict-count" class="warning"></span>
+            </div>
+          </div>
         </div>
         <div id="term-list" class="list"></div>
       </div>
