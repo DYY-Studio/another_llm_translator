@@ -1012,11 +1012,11 @@ HTTP 重试：
 
 格式修正：
 
-- `choices[0].message.content` 开头允许存在一个完整思考块：Qwen
-  `<think>...</think>`、Google AI Studio 兼容端点
-  `<thought>...</thought>`，或 Gemma 4
-  `<|channel>thought\n...<channel|>`。允许思考块前有 BOM 或空白；剥离后再按
-  下述 JSONL 规则解析。
+- `choices[0].message.content` 开头允许存在一个完整的 Tag 思考块：
+  `<think>...</think>`、`<thinking>...</thinking>`、
+  `<thought>...</thought>` 或 `<analysis>...</analysis>`。Google AI Studio
+  兼容端点实测使用 `<thought>`。允许思考块前有 BOM 或空白；剥离后再按
+  下述 JSONL 规则解析。不支持 Gemma Channel 形式。
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
 - 思考正文不属于 Prompt、Chunk、Segment 结果或进度。普通模式不持久化；

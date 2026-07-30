@@ -46,8 +46,9 @@ def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
     "template",
     [
         "\ufeff \r\n<think>推理过程</think>\r\n{answer}",
+        "<thinking>推理过程</thinking>\n{answer}",
         "<thought></thought>\n{answer}",
-        "<|channel>thought\n推理过程<channel|>{answer}",
+        "<analysis>推理过程</analysis>\n{answer}",
     ],
 )
 def test_jsonl_extraction_accepts_leading_thought_blocks(template: str) -> None:
@@ -96,8 +97,8 @@ def test_jsonl_extraction_rejects_malformed_or_nonleading_thought_blocks(
 
 def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
     translation = (
-        "保留 <think>文本</think>、<thought>文本</thought> 和 "
-        "<|channel>thought 文本 <channel|>"
+        "保留 <think>文本</think>、<thinking>文本</thinking>、"
+        "<thought>文本</thought> 和 <analysis>文本</analysis>"
     )
     valid, unresolved, errors, complete = _parse_translation_items(
         llm_jsonl(
@@ -194,8 +195,9 @@ def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
     "template",
     [
         "<think>推理过程</think>\n{answer}",
+        "<thinking>推理过程</thinking>\n{answer}",
         "<thought>推理过程</thought>\n{answer}",
-        "<|channel>thought\n推理过程<channel|>{answer}",
+        "<analysis>推理过程</analysis>\n{answer}",
     ],
 )
 async def test_translation_accepts_embedded_thought_content_without_retry(
