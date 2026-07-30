@@ -998,6 +998,15 @@ HTTP 重试：
 
 格式修正：
 
+- `choices[0].message.content` 开头允许存在一个完整思考块：Qwen
+  `<think>...</think>`、Google AI Studio 兼容端点
+  `<thought>...</thought>`，或 Gemma 4
+  `<|channel>thought\n...<channel|>`。允许思考块前有 BOM 或空白；剥离后再按
+  下述 JSONL 规则解析。
+- 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
+  猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
+- 思考正文不属于 Prompt、Chunk、Segment 结果或进度。普通模式不持久化；
+  debug 模式仍在原始响应 Payload 中保存，不新增独立思考记录。
 - 原始正文或受支持 Markdown 围栏内部必须是一行一个 JSON 对象；围栏外说明文字忽略。
 - 接受 `jsonl`、`ndjson`、`json` 和无标签围栏，不接受旧顶层 JSON 对象或数组协议。
 - 每行独立解析；立即保存 end 前 ID 唯一、字段有效且通过校验的 Segment。
@@ -1280,7 +1289,9 @@ polished   → proofreading_applied → translation → source
   Run 中更旧者被 supersede。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。
 - 合法部分响应立即保存有效 Segment。
-- 原始 JSONL、CRLF、BOM、空行和受支持 Markdown 围栏均可解析。
+- 原始 JSONL、CRLF、BOM、空行、受支持 Markdown 围栏和三种开头思考块均可解析。
+- 未闭合、重复、嵌套或不在开头的思考标签会进入格式修正，JSON 字段内标签文本
+  保持原样。
 - 缺失、重复或提前 end、非法行、重复或未知 ID 会进入格式修正。
 - 旧顶层 JSON 对象或数组不再接受。
 - 格式修正和校验修复只请求连续分组后的未决 Segment。
