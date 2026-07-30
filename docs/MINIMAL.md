@@ -943,6 +943,11 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 - 当前 Segment。
 - JSONL 记录结构字符。
 
+`token_safety_factor` 必须大于 `0`，可以小于、等于或大于 `1`。小于
+`1` 会主动降低启发式估算值，可提高分词效率更高模型的上下文利用率，但也会
+增加服务端上下文超限或实际 ITPM 超限风险。该估算不保证与任一模型、语言或
+Prompt 的真实分词结果一致，使用者应依据实际分词器和端点行为调节。
+
 每次尝试加入 Segment 后重新渲染并估算完整 Prompt。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
 
 `target_chunk_input_tokens` 是软目标。贪心累计时，加入下一个 Segment 将超过目标便结束当前 Chunk；单个 Segment 自身超过目标但仍低于模型输入硬限制时，可以单独发送。文件末尾和范围末尾的短尾 Chunk 允许明显低于目标。

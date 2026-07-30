@@ -208,6 +208,70 @@ async def test_run_all_dry_run_plans_without_writing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_all_shares_production_client_and_limiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    clients: list[object] = []
+    calls: list[tuple[str, object, object]] = []
+
+    class DummyClient:
+        def __init__(self, **_: object) -> None:
+            clients.append(self)
+            self.closed = False
+
+        async def __aenter__(self) -> "DummyClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            self.closed = True
+
+    async def fake_terminology(
+        _project: Path,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict:
+        calls.append(
+            ("terminology", kwargs["http_client"], kwargs["limiter"])
+        )
+        return {"stage": "terminology", "failed": 0, "pending": 0}
+
+    async def fake_translation(
+        _project: Path,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict:
+        calls.append(
+            ("translation", kwargs["http_client"], kwargs["limiter"])
+        )
+        return {"stage": "translation", "failed": 0, "pending": 0}
+
+    async def fake_review(
+        _project: Path,
+        stage: str,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict:
+        calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
+        return {"stage": stage, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.stages.httpx.AsyncClient", DummyClient)
+    monkeypatch.setattr("app.stages.run_terminology", fake_terminology)
+    monkeypatch.setattr("app.stages.run_translation", fake_translation)
+    monkeypatch.setattr("app.stages.run_review", fake_review)
+    try:
+        await run_all(project, Scope())
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert len(clients) == 1
+    assert clients[0].closed
+    assert {id(client) for _, client, _ in calls} == {id(clients[0])}
+    assert len({id(limiter) for _, _, limiter in calls}) == 1
+
+
+@pytest.mark.asyncio
 async def test_review_format_retry_regroups_around_valid_nonempty_segment(
     tmp_path: Path,
 ) -> None:

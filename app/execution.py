@@ -25,6 +25,7 @@ from .errors import (
     ContextLengthError,
     ExternalError,
     FatalExternalError,
+    RequestSizeError,
     StorageError,
     UsageError,
 )
@@ -418,15 +419,17 @@ def build_chunk_plans(
                 payload = payload_builder(current)
                 estimated = estimate_messages(render_messages(prompt, payload), factor)
             if estimated > input_limit:
-                raise ConfigError(
-                    f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}"
+                raise RequestSizeError(
+                    f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
+                    reason="context",
                 )
             if (
                 config["execution"]["input_tokens_per_minute"] > 0
                 and estimated > config["execution"]["input_tokens_per_minute"]
             ):
-                raise ConfigError(
-                    f"单请求预测 Token 超过 ITPM：{segment['segment_id']}"
+                raise RequestSizeError(
+                    f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
+                    reason="itpm",
                 )
             if len(current) == 1 and current[0] is segment:
                 continue

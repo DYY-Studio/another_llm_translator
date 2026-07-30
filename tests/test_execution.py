@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from app.execution import (
     SlidingWindowLimiter,
     build_chunk_plans,
     classify_stage,
+    estimate_messages,
     full_prompt,
     materialize_chunks,
     previous_context,
@@ -467,3 +469,28 @@ async def test_rate_limits_can_be_disabled_independently() -> None:
     await rpm_only.acquire(1000000)
     await rpm_only.acquire(1000000)
     assert waits == [60.0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_reserve_one_shared_rate_window() -> None:
+    now = [0.0]
+    waits: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+        now[0] += delay
+
+    limiter = SlidingWindowLimiter(
+        1,
+        0,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    await asyncio.gather(limiter.acquire(10), limiter.acquire(10))
+    assert waits == [60.0]
+    assert len(limiter.records) == 1
+
+
+def test_token_safety_factor_below_one_scales_estimate() -> None:
+    messages = render_messages("prompt", {"segments": [{"source": "one"}]})
+    assert estimate_messages(messages, 0.5) < estimate_messages(messages, 1.0)

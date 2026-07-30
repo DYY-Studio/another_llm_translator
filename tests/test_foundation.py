@@ -90,6 +90,19 @@ def test_config_accepts_disabled_rate_limits(tmp_path: Path) -> None:
     assert loaded["execution"]["input_tokens_per_minute"] == 0
 
 
+def test_config_accepts_token_safety_factor_below_one(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "token_safety_factor = 1.25",
+            "token_safety_factor = 0.5",
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(path)["execution"]["token_safety_factor"] == 0.5
+
+
 def test_decode_gbk_as_gb18030() -> None:
     source = "你好，世界。这是一段用于编码探测的简体中文测试文本。"
     text, detected, used, _, _ = decode_txt(

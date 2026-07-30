@@ -60,7 +60,8 @@ request_timeout_seconds = 120
 # Chunk 调度方式：ordered_by_file 为文件内顺序、文件间并发；
 # parallel 为所有 Chunk 并发，且参考上文只携带源文。
 scheduling_mode = "ordered_by_file"
-# Token 安全估算乘数。值越大越保守，会生成更小的 Chunk。
+# Token 启发式估算乘数，必须大于 0。小于 1 可提高部分模型的上下文利用率，
+# 但会增加服务端上下文超限或实际 ITPM 超限风险；应按实际分词器调节。
 token_safety_factor = 1.25
 
 [chunking]
