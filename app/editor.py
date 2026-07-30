@@ -17,6 +17,7 @@ from .execution import (
     stage_fingerprint,
     stage_result_path,
 )
+from .locking import project_write_lock
 from .project import load_segments, load_source_files, resolve_project
 from .stages import (
     load_terms,
@@ -229,6 +230,10 @@ class EditorStore:
         }
 
     def save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            return self._save_translation(payload)
+
+    def _save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
         segment_id = payload.get("segment_id")
         self._require_segment(segment_id)
         text = payload.get("text")
@@ -256,6 +261,10 @@ class EditorStore:
         return self._result_view(record) or {}
 
     def save_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            return self._save_review(payload)
+
+    def _save_review(self, payload: dict[str, Any]) -> dict[str, Any]:
         stage = payload.get("stage")
         if stage not in REVIEW_STAGES:
             raise UsageError(f"不支持的建议阶段：{stage}")
@@ -391,6 +400,10 @@ class EditorStore:
         return value
 
     def save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            return self._save_term(payload)
+
+    def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = payload.get("source")
         if not isinstance(source, str) or not source.strip():
             raise UsageError("术语 source 不能为空")

@@ -955,6 +955,15 @@ async def run_terminology(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(len(selected) - len(work)) if resume_run_id else 0,
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
@@ -1830,6 +1839,19 @@ async def run_translation(
                     }
                     await repair_group(group, subset)
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
@@ -2571,6 +2593,19 @@ async def run_review(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+    except asyncio.CancelledError:
+        finalize_run(
+            run_dir,
+            status="interrupted",
+            completed=(
+                len(selection.reusable) + len(completed_ids)
+                if resume_run_id
+                else len(completed_ids)
+            ),
+            failed=0,
+            warnings=[*warnings, "任务已由用户取消"],
+        )
+        raise
     except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,

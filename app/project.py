@@ -26,7 +26,12 @@ from .storage import (
     write_jsonl,
 )
 
-APP_ROOT = Path(__file__).resolve().parents[1]
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = (
+    _SOURCE_ROOT
+    if (_SOURCE_ROOT / "config" / "config.toml").is_file()
+    else Path(sys.prefix)
+)
 GLOBAL_CONFIG = APP_ROOT / "config" / "config.toml"
 GLOBAL_PROMPTS = APP_ROOT / "prompts"
 PROJECTS_ROOT = APP_ROOT / "projects"
