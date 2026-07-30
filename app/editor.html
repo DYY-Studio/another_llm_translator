@@ -28,11 +28,15 @@
     main { padding: 14px 20px; }
     .layout { display: grid; grid-template-columns: minmax(380px, 44%) minmax(0, 1fr); gap: 14px; }
     .panel { background: white; border: 1px solid var(--border); padding: 12px; min-width: 0; }
-    .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
-    .toolbar input, .toolbar select { padding: 7px 8px; min-width: 140px; font-size: 14px; }
-    .toolbar input { flex: 1; }
-    .toolbar select { max-width: 100%; }
-    .toolbar .inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: 400; }
+    .stage-toolbar { display: grid; gap: 8px; margin-bottom: 10px; }
+    .stage-toolbar input, .stage-toolbar select { padding: 7px 8px; min-width: 0; font-size: 14px; }
+    #file-filter { width: 100%; }
+    .stage-filter-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 8px;
+    }
+    #segment-search { width: 100%; }
     .term-toolbar { display: grid; gap: 9px; margin-bottom: 10px; }
     .term-primary { display: flex; align-items: center; gap: 8px; }
     .term-primary input { flex: 1; min-width: 0; }
@@ -235,10 +239,12 @@
     </section>
     <section id="stage-view" class="layout">
       <div class="panel">
-        <div class="toolbar">
+        <div class="stage-toolbar">
           <select id="file-filter"></select>
-          <select id="status-filter" aria-label="状态筛选"></select>
-          <input id="segment-search" placeholder="筛选当前阶段文本">
+          <div class="stage-filter-row">
+            <select id="status-filter" aria-label="状态筛选"></select>
+            <input id="segment-search" placeholder="筛选当前阶段文本">
+          </div>
         </div>
         <div id="segment-list" class="list"></div>
         <div class="actions">
