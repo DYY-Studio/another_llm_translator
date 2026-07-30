@@ -2,11 +2,15 @@
 
 ## 最小可行性验证实现文档
 
-版本：MVP 0.2  
-实现语言：Python 3.11+  
-运行方式：单机、单进程、异步并发、命令行  
-存储方式：项目文件夹、JSON、JSONL、TOML、TXT  
-LLM 接口：OpenAI-compatible Chat Completions
+版本：MVP 0.3
+
+实现语言：Python 3.11+
+
+运行方式：单机、本地 CLI/Web、异步并发
+
+存储方式：项目文件夹、JSON、JSONL、TOML、TXT、EPUB
+
+LLM 接口：声明式非流式 JSON POST Adapter
 
 ---
 
@@ -17,7 +21,7 @@ LLM 接口：OpenAI-compatible Chat Completions
 本项目只验证下面这条工程化翻译链路是否可行：
 
 ```text
-TXT 导入
+TXT/EPUB 导入
 → Segment 化
 → 术语提取
 → 翻译
@@ -25,13 +29,13 @@ TXT 导入
 → 可选应用校对
 → 润色建议
 → 可选应用润色
-→ TXT 导出
+→ 原文档格式导出
 ```
 
 MVP 需要回答：
 
-1. 多个 TXT 能否按稳定顺序导入、处理并分别导出。
-2. 每一行能否稳定映射为一个 Segment，空行是否保持可见结构。
+1. TXT 与 EPUB 能否稳定导入、处理并按原格式导出。
+2. 文档的可翻译单元能否稳定映射为 Segment，TXT 空行是否保持可见结构。
 3. 长文本能否在模型 Token 限制内动态分块。
 4. 术语能否从项目文本提取、合并并注入相关翻译请求。
 5. 翻译、校对和润色结果能否准确对应 Segment。
@@ -39,7 +43,7 @@ MVP 需要回答：
 7. 并发、RPM、ITPM 和有限重试是否有效。
 8. 中断后能否只继续未完成 Segment。
 9. 修改 Chunk、限流或调度参数后能否继续复用已完成结果。
-10. 单语和双语 TXT 是否可读，并保持文档的视觉行结构。
+10. 单语和双语文档是否可读，并保持格式对应的结构与资源。
 
 术语召回率约 85%、核心术语一致率约 90% 只是在固定样本、模型、Prompt 和配置下的观测参考，不作为随机自动化硬门槛。
 
@@ -51,7 +55,9 @@ MVP 需要回答：
 
 ### Segment 是进度单位
 
-Segment 对应源文件中的一个逻辑行。术语扫描、翻译、校对和润色的完成结果、失败记录和恢复判断全部绑定 `segment_id`。
+Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻辑行，EPUB
+中对应 XHTML 文本槽。术语扫描、翻译、校对和润色的完成结果、失败记录和恢复
+判断全部绑定 `segment_id`。
 
 非空 Segment 的连续前导 Unicode 空白以源文为准。模型仍接收完整文本，但翻译、
 校对建议、润色建议、apply 和导出在本地移除模型生成的前导空白，并恢复源
@@ -94,7 +100,7 @@ apply 不调用 LLM，因此只保存配置和输入结果引用，不保存虚�
 
 ### 设置变化由用户决断
 
-设置变化只能产生警告，不能自动清空、隐藏、拒绝或标记旧进度失效。
+设置变化不能自动清空、隐藏或标记旧进度失效；是否复用必须由用户决定。
 
 - 已有 completed 继续作为可用结果。
 - 尚未完成的 Segment 使用当前设置处理。
@@ -106,12 +112,13 @@ apply 不调用 LLM，因此只保存配置和输入结果引用，不保存虚�
 
 MVP 不实现：
 
-- GUI 或 Web 服务。
+- 远程、多用户或公网 Web 服务。
 - 数据库、消息队列或分布式执行。
-- 同一项目的多个写命令并发运行。
-- 跨进程锁、网络共享盘协调或并发写入合并。
-- TXT 以外的文件格式。
-- 插件系统、Provider 抽象或通用工作流引擎。
+- 同一项目的多个写任务并发运行或并发写入合并。
+- 网络共享盘协调。
+- EPUB 以外的复杂文档格式。
+- Python LLM Adapter、自动 Provider 判断或通用工作流引擎。
+- 远程插件、自动安装、插件市场或插件沙箱。
 - Repository、Service、依赖注入或迁移框架。
 - 通用术语编辑器或复杂自动冲突裁决。
 - 自动翻译质量评分。
@@ -125,25 +132,31 @@ MVP 不实现：
 
 ## 2.1 最小技术栈与职责
 
-第三方依赖只要求：
+运行时第三方依赖：
 
 ```text
 httpx
 chardet
+fastapi
+uvicorn
+python-multipart
 ```
 
-标准库负责 CLI、异步调度、JSON/JSONL/TOML、Hash、日志、路径、原子替换和 Unicode 归一化。
+React/Vite/TypeScript 只用于构建随 Python 包分发的 Web 静态资源。标准库负责
+CLI、异步调度、JSON/JSONL/TOML、Hash、日志、路径、原子替换、插件发现、
+EPUB ZIP/XML 处理和 Unicode 归一化。
 
 代码只需覆盖以下职责，不预先规定模块数量：
 
 - CLI 和配置加载。
 - 项目初始化及模板同步。
-- TXT 解码和 Segment 化。
+- TXT/EPUB Document Adapter 与 Segment 化。
 - JSON/JSONL 持久化。
 - Prompt 渲染、Token 估算和 Chunk 生成。
-- OpenAI-compatible HTTP 调用、限流和重试。
+- 声明式 LLM Adapter、HTTP 调用、限流和重试。
 - 术语、翻译、校对、润色和 apply。
-- inspect 与 TXT 导出。
+- inspect 与原文档格式导出。
+- 只绑定本机回环地址的 Web Alpha。
 
 ## 2.2 项目内容
 
@@ -153,9 +166,11 @@ chardet
 project.json
 config.toml
 prompts/
+llm_adapters/
 input/
 source/files.jsonl
 source/segments.jsonl
+source/adapters/{document_adapter_id}/state.json
 terminology/terms.json
 terminology/overrides.json
 terminology/active_task.json
@@ -177,27 +192,36 @@ prompts/terminology.middle.txt
 prompts/translation.middle.txt
 prompts/proofreading.middle.txt
 prompts/polishing.middle.txt
+llm_adapters/openai-compatible.json
 ```
 
 ## 2.3 初始化与文件发现
 
-支持目录或显式文件：
+TXT 支持目录或显式文件；EPUB 每个项目接受一个显式文件：
 
 ```bash
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
+python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 ```
 
 规则：
 
 - 显式文件按参数顺序处理。
 - 目录按相对路径进行确定性的简单自然排序。
-- 未传 `--recursive` 时只读取目录第一层 TXT。
+- TXT 未传 `--recursive` 时只读取目录第一层。
 - 递归发现时忽略符号链接。
 - 显式符号链接输入直接拒绝。
 - 多个输入映射到同一导出相对路径时拒绝初始化。
 - 目录输入保存相对目录树；显式文件使用 basename。
 - 输入文件复制到项目 `input/`，后续阶段只读取项目数据。
+- 项目记录 `document_adapter_id`、版本和不透明状态位置；旧 TXT 项目缺少这些
+  字段时按内置 `txt` 解释。
+
+EPUB Adapter 按 OPF spine 顺序读取 XHTML 中可见的非空 `text` 和 `tail`
+槽位。原 EPUB 及定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他
+未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/
+压缩比、越界资源以及 XML DTD/实体声明会被拒绝。
 
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
 
@@ -260,6 +284,7 @@ encoding_confidence_threshold = 0.60
 fallback_encoding = "utf-8"
 
 [llm]
+adapter = "openai-compatible"
 base_url = "https://example.com/v1"
 endpoint = "/chat/completions"
 model = "example-model"
@@ -339,6 +364,11 @@ inject_missing_segment_every = 0
 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
 
 API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
+
+`llm.adapter` 选择项目 `llm_adapters/<id>.json`。定义是完整的 Header/body
+模板和成功响应 JSON Pointer；可加入 Provider 自定义 JSON 字段。定义 Hash
+进入阶段指纹，定义副本进入 Run 快照，解析后的密钥不进入任何持久化内容。完整
+schema 见 `docs/ADAPTERS.md`。
 
 `proxy_url` 为空时不显式设置代理，HTTPX 仍按默认行为读取 `HTTP_PROXY`、
 `HTTPS_PROXY` 和 `NO_PROXY`。非空值只接受 `http://` 或 `https://` URL；
@@ -459,6 +489,7 @@ failed
 - `scheduling_mode`
 - 影响阶段语义的配置
 - 使用的 `terms_revision`，适用时
+- LLM Adapter ID 与定义内容 Hash
 
 翻译还包含启用的文字校验器及 `exhausted_mode`。最大校验重试次数只影响执行，不进入指纹。
 
@@ -986,15 +1017,16 @@ Prompt 的真实分词结果一致，使用者应依据实际分词器和端点�
 
 ## 5.2 HTTP、并发与限流
 
-固定调用：
+请求 URL 固定由项目配置组成：
 
 ```http
 POST {base_url}{endpoint}
-Authorization: Bearer ${LLM_API_KEY}
 Content-Type: application/json
 ```
 
-使用非流式 Chat Completions，从 `choices[0].message.content` 读取正文。
+Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
+内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
+`/choices/0/message/content`。声明式 Adapter 只支持非流式 JSON POST。
 
 整个命令共享一个 `httpx.AsyncClient`：
 
@@ -1018,7 +1050,7 @@ HTTP 重试：
 
 格式修正：
 
-- `choices[0].message.content` 开头允许存在一个完整的 Tag 思考块：
+- Adapter 提取出的 content 开头允许存在一个完整的 Tag 思考块：
   `<think>...</think>`、`<thinking>...</thinking>`、
   `<thought>...</thought>` 或 `<analysis>...</analysis>`。Google AI Studio
   兼容端点实测使用 `<thought>`。允许思考块前有 BOM 或空白；剥离后再按
@@ -1104,6 +1136,7 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 
 ```bash
 python -m app.main init INPUT... --name PROJECT_NAME
+python -m app.main init BOOK.epub --name PROJECT_NAME --document-adapter epub
 python -m app.main inspect PROJECT
 python -m app.main terminology PROJECT
 python -m app.main translate PROJECT
@@ -1142,6 +1175,7 @@ python -m app.main run-all PROJECT
 --resume-run
 --decline-run
 --reuse-mixed-fingerprints
+--document-adapter
 ```
 
 语义：
@@ -1156,6 +1190,7 @@ python -m app.main run-all PROJECT
 - `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
   仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
+- `--document-adapter`：仅用于 init，选择输入与输出格式，默认 `txt`。
 
 两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
 `--decline-run` 直接按当前范围创建新 Run。`--dry-run` 不询问、不修改
@@ -1223,14 +1258,18 @@ output/bilingual/polished/
 
 尚未 apply 的 accepted/suggested 建议不能直接作为 proofread 或 polished 导出结果。
 
-默认行为：
+通用行为：
 
-- 每个输入文件独立导出。
-- 按 `file_order` 和 `line_index` 重建。
 - 缺少选定阶段结果时停止并报告。
 - validation warning 和混合设置必须出现在导出摘要。
-- 使用 `project.output_encoding` 严格编码，默认 `utf-8-sig`。
-- 编码无法表示结果字符时导出失败，不静默替换。
+- 使用项目初始化时的 Document Adapter；插件缺失、版本不兼容、状态损坏或
+  能力不足时明确失败，不回退为 TXT。
+- Adapter 先在宿主临时目录生成全部文件，成功后原子移动到正式输出目录。
+
+TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，并使用
+`project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
+EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
+XHTML 槽位。
 
 `--allow-missing` 回退：
 
@@ -1254,7 +1293,19 @@ polished   → proofreading_applied → translation → source
 - translated、proofread 和 polished 都支持。
 - 回退文本仍写在原文下一行。
 
-实现可以使用任意一致的文本行分隔方式。验收不检查换行符种类、BOM、末尾换行或输出字节，只检查文件可正常查看且逻辑行和可见空行结构正确。
+TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符种类、BOM、末尾换行
+或输出字节，只检查逻辑行和可见空行结构。EPUB 验收检查 spine 顺序、XHTML
+结构及未修改资源仍可读取。
+
+## 6.4 本地 Web Alpha
+
+`python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
+本机 Host 和跨站 Origin。Web 可创建 TXT/EPUB 项目、编辑项目配置、Prompt 与
+JSON LLM Adapter、运行/取消阶段任务、人工审校、apply 和 export。
+
+Web 不建立数据库；项目目录与 CLI 使用相同应用内核和持久化记录。同一项目的
+写任务通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web
+进程，重启后仍由项目 Run 与 Segment 记录恢复业务进度。
 
 ---
 
@@ -1312,7 +1363,7 @@ polished   → proofreading_applied → translation → source
   Run 中更旧者被 supersede。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。
 - 合法部分响应立即保存有效 Segment。
-- 原始 JSONL、CRLF、BOM、空行、受支持 Markdown 围栏和三种开头思考块均可解析。
+- 原始 JSONL、CRLF、BOM、空行、受支持 Markdown 围栏和已知开头思考块均可解析。
 - 未闭合、重复、嵌套或不在开头的思考标签会进入格式修正，JSON 字段内标签文本
   保持原样。
 - 缺失、重复或提前 end、非法行、重复或未知 ID 会进入格式修正。
@@ -1350,12 +1401,30 @@ polished   → proofreading_applied → translation → source
 - 调试故障注入不会在 `debug.enabled = false` 时生效。
 - 普通和调试模式都能通过 Segment 结果恢复。
 
+## 7.6 Adapter、EPUB 与 Web
+
+验收：
+
+- JSON LLM Adapter 的类型化占位符、自定义嵌套字段、认证 Header 和 RFC 6901
+  响应路径生效；非法 schema、未知占位符、缺失路径和非字符串正文快速失败。
+- Adapter 定义副本与 Run 快照不包含 API Key，定义 Hash 进入阶段指纹。
+- TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
+- EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
+  纯译文和双语文件均可重新打开。
+- EPUB ZIP 路径、符号链接、压缩炸弹和 XML DTD/实体输入明确拒绝。
+- Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
+  也不静默回退。
+- Python 插件发现拒绝重复 ID 和未知协议版本。
+- Web 只接受本机 Host/Origin，与 CLI 共用项目记录；同项目第二个写任务明确
+  失败，取消后的 Run 有正确收尾。
+- React 生产构建、TypeScript 检查、桌面与窄屏关键交互、浏览器控制台均通过。
+
 ---
 
 # 8. 最终最小架构
 
 ```text
-多个 TXT
+TXT / EPUB
    │
    ▼
 稳定 File / Segment
@@ -1375,7 +1444,7 @@ Run 原始快照与续作快照
 同文件连续临时 Chunk
           │
           ▼
-OpenAI-compatible LLM
+声明式 JSON LLM Adapter
 ```
 
 最终原则：
@@ -1385,7 +1454,7 @@ File 是内容边界。
 Segment 是唯一进度和恢复单位。
 Chunk 只是当前请求包装。
 Run 记录一次执行。
-设置变化只警告，是否重做由用户决定。
+设置变化不使旧结果失效；复用或重做由用户明确决定。
 普通模式保存最小结果，调试模式增加请求审计。
-TXT 可读且视觉结构一致即可，不追求字节保真。
+TXT 保持逻辑行；EPUB 保持原包资源和格式定位。
 ```
