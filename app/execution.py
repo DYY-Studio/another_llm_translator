@@ -8,6 +8,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import time
 import uuid
 from collections import defaultdict, deque
@@ -18,12 +19,14 @@ from typing import Any
 
 import httpx
 
+from .config import load_config
 from .errors import (
     ConfigError,
     ContextLengthError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    StorageError,
     UsageError,
 )
 from .logging_utils import get_logger
@@ -495,6 +498,187 @@ def create_run(
     return run_id, run_dir
 
 
+def find_running_runs(project: Path, stage: str) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    runs_dir = project / "runs"
+    if not runs_dir.exists():
+        return runs
+    for run_dir in runs_dir.iterdir():
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        manifest = read_json(manifest_path)
+        if manifest.get("stage") == stage and manifest.get("status") == "running":
+            runs.append(manifest)
+    return sorted(
+        runs,
+        key=lambda item: (
+            str(item.get("started_at", "")),
+            str(item.get("run_id", "")),
+        ),
+        reverse=True,
+    )
+
+
+def _interrupt_run(
+    project: Path,
+    manifest: dict[str, Any],
+    *,
+    reason: str,
+    superseded_by_run_id: str | None = None,
+    declined: bool = False,
+) -> None:
+    manifest.update(
+        status="interrupted",
+        interrupted_reason=reason,
+        interrupted_at=utc_now(),
+        completed_at=utc_now(),
+    )
+    if superseded_by_run_id is not None:
+        manifest["superseded_by_run_id"] = superseded_by_run_id
+    if declined:
+        manifest["resume_declined"] = True
+        manifest["resume_declined_at"] = utc_now()
+    run_id = str(manifest["run_id"])
+    atomic_write_json(project / "runs" / run_id / "manifest.json", manifest)
+
+
+def choose_running_run(
+    project: Path,
+    stage: str,
+    *,
+    action: str | None,
+    dry_run: bool,
+    interactive: bool | None = None,
+) -> tuple[str | None, list[str]]:
+    candidates = find_running_runs(project, stage)
+    if not candidates:
+        if action == "resume":
+            raise UsageError(f"{stage} 没有可续用的 running Run")
+        return None, []
+    latest = candidates[0]
+    run_id = str(latest["run_id"])
+    warning = f"发现未完成 Run：{run_id}"
+    if dry_run:
+        if action == "resume":
+            return run_id, [f"{warning}；dry-run 将按其原范围规划续作"]
+        return None, [
+            f"{warning}；dry-run 未修改状态，使用 --resume-run 可检查续作范围"
+        ]
+    for older in candidates[1:]:
+        _interrupt_run(
+            project,
+            older,
+            reason="superseded",
+            superseded_by_run_id=run_id,
+        )
+    interactive = sys.stdin.isatty() if interactive is None else interactive
+    if action is None and not interactive:
+        raise UsageError(
+            f"{warning}；非交互环境必须指定 --resume-run 或 --decline-run"
+        )
+    if action is None:
+        old_config = load_config(project / "runs" / run_id / "config.toml")
+        current_config = load_config(project / "config.toml")
+        scope = latest.get("scope", {})
+        print(
+            f"{warning}\n"
+            f"原范围：{json.dumps(scope, ensure_ascii=False)}\n"
+            f"旧模型/端点：{old_config['llm']['model']} "
+            f"{old_config['llm']['base_url']}{old_config['llm']['endpoint']}\n"
+            f"当前模型/端点：{current_config['llm']['model']} "
+            f"{current_config['llm']['base_url']}{current_config['llm']['endpoint']}\n"
+            "使用当前 config 和 Prompt 继续该 Run？"
+            "[r]esume/[n]ew: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        while True:
+            answer = input().strip().casefold()
+            if answer in {"r", "resume"}:
+                action = "resume"
+                break
+            if answer in {"n", "new"}:
+                action = "decline"
+                break
+            print("请输入 resume 或 new: ", end="", file=sys.stderr, flush=True)
+    if action == "decline":
+        _interrupt_run(project, latest, reason="resume_declined", declined=True)
+        return None, [f"已拒绝续用 Run：{run_id}"]
+    if action != "resume":
+        raise UsageError("Run 选择必须是 resume 或 decline")
+    return run_id, [f"将使用当前 config 和 Prompt 续用 Run：{run_id}"]
+
+
+def scope_from_run(
+    project: Path,
+    run_id: str,
+    *,
+    dry_run: bool,
+) -> Scope:
+    manifest = read_json(project / "runs" / run_id / "manifest.json")
+    raw = manifest.get("scope")
+    if not isinstance(raw, dict):
+        raise StorageError(f"Run 缺少 scope：{run_id}")
+    return Scope(
+        from_file=raw.get("from_file"),
+        only_file=raw.get("only_file"),
+        only_segment=raw.get("only_segment"),
+        force=False,
+        dry_run=dry_run,
+    )
+
+
+def continue_run(
+    project: Path,
+    run_id: str,
+    *,
+    stage: str,
+    fingerprint: str,
+    prompt: str,
+    scope: Scope,
+    selected_count: int,
+    requested_count: int,
+    reused_count: int,
+) -> tuple[str, Path]:
+    run_dir = project / "runs" / run_id
+    manifest = read_json(run_dir / "manifest.json")
+    if manifest.get("status") != "running" or manifest.get("stage") != stage:
+        raise StorageError(f"Run 不可续用：{run_id}")
+    continuations = list(manifest.get("continuations", []))
+    index = len(continuations) + 1
+    relative = Path("continuations") / f"{index:04d}"
+    snapshot_dir = run_dir / relative
+    snapshot_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(project / "config.toml", snapshot_dir / "config.toml")
+    (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    continuations.append(
+        {
+            "continuation_index": index,
+            "started_at": utc_now(),
+            "stage_fingerprint": fingerprint,
+            "scope": {
+                "all_nonempty": not (
+                    scope.from_file or scope.only_file or scope.only_segment
+                ),
+                "from_file": scope.from_file,
+                "only_file": scope.only_file,
+                "only_segment": scope.only_segment,
+                "force": False,
+            },
+            "selected_segment_count": selected_count,
+            "requested_segment_count": requested_count,
+            "reused_segment_count": reused_count,
+            "snapshot_dir": relative.as_posix(),
+        }
+    )
+    manifest["continuations"] = continuations
+    manifest["last_resumed_at"] = utc_now()
+    atomic_write_json(run_dir / "manifest.json", manifest)
+    return run_id, run_dir
+
+
 def finalize_run(
     run_dir: Path,
     *,
@@ -625,7 +809,11 @@ class LLMClient:
                 max_connections=self.config["execution"]["max_parallel"],
                 max_keepalive_connections=self.config["execution"]["max_parallel"],
             )
-            self.client = httpx.AsyncClient(timeout=timeout, limits=limits)
+            self.client = httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                proxy=self.config["llm"]["proxy_url"] or None,
+            )
         return self
 
     async def __aexit__(self, *_: object) -> None:
