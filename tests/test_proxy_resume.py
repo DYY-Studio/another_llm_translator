@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.config import load_config
+from app.llm_adapter import load_json_adapter
 from app.errors import ConfigError, UsageError
 from app.execution import (
     LLMClient,
@@ -37,6 +38,16 @@ from tests.test_terminology_translation import create_project
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def load_test_config() -> dict:
+    value = load_config(ROOT / "config" / "config.toml")
+    adapter = load_json_adapter(
+        ROOT / "llm_adapters" / f"{value['llm']['adapter']}.json"
+    )
+    value["_llm_adapter"] = adapter
+    value["_llm_adapter_hash"] = adapter.digest
+    return value
 
 
 def _replace_config(project: Path, old: str, new: str) -> None:
@@ -240,7 +251,7 @@ async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
             return None
 
     monkeypatch.setattr(httpx, "AsyncClient", DummyClient)
-    current = load_config(ROOT / "config" / "config.toml")
+    current = load_test_config()
     current["llm"]["proxy_url"] = "http://127.0.0.1:7890"
     async with LLMClient(
         current,
@@ -272,7 +283,7 @@ async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
 async def test_injected_http_client_does_not_create_another_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    current = load_config(ROOT / "config" / "config.toml")
+    current = load_test_config()
     injected = object()
 
     def fail(**_: Any) -> None:

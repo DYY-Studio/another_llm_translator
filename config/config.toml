@@ -18,6 +18,8 @@ encoding_confidence_threshold = 0.60
 fallback_encoding = "utf-8"
 
 [llm]
+# 项目使用的命名 JSON LLM Adapter。
+adapter = "openai-compatible"
 # OpenAI-compatible 服务的基础 URL；发送请求时会与 endpoint 拼接。
 base_url = "https://example.com/v1"
 # Chat Completions 端点路径。

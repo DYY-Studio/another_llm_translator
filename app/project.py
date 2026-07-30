@@ -15,6 +15,7 @@ import chardet
 
 from .config import load_config
 from .errors import ConfigError, ProjectError, UsageError
+from .llm_adapter import load_json_adapter
 from .storage import (
     atomic_write_json,
     new_record_id,
@@ -156,9 +157,18 @@ def decode_txt(
 
 
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
+    config = load_config(app_root / "config" / "config.toml")
+    adapter_id = str(config["llm"]["adapter"])
+    adapter = load_json_adapter(
+        app_root / "llm_adapters" / f"{adapter_id}.json"
+    )
+    if adapter.adapter_id != adapter_id:
+        raise ConfigError(
+            "全局 LLM Adapter 文件中的 adapter_id 与配置不一致"
+        )
     paths = [app_root / "config" / "config.toml"] + [
         app_root / "prompts" / name for name in PROMPT_NAMES
-    ]
+    ] + [app_root / "llm_adapters" / f"{adapter_id}.json"]
     digest = hashlib.sha256()
     for path in paths:
         if not path.is_file():
@@ -178,6 +188,14 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
     prompt_target.mkdir(parents=True, exist_ok=True)
     for name in PROMPT_NAMES:
         shutil.copy2(source_root / "prompts" / name, prompt_target / name)
+    config = load_config(source_root / "config" / "config.toml")
+    adapter_id = str(config["llm"]["adapter"])
+    adapter_source = source_root / "llm_adapters" / f"{adapter_id}.json"
+    if not adapter_source.is_file():
+        raise ConfigError(f"全局 LLM Adapter 缺失：{adapter_source}")
+    adapter_target = target / "llm_adapters"
+    adapter_target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(adapter_source, adapter_target / adapter_source.name)
 
 
 def init_project(
@@ -340,9 +358,11 @@ def sync_global_templates(
         return [f"全局模板无效，继续使用项目副本：{exc}"]
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
+    global_config = load_config(app_root / "config" / "config.toml")
+    adapter_id = str(global_config["llm"]["adapter"])
     bundle_files = [Path("config.toml")] + [
         Path("prompts") / name for name in PROMPT_NAMES
-    ]
+    ] + [Path("llm_adapters") / f"{adapter_id}.json"]
     changed = []
     for relative in bundle_files:
         global_path = (
@@ -381,6 +401,10 @@ def sync_global_templates(
         backup.mkdir(parents=True, exist_ok=False)
         shutil.copy2(project / "config.toml", backup / "config.toml")
         shutil.copytree(project / "prompts", backup / "prompts")
+        if (project / "llm_adapters").exists():
+            shutil.copytree(
+                project / "llm_adapters", backup / "llm_adapters"
+            )
         _copy_bundle(app_root, project)
         warnings.append(f"已更新项目模板；备份位于 {backup}")
     else:

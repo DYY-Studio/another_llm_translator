@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from .config import load_config
+from .config import load_project_config
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -78,7 +78,7 @@ def _project_context(
     list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
-    config = load_config(project / "config.toml")
+    config = load_project_config(project)
     metadata = read_json(project / "project.json")
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
@@ -2933,7 +2933,7 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
-    config = load_config(project / "config.toml")
+    config = load_project_config(project)
     limiter = SlidingWindowLimiter(
         config["execution"]["requests_per_minute"],
         config["execution"]["input_tokens_per_minute"],

@@ -22,6 +22,7 @@ def make_app_root(tmp_path: Path) -> Path:
     root = tmp_path / "app-root"
     (root / "config").mkdir(parents=True)
     (root / "prompts").mkdir()
+    (root / "llm_adapters").mkdir()
     source_root = Path(__file__).parents[1]
     (root / "config" / "config.toml").write_text(
         (source_root / "config" / "config.toml").read_text(encoding="utf-8"),
@@ -29,6 +30,10 @@ def make_app_root(tmp_path: Path) -> Path:
     )
     for source in (source_root / "prompts").glob("*.middle.txt"):
         (root / "prompts" / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    for source in (source_root / "llm_adapters").glob("*.json"):
+        (root / "llm_adapters" / source.name).write_text(
             source.read_text(encoding="utf-8"), encoding="utf-8"
         )
     return root

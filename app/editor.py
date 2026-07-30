@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .config import load_config
+from .config import load_project_config
 from .errors import AppError, UsageError
 from .execution import (
     latest_completed_by_segment,
@@ -39,7 +39,7 @@ class EditorStore:
 
     def __init__(self, project: Path):
         self.project = project
-        self.config = load_config(project / "config.toml")
+        self.config = load_project_config(project)
         self.metadata = read_json(project / "project.json")
         self.files = load_source_files(project)
         self.segments = load_segments(project)
