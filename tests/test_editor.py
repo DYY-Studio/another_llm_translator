@@ -465,7 +465,12 @@ def test_editor_http_serves_page_and_json_errors(tmp_path: Path) -> None:
     store = EditorStore(create_editor_project(tmp_path))
     page = _request_handler(store, method="GET", path="/")
     assert b"200 OK" in page
-    assert "项目结果编辑器" in page.decode("utf-8")
+    page_text = page.decode("utf-8")
+    assert "项目结果编辑器" in page_text
+    assert 'id="status-filter"' in page_text
+    assert 'id="context-card" class="context-card" open' in page_text
+    assert "当前建议未应用" in page_text
+    assert "没有符合当前筛选条件的 Segment" in page_text
 
     project = _request_handler(store, method="GET", path="/api/project")
     assert b"200 OK" in project
