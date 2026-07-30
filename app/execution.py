@@ -1156,6 +1156,7 @@ _FENCE_RE = re.compile(
 )
 _THOUGHT_BLOCK_TAGS = (
     ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
     ("<|channel>thought\n", "<channel|>"),
 )
