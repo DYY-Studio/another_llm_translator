@@ -82,17 +82,26 @@ def publish_document_export(
             output_encoding=output_encoding,
             opaque_state=opaque_state,
         )
+        sources: list[tuple[Path, Path]] = []
+        seen: set[Path] = set()
         for relative in generated:
             if relative.is_absolute() or ".." in relative.parts:
                 raise ProjectError(
                     f"Document Adapter 返回了不安全输出路径：{relative}"
                 )
+            if relative in seen:
+                raise ProjectError(
+                    f"Document Adapter 返回了重复输出路径：{relative}"
+                )
+            seen.add(relative)
             source = staging_dir / relative
             if not source.is_file():
                 raise ProjectError(
                     f"Document Adapter 未生成声明的输出：{relative}"
                 )
             destination = directory / relative
+            sources.append((source, destination))
+        for source, destination in sources:
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
             written.append(str(destination.relative_to(project)))

@@ -230,12 +230,42 @@ class FailingExportAdapter:
         raise ProjectError("fixture failure")
 
 
+class IncompleteExportAdapter:
+    adapter_id = "incomplete"
+    version = "1"
+    capabilities = frozenset({"translated_export"})
+
+    def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
+        (staging_dir / "ready.txt").write_text("ready", encoding="utf-8")
+        return [Path("ready.txt"), Path("missing.txt")]
+
+
 def test_document_export_failure_publishes_nothing(tmp_path: Path) -> None:
     project = tmp_path / "project"
     directory = project / "output" / "translated"
     with pytest.raises(ProjectError, match="fixture failure"):
         publish_document_export(
             FailingExportAdapter(),  # type: ignore[arg-type]
+            project=project,
+            directory=directory,
+            files=[],
+            segments=[],
+            output_text={},
+            bilingual=False,
+            output_encoding="utf-8",
+            opaque_state=None,
+        )
+    assert not directory.exists()
+
+
+def test_document_export_validates_all_files_before_publish(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    directory = project / "output" / "translated"
+    with pytest.raises(ProjectError, match="未生成声明的输出"):
+        publish_document_export(
+            IncompleteExportAdapter(),  # type: ignore[arg-type]
             project=project,
             directory=directory,
             files=[],
