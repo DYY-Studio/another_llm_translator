@@ -1154,14 +1154,47 @@ _FENCE_RE = re.compile(
     r"```[ \t]*(?P<label>[^\r\n`]*)\r?\n(?P<body>.*?)```",
     re.DOTALL,
 )
+_THOUGHT_BLOCK_TAGS = (
+    ("<think>", "</think>"),
+    ("<thought>", "</thought>"),
+    ("<|channel>thought\n", "<channel|>"),
+)
 
 
 def extract_jsonl_content(content: str) -> str:
     normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    stripped = normalized.lstrip()
+    for opening, closing in _THOUGHT_BLOCK_TAGS:
+        if not stripped.startswith(opening):
+            continue
+        closing_at = stripped.find(closing, len(opening))
+        if closing_at < 0:
+            return stripped.strip()
+        thought = stripped[len(opening) : closing_at]
+        remainder = stripped[closing_at + len(closing) :].lstrip()
+        if any(
+            tag in thought
+            for pair in _THOUGHT_BLOCK_TAGS
+            for tag in pair
+        ) or any(
+            remainder.startswith(tag)
+            for pair in _THOUGHT_BLOCK_TAGS
+            for tag in pair
+        ):
+            return stripped.strip()
+        normalized = remainder
+        break
     for match in _FENCE_RE.finditer(normalized):
         label = match.group("label").strip().casefold()
         body = match.group("body").strip()
         if label in _SUPPORTED_FENCE_LABELS and body:
+            outside = normalized[: match.start()] + normalized[match.end() :]
+            if any(
+                tag in outside
+                for pair in _THOUGHT_BLOCK_TAGS
+                for tag in pair
+            ):
+                return normalized.strip()
             return body
     return normalized.strip()
 
