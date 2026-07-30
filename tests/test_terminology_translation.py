@@ -11,7 +11,13 @@ import pytest
 from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
-from app.stages import load_terms, match_terms, run_terminology, run_translation
+from app.stages import (
+    _restore_leading_whitespace,
+    load_terms,
+    match_terms,
+    run_terminology,
+    run_translation,
+)
 from app.storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
@@ -32,6 +38,24 @@ async def create_project(
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
     return project
+
+
+@pytest.mark.parametrize(
+    ("source", "model_text", "expected"),
+    [
+        ("  source", "translation  \t", "  translation  \t"),
+        ("\tsource", "  translation", "\ttranslation"),
+        ("\u3000source", "\ttranslation", "\u3000translation"),
+        (" \t\u3000\u00a0source", "\u3000translation", " \t\u3000\u00a0translation"),
+        ("source", "\ttranslation", "translation"),
+    ],
+)
+def test_restore_leading_unicode_whitespace(
+    source: str,
+    model_text: str,
+    expected: str,
+) -> None:
+    assert _restore_leading_whitespace(source, model_text) == expected
 
 
 @pytest.mark.asyncio
@@ -227,7 +251,7 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
 async def test_translation_partial_response_retries_only_missing(
     tmp_path: Path,
 ) -> None:
-    project = await create_project(tmp_path, "one\ntwo")
+    project = await create_project(tmp_path, " one\n\ttwo")
     calls: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -263,6 +287,8 @@ async def test_translation_partial_response_retries_only_missing(
         load_stage_history(project, "translation")
     )
     assert set(completed) == {"F0001-S000001", "F0001-S000002"}
+    assert completed["F0001-S000001"]["text"] == " ok:F0001-S000001"
+    assert completed["F0001-S000002"]["text"] == "\tok:F0001-S000002"
 
 
 @pytest.mark.asyncio
@@ -477,7 +503,11 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "A" * 5000)
+    project = await create_project(
+        tmp_path,
+        " \t\u3000" + "A" * 5000,
+        encoding="utf-8-sig",
+    )
     config_path = project / "config.toml"
     text = config_path.read_text(encoding="utf-8")
     for key, value in (
@@ -519,7 +549,7 @@ async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None
     completed = [record for record in records if record["status"] == "completed"]
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
-    assert completed[0]["text"] == "a" * 5000
+    assert completed[0]["text"] == " \t\u3000" + "a" * 5000
 
 
 @pytest.mark.asyncio

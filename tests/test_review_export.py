@@ -19,7 +19,7 @@ from app.stages import (
     run_review,
     run_translation,
 )
-from app.storage import read_jsonl
+from app.storage import read_jsonl, write_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
@@ -118,6 +118,81 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
         "two",
         "润:校:译:two",
     ]
+
+
+@pytest.mark.asyncio
+async def test_review_apply_and_export_restore_source_indentation(
+    tmp_path: Path,
+) -> None:
+    source = " \t\u3000one"
+    project = await create_project(tmp_path, source, encoding="utf-8-sig")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        if "完整 translation" in system:
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": "\u00a0translated  \t",
+                }
+                for item in payload["segments"]
+            ]
+        else:
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "status": "suggested",
+                    "suggested_text": "\t\u3000fixed  \t",
+                    "reason": "test",
+                }
+                for item in payload["segments"]
+            ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    translation = read_jsonl(project / "stages" / "translation.jsonl")[-1]
+    suggestion = read_jsonl(project / "stages" / "proofreading.jsonl")[-1]
+    assert translation["text"] == " \t\u3000translated  \t"
+    assert suggestion["suggested_text"] == " \t\u3000fixed  \t"
+
+    run_apply(
+        project,
+        "proofreading",
+        Scope(),
+        allow_outdated_base=False,
+        confirmed_all=True,
+    )
+    applied_path = project / "stages" / "proofreading_applied.jsonl"
+    applied = read_jsonl(applied_path)
+    assert applied[-1]["text"] == " \t\u3000fixed  \t"
+
+    # Simulate a result written before local whitespace protection existed.
+    applied[-1]["text"] = "\tlegacy  \t"
+    write_jsonl(applied_path, applied)
+    export_project(project, "proofread", bilingual=False, allow_missing=False)
+    export_project(project, "proofread", bilingual=True, allow_missing=False)
+    assert (
+        project / "output" / "proofread" / "source.txt"
+    ).read_text(encoding="utf-8-sig") == " \t\u3000legacy  \t"
+    assert (
+        project / "output" / "bilingual" / "proofread" / "source.txt"
+    ).read_text(encoding="utf-8-sig") == (
+        f"{source}\n \t\u3000legacy  \t"
+    )
 
 
 @pytest.mark.asyncio
@@ -436,13 +511,13 @@ async def test_apply_requires_all_as_usage_error(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_export_allow_missing_falls_back_and_reports(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one")
+    project = await create_project(tmp_path, " \tone")
     summary = export_project(
         project, "translated", bilingual=False, allow_missing=True
     )
     assert summary["fallback_segments"] == ["F0001-S000001"]
     output = project / "output" / "translated" / "source.txt"
-    assert output.read_text(encoding="utf-8-sig") == "one"
+    assert output.read_text(encoding="utf-8-sig") == " \tone"
     del os.environ["LLM_API_KEY"]
 
 
