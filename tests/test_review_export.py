@@ -307,6 +307,7 @@ async def test_run_all_shares_production_client_and_limiter(
         _scope: Scope,
         **kwargs: object,
     ) -> dict:
+        assert kwargs["reuse_mixed_fingerprints"] is True
         calls.append(
             ("terminology", kwargs["http_client"], kwargs["limiter"])
         )
@@ -317,6 +318,7 @@ async def test_run_all_shares_production_client_and_limiter(
         _scope: Scope,
         **kwargs: object,
     ) -> dict:
+        assert kwargs["reuse_mixed_fingerprints"] is True
         calls.append(
             ("translation", kwargs["http_client"], kwargs["limiter"])
         )
@@ -328,6 +330,7 @@ async def test_run_all_shares_production_client_and_limiter(
         _scope: Scope,
         **kwargs: object,
     ) -> dict:
+        assert kwargs["reuse_mixed_fingerprints"] is True
         calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
         return {"stage": stage, "failed": 0, "pending": 0}
 
@@ -336,7 +339,11 @@ async def test_run_all_shares_production_client_and_limiter(
     monkeypatch.setattr("app.stages.run_translation", fake_translation)
     monkeypatch.setattr("app.stages.run_review", fake_review)
     try:
-        await run_all(project, Scope())
+        await run_all(
+            project,
+            Scope(),
+            reuse_mixed_fingerprints=True,
+        )
     finally:
         del os.environ["LLM_API_KEY"]
 

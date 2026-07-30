@@ -477,9 +477,14 @@ failed
 
 1. 计算当前阶段指纹。
 2. 汇总选定范围内已有 completed 所使用的指纹。
-3. 不同则打印警告，但继续复用。
-4. 新 pending 使用当前设置。
-5. `inspect` 报告每个阶段使用过的指纹数量和当前指纹覆盖数量。
+3. 不同且未使用 `--force` 时，必须由交互用户确认复用，或在非交互环境
+   显式指定 `--reuse-mixed-fingerprints`。
+4. 用户拒绝复用时停止且不创建本阶段 Run；使用 `--force` 才重做选定范围。
+5. 新 pending 使用当前设置。
+6. `inspect` 报告每个阶段使用过的指纹数量和当前指纹覆盖数量。
+
+`--resume-run` 已经显式授权按当前设置续用旧 Run，不重复询问设置指纹。
+`--dry-run` 不询问，只报告正式执行所需的选择。
 
 不再计算 Request、Response、Prompt、Config、Source、Chunk Manifest、逐 Segment 术语或术语内容 Hash。
 
@@ -667,7 +672,7 @@ previous_segments = 3
 3. 每个非空 Segment 在活动任务中记录 completed 或 failed 扫描。
 4. 中断恢复只处理该任务中 pending 和 failed 的 Segment。
 5. Chunk 变化不影响扫描进度。
-6. 设置指纹变化只警告；已有扫描继续复用，pending 使用当前设置。
+6. 选定范围的设置指纹变化时先取得复用确认；pending 使用当前设置。
 7. 所有非空 Segment 扫描 completed 后，合并候选、应用 overrides，并原子发布。
 8. 发布成功后 `terms_revision` 加一。
 
@@ -900,7 +905,7 @@ apply 前必须确认建议的 `base_result_id` 仍是该 Segment 当前选择�
 - 没有已发布术语库时，先完成活动术语任务。
 - 存在未完成的活动术语任务时，先继续并发布，再翻译。
 - 已有完整术语库且没有活动任务时直接复用。
-- 设置指纹不同只警告，不自动重做。
+- 设置指纹不同时逐阶段确认复用；拒绝后停止，不自动重做。
 - 任一阶段选定范围未完成时停止，不启动依赖它的后续阶段。
 - `--force` 明确要求所选阶段重做；用于术语时创建新的全量活动任务。
 
@@ -1130,6 +1135,7 @@ python -m app.main run-all PROJECT
 --all
 --resume-run
 --decline-run
+--reuse-mixed-fingerprints
 ```
 
 语义：
@@ -1142,6 +1148,8 @@ python -m app.main run-all PROJECT
 - `--all`：apply 的必需批量确认。
 - `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
 - `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
+- `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
+  仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
 
 两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
 `--decline-run` 直接按当前范围创建新 Run。`--dry-run` 不询问、不修改
@@ -1314,13 +1322,14 @@ polished   → proofreading_applied → translation → source
 
 验收：
 
-- Prompt、模型、目标语言、上下文、校验策略或术语 revision 变化只产生警告。
-- 已有 completed 继续复用。
+- Prompt、模型、目标语言、上下文、校验策略或术语 revision 变化时，交互
+  环境询问是否复用；非交互环境要求显式 flag。
+- 用户确认或指定 `--reuse-mixed-fingerprints` 后已有 completed 继续复用。
 - 新 pending 使用当前设置。
 - inspect 能报告同一阶段的混合设置来源。
 - 只有 `--force` 才重做已有 completed。
 - Chunk、Token、并发、限流、timeout 和重试变化不进入阶段指纹。
-- 调度模式会改变可用上文内容，因此进入阶段指纹；变化时仍然只警告。
+- 调度模式会改变可用上文内容，因此进入阶段指纹并要求相同确认。
 
 ## 7.5 模板、普通模式与调试
 
