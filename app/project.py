@@ -180,11 +180,6 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
         shutil.copy2(source_root / "prompts" / name, prompt_target / name)
 
 
-def _safe_project_name(name: str) -> None:
-    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\0" in name:
-        raise UsageError("项目名不能为空，也不能包含路径分隔符")
-
-
 def init_project(
     inputs: list[str],
     *,
@@ -194,7 +189,14 @@ def init_project(
     app_root: Path = APP_ROOT,
     projects_root: Path | None = None,
 ) -> tuple[Path | None, dict[str, object]]:
-    _safe_project_name(name)
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or "\0" in name
+    ):
+        raise UsageError("项目名不能为空，也不能包含路径分隔符")
     projects_root = projects_root or app_root / "projects"
     global_config = load_config(app_root / "config" / "config.toml")
     global_hash = bundle_hash(app_root)
@@ -334,7 +336,7 @@ def sync_global_templates(
     try:
         load_config(app_root / "config" / "config.toml")
         current_hash = bundle_hash(app_root)
-    except (ConfigError, ProjectError) as exc:
+    except ConfigError as exc:
         return [f"全局模板无效，继续使用项目副本：{exc}"]
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
@@ -386,20 +388,6 @@ def sync_global_templates(
     metadata["global_bundle_hash_seen"] = current_hash
     atomic_write_json(project / "project.json", metadata)
     return warnings
-
-
-def inspect_project(project: Path, *, repair_tail: bool = True) -> dict[str, object]:
-    metadata = read_json(project / "project.json")
-    files = read_jsonl(project / "source" / "files.jsonl", repair_tail=repair_tail)
-    segments = read_jsonl(
-        project / "source" / "segments.jsonl", repair_tail=repair_tail
-    )
-    return {
-        "name": metadata["name"],
-        "files": len(files),
-        "segments": len(segments),
-        "empty_segments": sum(bool(item["is_empty"]) for item in segments),
-    }
 
 
 def load_source_files(

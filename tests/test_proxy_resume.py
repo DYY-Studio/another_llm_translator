@@ -17,7 +17,8 @@ from app.execution import (
     choose_running_run,
     create_run,
 )
-from app.main import build_parser
+from app.main import build_parser, run as run_cli
+from app.project import init_project
 from app.stages import run_review, run_terminology, run_translation
 from app.storage import (
     append_jsonl,
@@ -26,6 +27,7 @@ from app.storage import (
     record_header,
 )
 from tests.helpers import llm_jsonl
+from tests.test_foundation import make_app_root
 from tests.test_terminology_translation import create_project
 
 
@@ -221,6 +223,7 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
         declined = read_json(newer_path)
         assert declined["status"] == "interrupted"
         assert declined["resume_declined"] is True
+        assert "resume_declined_at" not in declined
         assert choose_running_run(
             project,
             "translation",
@@ -304,6 +307,51 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     assert manifest["status"] == "completed"
     assert manifest["completed_segment_count"] == 3
     assert manifest["continuations"][0]["requested_segment_count"] == 2
+    assert "continuation_index" not in manifest["continuations"][0]
+    assert "snapshot_dir" not in manifest["continuations"][0]
+    assert "last_resumed_at" not in manifest
+
+
+def test_cli_logs_resume_warning_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    run_id = _new_running_run(project, "translation")
+
+    async def fake_translation(
+        _project: Path,
+        _scope: Scope,
+        *,
+        resume_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        assert resume_run_id == run_id
+        return {
+            "completed": 0,
+            "failed": 0,
+            "pending": 0,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("app.main.run_translation", fake_translation)
+    exit_code = run_cli(
+        ["translate", str(project), "--resume-run", "--dry-run"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err.count(f"发现未完成 Run：{run_id}") == 1
 
 
 @pytest.mark.asyncio

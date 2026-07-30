@@ -25,7 +25,6 @@ from .errors import (
     ContextLengthError,
     ExternalError,
     FatalExternalError,
-    IncompleteError,
     StorageError,
     UsageError,
 )
@@ -526,7 +525,6 @@ def _interrupt_run(
     *,
     reason: str,
     superseded_by_run_id: str | None = None,
-    declined: bool = False,
 ) -> None:
     manifest.update(
         status="interrupted",
@@ -536,9 +534,8 @@ def _interrupt_run(
     )
     if superseded_by_run_id is not None:
         manifest["superseded_by_run_id"] = superseded_by_run_id
-    if declined:
+    if reason == "resume_declined":
         manifest["resume_declined"] = True
-        manifest["resume_declined_at"] = utc_now()
     run_id = str(manifest["run_id"])
     atomic_write_json(project / "runs" / run_id / "manifest.json", manifest)
 
@@ -604,7 +601,7 @@ def choose_running_run(
                 break
             print("请输入 resume 或 new: ", end="", file=sys.stderr, flush=True)
     if action == "decline":
-        _interrupt_run(project, latest, reason="resume_declined", declined=True)
+        _interrupt_run(project, latest, reason="resume_declined")
         return None, [f"已拒绝续用 Run：{run_id}"]
     if action != "resume":
         raise UsageError("Run 选择必须是 resume 或 decline")
@@ -655,7 +652,6 @@ def continue_run(
     (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     continuations.append(
         {
-            "continuation_index": index,
             "started_at": utc_now(),
             "stage_fingerprint": fingerprint,
             "scope": {
@@ -670,11 +666,9 @@ def continue_run(
             "selected_segment_count": selected_count,
             "requested_segment_count": requested_count,
             "reused_segment_count": reused_count,
-            "snapshot_dir": relative.as_posix(),
         }
     )
     manifest["continuations"] = continuations
-    manifest["last_resumed_at"] = utc_now()
     atomic_write_json(run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
@@ -1207,11 +1201,3 @@ def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
         errors=tuple(errors),
         complete=seen_end and not errors,
     )
-
-
-def ensure_complete_or_raise(selection: StageSelection) -> None:
-    if any(
-        segment["segment_id"] not in selection.latest_completed
-        for segment in selection.selected
-    ):
-        raise IncompleteError("选定范围仍有 pending 或 failed")

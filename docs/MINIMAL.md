@@ -326,6 +326,10 @@ inject_invalid_json_every = 0
 inject_missing_segment_every = 0
 ```
 
+`unicode_normalization` 和 `case_insensitive` 当前尚未实现为可变行为，只是后续
+能力占位。术语实现固定使用 `NFKC` 和 `casefold`，因此现阶段只接受上述值。
+待核心主流程完成全面验证后，再基于真实用例实现其他取值并补充测试。
+
 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示禁用 RPM
 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标及单请求
 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。

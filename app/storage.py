@@ -66,15 +66,6 @@ def record_header(
     record_id: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
-    for key, allowed in (
-        ("stage", STAGES),
-        ("status", RECORD_STATUSES),
-        ("review_status", REVIEW_STATUSES),
-        ("validation_status", VALIDATION_STATUSES),
-        ("error_class", ERROR_CATEGORIES),
-    ):
-        if key in fields and fields[key] is not None and fields[key] not in allowed:
-            raise ValueError(f"不支持的 {key}：{fields[key]}")
     return {
         "schema_version": 1,
         "record_type": record_type,

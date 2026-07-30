@@ -2711,7 +2711,7 @@ def export_project(
         destination = directory / relative
         try:
             payload = "\n".join(lines).encode(encoding, errors="strict")
-        except (LookupError, UnicodeEncodeError) as exc:
+        except UnicodeEncodeError as exc:
             raise IncompleteError(
                 f"输出编码 {encoding} 无法表示 {relative}: {exc}"
             ) from exc

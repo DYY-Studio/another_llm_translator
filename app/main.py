@@ -201,7 +201,7 @@ def run(argv: list[str] | None = None) -> int:
             *summary["warnings"],
         ]
         for warning in summary["warnings"]:
-            if warning not in warnings:
+            if warning not in warnings and warning not in run_warnings:
                 logger.warning("%s", warning)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         logger.info(

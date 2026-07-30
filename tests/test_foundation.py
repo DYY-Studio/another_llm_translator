@@ -13,7 +13,6 @@ from app.project import (
     decode_txt,
     discover_inputs,
     init_project,
-    inspect_project,
     sync_global_templates,
 )
 from app.storage import append_jsonl, read_json, read_jsonl, record_header
@@ -56,7 +55,7 @@ def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
     )
     path = tmp_path / "config.toml"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="max_parallel 必须是整数"):
+    with pytest.raises(ConfigError, match="max_parallel 必须是正整数"):
         load_config(path)
 
 
@@ -123,20 +122,17 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
 
     assert project is not None
     assert summary["file_count"] == 3
-    state = inspect_project(project)
-    assert state == {
-        "name": "demo",
-        "files": 3,
-        "segments": 9,
-        "empty_segments": 4,
-    }
+    assert read_json(project / "project.json")["name"] == "demo"
     files = read_jsonl(project / "source" / "files.jsonl")
+    assert len(files) == 3
     assert [item["original_name"] for item in files] == [
         "2.txt",
         "10.txt",
         "chapter/1.txt",
     ]
     segments = read_jsonl(project / "source" / "segments.jsonl")
+    assert len(segments) == 9
+    assert sum(bool(item["is_empty"]) for item in segments) == 4
     by_source = {str(item["source"]): bool(item["is_empty"]) for item in segments}
     assert by_source[""] is True
     assert by_source["\u3000"] is True
@@ -303,3 +299,13 @@ def test_jsonl_middle_corruption_stops_without_repair(tmp_path: Path) -> None:
     with pytest.raises(StorageError, match="中间行损坏"):
         read_jsonl(path)
     assert path.read_bytes() == original
+
+
+def test_persisted_record_rejects_unsupported_enum(tmp_path: Path) -> None:
+    path = tmp_path / "record.json"
+    path.write_text(
+        '{"schema_version":1,"status":"unknown"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(StorageError, match="不支持的 status"):
+        read_json(path)

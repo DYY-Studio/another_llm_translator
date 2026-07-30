@@ -97,9 +97,10 @@ enabled = true
 previous_segments = 3
 
 [terminology]
-# 术语主名称、别名和匹配文本使用的 Unicode 归一化形式；MVP 仅支持 NFKC。
+# 尚未实现为可变行为：主流程完成全面验证后再实现并补充真实用例。
+# 当前术语主名称、别名和匹配文本固定使用 NFKC。
 unicode_normalization = "NFKC"
-# 是否对术语归一化结果执行 casefold；MVP 仅支持 true。
+# 尚未实现为可变行为：当前固定执行 casefold，仅支持 true。
 case_insensitive = true
 # 每个 Segment 最多向 LLM 注入多少条确定性匹配到的术语。
 max_terms_per_segment = 100

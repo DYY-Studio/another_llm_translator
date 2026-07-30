@@ -93,13 +93,6 @@ def _reject_unknown(value: dict[str, Any], schema: dict[str, Any], path: str) ->
         _reject_unknown(child, child_schema, f"{path}.{key}")
 
 
-def _positive(config: dict[str, Any], section: str, key: str) -> float:
-    value = config[section][key]
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
-        raise ConfigError(f"{section}.{key} 必须大于 0")
-    return float(value)
-
-
 def validate_config(config: dict[str, Any]) -> None:
     _reject_unknown(config, SCHEMA, "config")
     for section, key in (
@@ -138,24 +131,24 @@ def validate_config(config: dict[str, Any]) -> None:
         ("llm", "max_output_tokens"),
         ("llm", "context_window_tokens"),
         ("execution", "max_parallel"),
-        ("execution", "request_timeout_seconds"),
-        ("execution", "token_safety_factor"),
-        ("chunking", "target_chunk_input_tokens"),
-        ("retry", "http_max_attempts"),
-    ):
-        _positive(config, section, key)
-    for section, key in (
-        ("llm", "max_output_tokens"),
-        ("llm", "context_window_tokens"),
-        ("execution", "max_parallel"),
-        ("execution", "requests_per_minute"),
-        ("execution", "input_tokens_per_minute"),
         ("chunking", "target_chunk_input_tokens"),
         ("retry", "http_max_attempts"),
     ):
         value = config[section][key]
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ConfigError(f"{section}.{key} 必须是整数")
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ConfigError(f"{section}.{key} 必须是正整数")
+    for key in ("request_timeout_seconds", "token_safety_factor"):
+        value = config["execution"][key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ConfigError(f"execution.{key} 必须大于 0")
     for key in ("requests_per_minute", "input_tokens_per_minute"):
         value = config["execution"][key]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -228,6 +221,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("retry.max_delay_seconds 不能小于 base_delay_seconds")
     if not isinstance(config["chunking"]["allow_split_oversized_segment"], bool):
         raise ConfigError("chunking.allow_split_oversized_segment 必须是布尔值")
+    # TODO: 主流程完成全面验证后，实现可配置归一化与大小写匹配并补充真实用例。
+    # 当前两项只是明确占位，术语实现固定使用 NFKC、casefold。
     if not isinstance(config["terminology"]["unicode_normalization"], str):
         raise ConfigError("terminology.unicode_normalization 必须是字符串")
     if config["terminology"]["unicode_normalization"] != "NFKC":
@@ -236,12 +231,13 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("terminology.case_insensitive 必须是布尔值")
     if not config["terminology"]["case_insensitive"]:
         raise ConfigError("MVP 仅支持 terminology.case_insensitive = true")
-    _positive(config, "terminology", "max_terms_per_segment")
+    max_terms = config["terminology"]["max_terms_per_segment"]
     if (
-        not isinstance(config["terminology"]["max_terms_per_segment"], int)
-        or isinstance(config["terminology"]["max_terms_per_segment"], bool)
+        not isinstance(max_terms, int)
+        or isinstance(max_terms, bool)
+        or max_terms <= 0
     ):
-        raise ConfigError("terminology.max_terms_per_segment 必须是整数")
+        raise ConfigError("terminology.max_terms_per_segment 必须是正整数")
     if not isinstance(config["debug"]["enabled"], bool):
         raise ConfigError("debug.enabled 必须是布尔值")
     for key in (
