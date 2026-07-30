@@ -1161,7 +1161,7 @@ _THOUGHT_BLOCK_TAGS = (
     ("<think>", "</think>"),
     ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
-    ("<|channel>thought\n", "<channel|>"),
+    ("<analysis>", "</analysis>"),
 )
 
 
