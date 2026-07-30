@@ -101,6 +101,34 @@ class EditorStore:
         applied = self._history("proofreading_applied")
         return {**translations, **applied}
 
+    def _review_view(
+        self,
+        stage: str,
+        segment_id: str,
+        histories: dict[str, dict[str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        base = histories["translation"].get(segment_id)
+        if stage == "polishing":
+            base = histories["proofreading_applied"].get(segment_id) or base
+        suggestion = histories[stage].get(segment_id)
+        applied = histories[f"{stage}_applied"].get(segment_id)
+        return {
+            "base": self._result_view(base),
+            "suggestion": self._result_view(suggestion),
+            "applied": self._result_view(applied),
+            "outdated": bool(
+                base
+                and suggestion
+                and suggestion.get("base_result_id") != base.get("record_id")
+            ),
+            "applied_current": bool(
+                suggestion
+                and applied
+                and applied.get("suggestion_result_id")
+                == suggestion.get("record_id")
+            ),
+        }
+
     def overview(self) -> dict[str, Any]:
         histories = {
             stage: self._history(stage)
@@ -139,6 +167,13 @@ class EditorStore:
                         stage: segment_id in history
                         for stage, history in histories.items()
                     },
+                    "translation": self._result_view(
+                        histories["translation"].get(segment_id)
+                    ),
+                    "reviews": {
+                        stage: self._review_view(stage, segment_id, histories)
+                        for stage in sorted(REVIEW_STAGES)
+                    },
                 }
             )
         return {
@@ -150,29 +185,28 @@ class EditorStore:
 
     def segment_detail(self, segment_id: str) -> dict[str, Any]:
         segment = self._require_segment(segment_id)
-        translation = self._history("translation").get(segment_id)
-        reviews: dict[str, Any] = {}
-        for stage in sorted(REVIEW_STAGES):
-            base = self._base_results(stage).get(segment_id)
-            suggestion = self._history(stage).get(segment_id)
-            applied = self._history(f"{stage}_applied").get(segment_id)
-            reviews[stage] = {
-                "base": self._result_view(base),
-                "suggestion": self._result_view(suggestion),
-                "applied": self._result_view(applied),
-                "outdated": bool(
-                    base
-                    and suggestion
-                    and suggestion.get("base_result_id") != base.get("record_id")
-                ),
-            }
+        histories = {
+            stage: self._history(stage)
+            for stage in (
+                "translation",
+                "proofreading",
+                "proofreading_applied",
+                "polishing",
+                "polishing_applied",
+            )
+        }
         return {
             "segment_id": segment_id,
             "file_id": segment["file_id"],
             "line_index": segment["line_index"],
             "source": segment["source"],
-            "translation": self._result_view(translation),
-            "reviews": reviews,
+            "translation": self._result_view(
+                histories["translation"].get(segment_id)
+            ),
+            "reviews": {
+                stage: self._review_view(stage, segment_id, histories)
+                for stage in sorted(REVIEW_STAGES)
+            },
         }
 
     @staticmethod

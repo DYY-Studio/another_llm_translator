@@ -95,6 +95,14 @@ def test_editor_overview_excludes_empty_segments_and_preserves_order(
     assert overview["name"] == "editor-demo"
     assert [item["source"] for item in overview["segments"]] == ["first", "second"]
     assert [item["line_index"] for item in overview["segments"]] == [0, 2]
+    assert overview["segments"][0]["translation"] is None
+    assert overview["segments"][0]["reviews"]["proofreading"] == {
+        "base": None,
+        "suggestion": None,
+        "applied": None,
+        "outdated": False,
+        "applied_current": False,
+    }
 
 
 def test_editor_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:
@@ -135,6 +143,10 @@ def test_editor_translation_records_enabled_validator_warning(tmp_path: Path) ->
         {"segment_id": "F0001-S000001", "text": "残留カナ"}
     )
     assert result["validation_status"] == "warning"
+    store = EditorStore(project)
+    assert store.overview()["segments"][0]["translation"]["validation_status"] == (
+        "warning"
+    )
     record = load_stage_history(project, "translation")[-1]
     assert record["validation_findings"][0]["validator"] == "japanese_kana"
 
@@ -170,13 +182,21 @@ def test_editor_saves_and_applies_review_results_with_current_lineage(
     )
     detail = store.segment_detail("F0001-S000001")
     assert detail["reviews"]["proofreading"]["applied"]["text"] == "校对文本"
+    assert detail["reviews"]["proofreading"]["applied_current"] is True
     assert detail["reviews"]["polishing"]["base"]["text"] == "校对文本"
     assert detail["reviews"]["polishing"]["applied"]["text"] == "润色文本"
+    assert detail["reviews"]["polishing"]["applied_current"] is True
+
+    overview = store.overview()["segments"][0]
+    assert overview["translation"]["text"] == "译文一"
+    assert overview["reviews"]["proofreading"]["base"]["text"] == "译文一"
+    assert overview["reviews"]["proofreading"]["suggestion"]["reason"] == "人工调整"
+    assert overview["reviews"]["polishing"]["base"]["text"] == "校对文本"
 
     store.save_translation({"segment_id": "F0001-S000001", "text": "译文二"})
-    assert store.segment_detail("F0001-S000001")["reviews"]["proofreading"][
-        "outdated"
-    ]
+    outdated = store.segment_detail("F0001-S000001")["reviews"]["proofreading"]
+    assert outdated["outdated"]
+    assert outdated["applied_current"] is True
     store.save_review(
         {
             "stage": "proofreading",
@@ -191,6 +211,39 @@ def test_editor_saves_and_applies_review_results_with_current_lineage(
         load_stage_history(project, "proofreading_applied")
     )["F0001-S000001"]
     assert applied["text"] == "译文二"
+    current = store.overview()["segments"][0]["reviews"]["proofreading"]
+    assert current["outdated"] is False
+    assert current["applied_current"] is True
+
+    store.save_review(
+        {
+            "stage": "proofreading",
+            "segment_id": "F0001-S000001",
+            "review_status": "suggested",
+            "suggested_text": "尚未应用的新建议",
+            "reason": "再次调整",
+            "apply": False,
+        }
+    )
+    newer = store.overview()["segments"][0]["reviews"]["proofreading"]
+    assert newer["applied"]["text"] == "译文二"
+    assert newer["applied_current"] is False
+
+
+def test_editor_polishing_overview_falls_back_to_translation_base(
+    tmp_path: Path,
+) -> None:
+    project = create_editor_project(tmp_path, "one")
+    store = EditorStore(project)
+    translation = store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "仅有译文"}
+    )
+
+    polishing = store.overview()["segments"][0]["reviews"]["polishing"]
+    assert polishing["base"]["record_id"] == translation["record_id"]
+    assert polishing["base"]["text"] == "仅有译文"
+    assert polishing["suggestion"] is None
+    assert polishing["applied_current"] is False
 
 
 def test_editor_terms_update_library_and_overrides_immediately(tmp_path: Path) -> None:
@@ -417,6 +470,8 @@ def test_editor_http_serves_page_and_json_errors(tmp_path: Path) -> None:
     project = _request_handler(store, method="GET", path="/api/project")
     assert b"200 OK" in project
     assert '"source": "one"' in project.decode("utf-8")
+    assert '"translation": null' in project.decode("utf-8")
+    assert '"applied_current": false' in project.decode("utf-8")
 
     error = _request_handler(
         store,
