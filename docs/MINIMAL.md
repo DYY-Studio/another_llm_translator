@@ -1054,7 +1054,7 @@ HTTP 重试：
   `<think>...</think>`、`<thinking>...</thinking>`、
   `<thought>...</thought>` 或 `<analysis>...</analysis>`。Google AI Studio
   兼容端点实测使用 `<thought>`。允许思考块前有 BOM 或空白；剥离后再按
-  下述 JSONL 规则解析。不支持 Gemma Channel 形式。
+  下述 JSONL 规则解析。
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
 - 思考正文不属于 Prompt、Chunk、Segment 结果或进度。普通模式不持久化；
