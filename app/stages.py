@@ -1982,20 +1982,22 @@ def _parse_review_items(
     for item in document.records:
         segment_id = item.get("id")
         review_status = item.get("status")
-        suggested = item.get("suggested_text")
-        reason = item.get("reason")
         if segment_id not in expected or counts[segment_id] != 1:
             errors.append(f"未知或重复 ID：{segment_id}")
             continue
         if review_status not in {"accepted", "suggested"}:
             errors.append(f"status 字段错误：{segment_id}")
             continue
-        if review_status == "accepted" and suggested is not None:
-            errors.append(f"accepted 不应包含建议文本：{segment_id}")
+        if review_status == "accepted":
+            valid[str(segment_id)] = {
+                "review_status": "accepted",
+                "suggested_text": None,
+                "reason": None,
+            }
             continue
-        if review_status == "suggested" and (
-            not isinstance(suggested, str) or not suggested
-        ):
+        suggested = item.get("suggested_text")
+        reason = item.get("reason")
+        if not isinstance(suggested, str) or not suggested:
             errors.append(f"suggested 缺少建议文本：{segment_id}")
             continue
         if reason is not None and not isinstance(reason, str):
@@ -2418,7 +2420,11 @@ async def run_review(
             if format_attempt:
                 payload["format_correction"] = (
                     "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
+                    'ID。accepted 每行使用 {"type":"segment","id":"...",'
+                    '"status":"accepted"}；suggested 每行使用 '
+                    '{"type":"segment","id":"...","status":"suggested",'
+                    '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
+                    '也可为 null。最后输出 {"type":"end"}。'
                 )
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"

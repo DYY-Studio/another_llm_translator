@@ -165,6 +165,69 @@ def test_stage_jsonl_validators_reject_duplicates_and_keep_other_valid_rows() ->
     assert review_complete is True
 
 
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        {},
+        {"suggested_text": None, "reason": None},
+        {"suggested_text": "回显当前文本", "reason": "无需修改"},
+        {"suggested_text": 123, "reason": {"detail": "ignored"}},
+        {"suggested_text": [], "reason": ["ignored"]},
+    ],
+)
+def test_review_parser_ignores_accepted_optional_fields(
+    extra_fields: dict[str, object],
+) -> None:
+    record = {
+        "type": "segment",
+        "id": "S1",
+        "status": "accepted",
+        **extra_fields,
+    }
+    valid, unresolved, errors, complete = _parse_review_items(
+        llm_jsonl([record]),
+        ["S1"],
+    )
+    assert valid == {
+        "S1": {
+            "review_status": "accepted",
+            "suggested_text": None,
+            "reason": None,
+        }
+    }
+    assert unresolved == []
+    assert errors == []
+    assert complete is True
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"reason": None},
+        {"suggested_text": "", "reason": None},
+        {"suggested_text": 123, "reason": None},
+        {"suggested_text": "建议", "reason": {"detail": "invalid"}},
+    ],
+)
+def test_review_parser_keeps_suggested_fields_strict(
+    fields: dict[str, object],
+) -> None:
+    record = {
+        "type": "segment",
+        "id": "S1",
+        "status": "suggested",
+        **fields,
+    }
+    valid, unresolved, errors, complete = _parse_review_items(
+        llm_jsonl([record]),
+        ["S1"],
+    )
+    assert valid == {}
+    assert unresolved == ["S1"]
+    assert errors
+    assert complete is False
+
+
 def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
     terms, errors, complete = _validate_term_items('{"type":"end"}')
     assert terms == []

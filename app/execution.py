@@ -230,17 +230,25 @@ def full_prompt(stage: str, middle: str) -> str:
         ),
         "proofreading": (
             "保持 Segment ID 不变。"
-            '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
-            "suggested_text、reason；status 只能是 accepted 或 suggested。"
-            "记录格式："
+            '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
+            "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
+            "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
+            "accepted 记录格式："
+            '{"type":"segment","id":"F0001-S000001","status":"accepted"}。'
+            "suggested 必须包含非空完整 suggested_text，reason 为字符串或 "
+            "null。suggested 记录格式："
             '{"type":"segment","id":"F0001-S000001","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
         "polishing": (
             "保持 Segment ID 不变。"
-            '每个 Segment 输出一条 type="segment" 记录，包含 id、status、'
-            "suggested_text、reason；status 只能是 accepted 或 suggested。"
-            "记录格式："
+            '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
+            "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
+            "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
+            "accepted 记录格式："
+            '{"type":"segment","id":"F0001-S000001","status":"accepted"}。'
+            "suggested 必须包含非空完整 suggested_text，reason 为字符串或 "
+            "null。suggested 记录格式："
             '{"type":"segment","id":"F0001-S000001","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
