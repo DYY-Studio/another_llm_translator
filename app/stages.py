@@ -113,6 +113,13 @@ def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
 
 
+def _restore_leading_whitespace(source: str, text: str) -> str:
+    prefix_end = 0
+    while prefix_end < len(source) and source[prefix_end].isspace():
+        prefix_end += 1
+    return source[:prefix_end] + text.lstrip()
+
+
 def _request_estimate(
     messages: list[dict[str, str]],
     config: dict[str, Any],
@@ -1329,6 +1336,10 @@ async def run_translation(
         validation_status: str = "passed",
         findings: list[dict[str, Any]] | None = None,
     ) -> None:
+        text = _restore_leading_whitespace(
+            str(by_id[segment_id]["source"]),
+            text,
+        )
         async with write_lock:
             append_jsonl(
                 result_path,
@@ -2182,6 +2193,12 @@ async def run_review(
         base = bases[segment_id]
         async with write_lock:
             if parsed is not None:
+                suggested_text = parsed["suggested_text"]
+                if suggested_text is not None:
+                    suggested_text = _restore_leading_whitespace(
+                        str(by_id[segment_id]["source"]),
+                        str(suggested_text),
+                    )
                 append_jsonl(
                     result_path,
                     record_header(
@@ -2191,7 +2208,7 @@ async def run_review(
                         segment_id=segment_id,
                         status="completed",
                         review_status=parsed["review_status"],
-                        suggested_text=parsed["suggested_text"],
+                        suggested_text=suggested_text,
                         reason=parsed["reason"],
                         base_result_id=base["record_id"],
                         stage_fingerprint=fingerprint,
@@ -2583,6 +2600,10 @@ def run_apply(
             if suggestion["review_status"] == "suggested"
             else base["text"]
         )
+        text = _restore_leading_whitespace(
+            str(segment["source"]),
+            str(text),
+        )
         append_jsonl(
             result_path,
             record_header(
@@ -2723,6 +2744,11 @@ def export_project(
             missing.append(segment_id)
         else:
             output_text[segment_id] = str(record["text"])
+        if segment_id in output_text:
+            output_text[segment_id] = _restore_leading_whitespace(
+                str(segment["source"]),
+                output_text[segment_id],
+            )
         if record is not None:
             lineage = result_lineage(record)
             if any(
