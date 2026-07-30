@@ -20,6 +20,7 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    RequestSizeError,
     StorageError,
     UsageError,
 )
@@ -134,7 +135,10 @@ def _request_estimate(
         config["execution"]["input_tokens_per_minute"] > 0
         and estimated > config["execution"]["input_tokens_per_minute"]
     ):
-        raise ConfigError("单请求预测 Token 超过 ITPM")
+        raise RequestSizeError(
+            "单请求预测 Token 超过 ITPM",
+            reason="itpm",
+        )
     return estimated
 
 
@@ -316,6 +320,7 @@ async def run_terminology(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
@@ -462,8 +467,8 @@ async def run_terminology(
             )
             request_segments.append(segment)
             continue
-        except ConfigError as exc:
-            if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+        except RequestSizeError as exc:
+            if exc.reason != "context":
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -486,8 +491,8 @@ async def run_terminology(
                     payload_builder=payload_builder,
                 )
                 accepted_sources.append(source_part)
-            except ConfigError as exc:
-                if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+            except RequestSizeError as exc:
+                if exc.reason != "context":
                     raise
                 left, right = _split_source_once(source_part)
                 sources[0:0] = [left, right]
@@ -566,10 +571,11 @@ async def run_terminology(
             "terminology",
             chunks,
         )
-    limiter = SlidingWindowLimiter(
-        config["execution"]["requests_per_minute"],
-        config["execution"]["input_tokens_per_minute"],
-    )
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            config["execution"]["requests_per_minute"],
+            config["execution"]["input_tokens_per_minute"],
+        )
     write_lock = asyncio.Lock()
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
@@ -603,7 +609,11 @@ async def run_terminology(
                 )
             except FatalExternalError:
                 raise
-            except ContextLengthError:
+            except ContextLengthError as exc:
+                if exc.segment_ids is None:
+                    exc.segment_ids = tuple(
+                        str(segment["segment_id"]) for segment in unresolved
+                    )
                 raise
             except ExternalError as exc:
                 async with write_lock:
@@ -752,7 +762,17 @@ async def run_terminology(
                 exc.request_id,
                 len(chunk.segments),
             )
-            items = list(chunk.segments)
+            requested_ids = (
+                set(exc.segment_ids) if exc.segment_ids is not None else None
+            )
+            items = [
+                item
+                for item in chunk.segments
+                if requested_ids is None
+                or str(item["segment_id"]) in requested_ids
+            ]
+            if not items:
+                return 0, 0
             if len(items) > 1:
                 midpoint = len(items) // 2
                 groups = (items[:midpoint], items[midpoint:])
@@ -847,14 +867,19 @@ async def run_terminology(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
-    except FatalExternalError:
+    except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
             status="failed",
             completed=(len(selected) - len(work)) if resume_run_id else 0,
             failed=len(work),
+            warnings=warnings,
         )
-        logger.error("run failed run=%s fatal_external_error=true", run_id)
+        logger.error(
+            "run failed run=%s error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
         raise
 
     completed = sum(value[0] for value in results)
@@ -1074,6 +1099,7 @@ async def run_translation(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
@@ -1172,8 +1198,8 @@ async def run_translation(
             )
             request_segments.append(segment)
             continue
-        except ConfigError as exc:
-            if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+        except RequestSizeError as exc:
+            if exc.reason != "context":
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -1196,8 +1222,8 @@ async def run_translation(
                     payload_builder=payload_builder,
                 )
                 accepted_sources.append(source_part)
-            except ConfigError as exc:
-                if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+            except RequestSizeError as exc:
+                if exc.reason != "context":
                     raise
                 left, right = _split_source_once(source_part)
                 sources[0:0] = [left, right]
@@ -1279,10 +1305,11 @@ async def run_translation(
             "translation",
             chunks,
         )
-    limiter = SlidingWindowLimiter(
-        config["execution"]["requests_per_minute"],
-        config["execution"]["input_tokens_per_minute"],
-    )
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            config["execution"]["requests_per_minute"],
+            config["execution"]["input_tokens_per_minute"],
+        )
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
@@ -1467,7 +1494,9 @@ async def run_translation(
                 )
             except FatalExternalError:
                 raise
-            except ContextLengthError:
+            except ContextLengthError as exc:
+                if exc.segment_ids is None:
+                    exc.segment_ids = tuple(expected)
                 raise
             except ExternalError as exc:
                 for segment_id in expected:
@@ -1541,7 +1570,17 @@ async def run_translation(
                 exc.request_id,
                 len(chunk.segments),
             )
-            items = list(chunk.segments)
+            requested_ids = (
+                set(exc.segment_ids) if exc.segment_ids is not None else None
+            )
+            items = [
+                item
+                for item in chunk.segments
+                if requested_ids is None
+                or str(item["segment_id"]) in requested_ids
+            ]
+            if not items:
+                return
             if len(items) > 1:
                 midpoint = len(items) // 2
                 groups = (items[:midpoint], items[midpoint:])
@@ -1688,7 +1727,7 @@ async def run_translation(
                     }
                     await repair_group(group, subset)
         _extend_unique(warnings, llm.warnings)
-    except FatalExternalError:
+    except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
             status="failed",
@@ -1701,9 +1740,10 @@ async def run_translation(
             warnings=warnings,
         )
         logger.error(
-            "run failed run=%s completed=%d fatal_external_error=true",
+            "run failed run=%s completed=%d error_type=%s",
             run_id,
             len(completed_ids),
+            type(exc).__name__,
         )
         raise
 
@@ -1873,6 +1913,7 @@ async def run_review(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
@@ -1997,8 +2038,8 @@ async def run_review(
             )
             request_segments.append(segment)
             continue
-        except ConfigError as exc:
-            if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+        except RequestSizeError as exc:
+            if exc.reason != "context":
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -2024,8 +2065,8 @@ async def run_review(
                     payload_builder=payload_builder,
                 )
                 accepted_parts.append((source_part, text_part))
-            except ConfigError as exc:
-                if "单 Segment Prompt 超过模型硬限制" not in str(exc):
+            except RequestSizeError as exc:
+                if exc.reason != "context":
                     raise
                 left_source, right_source = _split_source_once(source_part)
                 split_at = round(len(text_part) * len(left_source) / len(source_part))
@@ -2113,10 +2154,11 @@ async def run_review(
             stage,
             chunks,
         )
-    limiter = SlidingWindowLimiter(
-        config["execution"]["requests_per_minute"],
-        config["execution"]["input_tokens_per_minute"],
-    )
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            config["execution"]["requests_per_minute"],
+            config["execution"]["input_tokens_per_minute"],
+        )
     result_path = stage_result_path(project, stage)
     write_lock = asyncio.Lock()
     completed_ids: set[str] = set()
@@ -2274,7 +2316,9 @@ async def run_review(
                 )
             except FatalExternalError:
                 raise
-            except ContextLengthError:
+            except ContextLengthError as exc:
+                if exc.segment_ids is None:
+                    exc.segment_ids = tuple(expected)
                 raise
             except ExternalError as exc:
                 for segment_id in expected:
@@ -2330,7 +2374,17 @@ async def run_review(
                 exc.request_id,
                 len(chunk.segments),
             )
-            items = list(chunk.segments)
+            requested_ids = (
+                set(exc.segment_ids) if exc.segment_ids is not None else None
+            )
+            items = [
+                item
+                for item in chunk.segments
+                if requested_ids is None
+                or str(item["segment_id"]) in requested_ids
+            ]
+            if not items:
+                return
             if len(items) > 1:
                 midpoint = len(items) // 2
                 groups = (items[:midpoint], items[midpoint:])
@@ -2391,7 +2445,7 @@ async def run_review(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
-    except FatalExternalError:
+    except (FatalExternalError, ConfigError) as exc:
         finalize_run(
             run_dir,
             status="failed",
@@ -2404,9 +2458,10 @@ async def run_review(
             warnings=warnings,
         )
         logger.error(
-            "run failed run=%s completed=%d fatal_external_error=true",
+            "run failed run=%s completed=%d error_type=%s",
             run_id,
             len(completed_ids),
+            type(exc).__name__,
         )
         raise
     finalize_run(
@@ -2742,30 +2797,74 @@ async def run_all(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    summaries: list[dict[str, Any]] = []
-    terms = load_terms(project)
-    active_path = project / "terminology" / "active_task.json"
-    active = read_json(active_path) if active_path.exists() else None
-    if scope.force or terms is None or (active and active.get("status") == "active"):
-        term_summary = await run_terminology(
-            project, scope, http_client=http_client
+    config = load_config(project / "config.toml")
+    limiter = SlidingWindowLimiter(
+        config["execution"]["requests_per_minute"],
+        config["execution"]["input_tokens_per_minute"],
+    )
+
+    async def execute(shared_client: httpx.AsyncClient | None) -> dict[str, Any]:
+        summaries: list[dict[str, Any]] = []
+        terms = load_terms(project)
+        active_path = project / "terminology" / "active_task.json"
+        active = read_json(active_path) if active_path.exists() else None
+        if scope.force or terms is None or (
+            active and active.get("status") == "active"
+        ):
+            term_summary = await run_terminology(
+                project,
+                scope,
+                http_client=shared_client,
+                limiter=limiter,
+            )
+            summaries.append(term_summary)
+            require_success(term_summary)
+        translation = await run_translation(
+            project,
+            scope,
+            http_client=shared_client,
+            limiter=limiter,
         )
-        summaries.append(term_summary)
-        require_success(term_summary)
-    translation = await run_translation(project, scope, http_client=http_client)
-    summaries.append(translation)
-    require_success(translation)
-    proofreading = await run_review(
-        project, "proofreading", scope, http_client=http_client
+        summaries.append(translation)
+        require_success(translation)
+        proofreading = await run_review(
+            project,
+            "proofreading",
+            scope,
+            http_client=shared_client,
+            limiter=limiter,
+        )
+        summaries.append(proofreading)
+        require_success(proofreading)
+        polishing = await run_review(
+            project,
+            "polishing",
+            scope,
+            http_client=shared_client,
+            limiter=limiter,
+        )
+        summaries.append(polishing)
+        require_success(polishing)
+        return {
+            "stage": "run-all",
+            "steps": summaries,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    if http_client is not None or scope.dry_run:
+        return await execute(http_client)
+    timeout = float(config["execution"]["request_timeout_seconds"])
+    limits = httpx.Limits(
+        max_connections=config["execution"]["max_parallel"],
+        max_keepalive_connections=config["execution"]["max_parallel"],
     )
-    summaries.append(proofreading)
-    require_success(proofreading)
-    polishing = await run_review(
-        project, "polishing", scope, http_client=http_client
-    )
-    summaries.append(polishing)
-    require_success(polishing)
-    return {"stage": "run-all", "steps": summaries, "failed": 0, "pending": 0}
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        limits=limits,
+        proxy=config["llm"]["proxy_url"] or None,
+    ) as shared_client:
+        return await execute(shared_client)
 
 
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:

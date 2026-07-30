@@ -8,10 +8,11 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import load_terms, match_terms, run_terminology, run_translation
-from app.storage import read_jsonl
+from app.storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
@@ -262,6 +263,128 @@ async def test_translation_partial_response_retries_only_missing(
         load_stage_history(project, "translation")
     )
     assert set(completed) == {"F0001-S000001", "F0001-S000002"}
+
+
+@pytest.mark.asyncio
+async def test_partial_response_context_split_does_not_retry_completed_segment(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo")
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        ids = [item["id"] for item in payload["segments"]]
+        calls.append(ids)
+        if len(calls) == 1:
+            returned = ids[:1]
+        elif len(calls) == 2:
+            return httpx.Response(
+                400,
+                text="context_length_exceeded: maximum context tokens",
+            )
+        else:
+            returned = ids
+        records = [
+            {
+                "type": "segment",
+                "id": segment_id,
+                "translation": f"ok:{segment_id}",
+            }
+            for segment_id in returned
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["completed"] == 2
+    assert calls[:2] == [
+        ["F0001-S000001", "F0001-S000002"],
+        ["F0001-S000002"],
+    ]
+    assert calls[2:]
+    assert all(
+        all(segment_id.startswith("F0001-S000002") for segment_id in request)
+        for request in calls[2:]
+    )
+    records = read_jsonl(project / "stages" / "translation.jsonl")
+    assert [
+        record["segment_id"]
+        for record in records
+        if record["status"] == "completed"
+    ] == ["F0001-S000001", "F0001-S000002"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_itpm_failure_finalizes_translation_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo")
+    from app import stages
+
+    original_estimate = stages._request_estimate
+    estimate_calls = 0
+
+    def fail_second_estimate(
+        messages: list[dict[str, str]],
+        config: dict,
+        request_id: str,
+    ) -> int:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        if estimate_calls == 2:
+            raise RequestSizeError(
+                "单请求预测 Token 超过 ITPM",
+                reason="itpm",
+            )
+        return original_estimate(messages, config, request_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        first = payload["segments"][0]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": first["id"],
+                                        "translation": "ok",
+                                    }
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(stages, "_request_estimate", fail_second_estimate)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RequestSizeError, match="ITPM"):
+            await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    manifests = [
+        read_json(path)
+        for path in (project / "runs").glob("*/manifest.json")
+    ]
+    assert len(manifests) == 1
+    assert manifests[0]["status"] == "failed"
 
 
 @pytest.mark.asyncio
