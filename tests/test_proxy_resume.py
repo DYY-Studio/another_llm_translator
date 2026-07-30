@@ -19,7 +19,12 @@ from app.execution import (
 )
 from app.main import build_parser, run as run_cli
 from app.project import init_project
-from app.stages import run_review, run_terminology, run_translation
+from app.stages import (
+    _confirm_fingerprint_reuse,
+    run_review,
+    run_terminology,
+    run_translation,
+)
 from app.storage import (
     append_jsonl,
     atomic_write_json,
@@ -79,6 +84,118 @@ def test_resume_flags_only_exist_on_standalone_llm_commands() -> None:
         assert parsed.resume_run is True
     with pytest.raises(SystemExit):
         parser.parse_args(["run-all", "demo", "--resume-run"])
+
+
+def test_fingerprint_reuse_flag_only_exists_on_llm_commands() -> None:
+    parser = build_parser()
+    for command in (
+        "terminology",
+        "translate",
+        "proofread",
+        "polish",
+        "run-all",
+    ):
+        parsed = parser.parse_args(
+            [command, "demo", "--reuse-mixed-fingerprints"]
+        )
+        assert parsed.reuse_mixed_fingerprints is True
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    command,
+                    "demo",
+                    "--force",
+                    "--reuse-mixed-fingerprints",
+                ]
+            )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["export", "demo", "--reuse-mixed-fingerprints"]
+        )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["terminology", "translation", "proofreading", "polishing"],
+)
+def test_fingerprint_reuse_requires_explicit_decision(stage: str) -> None:
+    kwargs = {
+        "stage": stage,
+        "existing_fingerprints": {"old"},
+        "current_fingerprint": "current",
+        "reusable_count": 2,
+        "force": False,
+        "resume_run_id": None,
+        "reuse_allowed": False,
+        "dry_run": False,
+    }
+    assert _confirm_fingerprint_reuse(
+        **{
+            **kwargs,
+            "existing_fingerprints": {"current"},
+        },
+        interactive=False,
+    ) is None
+    with pytest.raises(UsageError, match="非交互环境"):
+        _confirm_fingerprint_reuse(**kwargs, interactive=False)
+    assert "已显式复用" in str(
+        _confirm_fingerprint_reuse(
+            **{**kwargs, "reuse_allowed": True},
+            interactive=False,
+        )
+    )
+    assert "正式执行必须选择" in str(
+        _confirm_fingerprint_reuse(
+            **{**kwargs, "dry_run": True},
+            interactive=False,
+        )
+    )
+    assert _confirm_fingerprint_reuse(
+        **{**kwargs, "force": True},
+        interactive=False,
+    ) is None
+    assert "续用 Run" in str(
+        _confirm_fingerprint_reuse(
+            **{**kwargs, "resume_run_id": "RUN-OLD"},
+            interactive=False,
+        )
+    )
+    with pytest.raises(UsageError, match="--force"):
+        _confirm_fingerprint_reuse(
+            **kwargs,
+            interactive=True,
+            choice="new",
+        )
+    assert "用户确认复用" in str(
+        _confirm_fingerprint_reuse(
+            **kwargs,
+            interactive=True,
+            choice="reuse",
+        )
+    )
+
+
+def test_fingerprint_reuse_interactive_prompt_uses_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    answers = iter(["invalid", "reuse"])
+    monkeypatch.setattr("builtins.input", lambda: next(answers))
+    warning = _confirm_fingerprint_reuse(
+        "translation",
+        {"old"},
+        "current",
+        1,
+        force=False,
+        resume_run_id=None,
+        reuse_allowed=False,
+        dry_run=False,
+        interactive=True,
+    )
+    captured = capsys.readouterr()
+    assert "是否复用" in captured.err
+    assert "请输入 reuse 或 new" in captured.err
+    assert "用户确认复用" in str(warning)
 
 
 def test_proxy_config_accepts_empty_http_and_https(tmp_path: Path) -> None:
@@ -312,6 +429,79 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     assert "last_resumed_at" not in manifest
 
 
+@pytest.mark.asyncio
+async def test_translation_mixed_fingerprint_stops_before_run_or_request(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo")
+    metadata = read_json(project / "project.json")
+    append_jsonl(
+        project / "stages" / "translation.jsonl",
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id="F0001-S000001",
+            status="completed",
+            text="旧译文",
+            validation_status="passed",
+            validation_findings=[],
+            terms_revision=None,
+            stage_fingerprint="old",
+            run_id="OLD",
+            request_id="OLD",
+        ),
+    )
+    before_runs = list((project / "runs").iterdir())
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": "新译文",
+            }
+            for item in payload["segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        dry_run = await run_translation(
+            project,
+            Scope(dry_run=True),
+            http_client=client,
+        )
+        assert any(
+            "正式执行必须选择" in warning
+            for warning in dry_run["warnings"]
+        )
+        with pytest.raises(UsageError, match="--reuse-mixed-fingerprints"):
+            await run_translation(project, Scope(), http_client=client)
+        assert list((project / "runs").iterdir()) == before_runs
+        assert requests == 0
+        summary = await run_translation(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+    assert summary["reused"] == 1
+    assert summary["completed"] == 1
+    assert requests == 1
+    assert any("已显式复用" in warning for warning in summary["warnings"])
+
+
 def test_cli_logs_resume_warning_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -335,8 +525,10 @@ def test_cli_logs_resume_warning_once(
         _scope: Scope,
         *,
         resume_run_id: str | None = None,
+        reuse_mixed_fingerprints: bool = False,
     ) -> dict[str, Any]:
         assert resume_run_id == run_id
+        assert reuse_mixed_fingerprints is False
         return {
             "completed": 0,
             "failed": 0,
@@ -411,6 +603,63 @@ async def test_terminology_resume_keeps_active_task(tmp_path: Path) -> None:
     assert summary["run_id"] == run_id
     assert summary["active_task_id"] == task_id
     assert seen == ["Bob"]
+
+
+@pytest.mark.asyncio
+async def test_terminology_ignores_old_fingerprint_outside_scope(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice\nBob")
+    metadata = read_json(project / "project.json")
+    task_id = "TERM-TASK-SCOPE"
+    atomic_write_json(
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="old",
+        ),
+    )
+    append_jsonl(
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            str(metadata["project_id"]),
+            stage="terminology",
+            segment_id="F0001-S000001",
+            status="completed",
+            active_task_id=task_id,
+            stage_fingerprint="old",
+            run_id="OLD",
+            request_id="OLD",
+        ),
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.extend(item["source"] for item in payload["source_segments"])
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl([])}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(
+            project,
+            Scope(only_segment="F0001-S000002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+    assert summary["completed"] == 1
+    assert seen == ["Bob"]
+    assert not any("设置指纹" in warning for warning in summary["warnings"])
 
 
 @pytest.mark.parametrize("stage", ["proofreading", "polishing"])

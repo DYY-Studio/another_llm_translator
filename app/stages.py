@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shlex
+import sys
 import tempfile
 import unicodedata
 import uuid
@@ -118,6 +119,74 @@ def _restore_leading_whitespace(source: str, text: str) -> str:
     while prefix_end < len(source) and source[prefix_end].isspace():
         prefix_end += 1
     return source[:prefix_end] + text.lstrip()
+
+
+def _confirm_fingerprint_reuse(
+    stage: str,
+    existing_fingerprints: set[str] | frozenset[str],
+    current_fingerprint: str,
+    reusable_count: int,
+    *,
+    force: bool,
+    resume_run_id: str | None,
+    reuse_allowed: bool,
+    dry_run: bool,
+    interactive: bool | None = None,
+    choice: str | None = None,
+) -> str | None:
+    if (
+        force
+        or reusable_count == 0
+        or not existing_fingerprints
+        or existing_fingerprints == {current_fingerprint}
+    ):
+        return None
+    message = (
+        f"{stage} 选定范围有 {reusable_count} 个可复用 Segment，"
+        f"来自 {len(existing_fingerprints)} 个设置指纹，"
+        f"与当前指纹 {current_fingerprint} 不一致"
+    )
+    if resume_run_id is not None:
+        return f"{message}；已通过续用 Run 明确复用"
+    if reuse_allowed:
+        return f"{message}；已显式复用"
+    if dry_run:
+        return (
+            f"{message}；正式执行必须选择 "
+            "--reuse-mixed-fingerprints 或 --force"
+        )
+    interactive = sys.stdin.isatty() if interactive is None else interactive
+    if choice is None and not interactive:
+        raise UsageError(
+            f"{message}；非交互环境必须指定 "
+            "--reuse-mixed-fingerprints 或 --force"
+        )
+    if choice is None:
+        print(
+            f"{message}\n是否复用这些已完成结果？[r]euse/[n]ew: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        while True:
+            answer = input().strip().casefold()
+            if answer in {"r", "reuse"}:
+                choice = "reuse"
+                break
+            if answer in {"n", "new"}:
+                choice = "new"
+                break
+            print(
+                "请输入 reuse 或 new: ",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+    if choice == "reuse":
+        return f"{message}；已由用户确认复用"
+    if choice == "new":
+        raise UsageError(f"{message}；已拒绝复用，请使用 --force 重做选定范围")
+    raise UsageError("指纹复用选择必须是 reuse 或 new")
 
 
 def _request_estimate(
@@ -329,6 +398,7 @@ async def run_terminology(
     http_client: httpx.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
+    reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
     resume_arguments_ignored = False
@@ -416,10 +486,13 @@ async def run_terminology(
             if str(segment["segment_id"]) not in completed_ids
         ]
     )
+    selected_ids = {str(segment["segment_id"]) for segment in selected}
     existing_fingerprints = {
         str(record["stage_fingerprint"])
         for record in scans
-        if record.get("stage_fingerprint")
+        if record.get("status") == "completed"
+        and str(record.get("segment_id")) in selected_ids
+        and record.get("stage_fingerprint")
     }
     warnings: list[str] = []
     if resume_run_id is not None:
@@ -432,10 +505,18 @@ async def run_terminology(
     configured_output_warning = _configured_output_warning(config)
     if configured_output_warning:
         warnings.append(configured_output_warning)
-    if existing_fingerprints and existing_fingerprints != {fingerprint}:
-        warnings.append(
-            "活动术语任务包含不同设置指纹；继续复用并处理 pending"
-        )
+    fingerprint_warning = _confirm_fingerprint_reuse(
+        "terminology",
+        existing_fingerprints,
+        fingerprint,
+        len(selected_ids & completed_ids),
+        force=scope.force,
+        resume_run_id=resume_run_id,
+        reuse_allowed=reuse_mixed_fingerprints,
+        dry_run=scope.dry_run,
+    )
+    if fingerprint_warning:
+        warnings.append(fingerprint_warning)
 
     context_config = config["context"]["terminology"]
 
@@ -1108,6 +1189,7 @@ async def run_translation(
     http_client: httpx.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
+    reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
     resume_arguments_ignored = False
@@ -1151,8 +1233,18 @@ async def run_translation(
         warnings.append(configured_output_warning)
     if library is None:
         warnings.append("没有已发布术语库；本次翻译 terms_revision = null")
-    if selection.fingerprints and selection.fingerprints != {fingerprint}:
-        warnings.append("翻译结果包含不同设置指纹；继续复用并处理 pending")
+    fingerprint_warning = _confirm_fingerprint_reuse(
+        "translation",
+        selection.fingerprints,
+        fingerprint,
+        len(selection.reusable),
+        force=scope.force,
+        resume_run_id=resume_run_id,
+        reuse_allowed=reuse_mixed_fingerprints,
+        dry_run=scope.dry_run,
+    )
+    if fingerprint_warning:
+        warnings.append(fingerprint_warning)
     latest_text = {
         segment_id: str(record["text"])
         for segment_id, record in selection.latest_completed.items()
@@ -1926,6 +2018,7 @@ async def run_review(
     http_client: httpx.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
+    reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
@@ -1992,8 +2085,18 @@ async def run_review(
             f"{stage} dry-run 使用源文占位估算；"
             f"实际运行仍缺少 {len(missing_base)} 条上游结果"
         )
-    if selection.fingerprints and selection.fingerprints != {fingerprint}:
-        warnings.append(f"{stage} 结果包含不同设置指纹；继续复用并处理 pending")
+    fingerprint_warning = _confirm_fingerprint_reuse(
+        stage,
+        selection.fingerprints,
+        fingerprint,
+        len(selection.reusable),
+        force=scope.force,
+        resume_run_id=resume_run_id,
+        reuse_allowed=reuse_mixed_fingerprints,
+        dry_run=scope.dry_run,
+    )
+    if fingerprint_warning:
+        warnings.append(fingerprint_warning)
     context_config = config["context"][stage]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2822,6 +2925,7 @@ async def run_all(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
+    reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
     config = load_config(project / "config.toml")
     limiter = SlidingWindowLimiter(
@@ -2842,6 +2946,7 @@ async def run_all(
                 scope,
                 http_client=shared_client,
                 limiter=limiter,
+                reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             )
             summaries.append(term_summary)
             require_success(term_summary)
@@ -2850,6 +2955,7 @@ async def run_all(
             scope,
             http_client=shared_client,
             limiter=limiter,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(translation)
         require_success(translation)
@@ -2859,6 +2965,7 @@ async def run_all(
             scope,
             http_client=shared_client,
             limiter=limiter,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(proofreading)
         require_success(proofreading)
@@ -2868,6 +2975,7 @@ async def run_all(
             scope,
             http_client=shared_client,
             limiter=limiter,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(polishing)
         require_success(polishing)

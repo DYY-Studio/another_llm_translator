@@ -44,7 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("project")
         command.add_argument("--dry-run", action="store_true")
-        command.add_argument("--force", action="store_true")
+        result_choice = command.add_mutually_exclusive_group()
+        result_choice.add_argument("--force", action="store_true")
+        result_choice.add_argument(
+            "--reuse-mixed-fingerprints",
+            action="store_true",
+            help="显式复用设置指纹不同的已完成结果",
+        )
         selectors = command.add_mutually_exclusive_group()
         selectors.add_argument("--from-file")
         selectors.add_argument("--only-file")
@@ -168,11 +174,21 @@ def run(argv: list[str] | None = None) -> int:
                 logger.warning("%s", warning)
         if args.command == "terminology":
             summary = asyncio.run(
-                run_terminology(project, scope, resume_run_id=resume_run_id)
+                run_terminology(
+                    project,
+                    scope,
+                    resume_run_id=resume_run_id,
+                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                )
             )
         elif args.command == "translate":
             summary = asyncio.run(
-                run_translation(project, scope, resume_run_id=resume_run_id)
+                run_translation(
+                    project,
+                    scope,
+                    resume_run_id=resume_run_id,
+                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                )
             )
         elif args.command == "proofread":
             summary = asyncio.run(
@@ -181,6 +197,7 @@ def run(argv: list[str] | None = None) -> int:
                     "proofreading",
                     scope,
                     resume_run_id=resume_run_id,
+                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
                 )
             )
         elif args.command == "polish":
@@ -190,10 +207,17 @@ def run(argv: list[str] | None = None) -> int:
                     "polishing",
                     scope,
                     resume_run_id=resume_run_id,
+                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
                 )
             )
         else:
-            summary = asyncio.run(run_all(project, scope))
+            summary = asyncio.run(
+                run_all(
+                    project,
+                    scope,
+                    reuse_mixed_fingerprints=args.reuse_mixed_fingerprints,
+                )
+            )
         summary.setdefault("warnings", [])
         summary["warnings"] = [
             *warnings,
