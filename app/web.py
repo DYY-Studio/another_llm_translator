@@ -17,6 +17,7 @@ from .errors import AppError, UsageError
 from .execution import Scope
 from .llm_adapter import adapter_path, load_json_adapter
 from .locking import project_write_lock
+from .plugins import document_adapter_summaries
 from .project import (
     PROJECTS_ROOT,
     init_project,
@@ -88,9 +89,14 @@ def create_app(
                 )
         return {"projects": values}
 
+    @app.get("/api/v1/document-adapters")
+    async def document_adapters() -> dict[str, Any]:
+        return {"adapters": document_adapter_summaries()}
+
     @app.post("/api/v1/projects")
     async def create_project(
         name: str = Form(...),
+        document_adapter: str = Form("txt"),
         files: list[UploadFile] = File(...),
     ) -> dict[str, Any]:
         if not files:
@@ -107,6 +113,7 @@ def create_app(
             path, summary = init_project(
                 inputs,
                 name=name,
+                document_adapter_id=document_adapter,
                 projects_root=projects_root,
             )
         summary["project_path"] = str(path)

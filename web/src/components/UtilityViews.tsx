@@ -64,10 +64,17 @@ export function ExportView({ project }: { project: string }) {
 
 export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
   const [name, setName] = useState("");
+  const [adapter, setAdapter] = useState("txt");
+  const [adapters, setAdapters] = useState<Array<{ adapter_id: string; capabilities: string[] }>>([]);
   const [files, setFiles] = useState<FileList | null>(null);
+  useEffect(() => {
+    void api<{ adapters: Array<{ adapter_id: string; capabilities: string[] }> }>("/api/v1/document-adapters")
+      .then((value) => setAdapters(value.adapters));
+  }, []);
   async function submit() {
     const body = new FormData();
     body.append("name", name);
+    body.append("document_adapter", adapter);
     Array.from(files ?? []).forEach((file) => body.append("files", file));
     await api("/api/v1/projects", { method: "POST", body });
     onCreated(name);
@@ -77,7 +84,20 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
       <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
         <h2>新建项目</h2>
         <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>TXT 文件<input type="file" accept=".txt,text/plain" multiple onChange={(event) => setFiles(event.target.files)} /></label>
+        <label>文档格式
+          <select value={adapter} onChange={(event) => { setAdapter(event.target.value); setFiles(null); }}>
+            {adapters.map((item) => <option key={item.adapter_id} value={item.adapter_id}>{item.adapter_id.toUpperCase()}</option>)}
+          </select>
+        </label>
+        <label>输入文件
+          <input
+            key={adapter}
+            type="file"
+            accept={adapter === "epub" ? ".epub,application/epub+zip" : ".txt,text/plain"}
+            multiple={adapter === "txt"}
+            onChange={(event) => setFiles(event.target.files)}
+          />
+        </label>
         <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name || !files?.length} onClick={submit}>创建项目</button></div>
       </div>
     </div>

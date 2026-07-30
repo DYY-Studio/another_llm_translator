@@ -14,7 +14,8 @@ from typing import Iterable
 import chardet
 
 from .config import load_config
-from .errors import ConfigError, ProjectError, UsageError
+from .documents import DocumentImport, ImportedFile
+from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .llm_adapter import load_json_adapter
 from .storage import (
     atomic_write_json,
@@ -161,6 +162,97 @@ def decode_txt(
     return text, detected, used, confidence, warnings
 
 
+class TXTDocumentAdapter:
+    adapter_id = "txt"
+    version = "1"
+    capabilities = frozenset({"import", "translated_export", "bilingual_export"})
+
+    def import_sources(
+        self,
+        inputs: list[str],
+        *,
+        recursive: bool,
+        config: dict[str, object],
+    ) -> DocumentImport:
+        discovered = discover_inputs(inputs, recursive)
+        files: list[ImportedFile] = []
+        warnings: list[str] = []
+        input_config = config["input"]
+        if not isinstance(input_config, dict):
+            raise ConfigError("input 配置节无效")
+        for item in discovered:
+            text, detected, used, confidence, file_warnings = decode_txt(
+                item.path.read_bytes(),
+                confidence_threshold=float(
+                    input_config["encoding_confidence_threshold"]
+                ),
+                fallback_encoding=str(input_config["fallback_encoding"]),
+            )
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            files.append(
+                ImportedFile(
+                    source_path=item.path,
+                    original_name=item.original_name,
+                    segments=tuple(normalized.split("\n")),
+                    encoding_detected=detected,
+                    encoding_used=used,
+                    encoding_confidence=confidence,
+                )
+            )
+            warnings.extend(
+                f"{item.original_name}: {warning}"
+                for warning in file_warnings
+            )
+        return DocumentImport(files=tuple(files), warnings=tuple(warnings))
+
+    def export_sources(
+        self,
+        *,
+        project: Path,
+        staging_dir: Path,
+        files: list[dict[str, object]],
+        segments: list[dict[str, object]],
+        output_text: dict[str, str],
+        bilingual: bool,
+        output_encoding: str,
+        opaque_state: dict[str, object] | None,
+    ) -> list[Path]:
+        del project, opaque_state
+        by_file: dict[str, list[dict[str, object]]] = {}
+        for segment in segments:
+            by_file.setdefault(str(segment["file_id"]), []).append(segment)
+        generated: list[Path] = []
+        for file_record in sorted(
+            files, key=lambda item: int(item["file_order"])
+        ):
+            lines: list[str] = []
+            for segment in sorted(
+                by_file[str(file_record["file_id"])],
+                key=lambda item: int(item["line_index"]),
+            ):
+                if segment["is_empty"]:
+                    lines.append("")
+                elif bilingual:
+                    lines.append(str(segment["source"]))
+                    lines.append(output_text[str(segment["segment_id"])])
+                else:
+                    lines.append(output_text[str(segment["segment_id"])])
+            relative = Path(str(file_record["original_name"]))
+            try:
+                payload = "\n".join(lines).encode(
+                    output_encoding, errors="strict"
+                )
+            except UnicodeEncodeError as exc:
+                raise IncompleteError(
+                    f"输出编码 {output_encoding} 无法表示 {relative}: {exc}"
+                ) from exc
+            destination = staging_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            generated.append(relative)
+        return generated
+
+
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
     config = load_config(app_root / "config" / "config.toml")
     adapter_id = str(config["llm"]["adapter"])
@@ -208,6 +300,7 @@ def init_project(
     *,
     name: str,
     recursive: bool = False,
+    document_adapter_id: str = "txt",
     dry_run: bool = False,
     app_root: Path = APP_ROOT,
     projects_root: Path | None = None,
@@ -223,30 +316,25 @@ def init_project(
     projects_root = projects_root or app_root / "projects"
     global_config = load_config(app_root / "config" / "config.toml")
     global_hash = bundle_hash(app_root)
-    files = discover_inputs(inputs, recursive)
-    decoded: list[tuple[InputFile, str, str, str, float, list[str]]] = []
-    for item in files:
-        text, detected, used, confidence, warnings = decode_txt(
-            item.path.read_bytes(),
-            confidence_threshold=global_config["input"][
-                "encoding_confidence_threshold"
-            ],
-            fallback_encoding=global_config["input"]["fallback_encoding"],
+    from .plugins import get_document_adapter
+
+    document_adapter = get_document_adapter(document_adapter_id)
+    if "import" not in document_adapter.capabilities:
+        raise UsageError(
+            f"Document Adapter 不支持导入：{document_adapter.adapter_id}"
         )
-        decoded.append((item, text, detected, used, confidence, warnings))
+    imported = document_adapter.import_sources(
+        inputs,
+        recursive=recursive,
+        config=global_config,
+    )
 
     summary: dict[str, object] = {
         "project_name": name,
-        "file_count": len(decoded),
-        "segment_count": sum(
-            len(text.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
-            for _, text, *_ in decoded
-        ),
-        "warnings": [
-            f"{item.original_name}: {warning}"
-            for item, _, _, _, _, warnings in decoded
-            for warning in warnings
-        ],
+        "document_adapter": document_adapter.adapter_id,
+        "file_count": len(imported.files),
+        "segment_count": sum(len(item.segments) for item in imported.files),
+        "warnings": list(imported.warnings),
     }
     if dry_run:
         return None, summary
@@ -261,18 +349,15 @@ def init_project(
         _copy_bundle(app_root, temp)
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
-        for file_order, (item, text, detected, used, confidence, _) in enumerate(
-            decoded, start=1
-        ):
+        for file_order, item in enumerate(imported.files, start=1):
             file_id = f"F{file_order:04d}"
             relative = Path(item.original_name)
             stored_name = relative.parent / f"{file_id}__{relative.name}"
             stored_path = temp / "input" / stored_name
             stored_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item.path, stored_path)
+            shutil.copy2(item.source_path, stored_path)
 
-            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-            segments = normalized.split("\n")
+            segments = item.segments
             file_records.append(
                 record_header(
                     "source_file",
@@ -282,9 +367,9 @@ def init_project(
                     file_order=file_order,
                     original_name=item.original_name,
                     stored_name=stored_name.as_posix(),
-                    encoding_detected=detected,
-                    encoding_confidence=confidence,
-                    encoding_used=used,
+                    encoding_detected=item.encoding_detected,
+                    encoding_confidence=item.encoding_confidence,
+                    encoding_used=item.encoding_used,
                     segment_count=len(segments),
                 )
             )
@@ -305,6 +390,25 @@ def init_project(
 
         write_jsonl(temp / "source" / "files.jsonl", file_records)
         write_jsonl(temp / "source" / "segments.jsonl", segment_records)
+        state_path = None
+        if imported.opaque_state is not None:
+            state_path = (
+                Path("source")
+                / "adapters"
+                / document_adapter.adapter_id
+                / "state.json"
+            )
+            atomic_write_json(
+                temp / state_path,
+                record_header(
+                    "document_adapter_state",
+                    project_id,
+                    record_id=f"DOCUMENT-{document_adapter.adapter_id}",
+                    adapter_id=document_adapter.adapter_id,
+                    adapter_version=document_adapter.version,
+                    state=imported.opaque_state,
+                ),
+            )
         (temp / "terminology").mkdir(parents=True, exist_ok=True)
         (temp / "stages").mkdir(parents=True, exist_ok=True)
         (temp / "runs").mkdir(parents=True, exist_ok=True)
@@ -329,6 +433,11 @@ def init_project(
                 global_bundle_hash_seen=global_hash,
                 file_count=len(file_records),
                 segment_count=len(segment_records),
+                document_adapter_id=document_adapter.adapter_id,
+                document_adapter_version=document_adapter.version,
+                document_adapter_state=(
+                    state_path.as_posix() if state_path is not None else None
+                ),
                 status="active",
             ),
         )

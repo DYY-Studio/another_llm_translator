@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("inputs", nargs="+")
     init.add_argument("--name", required=True)
     init.add_argument("--recursive", action="store_true")
+    init.add_argument(
+        "--document-adapter",
+        default="txt",
+        help="输入输出格式 Adapter ID（默认：txt）",
+    )
     init.add_argument("--dry-run", action="store_true")
 
     inspect = subparsers.add_parser("inspect", help="检查项目状态")
@@ -81,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply_selectors.add_argument("--only-file")
     apply_selectors.add_argument("--only-segment")
 
-    export = subparsers.add_parser("export", help="导出 TXT")
+    export = subparsers.add_parser("export", help="按项目文档格式导出")
     export.add_argument("project")
     export.add_argument(
         "--stage", choices=("translated", "proofread", "polished"), required=True
@@ -102,6 +107,7 @@ def run(argv: list[str] | None = None) -> int:
             args.inputs,
             name=args.name,
             recursive=args.recursive,
+            document_adapter_id=args.document_adapter,
             dry_run=args.dry_run,
         )
         if path is not None:

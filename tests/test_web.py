@@ -74,6 +74,8 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
         "first.txt",
         "second.txt",
     ]
+    adapters = client.get("/api/v1/document-adapters").json()["adapters"]
+    assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
 
 
 def test_web_adapter_validation_preview_and_secret_redaction(
