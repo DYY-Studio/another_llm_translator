@@ -166,8 +166,15 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert ".segment-row-boundary" in css.text
     assert ".segment-row:after" not in css.text
     assert ".settings-navigation{position:sticky;top:58px" in css.text
+    assert "grid-template-rows:auto minmax(0,1fr)" in css.text
+    assert ".config-settings{height:100%;min-height:0;overflow:auto;padding:0 30px 30px" in css.text
+    assert ".settings-sticky-heading{position:sticky;top:0;z-index:2;margin:0 -30px 24px" in css.text
     assert ".preset-list-body" in css.text
     assert ".preset-editor-body" in css.text
+    assert 'grid-template:"list-heading editor-heading" auto "list-body editor-body"' in css.text
+    assert ".preset-list-body{grid-area:list-body" in css.text
+    assert "padding:0 0 24px" in css.text
+    assert ".preset-list{" not in css.text
     assert "height:clamp(360px,52vh,520px)" in css.text
     for text in (
         "terms-workspace",
