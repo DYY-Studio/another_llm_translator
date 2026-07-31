@@ -177,8 +177,9 @@ def descriptor() -> PluginDescriptor:
 
 Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，
 并保存端点、模型、鉴权环境变量名、模型 Token 能力和
-端点限速等连接设置。项目引用 Preset ID；Run 保存实际解析的 Preset 快照，
-阶段指纹包含 Preset ID 和定义内容 Hash。
+端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色
+分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
+快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
 
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等
 端点专属请求字段：

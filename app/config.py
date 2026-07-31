@@ -13,6 +13,7 @@ from .llm_preset import LLMPreset, load_llm_preset, preset_path
 
 
 APP_ROOT = Path(__file__).parents[1]
+LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
 
 
 SCHEMA: dict[str, Any] = {
@@ -20,6 +21,10 @@ SCHEMA: dict[str, Any] = {
     "input": {"encoding_confidence_threshold": None, "fallback_encoding": None},
     "llm": {
         "preset": None,
+        "preset_terminology": None,
+        "preset_translation": None,
+        "preset_proofreading": None,
+        "preset_polishing": None,
         "temperature_terminology": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
@@ -99,6 +104,10 @@ def validate_config(config: dict[str, Any]) -> None:
     preset_id = config["llm"]["preset"]
     if not isinstance(preset_id, str) or not preset_id.strip():
         raise ConfigError("llm.preset 必须是非空字符串")
+    for stage in LLM_STAGES:
+        value = config["llm"][f"preset_{stage}"]
+        if not isinstance(value, str):
+            raise ConfigError(f"llm.preset_{stage} 必须是字符串")
     for section, key in (
         ("project", "output_encoding"),
         ("input", "fallback_encoding"),
@@ -275,11 +284,15 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def load_project_config(
-    project: Path, *, presets_root: Path | None = None
+    project: Path,
+    *,
+    stage: str | None = None,
+    presets_root: Path | None = None,
 ) -> dict[str, Any]:
     return resolve_project_config(
         load_config(project / "config.toml"),
         project,
+        stage=stage,
         presets_root=presets_root,
     )
 
@@ -288,10 +301,11 @@ def resolve_project_config(
     config: dict[str, Any],
     project: Path,
     *,
+    stage: str | None = None,
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    configured_preset_id = str(config["llm"]["preset"])
+    configured_preset_id = _preset_id_for_stage(config, stage)
     preset_file = preset_path(presets_root or APP_ROOT, configured_preset_id)
     preset = load_llm_preset(preset_file)
     if preset.preset_id != configured_preset_id:
@@ -308,10 +322,10 @@ def load_global_config(root: Path) -> dict[str, Any]:
 
 
 def resolve_global_config(
-    config: dict[str, Any], root: Path
+    config: dict[str, Any], root: Path, *, stage: str | None = None
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    configured_preset_id = str(config["llm"]["preset"])
+    configured_preset_id = _preset_id_for_stage(config, stage)
     preset = load_llm_preset(preset_path(root, configured_preset_id))
     if preset.preset_id != configured_preset_id:
         raise ConfigError("LLM Preset 文件中的 preset_id 与全局配置不一致")
@@ -320,6 +334,13 @@ def resolve_global_config(
         adapter_file=root / "llm_adapters" / f"{preset.adapter_id}.json",
         preset=preset,
     )
+
+
+def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
+    if stage is not None and stage not in LLM_STAGES:
+        raise ConfigError(f"未知 LLM 阶段：{stage}")
+    override = config["llm"].get(f"preset_{stage}", "") if stage else ""
+    return str(override or config["llm"]["preset"])
 
 
 def load_run_config(run_dir: Path) -> dict[str, Any]:

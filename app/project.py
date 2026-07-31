@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 import chardet
 
-from .config import load_config
+from .config import LLM_STAGES, load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .llm_adapter import load_json_adapter
@@ -243,24 +243,38 @@ class TXTDocumentAdapter:
         return [relative]
 
 
-def _global_adapter_id(config: dict[str, Any], app_root: Path) -> str:
-    preset_id = str(config["llm"]["preset"])
-    return load_llm_preset(preset_path(app_root, preset_id)).adapter_id
+def _global_adapter_ids(config: dict[str, Any], app_root: Path) -> list[str]:
+    preset_ids = {str(config["llm"]["preset"])}
+    preset_ids.update(
+        str(config["llm"][f"preset_{stage}"])
+        for stage in LLM_STAGES
+        if config["llm"][f"preset_{stage}"]
+    )
+    return sorted(
+        {
+            load_llm_preset(preset_path(app_root, preset_id)).adapter_id
+            for preset_id in preset_ids
+        }
+    )
 
 
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
     config = load_config(app_root / "config" / "config.toml")
-    adapter_id = _global_adapter_id(config, app_root)
-    adapter = load_json_adapter(
-        app_root / "llm_adapters" / f"{adapter_id}.json"
-    )
-    if adapter.adapter_id != adapter_id:
-        raise ConfigError(
-            "全局 LLM Adapter 文件中的 adapter_id 与配置不一致"
+    adapter_ids = _global_adapter_ids(config, app_root)
+    for adapter_id in adapter_ids:
+        adapter = load_json_adapter(
+            app_root / "llm_adapters" / f"{adapter_id}.json"
         )
+        if adapter.adapter_id != adapter_id:
+            raise ConfigError(
+                "全局 LLM Adapter 文件中的 adapter_id 与配置不一致"
+            )
     paths = [app_root / "config" / "config.toml"] + [
         app_root / "prompts" / name for name in PROMPT_NAMES
-    ] + [app_root / "llm_adapters" / f"{adapter_id}.json"]
+    ] + [
+        app_root / "llm_adapters" / f"{adapter_id}.json"
+        for adapter_id in adapter_ids
+    ]
     digest = hashlib.sha256()
     for path in paths:
         if not path.is_file():
@@ -281,13 +295,13 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
     for name in PROMPT_NAMES:
         shutil.copy2(source_root / "prompts" / name, prompt_target / name)
     config = load_config(source_root / "config" / "config.toml")
-    adapter_id = _global_adapter_id(config, source_root)
-    adapter_source = source_root / "llm_adapters" / f"{adapter_id}.json"
-    if not adapter_source.is_file():
-        raise ConfigError(f"全局 LLM Adapter 缺失：{adapter_source}")
     adapter_target = target / "llm_adapters"
     adapter_target.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(adapter_source, adapter_target / adapter_source.name)
+    for adapter_id in _global_adapter_ids(config, source_root):
+        adapter_source = source_root / "llm_adapters" / f"{adapter_id}.json"
+        if not adapter_source.is_file():
+            raise ConfigError(f"全局 LLM Adapter 缺失：{adapter_source}")
+        shutil.copy2(adapter_source, adapter_target / adapter_source.name)
 
 
 def init_project(
@@ -877,10 +891,12 @@ def sync_global_templates(
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
     global_config = load_config(app_root / "config" / "config.toml")
-    adapter_id = _global_adapter_id(global_config, app_root)
     bundle_files = [Path("config.toml")] + [
         Path("prompts") / name for name in PROMPT_NAMES
-    ] + [Path("llm_adapters") / f"{adapter_id}.json"]
+    ] + [
+        Path("llm_adapters") / f"{adapter_id}.json"
+        for adapter_id in _global_adapter_ids(global_config, app_root)
+    ]
     changed = []
     for relative in bundle_files:
         global_path = (

@@ -619,7 +619,7 @@ def choose_running_run(
         )
     if action is None:
         old_config = load_run_config(project / "runs" / run_id)
-        current_config = load_project_config(project)
+        current_config = load_project_config(project, stage=stage)
         scope = latest.get("scope", {})
         print(
             f"{warning}\n"

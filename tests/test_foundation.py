@@ -44,6 +44,47 @@ def make_app_root(tmp_path: Path) -> Path:
     return root
 
 
+def test_init_copies_adapters_for_global_and_stage_presets(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    adapter = json.loads(
+        (app_root / "llm_adapters" / "openai-compatible.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    adapter["adapter_id"] = "alternate"
+    (app_root / "llm_adapters" / "alternate.json").write_text(
+        json.dumps(adapter), encoding="utf-8"
+    )
+    preset = json.loads(
+        (app_root / "llm_presets" / "default.json").read_text(encoding="utf-8")
+    )
+    preset.update(preset_id="alternate", adapter_id="alternate")
+    (app_root / "llm_presets" / "alternate.json").write_text(
+        json.dumps(preset), encoding="utf-8"
+    )
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset_translation = ""',
+            'preset_translation = "alternate"',
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+
+    project, _ = init_project(
+        [str(source)],
+        name="stage-adapters",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+
+    assert project is not None
+    assert (project / "llm_adapters" / "openai-compatible.json").is_file()
+    assert (project / "llm_adapters" / "alternate.json").is_file()
+
+
 def test_config_rejects_unknown_key(tmp_path: Path) -> None:
     config = Path(__file__).parents[1] / "config" / "config.toml"
     text = config.read_text(encoding="utf-8").replace(

@@ -55,7 +55,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         manifest = candidates[0]
         run_id = str(manifest["run_id"])
         old_config = load_run_config(project / "runs" / run_id)
-        current_config = load_project_config(project)
+        current_config = load_project_config(project, stage=stage)
         running_run = {
             "run_id": run_id,
             "started_at": manifest.get("started_at"),
