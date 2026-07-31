@@ -174,8 +174,8 @@ export function SegmentWorkspace({
             </div>
             {stage !== "translation" && (
               <div className="review-controls">
-                <label><input type="radio" checked={reviewStatus === "accepted"} onChange={() => setReviewStatus("accepted")} /> 接受当前基准</label>
-                <label><input type="radio" checked={reviewStatus === "suggested"} onChange={() => setReviewStatus("suggested")} /> 使用建议修改</label>
+                <label className="radio-option"><input type="radio" checked={reviewStatus === "accepted"} onChange={() => setReviewStatus("accepted")} />接受当前基准</label>
+                <label className="radio-option"><input type="radio" checked={reviewStatus === "suggested"} onChange={() => setReviewStatus("suggested")} />使用建议修改</label>
                 <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="修改原因（可选）" />
               </div>
             )}

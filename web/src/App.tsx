@@ -116,6 +116,7 @@ export default function App() {
         onCreate={() => setCreateOpen(true)}
         onRun={startRun}
         onCancel={cancelRun}
+        canRun={Boolean(runnable[stage])}
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
       >
