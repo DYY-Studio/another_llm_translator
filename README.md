@@ -77,8 +77,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 1（空项目与同格式文件增删）；下一阶段是 Web
-结构化项目设置。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 2（Web 结构化项目设置）；下一阶段是全局设置、
+Prompt 与实时 LLM Preset。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 
@@ -94,8 +94,9 @@ python -m app.web
 
 打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
 限速与恢复逻辑，不建立第二套数据库。可创建空的或带文件的 TXT/EPUB 项目，
-并在概览追加或批量移除同格式源文件；也可编辑配置、Prompt
-和 JSON LLM Adapter，运行或取消阶段任务，并审校、apply 与导出。术语工作区
+并在概览追加或批量移除同格式源文件；项目配置通过覆盖全部现有字段的分组
+表单编辑，Prompt 和 JSON LLM Adapter 保持独立高级编辑器。也可运行或取消
+阶段任务，并审校、apply 与导出。术语工作区
 支持搜索、冲突裁决、JSON/CSV 导入导出、新增、编辑、移除和恢复；术语与
 Segment 列表支持 Ctrl/Cmd/Shift 经典多选。翻译、校对和润色可按所选或当前
 过滤范围清除结果，校对和润色还可批量应用建议。顶栏外观按钮可在跟随系统、
