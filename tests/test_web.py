@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.editor import EditorStore
 from app.errors import UsageError
+from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
+from app.storage import append_jsonl, atomic_write_json, read_json, record_header
 from app.web import create_app
+from app.web_tasks import WebTaskManager
 from tests.test_editor import seed_conflicted_terms
 from tests.test_foundation import make_app_root
 
@@ -224,6 +228,224 @@ def test_web_adapter_validation_preview_and_secret_redaction(
     ).json()
     assert preview["headers"]["Authorization"] == "Bearer ***"
     assert "***" not in json.dumps(preview["body"])
+
+
+def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    store = EditorStore(project)
+    segment_id = store.overview()["segments"][0]["segment_id"]
+    store.save_translation({"segment_id": segment_id, "text": "一"})
+    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path.write_text(
+        prompt_path.read_text(encoding="utf-8") + "\nchanged",
+        encoding="utf-8",
+    )
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+
+    options = client.get(
+        "/api/v1/projects/sample/task-options/translation"
+    )
+    assert options.status_code == 200
+    assert options.json()["selected"] == 2
+    assert options.json()["completed"] == 1
+    assert options.json()["current_fingerprint_completed"] == 0
+    assert options.json()["mismatched_fingerprint_completed"] == 1
+    assert options.json()["running_run"] is None
+
+    undecided = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation"},
+    )
+    assert undecided.status_code == 400
+    assert "必须明确选择复用或 force" in undecided.json()["error"]
+    assert app.state.tasks.tasks == {}
+
+    invalid_boolean = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "force": "true"},
+    )
+    assert invalid_boolean.status_code == 400
+    assert "force 必须是布尔值" in invalid_boolean.json()["error"]
+    conflicting = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={
+            "stage": "translation",
+            "force": True,
+            "reuse_mixed_fingerprints": True,
+        },
+    )
+    assert conflicting.status_code == 400
+    assert "不能同时使用" in conflicting.json()["error"]
+    assert app.state.tasks.tasks == {}
+
+
+def test_web_task_options_require_explicit_running_run_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, _ = create_run(
+        project,
+        stage="translation",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_translation(
+        _: Path,
+        scope: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append({"force": scope.force, **kwargs})
+        return {"failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    app = create_app(projects_root=projects_root)
+    with TestClient(app) as client:
+        options = client.get(
+            "/api/v1/projects/sample/task-options/translation"
+        ).json()
+        assert options["running_run"]["run_id"] == run_id
+        assert options["running_run"]["scope"]["all_nonempty"] is True
+        assert options["running_run"]["previous"]["model"]
+        assert options["running_run"]["current"]["endpoint"]
+
+        undecided = client.post(
+            "/api/v1/projects/sample/tasks",
+            json={"stage": "translation"},
+        )
+        assert undecided.status_code == 400
+        assert "必须选择续用或结束并新建" in undecided.json()["error"]
+        assert app.state.tasks.tasks == {}
+
+        ignored_options = client.post(
+            "/api/v1/projects/sample/tasks",
+            json={
+                "stage": "translation",
+                "run_action": "resume",
+                "force": True,
+            },
+        )
+        assert ignored_options.status_code == 400
+        assert "续用 Run 时不能" in ignored_options.json()["error"]
+        assert app.state.tasks.tasks == {}
+
+        resumed = client.post(
+            "/api/v1/projects/sample/tasks",
+            json={"stage": "translation", "run_action": "resume"},
+        )
+        assert resumed.status_code == 200
+        task_id = resumed.json()["task_id"]
+        for _ in range(20):
+            state = client.get(f"/api/v1/tasks/{task_id}").json()
+            if state["status"] == "completed":
+                break
+        assert state["status"] == "completed"
+        assert calls[0]["resume_run_id"] == run_id
+        assert calls[0]["force"] is False
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    store = EditorStore(project)
+    segment_id = store.overview()["segments"][0]["segment_id"]
+    store.save_translation({"segment_id": segment_id, "text": "一"})
+    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path.write_text(
+        prompt_path.read_text(encoding="utf-8") + "\nchanged",
+        encoding="utf-8",
+    )
+    calls: list[tuple[bool, bool]] = []
+
+    async def fake_translation(
+        _: Path,
+        scope: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append(
+            (scope.force, bool(kwargs["reuse_mixed_fingerprints"]))
+        )
+        return {"failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager()
+    forced = await manager.start(
+        project,
+        "translation",
+        scope=Scope(force=True),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[forced["task_id"]].asyncio_task
+    reused = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=True,
+        run_action=None,
+    )
+    await manager.tasks[reused["task_id"]].asyncio_task
+    assert calls == [(True, False), (False, True)]
+
+
+def test_web_task_options_include_completed_terminology_scans(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    project_id = str(read_json(project / "project.json")["project_id"])
+    task_id = "TERM-TASK-COMPLETED"
+    atomic_write_json(
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            project_id,
+            record_id=task_id,
+            active_task_id=task_id,
+            status="completed",
+            initial_stage_fingerprint="old",
+        ),
+    )
+    append_jsonl(
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            project_id,
+            stage="terminology",
+            segment_id="F0001-S000001",
+            status="completed",
+            active_task_id=task_id,
+            stage_fingerprint="old",
+            run_id="RUN-OLD",
+            request_id="REQ-OLD",
+        ),
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+    options = client.get(
+        "/api/v1/projects/sample/task-options/terminology"
+    ).json()
+    assert options["completed"] == 1
+    assert options["pending"] == 1
+    assert options["mismatched_fingerprint_completed"] == 1
 
 
 def test_project_write_lock_rejects_second_writer(tmp_path: Path) -> None:

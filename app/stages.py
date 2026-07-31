@@ -3084,7 +3084,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     active_path = project / "terminology" / "active_task.json"
     if active_path.exists():
         active = read_json(active_path)
-        if active.get("status") == "active":
+        if active.get("status") in {"active", "completed"}:
             scans = [
                 item
                 for item in read_jsonl(
