@@ -13,7 +13,7 @@ from .errors import ConfigError, ExternalError
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([a-z_][a-z0-9_]*)\}")
 _BODY_PLACEHOLDERS = frozenset(
-    {"model", "messages", "temperature", "max_output_tokens", "stream"}
+    {"model", "system", "messages", "temperature", "max_output_tokens", "stream"}
 )
 _HEADER_PLACEHOLDERS = _BODY_PLACEHOLDERS | {"api_key"}
 _REQUIRED_ADAPTER_KEYS = frozenset(
@@ -25,7 +25,10 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
         "response_content_pointer",
     }
 )
-_OPTIONAL_ADAPTER_KEYS = frozenset({"response_reasoning_content_pointer"})
+_OPTIONAL_ADAPTER_KEYS = frozenset(
+    {"messages_format", "response_reasoning_content_pointer"}
+)
+_MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ class JSONLLMAdapter:
     body_template: dict[str, Any]
     response_content_pointer: str
     response_reasoning_content_pointer: str | None
+    messages_format: str
     digest: str
     definition: dict[str, Any]
 
@@ -58,7 +62,8 @@ class JSONLLMAdapter:
         values: dict[str, Any] = {
             "api_key": api_key,
             "model": model,
-            "messages": messages,
+            "system": _extract_system(messages),
+            "messages": _transform_messages(messages, self.messages_format),
             "temperature": temperature,
             "max_output_tokens": max_output_tokens,
             "stream": stream,
@@ -118,7 +123,7 @@ class JSONLLMAdapter:
         token = tokens[-1]
         try:
             if isinstance(parent, list):
-                if token == "-" or not token.isdecimal():
+                if not _is_index(token):
                     raise KeyError(token)
                 parent[int(token)] = content
             elif isinstance(parent, dict):
@@ -158,6 +163,9 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         or not re.fullmatch(r"[a-z][a-z0-9-]*", adapter_id)
     ):
         raise ConfigError("LLM Adapter adapter_id 格式无效")
+    messages_format = value.get("messages_format", "openai")
+    if not isinstance(messages_format, str) or messages_format not in _MESSAGES_FORMATS:
+        raise ConfigError("LLM Adapter messages_format 无效")
     headers = value["headers"]
     if not isinstance(headers, dict) or not all(
         isinstance(name, str)
@@ -196,6 +204,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         body_template=deepcopy(body),
         response_content_pointer=pointer,
         response_reasoning_content_pointer=reasoning_pointer,
+        messages_format=messages_format,
         digest=digest,
         definition=deepcopy(value),
     )
@@ -258,6 +267,38 @@ def _render_body(value: Any, values: dict[str, Any]) -> Any:
     return value
 
 
+def _extract_system(messages: list[dict[str, str]]) -> str:
+    return "\n\n".join(
+        message["content"]
+        for message in messages
+        if message["role"] == "system"
+    )
+
+
+def _transform_messages(
+    messages: list[dict[str, str]], messages_format: str
+) -> list[dict[str, Any]]:
+    if messages_format == "openai":
+        return messages
+    if messages_format == "anthropic":
+        return [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message["role"] in ("user", "assistant")
+        ]
+    if messages_format == "gemini":
+        role = {"user": "user", "assistant": "model"}
+        return [
+            {
+                "role": role[message["role"]],
+                "parts": [{"text": message["content"]}],
+            }
+            for message in messages
+            if message["role"] in ("user", "assistant")
+        ]
+    raise ConfigError("LLM Adapter messages_format 无效")
+
+
 def _parse_json_pointer(pointer: str) -> list[str]:
     if pointer == "":
         return []
@@ -276,6 +317,14 @@ def _parse_json_pointer(pointer: str) -> list[str]:
     return [token.replace("~1", "/").replace("~0", "~") for token in tokens]
 
 
+def _is_index(token: str) -> bool:
+    if token == "-":
+        return False
+    if token.startswith("-"):
+        return token[1:].isdecimal()
+    return token.isdecimal()
+
+
 def _resolve_json_pointer(value: Any, pointer: str) -> Any:
     return _resolve_json_pointer_tokens(value, _parse_json_pointer(pointer))
 
@@ -285,7 +334,7 @@ def _resolve_json_pointer_tokens(value: Any, tokens: list[str]) -> Any:
     try:
         for token in tokens:
             if isinstance(current, list):
-                if token == "-" or not token.isdecimal():
+                if not _is_index(token):
                     raise KeyError(token)
                 current = current[int(token)]
             elif isinstance(current, dict):

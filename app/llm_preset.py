@@ -84,6 +84,8 @@ def load_llm_preset(path: Path) -> LLMPreset:
     ):
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
+    if "${" in value["endpoint"].replace("${model}", ""):
+        raise ConfigError("LLM Preset endpoint 只允许 ${model} 占位符")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
     parsed_base = urlsplit(value["base_url"])
