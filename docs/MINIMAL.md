@@ -1267,6 +1267,8 @@ python -m app.main run-all PROJECT
 - `files-add`：追加源文件；内置 TXT/EPUB 可按扩展名识别，外部或其他扩展名
   使用 `--document-adapter`。TXT 目录支持 `--recursive`。
 - `files-remove`：按 File ID 从活动项目移除文件，不清理历史结果。
+- `export --file FILE_ID`：只导出指定活动 File；参数可重复。省略时导出全部
+  活动 File，未知、重复或显式空范围在发布前失败。
 
 两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
 `--decline-run` 直接按当前范围创建新 Run。`--dry-run` 不询问、不修改
@@ -1351,9 +1353,12 @@ XHTML 槽位。
 ```bash
 python -m app.main export PROJECT --stage translated --format original
 python -m app.main export PROJECT --stage translated --format txt
+python -m app.main export PROJECT --stage translated --file F0001 --file F0003
 ```
 
 除各 File 来源格式和 TXT 外，不提供任意格式转换。
+文件范围同时适用于原格式和 TXT；只校验所选 File 的阶段结果。宿主保持
+`file_order`，不提供按 Segment 导出或跨 File 合并。
 
 `--allow-missing` 回退：
 
@@ -1385,7 +1390,8 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
 本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
-追加或经典多选移除 TXT/EPUB 源文件。项目配置使用覆盖全部现有字段的分组表单；
+追加或经典多选移除 TXT/EPUB 源文件。导出页用 Ctrl/Cmd/Shift 经典多选限定
+文件范围，未选择时导出全部。项目配置使用覆盖全部现有字段的分组表单；
 项目 Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还提供全局配置、
 全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工

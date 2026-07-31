@@ -3366,13 +3366,34 @@ def export_project(
     bilingual: bool,
     allow_missing: bool,
     output_format: str = "original",
+    file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     if export_stage not in {"translated", "proofread", "polished"}:
-        raise ValueError(f"unsupported export stage: {export_stage}")
+        raise UsageError(f"不支持的导出阶段：{export_stage}")
     if output_format not in {"original", "txt"}:
-        raise ValueError(f"unsupported output format: {output_format}")
+        raise UsageError(f"不支持的导出格式：{output_format}")
     logger = get_logger("export")
-    config, metadata, files, segments = _project_context(project, dry_run=False)
+    config, _, files, segments = _project_context(project, dry_run=False)
+    if file_ids is not None:
+        if not file_ids:
+            raise UsageError("导出文件范围不能为空")
+        if len(file_ids) != len(set(file_ids)):
+            raise UsageError("导出文件 ID 不能重复")
+        known_file_ids = {str(item["file_id"]) for item in files}
+        unknown = [
+            file_id for file_id in file_ids if file_id not in known_file_ids
+        ]
+        if unknown:
+            raise UsageError(f"未知文件 ID：{', '.join(unknown)}")
+        selected_file_ids = set(file_ids)
+        files = [
+            item for item in files if str(item["file_id"]) in selected_file_ids
+        ]
+        segments = [
+            item
+            for item in segments
+            if str(item["file_id"]) in selected_file_ids
+        ]
     _require_nonempty_segments(segments)
     stage_name = {
         "translated": "translation",
@@ -3549,6 +3570,7 @@ def export_project(
         "stage": export_stage,
         "bilingual": bilingual,
         "format": output_format,
+        "selected_file_ids": [str(item["file_id"]) for item in files],
         "files": len(written),
         "written": written,
         "fallback_segments": fallback_records,

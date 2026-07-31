@@ -734,6 +734,12 @@ def create_app(
     @app.post("/api/v1/projects/{name}/export")
     async def export(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         root = project(name)
+        file_ids = payload.get("file_ids")
+        if file_ids is not None and (
+            not isinstance(file_ids, list)
+            or not all(isinstance(value, str) and value for value in file_ids)
+        ):
+            raise UsageError("file_ids 必须是字符串数组或 null")
         with project_write_lock(root):
             return export_project(
                 root,
@@ -741,6 +747,7 @@ def create_app(
                 bilingual=bool(payload.get("bilingual", False)),
                 allow_missing=bool(payload.get("allow_missing", False)),
                 output_format=str(payload.get("format", "original")),
+                file_ids=file_ids,
             )
 
     @app.post("/api/v1/projects/{name}/sync-templates")

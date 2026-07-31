@@ -54,6 +54,7 @@ python -m app.main init --empty --name novel
 python -m app.main files-add novel chapter-1.txt chapter-2.txt
 python -m app.main files-add novel appendix.epub
 python -m app.main files-remove novel F0001
+python -m app.main export novel --stage translated --file F0002
 ```
 
 每个 File 保存自己的 TXT/EPUB 来源 Adapter；原格式导出逐 File 重建，也可用
@@ -81,8 +82,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 5（File 级 Document Adapter 与多格式项目）；下一
-阶段是按文件筛选导出。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 6（按文件筛选导出）；下一阶段是四阶段独立 LLM
+Preset。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 

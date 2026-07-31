@@ -14,7 +14,7 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 5 已完成；下一阶段是按文件筛选导出。
+- 产品路线 Stage 1 至 Stage 6 已完成；下一阶段是四阶段独立 LLM Preset。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -104,7 +104,7 @@ Preset 并切换”的明确迁移操作；新项目只使用 Preset，旧兼容
   转为 TXT。
 - 不建立通用 DOM、排版树或跨格式中间文档模型。
 
-## Stage 6：按文件筛选导出
+## Stage 6：按文件筛选导出（已完成）
 
 - CLI export 增加 File ID 范围选择。
 - Web 导出页使用经典 Ctrl/Cmd/Shift 多选。

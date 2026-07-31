@@ -151,7 +151,7 @@ export default function App() {
     else if (stage === "terminology") content = <TermsView project={project} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} />;
-    } else if (stage === "export") content = <ExportView project={project} />;
+    } else if (stage === "export") content = <ExportView project={project} overview={overview} />;
   }
 
   return (

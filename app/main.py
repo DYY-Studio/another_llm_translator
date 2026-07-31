@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument(
         "--format", choices=("original", "txt"), default="original"
     )
+    export.add_argument(
+        "--file",
+        dest="file_ids",
+        action="append",
+        help="仅导出指定 File ID；可重复使用",
+    )
 
     terms_import = subparsers.add_parser(
         "terms-import", help="合并导入 JSON 或 CSV 术语表"
@@ -368,6 +374,7 @@ def run(argv: list[str] | None = None) -> int:
                 bilingual=args.bilingual,
                 allow_missing=args.allow_missing,
                 output_format=args.format,
+                file_ids=args.file_ids,
             )
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))
