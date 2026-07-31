@@ -43,6 +43,7 @@ def init_empty(
     )
     assert project is not None
     assert summary["file_count"] == summary["segment_count"] == 0
+    assert (project / "input").is_dir()
     return project
 
 

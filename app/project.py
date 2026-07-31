@@ -354,6 +354,7 @@ def init_project(
     temp = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=projects_root))
     try:
         _copy_bundle(app_root, temp)
+        (temp / "input").mkdir()
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
         for file_order, item in enumerate(imported.files, start=1):
