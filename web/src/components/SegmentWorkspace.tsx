@@ -209,16 +209,18 @@ export function SegmentWorkspace({
               resetFilterSelection();
             }} placeholder="搜索原文或译文" />
           </div>
-          <div className="batch-toolbar">
+          <div className="batch-toolbar segment-batch-toolbar">
             <span>已选择 {selectedVisibleIds.length} / 当前 {visible.length}</span>
-            {stage !== "translation" && (
-              <>
-                <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>应用所选</button>
-                <button className="quiet-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
-              </>
-            )}
-            <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>清除所选</button>
-            <button className="danger-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
+            <div className="segment-batch-actions">
+              {stage !== "translation" && (
+                <>
+                  <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>应用所选</button>
+                  <button className="quiet-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
+                </>
+              )}
+              <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>清除所选</button>
+              <button className="danger-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
+            </div>
           </div>
           {batchMessage && <span className="success-text">{batchMessage}</span>}
         </div>
