@@ -3,10 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
     <title>译工坊</title>
-    <script type="module" crossorigin src="/assets/index-CnI6Z4Dz.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-RZRLfC_n.css">
+    <script>
+      (() => {
+        const key = "minimal-llm-translator.theme.v1";
+        let mode = "system";
+        try {
+          const stored = localStorage.getItem(key);
+          if (stored === "light" || stored === "dark" || stored === "system") mode = stored;
+        } catch {}
+        const theme = mode === "system"
+          ? matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+          : mode;
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeMode = mode;
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-7YrVLZix.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-C9rJ2Lnp.css">
   </head>
   <body>
     <div id="root"></div>

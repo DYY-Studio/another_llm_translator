@@ -5,9 +5,10 @@ import { SegmentWorkspace } from "./components/SegmentWorkspace";
 import { TermsView } from "./components/TermsView";
 import { CreateProjectDialog, ExportView, Overview } from "./components/UtilityViews";
 import { SettingsView } from "./components/SettingsView";
-import type { ProjectOverview, ProjectSummary, Stage, TaskState } from "./types";
+import type { ProjectOverview, ProjectSummary, Stage, TaskState, ThemeMode } from "./types";
 import "./styles.css";
 
+const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
 const runnable: Partial<Record<Stage, string>> = {
   terminology: "terminology",
   translation: "translation",
@@ -23,6 +24,35 @@ export default function App() {
   const [task, setTask] = useState<TaskState | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState("");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    try {
+      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+      return stored === "light" || stored === "dark" || stored === "system"
+        ? stored
+        : "system";
+    } catch {
+      return "system";
+    }
+  });
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolved = themeMode === "system"
+        ? media.matches ? "dark" : "light"
+        : themeMode;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.themeMode = themeMode;
+    };
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+    } catch {
+      // The selected theme still applies for this page when storage is unavailable.
+    }
+    applyTheme();
+    if (themeMode === "system") media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
     const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
@@ -86,6 +116,8 @@ export default function App() {
         onCreate={() => setCreateOpen(true)}
         onRun={startRun}
         onCancel={cancelRun}
+        themeMode={themeMode}
+        onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
       >
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}

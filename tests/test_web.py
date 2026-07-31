@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,30 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
         ).status_code
         == 403
     )
+
+
+def test_web_build_includes_editor_layout_context_and_theme_controls(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(projects_root=tmp_path / "projects"))
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "document.documentElement.dataset.theme" in page.text
+    assert "minimal-llm-translator.theme.v1" in page.text
+    asset = re.search(r'<script type="module"[^>]+src="([^"]+)"', page.text)
+    assert asset is not None
+    script = client.get(asset.group(1))
+    assert script.status_code == 200
+    for text in (
+        "terms-workspace",
+        "只看冲突",
+        "显示已移除",
+        "全部状态",
+        "上下文",
+        "当前外观",
+        "跟随系统",
+    ):
+        assert text in script.text
 
 
 def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
