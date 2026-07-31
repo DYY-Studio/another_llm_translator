@@ -7,7 +7,7 @@
 - `config/config.toml`: global configuration template.
 - `prompts/`: global stage prompts.
 - `projects/`: runtime project data; do not commit generated projects.
-- `docs/MINIMAL.md`: authoritative MVP behavior and boundaries.
+- `docs/ROADMAP.md`: authoritative MVP behavior and boundaries.
 
 Preserve the File/Segment/Chunk/Run meanings in the specification. Segment is
 the progress unit; Chunk is never durable business state. Avoid speculative
@@ -62,10 +62,10 @@ gates.
 
 ## Commit & Pull Request Guidelines
 
-Keep `main` stable. Start each key stage on a focused branch:
+Keep `dev` stable. Start each key stage on a focused branch:
 
 ```bash
-git switch main
+git switch dev
 git switch -c feat/segment-recovery
 ```
 
@@ -74,7 +74,7 @@ Use `feat/`, `fix/`, `docs/`, or `test/` and Conventional Commit messages such a
 stage passes its tests and `git diff --check`, merge with an explicit merge commit:
 
 ```bash
-git switch main
+git switch dev
 git merge --no-ff feat/segment-recovery
 git branch -d feat/segment-recovery
 ```

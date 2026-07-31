@@ -182,24 +182,6 @@ Preset；内联 LLM 连接配置不再支持。
 - 项目内容、Prompt、目标语言和模型输出不随 UI 语言自动变化。
 - 不实现自动翻译文案、远程语言包或插件本地化市场。
 
-## 需求状态映射
-
-| 原编号 | 内容 | 路线阶段 |
-|---|---|---|
-| 1 | 空项目与文件增删 | Stage 1，已完成 |
-| 2 | 多格式项目与原格式/TXT 导出 | Stage 5 |
-| 3 | 按文件导出 | Stage 6 |
-| 4 | LLM Preset 及附加 JSON | Stage 3 |
-| 5 | 思考内容字段 | Stage 4 |
-| 6 | 四阶段不同 LLM | Stage 7 |
-| 7 | 结构化项目配置 | Stage 2，已完成 |
-| 8 | 全局配置和 Prompt | Stage 3 |
-| 9 | SQLite 项目存储 | Stage 9 |
-| 10 | 外部项目位置 | Stage 8 |
-| 11 | 国际化与本地化 | Stage 12 |
-| 补充 A | Adapter models 端点与 usage 统计 | Stage 10 |
-| 补充 B | 单 Preset 多 API Key | Stage 11 |
-
 ## 协议成熟度
 
 产品 Stage 与协议稳定性分别推进，不能因为某项进入产品路线就提前冻结 SDK。
