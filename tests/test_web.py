@@ -159,7 +159,6 @@ def test_web_creates_empty_project_and_manages_source_files(
     )
     assert created.status_code == 200
     overview = client.get("/api/v1/projects/empty").json()
-    assert overview["document_adapter_id"] == "txt"
     assert overview["nonempty_segment_count"] == 0
     assert overview["files"] == []
     assert (
@@ -186,6 +185,11 @@ def test_web_creates_empty_project_and_manages_source_files(
     )
     assert added.status_code == 200
     assert added.json()["added_file_ids"] == ["F0001", "F0002"]
+    overview = client.get("/api/v1/projects/empty").json()
+    assert [item["document_adapter_id"] for item in overview["files"]] == [
+        "txt",
+        "txt",
+    ]
     removed = client.post(
         "/api/v1/projects/empty/files/remove",
         json={"file_ids": ["F0001", "F0002"]},

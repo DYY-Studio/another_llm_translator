@@ -100,22 +100,26 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 - 以临时项目目录完成事务化初始化；
 - 保存通用 File/Segment 记录。
 
-Adapter 可同时返回 JSON 可序列化的 `opaque_state`。宿主将其保存在
-`source/adapters/<adapter_id>/state.json`，只校验归属、版本和完整性，不解释
-内部字段。
+每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
+`source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
+ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
 
 ### 导出
 
-宿主选择阶段结果、执行缺失结果规则和前导空白恢复，再向原 Adapter 提供 File、
-Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging 目录生成
-相对路径；全部生成成功后，宿主逐文件原子移动到正式输出目录。
+宿主选择阶段结果、执行缺失结果规则和前导空白恢复，再逐 File 向来源 Adapter
+提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
+目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
+
+Document Adapter 插件协议当前为版本 2。统一 TXT 导出由宿主改用内置 `txt`
+Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
 不会自动改用 TXT，也不会删除仍可读取的项目 Segment 和阶段结果。
 
 ### EPUB 0.1
 
-EPUB 项目每次只导入一个 `.epub`。Adapter 保存原始容器，并记录 OPF、spine
+EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
+保存各 File 的原始容器，并记录 OPF、spine
 顺序以及 Segment 到 XHTML `text`/`tail` 槽位的定位。导出只重写被翻译的
 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 

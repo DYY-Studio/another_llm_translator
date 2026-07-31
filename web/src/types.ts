@@ -45,9 +45,13 @@ export interface Segment {
 export interface ProjectOverview {
   name: string;
   path: string;
-  document_adapter_id: string;
   nonempty_segment_count: number;
-  files: Array<{ file_id: string; file_order: number; name: string }>;
+  files: Array<{
+    file_id: string;
+    file_order: number;
+    name: string;
+    document_adapter_id: string;
+  }>;
   segments: Segment[];
 }
 

@@ -7,7 +7,7 @@ from .documents import DocumentAdapter
 from .errors import ConfigError, UsageError
 
 
-PLUGIN_PROTOCOL_VERSION = 1
+PLUGIN_PROTOCOL_VERSION = 2
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 

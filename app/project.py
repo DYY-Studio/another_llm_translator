@@ -14,7 +14,7 @@ from typing import Any, Iterable
 import chardet
 
 from .config import load_config
-from .documents import DocumentImport, ImportedFile
+from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .llm_adapter import load_json_adapter
 from .llm_preset import load_llm_preset, preset_path
@@ -211,7 +211,7 @@ class TXTDocumentAdapter:
         *,
         project: Path,
         staging_dir: Path,
-        files: list[dict[str, object]],
+        file: dict[str, object],
         segments: list[dict[str, object]],
         output_text: dict[str, str],
         bilingual: bool,
@@ -219,39 +219,28 @@ class TXTDocumentAdapter:
         opaque_state: dict[str, object] | None,
     ) -> list[Path]:
         del project, opaque_state
-        by_file: dict[str, list[dict[str, object]]] = {}
-        for segment in segments:
-            by_file.setdefault(str(segment["file_id"]), []).append(segment)
-        generated: list[Path] = []
-        for file_record in sorted(
-            files, key=lambda item: int(item["file_order"])
+        lines: list[str] = []
+        for segment in sorted(
+            segments, key=lambda item: int(item["line_index"])
         ):
-            lines: list[str] = []
-            for segment in sorted(
-                by_file[str(file_record["file_id"])],
-                key=lambda item: int(item["line_index"]),
-            ):
-                if segment["is_empty"]:
-                    lines.append("")
-                elif bilingual:
-                    lines.append(str(segment["source"]))
-                    lines.append(output_text[str(segment["segment_id"])])
-                else:
-                    lines.append(output_text[str(segment["segment_id"])])
-            relative = Path(str(file_record["original_name"]))
-            try:
-                payload = "\n".join(lines).encode(
-                    output_encoding, errors="strict"
-                )
-            except UnicodeEncodeError as exc:
-                raise IncompleteError(
-                    f"输出编码 {output_encoding} 无法表示 {relative}: {exc}"
-                ) from exc
-            destination = staging_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(payload)
-            generated.append(relative)
-        return generated
+            if segment["is_empty"]:
+                lines.append("")
+            elif bilingual:
+                lines.append(str(segment["source"]))
+                lines.append(output_text[str(segment["segment_id"])])
+            else:
+                lines.append(output_text[str(segment["segment_id"])])
+        relative = Path(str(file["original_name"]))
+        try:
+            payload = "\n".join(lines).encode(output_encoding, errors="strict")
+        except UnicodeEncodeError as exc:
+            raise IncompleteError(
+                f"输出编码 {output_encoding} 无法表示 {relative}: {exc}"
+            ) from exc
+        destination = staging_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        return [relative]
 
 
 def _global_adapter_id(config: dict[str, Any], app_root: Path) -> str:
@@ -329,24 +318,25 @@ def init_project(
     global_hash = bundle_hash(app_root)
     from .plugins import get_document_adapter
 
-    document_adapter = get_document_adapter(document_adapter_id)
-    if "import" not in document_adapter.capabilities:
-        raise UsageError(
-            f"Document Adapter 不支持导入：{document_adapter.adapter_id}"
-        )
-    imported = (
-        DocumentImport(files=(), warnings=())
-        if empty
-        else document_adapter.import_sources(
+    document_adapter = None
+    imported = DocumentImport(files=(), warnings=())
+    if not empty:
+        document_adapter = get_document_adapter(document_adapter_id)
+        if "import" not in document_adapter.capabilities:
+            raise UsageError(
+                f"Document Adapter 不支持导入：{document_adapter.adapter_id}"
+            )
+        imported = document_adapter.import_sources(
             inputs,
             recursive=recursive,
             config=global_config,
         )
-    )
 
     summary: dict[str, object] = {
         "project_name": name,
-        "document_adapter": document_adapter.adapter_id,
+        "document_adapter": (
+            document_adapter.adapter_id if document_adapter is not None else None
+        ),
         "file_count": len(imported.files),
         "segment_count": sum(len(item.segments) for item in imported.files),
         "warnings": list(imported.warnings),
@@ -366,6 +356,7 @@ def init_project(
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
         for file_order, item in enumerate(imported.files, start=1):
+            assert document_adapter is not None
             file_id = f"F{file_order:04d}"
             relative = Path(item.original_name)
             stored_name = relative.parent / f"{file_id}__{relative.name}"
@@ -374,6 +365,26 @@ def init_project(
             shutil.copy2(item.source_path, stored_path)
 
             segments = item.segments
+            state_path = None
+            if item.opaque_state is not None:
+                state_path = (
+                    Path("source")
+                    / "adapters"
+                    / document_adapter.adapter_id
+                    / f"{file_id}.json"
+                )
+                atomic_write_json(
+                    temp / state_path,
+                    record_header(
+                        "document_adapter_state",
+                        project_id,
+                        record_id=f"DOCUMENT-{file_id}",
+                        adapter_id=document_adapter.adapter_id,
+                        adapter_version=document_adapter.version,
+                        file_id=file_id,
+                        state=item.opaque_state,
+                    ),
+                )
             file_records.append(
                 record_header(
                     "source_file",
@@ -387,6 +398,11 @@ def init_project(
                     encoding_confidence=item.encoding_confidence,
                     encoding_used=item.encoding_used,
                     segment_count=len(segments),
+                    document_adapter_id=document_adapter.adapter_id,
+                    document_adapter_version=document_adapter.version,
+                    document_adapter_state=(
+                        state_path.as_posix() if state_path is not None else None
+                    ),
                 )
             )
             for line_index, source in enumerate(segments):
@@ -406,25 +422,6 @@ def init_project(
 
         write_jsonl(temp / "source" / "files.jsonl", file_records)
         write_jsonl(temp / "source" / "segments.jsonl", segment_records)
-        state_path = None
-        if imported.opaque_state is not None:
-            state_path = (
-                Path("source")
-                / "adapters"
-                / document_adapter.adapter_id
-                / "state.json"
-            )
-            atomic_write_json(
-                temp / state_path,
-                record_header(
-                    "document_adapter_state",
-                    project_id,
-                    record_id=f"DOCUMENT-{document_adapter.adapter_id}",
-                    adapter_id=document_adapter.adapter_id,
-                    adapter_version=document_adapter.version,
-                    state=imported.opaque_state,
-                ),
-            )
         (temp / "terminology").mkdir(parents=True, exist_ok=True)
         (temp / "stages").mkdir(parents=True, exist_ok=True)
         (temp / "runs").mkdir(parents=True, exist_ok=True)
@@ -450,11 +447,6 @@ def init_project(
                 file_count=len(file_records),
                 segment_count=len(segment_records),
                 next_file_sequence=len(file_records) + 1,
-                document_adapter_id=document_adapter.adapter_id,
-                document_adapter_version=document_adapter.version,
-                document_adapter_state=(
-                    state_path.as_posix() if state_path is not None else None
-                ),
                 status="active",
             ),
         )
@@ -491,27 +483,40 @@ def _running_run_ids(project: Path) -> list[str]:
     return sorted(running)
 
 
-def _require_mutable_document_adapter(
-    metadata: dict[str, Any],
-) -> tuple[str, object]:
-    adapter_id = str(metadata.get("document_adapter_id") or "txt")
-    if adapter_id not in {"txt", "epub"}:
-        raise UsageError(
-            f"Document Adapter {adapter_id} 暂不支持现有项目文件变更"
-        )
-    from .plugins import get_document_adapter
-
-    return adapter_id, get_document_adapter(adapter_id)
-
-
 def _source_records(
     project: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    metadata = read_json(project / "project.json")
+    files = read_jsonl(project / "source" / "files.jsonl")
     return (
-        read_json(project / "project.json"),
-        read_jsonl(project / "source" / "files.jsonl"),
+        metadata,
+        _resolve_file_adapters(metadata, files),
         read_jsonl(project / "source" / "segments.jsonl"),
     )
+
+
+def _resolve_file_adapters(
+    metadata: dict[str, Any], files: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    legacy_id = str(metadata.get("document_adapter_id") or "txt")
+    legacy_version = metadata.get("document_adapter_version")
+    legacy_state = metadata.get("document_adapter_state")
+    resolved: list[dict[str, Any]] = []
+    for file_record in files:
+        item = dict(file_record)
+        item.setdefault("document_adapter_id", legacy_id)
+        if "document_adapter_version" not in item:
+            if legacy_version is not None:
+                item["document_adapter_version"] = str(legacy_version)
+            else:
+                from .plugins import get_document_adapter
+
+                item["document_adapter_version"] = get_document_adapter(
+                    legacy_id
+                ).version
+        item.setdefault("document_adapter_state", legacy_state)
+        resolved.append(item)
+    return resolved
 
 
 def _write_source_snapshot(
@@ -520,33 +525,31 @@ def _write_source_snapshot(
     metadata: dict[str, Any],
     files: list[dict[str, Any]],
     segments: list[dict[str, Any]],
-    adapter_state_path: Path | None,
-    adapter_state: dict[str, Any] | None,
+    adapter_states: dict[Path, dict[str, Any]],
 ) -> None:
     write_jsonl(root / "source" / "files.jsonl", files)
     write_jsonl(root / "source" / "segments.jsonl", segments)
     atomic_write_json(root / "project.json", metadata)
-    if adapter_state_path is not None and adapter_state is not None:
-        atomic_write_json(root / adapter_state_path, adapter_state)
+    for state_path, state_record in adapter_states.items():
+        atomic_write_json(root / state_path, state_record)
 
 
 def _publish_source_snapshot(
     project: Path,
     staging: Path,
     *,
-    old_state_path: Path | None,
-    new_state_path: Path | None,
+    state_paths: list[Path],
+    removed_state_paths: list[Path],
 ) -> None:
     targets = [
         Path("source/files.jsonl"),
         Path("source/segments.jsonl"),
         Path("project.json"),
     ]
-    if new_state_path is not None:
-        targets.append(new_state_path)
+    targets.extend(state_paths)
     backup = staging / "backup"
     published: list[Path] = []
-    removed_old_state: Path | None = None
+    removed_states: list[tuple[Path, Path]] = []
     try:
         for relative in targets:
             current = project / relative
@@ -558,12 +561,13 @@ def _publish_source_snapshot(
             current.parent.mkdir(parents=True, exist_ok=True)
             os.replace(replacement, current)
             published.append(relative)
-        if old_state_path is not None and old_state_path != new_state_path:
+        for old_state_path in removed_state_paths:
             current = project / old_state_path
             if current.exists():
-                removed_old_state = backup / old_state_path
-                removed_old_state.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(current, removed_old_state)
+                saved = backup / old_state_path
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(current, saved)
+                removed_states.append((saved, old_state_path))
     except Exception:
         for relative in reversed(published):
             saved = backup / relative
@@ -572,10 +576,10 @@ def _publish_source_snapshot(
                 os.replace(saved, current)
             elif current.exists():
                 current.unlink()
-        if removed_old_state is not None and removed_old_state.exists():
+        for saved, old_state_path in removed_states:
             destination = project / old_state_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(removed_old_state, destination)
+            os.replace(saved, destination)
         raise
 
 
@@ -584,6 +588,7 @@ def add_project_files(
     inputs: list[str],
     *,
     recursive: bool = False,
+    document_adapter_id: str | None = None,
 ) -> dict[str, object]:
     running = _running_run_ids(project)
     if running:
@@ -591,25 +596,46 @@ def add_project_files(
             f"存在未完成 Run，不能添加文件：{', '.join(running)}"
         )
     metadata, files, segments = _source_records(project)
-    adapter_id, adapter = _require_mutable_document_adapter(metadata)
-    if adapter_id == "epub" and files:
-        raise UsageError("EPUB 项目已有文件，不能继续添加")
     config = load_config(project / "config.toml")
-    imported = adapter.import_sources(
-        inputs,
-        recursive=recursive,
-        config=config,
-    )
-    if adapter_id == "epub" and len(imported.files) != 1:
-        raise UsageError("EPUB 项目一次只能添加一个 EPUB 文件")
+    from .plugins import get_document_adapter
+
+    imports: list[tuple[DocumentAdapter, ImportedFile]] = []
+    warnings: list[str] = []
+    if document_adapter_id is not None:
+        adapter = get_document_adapter(document_adapter_id)
+        imported = adapter.import_sources(
+            inputs, recursive=recursive, config=config
+        )
+        imports.extend((adapter, item) for item in imported.files)
+        warnings.extend(imported.warnings)
+    else:
+        for raw_input in inputs:
+            path = Path(raw_input)
+            suffix = path.suffix.lower()
+            if path.is_dir() or suffix == ".txt":
+                adapter_id = "txt"
+            elif suffix == ".epub":
+                adapter_id = "epub"
+            else:
+                raise UsageError(
+                    f"无法识别输入格式，请使用 --document-adapter：{raw_input}"
+                )
+            adapter = get_document_adapter(adapter_id)
+            imported = adapter.import_sources(
+                [raw_input], recursive=recursive, config=config
+            )
+            imports.extend((adapter, item) for item in imported.files)
+            warnings.extend(imported.warnings)
     existing_names = {
         str(record["original_name"]).casefold() for record in files
     }
-    duplicate_names = sorted(
-        item.original_name
-        for item in imported.files
-        if item.original_name.casefold() in existing_names
-    )
+    duplicate_names: list[str] = []
+    added_names: set[str] = set()
+    for _, item in imports:
+        normalized_name = item.original_name.casefold()
+        if normalized_name in existing_names or normalized_name in added_names:
+            duplicate_names.append(item.original_name)
+        added_names.add(normalized_name)
     if duplicate_names:
         raise UsageError(f"活动文件已存在同名导出路径：{', '.join(duplicate_names)}")
 
@@ -620,16 +646,10 @@ def add_project_files(
     added_segments: list[dict[str, Any]] = []
     staging = Path(tempfile.mkdtemp(prefix=".files-add.", dir=project))
     moved_inputs: list[Path] = []
-    old_state = (
-        Path(str(metadata["document_adapter_state"]))
-        if metadata.get("document_adapter_state")
-        else None
-    )
-    new_state = old_state
-    state_record: dict[str, Any] | None = None
+    state_records: dict[Path, dict[str, Any]] = {}
     committed = False
     try:
-        for offset, item in enumerate(imported.files):
+        for offset, (adapter, item) in enumerate(imports):
             sequence = next_sequence + offset
             file_id = f"F{sequence:04d}"
             relative = Path(item.original_name)
@@ -637,6 +657,23 @@ def add_project_files(
             staged_input = staging / "input" / stored_name
             staged_input.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item.source_path, staged_input)
+            state_path = None
+            if item.opaque_state is not None:
+                state_path = (
+                    Path("source")
+                    / "adapters"
+                    / adapter.adapter_id
+                    / f"{file_id}.json"
+                )
+                state_records[state_path] = record_header(
+                    "document_adapter_state",
+                    project_id,
+                    record_id=f"DOCUMENT-{file_id}",
+                    adapter_id=adapter.adapter_id,
+                    adapter_version=adapter.version,
+                    file_id=file_id,
+                    state=item.opaque_state,
+                )
             file_record = record_header(
                 "source_file",
                 project_id,
@@ -649,6 +686,11 @@ def add_project_files(
                 encoding_confidence=item.encoding_confidence,
                 encoding_used=item.encoding_used,
                 segment_count=len(item.segments),
+                document_adapter_id=adapter.adapter_id,
+                document_adapter_version=adapter.version,
+                document_adapter_state=(
+                    state_path.as_posix() if state_path is not None else None
+                ),
             )
             added_files.append(file_record)
             for line_index, source in enumerate(item.segments):
@@ -665,16 +707,6 @@ def add_project_files(
                         is_empty=source == "" or source.isspace(),
                     )
                 )
-        if imported.opaque_state is not None:
-            new_state = Path("source") / "adapters" / adapter_id / "state.json"
-            state_record = record_header(
-                "document_adapter_state",
-                project_id,
-                record_id=f"DOCUMENT-{adapter_id}",
-                adapter_id=adapter_id,
-                adapter_version=adapter.version,
-                state=imported.opaque_state,
-            )
         new_files = [*files, *added_files]
         new_segments = [*segments, *added_segments]
         new_metadata = dict(metadata)
@@ -682,17 +714,19 @@ def add_project_files(
             file_count=len(new_files),
             segment_count=len(new_segments),
             next_file_sequence=next_sequence + len(added_files),
-            document_adapter_state=(
-                new_state.as_posix() if new_state is not None else None
-            ),
         )
+        for key in (
+            "document_adapter_id",
+            "document_adapter_version",
+            "document_adapter_state",
+        ):
+            new_metadata.pop(key, None)
         _write_source_snapshot(
             staging,
             metadata=new_metadata,
             files=new_files,
             segments=new_segments,
-            adapter_state_path=new_state if state_record is not None else None,
-            adapter_state=state_record,
+            adapter_states=state_records,
         )
         for file_record in added_files:
             relative = Path(str(file_record["stored_name"]))
@@ -703,8 +737,8 @@ def add_project_files(
         _publish_source_snapshot(
             project,
             staging,
-            old_state_path=old_state,
-            new_state_path=new_state if state_record is not None else None,
+            state_paths=list(state_records),
+            removed_state_paths=[],
         )
         committed = True
     except Exception:
@@ -720,7 +754,7 @@ def add_project_files(
         "added_segments": len(added_segments),
         "file_count": len(files) + len(added_files),
         "segment_count": len(segments) + len(added_segments),
-        "warnings": list(imported.warnings),
+        "warnings": warnings,
     }
 
 
@@ -738,7 +772,6 @@ def remove_project_files(
             f"存在未完成 Run，不能移除文件：{', '.join(running)}"
         )
     metadata, files, segments = _source_records(project)
-    _require_mutable_document_adapter(metadata)
     known = {str(item["file_id"]): item for item in files}
     unknown = [file_id for file_id in file_ids if file_id not in known]
     if unknown:
@@ -751,21 +784,32 @@ def remove_project_files(
     new_segments = [
         item for item in segments if str(item["file_id"]) not in selected
     ]
-    old_state = (
-        Path(str(metadata["document_adapter_state"]))
-        if metadata.get("document_adapter_state")
-        else None
+    retained_state_paths = {
+        str(item["document_adapter_state"])
+        for item in new_files
+        if item.get("document_adapter_state")
+    }
+    removed_state_paths = sorted(
+        {
+            Path(str(known[file_id]["document_adapter_state"]))
+            for file_id in file_ids
+            if known[file_id].get("document_adapter_state")
+            and str(known[file_id]["document_adapter_state"])
+            not in retained_state_paths
+        }
     )
-    new_state = old_state if new_files else None
     new_metadata = dict(metadata)
     new_metadata.update(
         file_count=len(new_files),
         segment_count=len(new_segments),
         next_file_sequence=_next_file_sequence(metadata, files),
-        document_adapter_state=(
-            new_state.as_posix() if new_state is not None else None
-        ),
     )
+    for key in (
+        "document_adapter_id",
+        "document_adapter_version",
+        "document_adapter_state",
+    ):
+        new_metadata.pop(key, None)
     staging = Path(tempfile.mkdtemp(prefix=".files-remove.", dir=project))
     moved_inputs: list[tuple[Path, Path]] = []
     committed = False
@@ -775,8 +819,7 @@ def remove_project_files(
             metadata=new_metadata,
             files=new_files,
             segments=new_segments,
-            adapter_state_path=None,
-            adapter_state=None,
+            adapter_states={},
         )
         for file_id in file_ids:
             relative = Path(str(known[file_id]["stored_name"]))
@@ -789,8 +832,8 @@ def remove_project_files(
         _publish_source_snapshot(
             project,
             staging,
-            old_state_path=old_state,
-            new_state_path=new_state,
+            state_paths=[],
+            removed_state_paths=removed_state_paths,
         )
         committed = True
     except Exception:
@@ -894,7 +937,11 @@ def sync_global_templates(
 def load_source_files(
     project: Path, *, repair_tail: bool = True
 ) -> list[dict[str, object]]:
-    return read_jsonl(project / "source" / "files.jsonl", repair_tail=repair_tail)
+    metadata = read_json(project / "project.json")
+    files = read_jsonl(
+        project / "source" / "files.jsonl", repair_tail=repair_tail
+    )
+    return _resolve_file_adapters(metadata, files)
 
 
 def load_segments(

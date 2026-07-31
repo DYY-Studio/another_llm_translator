@@ -19,7 +19,6 @@ export function Overview({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileIds = value.files.map((item) => item.file_id);
-  const canAdd = value.document_adapter_id === "txt" || value.files.length === 0;
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -69,17 +68,17 @@ export function Overview({
         <div><strong>{completed}</strong><span>已有译文</span></div>
       </div>
       <div className="section-heading">
-        <div><h2>文件</h2><p>{value.document_adapter_id.toUpperCase()} 项目</p></div>
+        <div><h2>文件</h2><p>每个文件保留其来源格式</p></div>
         <div className="section-actions">
           <input
             ref={uploadRef}
             className="visually-hidden"
             type="file"
-            accept={value.document_adapter_id === "epub" ? ".epub,application/epub+zip" : ".txt,text/plain"}
-            multiple={value.document_adapter_id === "txt"}
+            accept=".txt,.epub,text/plain,application/epub+zip"
+            multiple
             onChange={(event) => void upload(event.target.files)}
           />
-          <button className="quiet-button" disabled={busy || !canAdd} onClick={() => uploadRef.current?.click()}>
+          <button className="quiet-button" disabled={busy} onClick={() => uploadRef.current?.click()}>
             添加文件
           </button>
           <button className="danger-button" disabled={busy || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
@@ -92,7 +91,7 @@ export function Overview({
         {value.files.length === 0 && (
           <div className="empty-file-state">
             <strong>项目还没有源文件</strong>
-            <span>添加包含非空文本的 {value.document_adapter_id.toUpperCase()} 文件后即可运行阶段。</span>
+            <span>添加包含非空文本的 TXT 或 EPUB 文件后即可运行阶段。</span>
           </div>
         )}
         {value.files.map((item) => (
@@ -102,7 +101,7 @@ export function Overview({
             className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
             onClick={(event) => selection.select(item.file_id, fileIds, event)}
           >
-            <span>{item.file_id}</span><strong>{item.name}</strong>
+            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
           </button>
         ))}
       </div>
@@ -124,12 +123,13 @@ export function Overview({
 
 export function ExportView({ project }: { project: string }) {
   const [stage, setStage] = useState("translated");
+  const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
   const [result, setResult] = useState("");
   async function run() {
     const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
       method: "POST",
-      body: JSON.stringify({ stage, bilingual, allow_missing: false }),
+      body: JSON.stringify({ stage, format, bilingual, allow_missing: false }),
     });
     setResult(JSON.stringify(value, null, 2));
   }
@@ -137,6 +137,7 @@ export function ExportView({ project }: { project: string }) {
     <div className="page narrow-page">
       <div className="page-heading"><div><h1>导出</h1><p>从已持久化结果生成输出文件。</p></div></div>
       <label>结果阶段<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">翻译</option><option value="proofread">已应用校对</option><option value="polished">已应用润色</option></select></label>
+      <label>输出格式<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">保留各文件原格式</option><option value="txt">统一输出 TXT</option></select></label>
       <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> 生成双语对照</label>
       <button className="primary-button" onClick={run}>生成输出</button>
       {result && <pre className="result-box">{result}</pre>}

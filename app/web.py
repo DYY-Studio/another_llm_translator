@@ -740,6 +740,7 @@ def create_app(
                 str(payload.get("stage", "")),
                 bilingual=bool(payload.get("bilingual", False)),
                 allow_missing=bool(payload.get("allow_missing", False)),
+                output_format=str(payload.get("format", "original")),
             )
 
     @app.post("/api/v1/projects/{name}/sync-templates")

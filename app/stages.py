@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config
-from .documents import publish_document_export
+from .documents import DocumentExportJob, publish_document_exports
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -3365,9 +3365,12 @@ def export_project(
     *,
     bilingual: bool,
     allow_missing: bool,
+    output_format: str = "original",
 ) -> dict[str, Any]:
     if export_stage not in {"translated", "proofread", "polished"}:
         raise ValueError(f"unsupported export stage: {export_stage}")
+    if output_format not in {"original", "txt"}:
+        raise ValueError(f"unsupported output format: {output_format}")
     logger = get_logger("export")
     config, metadata, files, segments = _project_context(project, dry_run=False)
     _require_nonempty_segments(segments)
@@ -3471,46 +3474,68 @@ def export_project(
         if bilingual
         else project / "output" / export_stage
     )
-    adapter_id = str(metadata.get("document_adapter_id") or "txt")
-    adapter = get_document_adapter(adapter_id)
     required_capability = (
         "bilingual_export" if bilingual else "translated_export"
     )
-    if required_capability not in adapter.capabilities:
-        raise IncompleteError(
-            f"Document Adapter 不支持此导出模式：{adapter_id} "
-            f"{required_capability}"
+    segments_by_file: dict[str, list[dict[str, Any]]] = {}
+    for segment in segments:
+        segments_by_file.setdefault(str(segment["file_id"]), []).append(segment)
+    jobs: list[DocumentExportJob] = []
+    for file_record in files:
+        source_adapter_id = str(file_record["document_adapter_id"])
+        adapter_id = "txt" if output_format == "txt" else source_adapter_id
+        adapter = get_document_adapter(adapter_id)
+        if required_capability not in adapter.capabilities:
+            raise IncompleteError(
+                f"Document Adapter 不支持此导出模式：{adapter_id} "
+                f"{required_capability}"
+            )
+        opaque_state = None
+        export_file = dict(file_record)
+        if output_format == "txt":
+            export_file["original_name"] = str(
+                Path(str(file_record["original_name"])).with_suffix(".txt")
+            )
+        else:
+            project_version = str(file_record["document_adapter_version"])
+            if project_version != adapter.version:
+                raise IncompleteError(
+                    f"Document Adapter 版本不兼容：文件 "
+                    f"{file_record['file_id']} 使用 {project_version}，"
+                    f"当前 {adapter.version}"
+                )
+            state_path = file_record.get("document_adapter_state")
+            if state_path is not None:
+                state_record = read_json(project / str(state_path))
+                if (
+                    state_record.get("adapter_id") != adapter_id
+                    or str(state_record.get("adapter_version"))
+                    != project_version
+                    or state_record.get("file_id")
+                    not in {None, file_record["file_id"]}
+                    or not isinstance(state_record.get("state"), dict)
+                ):
+                    raise IncompleteError(
+                        f"Document Adapter 状态损坏或版本不匹配："
+                        f"{file_record['file_id']}"
+                    )
+                opaque_state = state_record["state"]
+        jobs.append(
+            DocumentExportJob(
+                adapter=adapter,
+                file=export_file,
+                segments=segments_by_file[str(file_record["file_id"])],
+                opaque_state=opaque_state,
+            )
         )
-    project_version = str(
-        metadata.get("document_adapter_version") or adapter.version
-    )
-    if project_version != adapter.version:
-        raise IncompleteError(
-            f"Document Adapter 版本不兼容：项目 {project_version}，"
-            f"当前 {adapter.version}"
-        )
-    state_path = metadata.get("document_adapter_state")
-    opaque_state = None
-    if state_path is not None:
-        state_record = read_json(project / str(state_path))
-        if (
-            state_record.get("adapter_id") != adapter_id
-            or str(state_record.get("adapter_version")) != project_version
-            or not isinstance(state_record.get("state"), dict)
-        ):
-            raise IncompleteError("Document Adapter 状态损坏或版本不匹配")
-        opaque_state = state_record["state"]
     encoding = str(config["project"]["output_encoding"])
-    written = publish_document_export(
-        adapter,
+    written = publish_document_exports(
+        jobs,
         project=project,
         directory=directory,
-        files=files,
-        segments=segments,
         output_text=output_text,
         bilingual=bilingual,
         output_encoding=encoding,
-        opaque_state=opaque_state,
     )
     for path in written:
         logger.info("file written path=%s", path)
@@ -3523,6 +3548,7 @@ def export_project(
     return {
         "stage": export_stage,
         "bilingual": bilingual,
+        "format": output_format,
         "files": len(written),
         "written": written,
         "fallback_segments": fallback_records,

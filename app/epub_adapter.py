@@ -75,13 +75,13 @@ class EPUBDocumentAdapter:
                     encoding_detected="xhtml",
                     encoding_used="utf-8",
                     encoding_confidence=1.0,
+                    opaque_state={
+                        "opf_path": opf_path,
+                        "spine_paths": xhtml_paths,
+                        "locators": locators,
+                    },
                 ),
             ),
-            opaque_state={
-                "opf_path": opf_path,
-                "spine_paths": xhtml_paths,
-                "locators": locators,
-            },
         )
 
     def export_sources(
@@ -89,7 +89,7 @@ class EPUBDocumentAdapter:
         *,
         project: Path,
         staging_dir: Path,
-        files: list[dict[str, Any]],
+        file: dict[str, Any],
         segments: list[dict[str, Any]],
         output_text: dict[str, str],
         bilingual: bool,
@@ -97,13 +97,13 @@ class EPUBDocumentAdapter:
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]:
         del output_encoding
-        if len(files) != 1 or opaque_state is None:
-            raise IncompleteError("EPUB 项目缺少 Document Adapter 状态")
+        if opaque_state is None:
+            raise IncompleteError("EPUB 文件缺少 Document Adapter 状态")
         state = deepcopy(opaque_state)
         locators = state.get("locators")
         if not isinstance(locators, list) or len(locators) != len(segments):
             raise IncompleteError("EPUB Segment 定位状态与项目不一致")
-        stored_name = str(files[0]["stored_name"])
+        stored_name = str(file["stored_name"])
         source_path = project / "input" / stored_name
         ordered_segments = sorted(
             segments, key=lambda value: int(value["line_index"])
@@ -156,7 +156,7 @@ class EPUBDocumentAdapter:
                 changed[xhtml_path] = ElementTree.tostring(
                     root, encoding="utf-8", xml_declaration=True
                 )
-            stem = Path(str(files[0]["original_name"])).stem
+            stem = Path(str(file["original_name"])).stem
             suffix = "bilingual" if bilingual else "translated"
             relative = Path(f"{stem}.{suffix}.epub")
             destination = staging_dir / relative
