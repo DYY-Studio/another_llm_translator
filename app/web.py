@@ -17,14 +17,13 @@ from .config import (
     LLM_STAGES,
     dump_config,
     load_config,
-    load_project_config,
     resolve_global_config,
     resolve_project_config,
 )
 from .editor import EditorStore
 from .errors import AppError, ExternalError, ProjectError, UsageError
 from .execution import Scope
-from .llm_adapter import adapter_path, load_json_adapter
+from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .plugins import document_adapter_summaries
@@ -561,10 +560,10 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        resolve_project_config(config, root, presets_root=app_root)
+        resolve_project_config(config, presets_root=app_root)
         for stage in LLM_STAGES:
             resolve_project_config(
-                config, root, stage=stage, presets_root=app_root
+                config, stage=stage, presets_root=app_root
             )
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
@@ -598,36 +597,6 @@ def create_app(
             atomic_write_text(root / "prompts" / filename, content)
         return {"saved": True}
 
-    @app.get("/api/v1/projects/{name}/adapters")
-    async def list_adapters(name: str) -> dict[str, Any]:
-        root = project(name)
-        config = load_config(root / "config.toml")
-        selected = load_llm_preset(
-            preset_path(app_root, str(config["llm"]["preset"]))
-        ).adapter_id
-        adapters = []
-        for path in sorted((root / "llm_adapters").glob("*.json")):
-            try:
-                adapter = load_json_adapter(path)
-                adapters.append(
-                    {
-                        "adapter_id": adapter.adapter_id,
-                        "digest": adapter.digest,
-                        "selected": adapter.adapter_id == selected,
-                        "valid": True,
-                    }
-                )
-            except AppError as exc:
-                adapters.append(
-                    {
-                        "adapter_id": path.stem,
-                        "selected": path.stem == selected,
-                        "valid": False,
-                        "error": str(exc),
-                    }
-                )
-        return {"adapters": adapters}
-
     @app.get("/api/v1/global/adapters")
     async def list_global_adapters() -> dict[str, Any]:
         adapters = []
@@ -651,22 +620,23 @@ def create_app(
                 )
         return {"adapters": adapters}
 
-    @app.get("/api/v1/projects/{name}/adapters/{adapter_id}")
-    async def get_adapter(name: str, adapter_id: str) -> dict[str, Any]:
-        adapter = load_json_adapter(adapter_path(project(name), adapter_id))
+    @app.get("/api/v1/global/adapters/{adapter_id}")
+    async def get_global_adapter(adapter_id: str) -> dict[str, Any]:
+        adapter = load_json_adapter(
+            app_root / "llm_adapters" / f"{adapter_id}.json"
+        )
         return adapter.definition
 
-    @app.put("/api/v1/projects/{name}/adapters/{adapter_id}")
-    async def put_adapter(
-        name: str, adapter_id: str, payload: dict[str, Any]
+    @app.put("/api/v1/global/adapters/{adapter_id}")
+    async def put_global_adapter(
+        adapter_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        root = project(name)
         if payload.get("adapter_id") != adapter_id:
             raise UsageError("URL 与 Adapter ID 不一致")
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=root,
+            dir=app_root / "llm_adapters",
             prefix=".adapter.",
             suffix=".json",
             delete=False,
@@ -676,30 +646,27 @@ def create_app(
             temporary = Path(handle.name)
         try:
             adapter = load_json_adapter(temporary)
-            with project_write_lock(root):
-                atomic_write_json(adapter_path(root, adapter_id), payload)
+            atomic_write_json(
+                app_root / "llm_adapters" / f"{adapter_id}.json", payload
+            )
         finally:
             temporary.unlink(missing_ok=True)
         return {"saved": True, "digest": adapter.digest}
 
-    @app.post("/api/v1/projects/{name}/adapters/copy-global")
-    async def copy_global_adapter(
-        name: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        adapter_id = payload.get("adapter_id")
-        if not isinstance(adapter_id, str):
-            raise UsageError("adapter_id 必须是字符串")
-        source = app_root / "llm_adapters" / f"{adapter_id}.json"
-        adapter = load_json_adapter(source)
-        if adapter.adapter_id != adapter_id:
-            raise UsageError("全局 Adapter 文件中的 adapter_id 不一致")
-        root = project(name)
-        destination = adapter_path(root, adapter_id)
-        if destination.exists():
-            raise UsageError(f"项目已存在 LLM Adapter：{adapter_id}")
-        with project_write_lock(root):
-            atomic_write_json(destination, adapter.definition)
-        return {"copied": True, "adapter_id": adapter_id}
+    @app.get("/api/v1/global/adapters/{adapter_id}/preview")
+    async def adapter_preview(adapter_id: str) -> dict[str, Any]:
+        adapter = load_json_adapter(
+            app_root / "llm_adapters" / f"{adapter_id}.json"
+        )
+        headers, body = adapter.build_request(
+            api_key="***",
+            model="model",
+            messages=[{"role": "user", "content": "…"}],
+            temperature=0.2,
+            max_output_tokens=4096,
+            stream=False,
+        )
+        return {"headers": headers, "body": body}
 
     @app.post("/api/v1/projects/{name}/tasks")
     async def start_task(
@@ -821,31 +788,6 @@ def create_app(
                 choice=choice,
             )
         return {"warnings": warnings}
-
-    @app.get("/api/v1/projects/{name}/adapter-preview")
-    async def adapter_preview(name: str) -> dict[str, Any]:
-        config = load_project_config(
-            project(name), stage="translation", presets_root=app_root
-        )
-        adapter = config["_llm_adapter"]
-        headers, body = adapter.build_request(
-            api_key="***",
-            model=str(config["llm"]["model"]),
-            messages=[{"role": "user", "content": "…"}],
-            temperature=float(config["llm"]["temperature_translation"]),
-            max_output_tokens=int(config["llm"]["max_output_tokens"]),
-            stream=False,
-            extra_body=config.get("_llm_extra_body"),
-        )
-        return {
-            "url": (
-                str(config["llm"]["base_url"]).rstrip("/")
-                + "/"
-                + str(config["llm"]["endpoint"]).lstrip("/")
-            ),
-            "headers": headers,
-            "body": body,
-        }
 
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")

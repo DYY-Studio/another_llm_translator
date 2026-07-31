@@ -5,7 +5,7 @@ import { AdapterSettings } from "./AdapterSettings";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "integration";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters";
 
 interface AdapterRow {
   adapter_id: string;
@@ -22,7 +22,12 @@ export function SettingsView({ project }: { project: string }) {
     }
   }, [project]);
   const activeScope: ConfigScope = project ? scope : "global";
-  const integrationLabel = activeScope === "project" ? "Adapter" : "LLM Preset";
+  const globalSections: SettingsSection[] = ["presets", "adapters"];
+  useEffect(() => {
+    if (activeScope === "project" && globalSections.includes(section)) {
+      setSection("config");
+    }
+  }, [activeScope, section]);
   return (
     <div className="settings-page">
       <nav className="settings-navigation" aria-label="设置">
@@ -33,14 +38,15 @@ export function SettingsView({ project }: { project: string }) {
         <div className="settings-section-tabs" aria-label={`${activeScope === "project" ? "项目" : "全局"}设置类别`}>
           <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>配置</button>
           <button className={section === "prompts" ? "active" : ""} onClick={() => setSection("prompts")}>Prompt</button>
-          <button className={section === "integration" ? "active" : ""} onClick={() => setSection("integration")}>{integrationLabel}</button>
+          {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
+          {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
         </div>
       </nav>
       <div className="settings-content">
         {section === "config" && <ConfigSettings project={project} scope={activeScope} />}
         {section === "prompts" && <PromptSettings project={project} scope={activeScope} />}
-        {section === "integration" && activeScope === "project" && <AdapterSettings project={project} />}
-        {section === "integration" && activeScope === "global" && <PresetSettings />}
+        {section === "presets" && <PresetSettings />}
+        {section === "adapters" && <AdapterSettings />}
       </div>
     </div>
   );
@@ -49,24 +55,18 @@ export function SettingsView({ project }: { project: string }) {
 function ConfigSettings({ project, scope }: { project: string; scope: ConfigScope }) {
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
-  const [projectAdapters, setProjectAdapters] = useState<AdapterRow[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const configPath = scope === "global" ? "/api/v1/global/config" : `/api/v1/projects/${project}/config`;
 
   async function load() {
-    const requests: [Promise<{ config: Record<string, unknown> }>, Promise<{ presets: LLMPresetSummary[] }>, Promise<{ adapters: AdapterRow[] }> | null] = [
+    const [configResponse, presetResponse] = await Promise.all([
       api<{ config: Record<string, unknown> }>(configPath),
       api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets"),
-      scope === "project" ? api<{ adapters: AdapterRow[] }>(`/api/v1/projects/${project}/adapters`) : null,
-    ];
-    const [configResponse, presetResponse, adapterResponse] = await Promise.all([
-      requests[0], requests[1], requests[2] ?? Promise.resolve({ adapters: [] }),
     ]);
     setConfig(configResponse.config as unknown as ProjectConfig);
     setPresets(presetResponse.presets);
-    setProjectAdapters(adapterResponse.adapters);
   }
 
   useEffect(() => {
@@ -105,22 +105,8 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     }
   }
 
-  async function copyRequiredAdapter(adapterId: string) {
-    if (!project) return;
-    try {
-      await api(`/api/v1/projects/${project}/adapters/copy-global`, {
-        method: "POST",
-        body: JSON.stringify({ adapter_id: adapterId }),
-      });
-      await load();
-      setMessage(`已显式复制 Adapter：${adapterId}`);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    }
-  }
-
   async function syncGlobal() {
-    if (!project || !window.confirm("用当前全局配置、Prompt 和所选 Adapter 替换项目副本？现有副本会先备份。")) return;
+    if (!project || !window.confirm("用当前全局配置和 Prompt 替换项目副本？现有副本会先备份。")) return;
     try {
       const result = await api<{ warnings: string[] }>(`/api/v1/projects/${project}/sync-templates`, {
         method: "POST",
@@ -135,24 +121,13 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || "正在加载配置…"}</p></section>;
 
-  const configuredPresetIds = [
-    config.llm.preset,
-    config.llm.preset_terminology,
-    config.llm.preset_translation,
-    config.llm.preset_proofreading,
-    config.llm.preset_polishing,
-  ].filter(Boolean);
-  const missingAdapterIds = scope === "project" ? Array.from(new Set(configuredPresetIds
-    .map((presetId) => presets.find((item) => item.preset_id === presetId)?.adapter_id)
-    .filter((adapterId): adapterId is string => Boolean(adapterId))
-    .filter((adapterId) => !projectAdapters.some((item) => item.valid !== false && item.adapter_id === adapterId)))) : [];
-  const contextLabels: Array<[ContextStage, string]> = [["terminology", "术语"], ["translation", "翻译"], ["proofreading", "校对"], ["polishing", "润色"]];
   const presetOptions = presets.filter((item) => item.valid);
+  const contextLabels: Array<[ContextStage, string]> = [["terminology", "术语"], ["translation", "翻译"], ["proofreading", "校对"], ["polishing", "润色"]];
   const stagePresetFields: Array<[ContextStage, string]> = [["terminology", "术语 Preset"], ["translation", "翻译 Preset"], ["proofreading", "校对 Preset"], ["polishing", "润色 Preset"]];
   return (
     <section className="config-settings">
       <div className="page-heading config-heading settings-action-heading">
-        <div><h1>{scope === "global" ? "全局配置模板" : "项目配置"}</h1><p>{scope === "global" ? "只影响新项目或明确同步的项目。" : "Prompt 与 Adapter 仍保留项目副本；连接设置实时引用全局 Preset。"}</p></div>
+        <div><h1>{scope === "global" ? "全局配置模板" : "项目配置"}</h1><p>{scope === "global" ? "只影响新项目或明确同步的项目。" : "Prompt 保留项目副本；连接与 Adapter 实时引用全局设置。"}</p></div>
         <div className="button-group">
           {scope === "project" && <button className="quiet-button" onClick={syncGlobal}>同步全局模板</button>}
           <button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中…" : "验证并保存"}</button>
@@ -160,7 +135,6 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
       {message && <p className="success-text">{message}</p>}
-      {missingAdapterIds.map((adapterId) => <div className="warning-banner" key={adapterId}>所选 Preset 需要项目尚未拥有的 Adapter：{adapterId}。<button className="quiet-button" onClick={() => copyRequiredAdapter(adapterId)}>显式复制全局 Adapter</button></div>)}
       <div className="config-form">
         <ConfigSection title="项目与输入" description="新项目默认目标、TXT 输出和源文件编码策略。">
           <Field label="目标语言"><input value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>

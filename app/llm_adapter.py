@@ -376,10 +376,6 @@ def _validate_usage_mapping(
     return (pointers[0], pointers[1], pointers[2])
 
 
-def adapter_path(project: Path, adapter_id: str) -> Path:
-    return project / "llm_adapters" / f"{adapter_id}.json"
-
-
 def _validate_placeholders(
     template: str, *, allowed: frozenset[str], location: str
 ) -> None:

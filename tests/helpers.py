@@ -22,7 +22,14 @@ def use_llm_preset(
     root = tmp_path / "runtime-global"
     presets = root / "llm_presets"
     presets.mkdir(parents=True, exist_ok=True)
-    source = Path(__file__).parents[1] / "llm_presets" / "default.json"
+    adapters = root / "llm_adapters"
+    adapters.mkdir(parents=True, exist_ok=True)
+    source_root = Path(__file__).parents[1]
+    for source in (source_root / "llm_adapters").glob("*.json"):
+        (adapters / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    source = source_root / "llm_presets" / "default.json"
     definition = json.loads(source.read_text(encoding="utf-8"))
     definition.update(changes)
     (presets / "default.json").write_text(
