@@ -39,10 +39,8 @@ export function SettingsView({ project }: { project: string }) {
 
 function ConfigSettings({ project, scope }: { project: string; scope: ConfigScope }) {
   const [config, setConfig] = useState<ProjectConfig | null>(null);
-  const [legacy, setLegacy] = useState(false);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [projectAdapters, setProjectAdapters] = useState<AdapterRow[]>([]);
-  const [migrationId, setMigrationId] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -57,15 +55,7 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     const [configResponse, presetResponse, adapterResponse] = await Promise.all([
       requests[0], requests[1], requests[2] ?? Promise.resolve({ adapters: [] }),
     ]);
-    const raw = configResponse.config;
-    const llm = raw.llm;
-    if (!llm || typeof llm !== "object" || !("preset" in llm)) {
-      setLegacy(true);
-      setConfig(null);
-    } else {
-      setLegacy(false);
-      setConfig(raw as unknown as ProjectConfig);
-    }
+    setConfig(configResponse.config as unknown as ProjectConfig);
     setPresets(presetResponse.presets);
     setProjectAdapters(adapterResponse.adapters);
   }
@@ -121,20 +111,6 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     }
   }
 
-  async function migrate() {
-    if (!project || !migrationId.trim()) return;
-    try {
-      await api(`/api/v1/projects/${project}/migrate-llm-preset`, {
-        method: "POST",
-        body: JSON.stringify({ preset_id: migrationId.trim() }),
-      });
-      await load();
-      setMessage(`已保存为 Preset：${migrationId.trim()}，项目已切换`);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    }
-  }
-
   async function syncGlobal() {
     if (!project || !window.confirm("用当前全局配置、Prompt 和所选 Adapter 替换项目副本？现有副本会先备份。")) return;
     try {
@@ -147,20 +123,6 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     } catch (reason) {
       setError(errorMessage(reason));
     }
-  }
-
-  if (legacy) {
-    return (
-      <section className="config-settings">
-        <div className="page-heading"><div><h1>迁移内联 LLM 配置</h1><p>此旧项目仍可运行。将当前连接保存为新的全局 Preset 后，项目会改为实时引用。</p></div></div>
-        {error && <div className="error-banner">{error}</div>}
-        {message && <p className="success-text">{message}</p>}
-        <div className="migration-card">
-          <Field label="新 Preset ID"><input value={migrationId} onChange={(event) => setMigrationId(event.target.value)} placeholder="my-provider" /></Field>
-          <button className="primary-button" disabled={!migrationId.trim()} onClick={migrate}>保存当前连接并切换</button>
-        </div>
-      </section>
-    );
   }
 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || "正在加载配置…"}</p></section>;

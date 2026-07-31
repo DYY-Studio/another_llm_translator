@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from app.config import (
-    dump_config,
     load_config,
+    load_global_config,
     load_project_config,
     load_run_config,
 )
@@ -157,6 +156,10 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     assert json.loads((run_dir / "llm_preset.json").read_text("utf-8")) == definition
     assert load_run_config(run_dir)["llm"]["model"] == "changed-model"
 
+    (run_dir / "llm_preset.json").unlink()
+    with pytest.raises(ConfigError, match="无法读取 LLM Preset"):
+        load_run_config(run_dir)
+
 
 def test_project_preset_requires_existing_project_adapter(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
@@ -178,7 +181,7 @@ def test_project_preset_requires_existing_project_adapter(tmp_path: Path) -> Non
         load_project_config(project, presets_root=app_root)
 
 
-def test_legacy_inline_project_config_remains_readable(tmp_path: Path) -> None:
+def test_inline_project_config_is_rejected(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "input.txt"
     source.write_text("one", encoding="utf-8")
@@ -189,42 +192,27 @@ def test_legacy_inline_project_config_remains_readable(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    raw = load_config(project / "config.toml")
-    preset = load_llm_preset(app_root / "llm_presets" / "default.json")
-    legacy = deepcopy(raw)
-    legacy["llm"].pop("preset")
-    legacy["llm"].update(
-        adapter=preset.adapter_id,
-        **{
-            key: preset.definition[key]
-            for key in (
-                "base_url",
-                "endpoint",
-                "model",
-                "api_key_env",
-                "proxy_url",
-                "max_output_tokens",
-                "context_window_tokens",
-                "context_safety_margin_tokens",
-            )
-        },
-    )
-    legacy["execution"].update(
-        {
-            key: preset.definition[key]
-            for key in (
-                "max_parallel",
-                "requests_per_minute",
-                "input_tokens_per_minute",
-                "request_timeout_seconds",
-                "token_safety_factor",
-            )
-        }
-    )
-    (project / "config.toml").write_text(
-        dump_config(legacy), encoding="utf-8"
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset = "default"', 'adapter = "openai-compatible"'
+        ),
+        encoding="utf-8",
     )
 
-    resolved = load_project_config(project, presets_root=app_root)
-    assert resolved["llm"]["model"] == preset.definition["model"]
-    assert "_llm_preset_id" not in resolved
+    with pytest.raises(ConfigError, match="未知配置键 config.llm: adapter"):
+        load_project_config(project, presets_root=app_root)
+
+
+def test_inline_global_config_is_rejected(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset = "default"', 'model = "legacy-model"'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="未知配置键 config.llm: model"):
+        load_global_config(app_root)
