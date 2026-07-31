@@ -368,6 +368,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .settings-main, .reference-rail { padding: 20px 14px; border: 0; }
   .settings-row { display: grid; }
   .settings-row label { min-width: 0; }
+  .text-settings { padding-inline: 14px; }
+  .stage-select { grid-template-columns: 80px minmax(0, 1fr); }
+  .stage-select select { min-width: 0; width: 100%; }
   .code-field textarea { min-height: 440px; }
   .config-settings { padding: 20px 14px; }
   .config-heading { position: static; margin: -20px -14px 20px; padding: 20px 14px; }
