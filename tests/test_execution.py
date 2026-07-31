@@ -17,6 +17,7 @@ from app.execution import (
     build_chunk_plans,
     classify_stage,
     estimate_messages,
+    finalize_run,
     full_prompt,
     materialize_chunks,
     previous_context,
@@ -659,6 +660,162 @@ async def test_concurrent_requests_reserve_one_shared_rate_window() -> None:
 def test_token_safety_factor_below_one_scales_estimate() -> None:
     messages = render_messages("prompt", {"segments": [{"source": "one"}]})
     assert estimate_messages(messages, 0.5) < estimate_messages(messages, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> None:
+    current = config()
+    responses = [
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+    ]
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        usage = responses[min(calls - 1, len(responses) - 1)]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"type":"end"}'}}],
+                "usage": usage,
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            for _ in range(3):
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+            assert llm.usage_summary() == {
+                "input_tokens": 14,
+                "output_tokens": 11,
+                "total_tokens": 25,
+                "available": True,
+            }
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_marks_usage_unavailable_when_omitted(
+    tmp_path: Path,
+) -> None:
+    current = config()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+            summary = llm.usage_summary()
+            assert summary is not None
+            assert summary["available"] is False
+            assert summary["input_tokens"] == 0
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_without_usage_mapping_has_no_summary(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    definition = dict(current["_llm_adapter"].definition)
+    definition.pop("usage")
+    adapter_file = tmp_path / "adapter.json"
+    adapter_file.write_text(json.dumps(definition), encoding="utf-8")
+    current["_llm_adapter"] = load_json_adapter(adapter_file)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+            assert llm.usage_summary() is None
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+
+def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def write_manifest() -> None:
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"schema_version": 1, "status": "running"}),
+            encoding="utf-8",
+        )
+
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "available": True,
+    }
+    write_manifest()
+    finalize_run(run_dir, status="completed", completed=2, failed=0, usage=usage)
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["usage"] == usage
+    assert manifest["status"] == "completed"
+
+    write_manifest()
+    finalize_run(run_dir, status="failed", completed=0, failed=1)
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert "usage" not in manifest
 
 
 def _use_adapter(config: dict, name: str) -> None:

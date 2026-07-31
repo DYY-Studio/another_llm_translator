@@ -30,7 +30,7 @@ from .errors import (
     UsageError,
 )
 from .logging_utils import get_logger
-from .llm_adapter import JSONLLMAdapter, LLMResponse
+from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -742,6 +742,7 @@ def finalize_run(
     completed: int,
     failed: int,
     warnings: list[str] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> None:
     manifest = read_json(run_dir / "manifest.json")
     manifest.update(
@@ -751,6 +752,8 @@ def finalize_run(
         warnings=warnings or [],
         completed_at=utc_now(),
     )
+    if usage is not None:
+        manifest["usage"] = usage
     atomic_write_json(run_dir / "manifest.json", manifest)
 
 
@@ -856,6 +859,8 @@ class LLMClient:
         self.send_count = 0
         self.warnings: list[str] = []
         self._reported_output_clamp = False
+        self.usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0)
+        self.usage_observed = False
         self.logger = get_logger(stage)
         adapter = config.get("_llm_adapter")
         if not isinstance(adapter, JSONLLMAdapter):
@@ -1087,6 +1092,20 @@ class LLMClient:
                 )
                 parsed = self.adapter.parse_response(response_data)
                 normalized = normalize_llm_response(parsed)
+                extracted = self.adapter.extract_usage(response_data)
+                if extracted is not None:
+                    self.usage = Usage(
+                        input_tokens=(
+                            self.usage.input_tokens + extracted.input_tokens
+                        ),
+                        output_tokens=(
+                            self.usage.output_tokens + extracted.output_tokens
+                        ),
+                        total_tokens=(
+                            self.usage.total_tokens + extracted.total_tokens
+                        ),
+                    )
+                    self.usage_observed = True
                 self.logger.info(
                     "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
                     request_id,
@@ -1180,6 +1199,16 @@ class LLMClient:
         delay += random.uniform(0, float(self.config["retry"]["jitter_seconds"]))
         self.logger.info("retry backoff attempt=%d wait=%.2fs", attempt, delay)
         await self.sleeper(delay)
+
+    def usage_summary(self) -> dict[str, Any] | None:
+        if self.adapter.usage_pointers is None:
+            return None
+        return {
+            "input_tokens": self.usage.input_tokens,
+            "output_tokens": self.usage.output_tokens,
+            "total_tokens": self.usage.total_tokens,
+            "available": self.usage_observed,
+        }
 
 
 async def dispatch_chunks(

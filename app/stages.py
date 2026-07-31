@@ -1053,6 +1053,7 @@ async def run_terminology(
         and record.get("stage_fingerprint")
     }
     warnings: list[str] = []
+    usage: dict[str, Any] | None = None
     if resume_run_id is not None:
         warnings.append(
             f"续用 Run {resume_run_id} 的原始范围和术语任务；"
@@ -1515,6 +1516,7 @@ async def run_terminology(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+        usage = llm.usage_summary()
     except asyncio.CancelledError:
         finalize_run(
             run_dir,
@@ -1522,6 +1524,7 @@ async def run_terminology(
             completed=(len(selected) - len(work)) if resume_run_id else 0,
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
+            usage=usage,
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -1531,6 +1534,7 @@ async def run_terminology(
             completed=(len(selected) - len(work)) if resume_run_id else 0,
             failed=len(work),
             warnings=warnings,
+            usage=usage,
         )
         logger.error(
             "run failed run=%s error_type=%s",
@@ -1576,6 +1580,7 @@ async def run_terminology(
         ),
         failed=failed,
         warnings=warnings,
+        usage=usage,
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d pending=%d",
@@ -1594,6 +1599,7 @@ async def run_terminology(
         "published": published_now,
         "terms_revision": published["terms_revision"] if published else None,
         "warnings": warnings,
+        "usage": usage,
     }
 
 
@@ -1800,6 +1806,7 @@ async def run_translation(
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    usage: dict[str, Any] | None = None
     if resume_run_id is not None:
         warnings.append(
             f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
@@ -2410,6 +2417,7 @@ async def run_translation(
                     }
                     await repair_group(group, subset)
         _extend_unique(warnings, llm.warnings)
+        usage = llm.usage_summary()
     except asyncio.CancelledError:
         finalize_run(
             run_dir,
@@ -2421,6 +2429,7 @@ async def run_translation(
             ),
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
+            usage=usage,
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -2434,6 +2443,7 @@ async def run_translation(
             ),
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
+            usage=usage,
         )
         logger.error(
             "run failed run=%s completed=%d error_type=%s",
@@ -2507,6 +2517,7 @@ async def run_translation(
         ),
         failed=failed_count,
         warnings=warnings,
+        usage=usage,
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
@@ -2524,6 +2535,7 @@ async def run_translation(
         "failed": failed_count,
         "last_attempt_failed": len(selection.last_attempt_failed),
         "warnings": warnings,
+        "usage": usage,
     }
 
 
@@ -2669,6 +2681,7 @@ async def run_review(
     history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
+    usage: dict[str, Any] | None = None
     if resume_run_id is not None:
         warnings.append(
             f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
@@ -3169,6 +3182,7 @@ async def run_review(
                 max_parallel=config["execution"]["max_parallel"],
             )
         _extend_unique(warnings, llm.warnings)
+        usage = llm.usage_summary()
     except asyncio.CancelledError:
         finalize_run(
             run_dir,
@@ -3180,6 +3194,7 @@ async def run_review(
             ),
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
+            usage=usage,
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -3193,6 +3208,7 @@ async def run_review(
             ),
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
+            usage=usage,
         )
         logger.error(
             "run failed run=%s completed=%d error_type=%s",
@@ -3211,6 +3227,7 @@ async def run_review(
         ),
         failed=len(failed_ids),
         warnings=warnings,
+        usage=usage,
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
@@ -3227,6 +3244,7 @@ async def run_review(
         "completed": len(completed_ids),
         "failed": len(failed_ids),
         "warnings": warnings,
+        "usage": usage,
     }
 
 

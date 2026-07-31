@@ -99,7 +99,14 @@ async def test_terminology_publishes_and_translation_uses_terms(
             ]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+            json={
+                "choices": [{"message": {"content": llm_jsonl(records)}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -128,6 +135,19 @@ async def test_terminology_publishes_and_translation_uses_terms(
     assert translation_summary["completed"] == 2
     assert seen_translation_payload is not None
     assert seen_translation_payload["terms"][0]["source"] == "Alice"
+    expected_usage = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "available": True,
+    }
+    assert term_summary["usage"] == expected_usage
+    assert translation_summary["usage"] == expected_usage
+    for run_id in (term_summary["run_id"], translation_summary["run_id"]):
+        manifest = json.loads(
+            (project / "runs" / run_id / "manifest.json").read_text("utf-8")
+        )
+        assert manifest["usage"] == expected_usage
 
 
 @pytest.mark.asyncio
