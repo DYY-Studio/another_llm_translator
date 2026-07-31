@@ -17,10 +17,6 @@
   "response_content_pointer": "/content/-1/text",
   "models": {
     "endpoint": "/v1/models",
-    "headers": {
-      "x-api-key": "${api_key}",
-      "anthropic-version": "2023-06-01"
-    },
     "response_models_pointer": "/data",
     "response_model_id": "id",
     "response_model_display": "display_name"

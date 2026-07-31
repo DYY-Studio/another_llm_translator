@@ -102,9 +102,6 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 {
   "models": {
     "endpoint": "/v1/models",
-    "headers": {
-      "Authorization": "Bearer ${api_key}"
-    },
     "response_models_pointer": "/data",
     "response_model_id": "id",
     "response_model_display": "display_name",
@@ -114,7 +111,8 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 ```
 
 - models 请求固定为非流式 GET，URL 由 Preset `base_url` 与 `endpoint`
-  组成；headers 只允许 `${api_key}` 占位符。
+  组成，Header 复用顶层 `headers` 模板；渲染时只提供 `${api_key}`，
+  含其他占位符的 Header 在触发模型发现时明确失败。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀

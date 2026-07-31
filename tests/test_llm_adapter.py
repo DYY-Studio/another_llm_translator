@@ -289,15 +289,29 @@ def test_json_adapter_negative_index_replace_content(tmp_path: Path) -> None:
 
 def models_definition() -> dict[str, object]:
     value = definition()
+    value["headers"] = {"Authorization": "Bearer ${api_key}"}
     value["models"] = {
         "endpoint": "/v1/models",
-        "headers": {"Authorization": "Bearer ${api_key}"},
         "response_models_pointer": "/data",
         "response_model_id": "id",
         "response_model_display": "display_name",
         "response_model_strip_prefix": "models/",
     }
     return value
+
+
+def test_json_adapter_models_request_rejects_header_placeholders(
+    tmp_path: Path,
+) -> None:
+    value = definition()
+    value["models"] = {
+        "endpoint": "/v1/models",
+        "response_models_pointer": "/data",
+        "response_model_id": "id",
+    }
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    with pytest.raises(ExternalError, match="只支持 \\$\\{api_key\\}"):
+        adapter.build_models_request(api_key="secret")
 
 
 def test_json_adapter_models_spec_builds_and_parses(tmp_path: Path) -> None:
@@ -343,8 +357,8 @@ def test_json_adapter_models_response_fails_fast(tmp_path: Path) -> None:
             "endpoint 必须是无占位符",
         ),
         (
-            lambda value: value["models"]["headers"].update({"X": "${model}"}),
-            "未知占位符",
+            lambda value: value["models"].update({"headers": {"X": "Y"}}),
+            "包含未知字段",
         ),
         (
             lambda value: value["models"].update({"response_models_pointer": "data"}),
