@@ -11,6 +11,7 @@ from app.errors import UsageError
 from app.locking import project_write_lock
 from app.project import init_project
 from app.web import create_app
+from tests.test_editor import seed_conflicted_terms
 from tests.test_foundation import make_app_root
 
 
@@ -76,6 +77,102 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     ]
     adapters = client.get("/api/v1/document-adapters").json()["adapters"]
     assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
+
+
+def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    empty = client.get("/api/v1/projects/sample/terms")
+    assert empty.status_code == 200
+    assert empty.json()["terms"] == []
+
+    added = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["A"],
+            "disabled": False,
+        },
+    )
+    assert added.status_code == 200
+    assert added.json()["terms_revision"] == 1
+    assert added.json()["terms"][0]["preferred_translation"] == "爱丽丝"
+
+    renamed = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "old_normalized": "alice",
+            "source": "Alice Liddell",
+            "preferred_translation": "爱丽丝·利德尔",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alice"],
+            "disabled": False,
+        },
+    )
+    assert renamed.status_code == 200
+    assert any(
+        item["normalized"] == "alice liddell" and not item["disabled"]
+        for item in renamed.json()["terms"]
+    )
+
+    removed = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "old_normalized": "alice liddell",
+            "source": "Alice Liddell",
+            "preferred_translation": "爱丽丝·利德尔",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alice"],
+            "disabled": True,
+        },
+    )
+    assert removed.status_code == 200
+    assert next(
+        item
+        for item in removed.json()["terms"]
+        if item["normalized"] == "alice liddell"
+    )["disabled"]
+
+    restored = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "old_normalized": "alice liddell",
+            "source": "Alice Liddell",
+            "preferred_translation": "爱丽丝·利德尔",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alice"],
+            "disabled": False,
+        },
+    )
+    assert restored.status_code == 200
+    assert not next(
+        item
+        for item in restored.json()["terms"]
+        if item["normalized"] == "alice liddell"
+    )["disabled"]
+
+    seed_conflicted_terms(project)
+    unresolved = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "old_normalized": "alpha",
+            "source": "Alpha",
+            "preferred_translation": "阿尔法",
+            "category": "",
+            "description": "category conflict",
+            "aliases": [],
+            "disabled": False,
+        },
+    )
+    assert unresolved.status_code == 400
+    assert "类别冲突尚未裁决" in unresolved.json()["error"]
 
 
 def test_web_adapter_validation_preview_and_secret_redaction(
