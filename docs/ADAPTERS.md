@@ -29,6 +29,16 @@
 }
 ```
 
+需要读取端点提供的结构化思考正文时可增加：
+
+```json
+{
+  "response_reasoning_content_pointer": "/choices/0/message/reasoning_content"
+}
+```
+
+该字段可省略；内置 OpenAI-compatible 定义未配置。
+
 ### 请求边界
 
 - 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。
@@ -45,9 +55,14 @@
 
 ### 响应边界
 
-`response_content_pointer` 是 RFC 6901 JSON Pointer。路径不存在或结果不是
-字符串时，当前请求失败；不猜测备用字段。提取出的字符串继续进入统一 JSONL
-解析、思考标签处理、格式修正和业务校验。
+`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。
+可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。任一路径
+不存在或类型错误时当前请求失败，不猜测备用字段。
+
+Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一
+严格规则从 content 开头剥离一个完整已知思考 Tag；若结构化字段与内嵌块同时
+非空则快速失败，不猜测拼接顺序。`reasoning_content` 只存在于当前请求生命
+周期，不进入阶段记录。debug 模式只保留原始响应，不新增思考副本。
 
 常规 HTTP 状态与网络异常不由 Adapter 分类。需要特殊签名、非 JSON body、
 非 JSON 成功响应或特殊错误解析的端点超出 schema 1 范围。

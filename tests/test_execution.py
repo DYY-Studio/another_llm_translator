@@ -364,6 +364,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
     current = config()
+    current["debug"]["enabled"] = True
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -405,6 +406,9 @@ async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
 
     assert response.content == '{"type":"end"}'
     assert response.reasoning_content == "reasoning"
+    saved_response = next((tmp_path / "payloads").glob("*.response.json"))
+    assert "<thought>reasoning</thought>" in saved_response.read_text("utf-8")
+    assert not list(tmp_path.rglob("*reasoning*"))
 
 
 @pytest.mark.asyncio

@@ -79,8 +79,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 3（全局设置、Prompt 与实时 LLM Preset）；下一阶段
-是规范化 LLM 思考响应。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 4（规范化 LLM 思考响应）；下一阶段是 File 级
+Document Adapter 与多格式项目。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 
