@@ -15,9 +15,6 @@
   "response_content_pointer": "/output_text",
   "models": {
     "endpoint": "/v1/models",
-    "headers": {
-      "Authorization": "Bearer ${api_key}"
-    },
     "response_models_pointer": "/data",
     "response_model_id": "id"
   },

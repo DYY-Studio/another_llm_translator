@@ -32,7 +32,6 @@ _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
 _MODELS_KEYS = frozenset(
     {
         "endpoint",
-        "headers",
         "response_models_pointer",
         "response_model_id",
         "response_model_display",
@@ -40,7 +39,7 @@ _MODELS_KEYS = frozenset(
     }
 )
 _MODELS_REQUIRED_KEYS = frozenset(
-    {"endpoint", "headers", "response_models_pointer", "response_model_id"}
+    {"endpoint", "response_models_pointer", "response_model_id"}
 )
 _USAGE_KEYS = frozenset(
     {"input_tokens_pointer", "output_tokens_pointer", "total_tokens_pointer"}
@@ -167,9 +166,15 @@ class JSONLLMAdapter:
     ) -> tuple[str, dict[str, str]]:
         if self.models_spec is None:
             raise ExternalError("该 Adapter 未声明模型发现规格")
+        for template in self.headers_template.values():
+            unknown = set(_PLACEHOLDER_RE.findall(template)) - {"api_key"}
+            if unknown:
+                raise ExternalError(
+                    "models 请求的 Header 只支持 ${api_key} 占位符"
+                )
         headers = {
             name: _render_header(template, {"api_key": api_key})
-            for name, template in self.models_spec["headers"].items()
+            for name, template in self.headers_template.items()
         }
         return self.models_spec["endpoint"], headers
 
@@ -313,18 +318,6 @@ def _validate_models_spec(value: Any) -> dict[str, Any] | None:
     endpoint = value["endpoint"]
     if not isinstance(endpoint, str) or not endpoint.strip() or "${" in endpoint:
         raise ConfigError("LLM Adapter models endpoint 必须是无占位符的非空字符串")
-    headers = value["headers"]
-    if not isinstance(headers, dict) or not all(
-        isinstance(name, str)
-        and name
-        and isinstance(template, str)
-        for name, template in headers.items()
-    ):
-        raise ConfigError("LLM Adapter models headers 必须是字符串到字符串的对象")
-    for template in headers.values():
-        _validate_placeholders(
-            template, allowed=frozenset({"api_key"}), location="models headers"
-        )
     models_pointer = value["response_models_pointer"]
     if (
         not isinstance(models_pointer, str)

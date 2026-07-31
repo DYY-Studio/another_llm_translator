@@ -305,6 +305,8 @@ def test_shipped_adapters_and_presets_load_and_dry_run() -> None:
             stream=False,
             extra_body=preset.definition["extra_body"],
         )
+        if adapter.models_spec is not None:
+            adapter.build_models_request(api_key="***")
 
 
 def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> None:
