@@ -77,6 +77,9 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
+当前产品路线已完成 Stage 1（空项目与同格式文件增删）；下一阶段是 Web
+结构化项目设置。未来行为以路线图为准，不属于当前 MVP 契约。
+
 ## 本地 Web Alpha
 
 构建前端后启动只监听回环地址的完整工作台：
