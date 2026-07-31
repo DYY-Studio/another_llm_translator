@@ -14,7 +14,8 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 8 已完成；下一阶段是 SQLite 标准项目存储。
+- 产品路线 Stage 1 至 Stage 8、Stage 10 已完成；下一阶段是 SQLite 标准
+  项目存储。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -147,7 +148,7 @@ Preset；内联 LLM 连接配置不再支持。
   仍可使用。
 - 完成迁移后删除 JSONL 运行路径和无用兼容代码。
 
-## Stage 10：Adapter 模型发现与 usage 统计
+## Stage 10：Adapter 模型发现与 usage 统计（已完成）
 
 - Adapter 可选声明 models 请求规格和响应映射；宿主继续负责鉴权、代理、
   超时和 HTTP 生命周期。
@@ -158,8 +159,8 @@ Preset；内联 LLM 连接配置不再支持。
 - Provider 未返回 usage 时明确显示不可用，不使用本地启发式估算冒充端点
   账单或实际消耗。
 
-模型发现和 usage 都是 Adapter 对端点响应的可选映射，待出现真实端点差异后
-共同设计；本阶段不改变主请求的限速或重试语义。
+模型发现和 usage 都是 Adapter 对端点响应的可选映射，与主请求的限速或重试
+语义无关。实现细节见 `docs/ADAPTERS.md`。
 
 ## Stage 11：单 Preset 多 API Key
 
