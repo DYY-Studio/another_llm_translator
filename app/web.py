@@ -20,7 +20,7 @@ from .config import (
     resolve_project_config,
 )
 from .editor import EditorStore
-from .errors import AppError, UsageError
+from .errors import AppError, ProjectError, UsageError
 from .execution import Scope
 from .llm_adapter import adapter_path, load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
@@ -33,6 +33,7 @@ from .project import (
     init_project,
     remove_project_files,
     resolve_project,
+    resolve_project_parent,
     sync_global_templates,
 )
 from .stages import export_project, export_terms, import_terms, run_apply
@@ -59,6 +60,7 @@ def create_app(
     app.state.projects_root = projects_root
     app.state.app_root = app_root
     app.state.tasks = WebTaskManager()
+    app.state.external_projects = set()
 
     @app.middleware("http")
     async def local_only(request: Request, call_next: Any) -> Any:
@@ -79,27 +81,75 @@ def create_app(
     async def app_error(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+    def remember_project(path: Path) -> None:
+        normalized = path.resolve()
+        if normalized.parent == projects_root.resolve():
+            return
+        app.state.external_projects.add(normalized)
+
+    def project_paths() -> list[Path]:
+        paths: list[Path] = []
+        if projects_root.exists():
+            paths.extend(
+                item
+                for item in sorted(
+                    projects_root.iterdir(), key=lambda value: value.name
+                )
+                if (item / "project.json").is_file()
+            )
+        paths.extend(
+            path
+            for path in sorted(app.state.external_projects)
+            if (path / "project.json").is_file()
+        )
+        unique: dict[Path, Path] = {}
+        for path in paths:
+            unique[path.resolve()] = path.resolve()
+        return list(unique.values())
+
+    def project_selector(path: Path, metadata: dict[str, Any]) -> str:
+        return (
+            path.name
+            if path.parent == projects_root.resolve()
+            else str(metadata["project_id"])
+        )
+
     def project(name: str) -> Path:
         if not name or "/" in name or "\\" in name or name in {".", ".."}:
             raise UsageError("项目名无效")
-        return resolve_project(name, projects_root)
+        try:
+            return resolve_project(name, projects_root)
+        except ProjectError:
+            matches = [
+                path
+                for path in project_paths()
+                if str(read_json(path / "project.json")["project_id"]) == name
+            ]
+            if len(matches) != 1:
+                raise ProjectError(f"项目不存在或标识冲突：{name}")
+            return matches[0]
 
     @app.get("/api/v1/projects")
     async def list_projects() -> dict[str, Any]:
         values = []
-        if projects_root.exists():
-            for item in sorted(projects_root.iterdir(), key=lambda path: path.name):
-                if not (item / "project.json").is_file():
-                    continue
-                metadata = read_json(item / "project.json")
-                values.append(
-                    {
-                        "name": metadata["name"],
-                        "project_id": metadata["project_id"],
-                        "file_count": metadata["file_count"],
-                        "segment_count": metadata["segment_count"],
-                    }
-                )
+        selectors: set[str] = set()
+        for item in project_paths():
+            metadata = read_json(item / "project.json")
+            selector = project_selector(item, metadata)
+            if selector in selectors:
+                raise UsageError(f"项目标识冲突：{selector}")
+            selectors.add(selector)
+            values.append(
+                {
+                    "selector": selector,
+                    "name": metadata["name"],
+                    "project_id": metadata["project_id"],
+                    "path": str(item),
+                    "external": item.parent != projects_root.resolve(),
+                    "file_count": metadata["file_count"],
+                    "segment_count": metadata["segment_count"],
+                }
+            )
         return {"projects": values}
 
     @app.get("/api/v1/document-adapters")
@@ -278,6 +328,7 @@ def create_app(
         name: str = Form(...),
         document_adapter: str = Form("txt"),
         empty: bool = Form(False),
+        parent_dir: str = Form(""),
         files: list[UploadFile] | None = File(None),
     ) -> dict[str, Any]:
         uploads = files or []
@@ -292,16 +343,44 @@ def create_app(
                 target.parent.mkdir()
                 target.write_bytes(await upload.read())
                 inputs.append(str(target))
+            selected_root = (
+                resolve_project_parent(parent_dir, require_absolute=True)
+                if parent_dir
+                else projects_root
+            )
             path, summary = init_project(
                 inputs,
                 name=name,
                 document_adapter_id=document_adapter,
                 empty=empty,
                 app_root=app_root,
-                projects_root=projects_root,
+                projects_root=selected_root,
             )
+        assert path is not None
+        remember_project(path)
+        metadata = read_json(path / "project.json")
         summary["project_path"] = str(path)
+        summary["project_selector"] = project_selector(path, metadata)
+        summary["external"] = path.parent != projects_root.resolve()
         return summary
+
+    @app.post("/api/v1/projects/open")
+    async def open_project(payload: dict[str, Any]) -> dict[str, Any]:
+        value = payload.get("path")
+        if not isinstance(value, str) or not value.strip():
+            raise UsageError("项目路径必须是非空字符串")
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise UsageError("项目路径必须是绝对路径")
+        root = resolve_project(str(candidate))
+        metadata = read_json(root / "project.json")
+        remember_project(root)
+        return {
+            "selector": project_selector(root, metadata),
+            "name": metadata["name"],
+            "path": str(root),
+            "external": root.parent != projects_root.resolve(),
+        }
 
     @app.get("/api/v1/projects/{name}")
     async def overview(name: str) -> dict[str, Any]:

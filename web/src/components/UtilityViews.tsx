@@ -180,12 +180,16 @@ export function ExportView({
   );
 }
 
-export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
+export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (selector: string, externalPath?: string) => void }) {
+  const [mode, setMode] = useState<"create" | "open">("create");
   const [name, setName] = useState("");
+  const [parentDir, setParentDir] = useState("");
+  const [projectPath, setProjectPath] = useState("");
   const [adapter, setAdapter] = useState("txt");
   const [adapters, setAdapters] = useState<Array<{ adapter_id: string; capabilities: string[] }>>([]);
   const [files, setFiles] = useState<FileList | null>(null);
   const [empty, setEmpty] = useState(false);
+  const [error, setError] = useState("");
   useEffect(() => {
     void api<{ adapters: Array<{ adapter_id: string; capabilities: string[] }> }>("/api/v1/document-adapters")
       .then((value) => setAdapters(value.adapters));
@@ -195,16 +199,42 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
     body.append("name", name);
     body.append("document_adapter", adapter);
     body.append("empty", String(empty));
+    body.append("parent_dir", parentDir.trim());
     Array.from(files ?? []).forEach((file) => body.append("files", file));
-    await api("/api/v1/projects", { method: "POST", body });
-    onCreated(name);
+    try {
+      const result = await api<{ project_selector: string; project_path: string; external: boolean }>("/api/v1/projects", { method: "POST", body });
+      onCreated(result.project_selector, result.external ? result.project_path : undefined);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+  async function open() {
+    try {
+      const result = await api<{ selector: string; path: string; external: boolean }>("/api/v1/projects/open", {
+        method: "POST",
+        body: JSON.stringify({ path: projectPath.trim() }),
+      });
+      onCreated(result.selector, result.external ? result.path : undefined);
+    } catch (reason) {
+      setError(String(reason));
+    }
   }
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-        <h2>新建项目</h2>
-        <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>文档格式
+        <div className="dialog-tabs" role="tablist" aria-label="项目操作">
+          <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>新建项目</button>
+          <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>打开现有项目</button>
+        </div>
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        {mode === "open" ? <>
+          <label>项目目录绝对路径<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /></label>
+          <p className="muted">只打开此目录，不扫描父目录，也不会移动项目。</p>
+          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>打开项目</button></div>
+        </> : <>
+          <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label>保存父目录（留空使用默认 projects）<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} placeholder="/path/to/parent" /></label>
+          <label>文档格式
           <select value={adapter} onChange={(event) => { setAdapter(event.target.value); setFiles(null); }}>
             {adapters.map((item) => <option key={item.adapter_id} value={item.adapter_id}>{item.adapter_id.toUpperCase()}</option>)}
           </select>
@@ -223,7 +253,8 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
             onChange={(event) => setFiles(event.target.files)}
           />
         </label>
-        <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name || (!empty && !files?.length)} onClick={submit}>创建项目</button></div>
+          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name || (!empty && !files?.length)} onClick={submit}>创建项目</button></div>
+        </>}
       </div>
     </div>
   );

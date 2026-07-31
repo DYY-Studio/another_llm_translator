@@ -62,6 +62,80 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    external_parent = tmp_path / "external"
+    external_parent.mkdir()
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "external-project",
+            "document_adapter": "txt",
+            "empty": "true",
+            "parent_dir": str(external_parent),
+        },
+    )
+    assert created.status_code == 200
+    selector = created.json()["project_selector"]
+    external_project = external_parent / "external-project"
+    assert created.json()["project_path"] == str(external_project)
+    listed = client.get("/api/v1/projects").json()["projects"]
+    external = next(item for item in listed if item["selector"] == selector)
+    assert external["external"] is True
+    assert external["path"] == str(external_project)
+    assert client.get(f"/api/v1/projects/{selector}").status_code == 200
+
+    hidden, _ = init_project(
+        [],
+        name="not-scanned",
+        empty=True,
+        app_root=app_root,
+        projects_root=external_parent,
+    )
+    assert hidden is not None
+    assert not any(
+        item["name"] == "not-scanned"
+        for item in client.get("/api/v1/projects").json()["projects"]
+    )
+    opened = client.post(
+        "/api/v1/projects/open", json={"path": str(hidden)}
+    )
+    assert opened.status_code == 200
+    assert opened.json()["path"] == str(hidden)
+
+    assert client.post(
+        "/api/v1/projects/open", json={"path": str(hidden)}
+    ).status_code == 200
+    names = [
+        item["name"]
+        for item in client.get("/api/v1/projects").json()["projects"]
+    ]
+    assert {"sample", "external-project", "not-scanned"} <= set(names)
+    assert names.count("not-scanned") == 1
+
+    moved = hidden.with_name("moved-project")
+    hidden.rename(moved)
+    assert client.post(
+        "/api/v1/projects/open", json={"path": str(hidden)}
+    ).status_code == 400
+    assert all(
+        item["name"] != "not-scanned"
+        for item in client.get("/api/v1/projects").json()["projects"]
+    )
+
+    assert client.post(
+        "/api/v1/projects/open", json={"path": "relative/project"}
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/open", json={"path": str(tmp_path)}
+    ).status_code == 400
+
+
 def test_web_build_includes_editor_layout_context_and_theme_controls(
     tmp_path: Path,
 ) -> None:
@@ -74,6 +148,7 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert asset is not None
     script = client.get(asset.group(1))
     assert script.status_code == 200
+    assert "minimal-llm-translator.recent-projects.v1" in script.text
     stylesheet = re.search(r'<link rel="stylesheet"[^>]+href="([^"]+)"', page.text)
     assert stylesheet is not None
     css = client.get(stylesheet.group(1))
@@ -110,6 +185,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "全局 LLM Preset",
         "使用全局 Preset",
         "翻译 Preset",
+        "打开现有项目",
+        "保存父目录",
+        "只打开此目录",
         "执行与分块",
         "参考上下文",
         "翻译校验与重试",
