@@ -100,8 +100,17 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "全部应用",
         "导入术语表",
         "导出术语表",
+        "项目与输入",
+        "LLM 连接",
+        "模型与采样",
+        "执行与分块",
+        "参考上下文",
+        "翻译校验与重试",
+        "调试与故障注入",
+        "写入规范 TOML",
     ):
         assert text in script.text
+    assert "保存前会严格验证完整 TOML" not in script.text
 
 
 def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:

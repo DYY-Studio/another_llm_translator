@@ -119,3 +119,74 @@ export interface TermsResponse {
 }
 
 export type ThemeMode = "system" | "light" | "dark";
+
+export interface ProjectConfig {
+  project: {
+    target_language: string;
+    output_encoding: string;
+  };
+  input: {
+    encoding_confidence_threshold: number;
+    fallback_encoding: string;
+  };
+  llm: {
+    adapter: string;
+    base_url: string;
+    endpoint: string;
+    model: string;
+    api_key_env: string;
+    proxy_url: string;
+    temperature_terminology: number;
+    temperature_translation: number;
+    temperature_proofreading: number;
+    temperature_polishing: number;
+    max_output_tokens: number;
+    context_window_tokens: number;
+    context_safety_margin_tokens: number;
+  };
+  execution: {
+    max_parallel: number;
+    requests_per_minute: number;
+    input_tokens_per_minute: number;
+    request_timeout_seconds: number;
+    scheduling_mode: "ordered_by_file" | "parallel";
+    token_safety_factor: number;
+  };
+  chunking: {
+    target_chunk_input_tokens: number;
+    allow_split_oversized_segment: boolean;
+  };
+  context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
+    enabled: boolean;
+    previous_segments: number;
+  }>;
+  terminology: {
+    unicode_normalization: "NFKC";
+    case_insensitive: true;
+    max_terms_per_segment: number;
+    alias_primary_collision: "conflict" | "merge";
+  };
+  validation: {
+    translation: {
+      japanese_kana: boolean;
+      korean_hangul: boolean;
+      max_retry_attempts: number;
+      exhausted_mode: "fail" | "warning";
+    };
+  };
+  retry: {
+    http_max_attempts: number;
+    format_max_attempts: number;
+    base_delay_seconds: number;
+    max_delay_seconds: number;
+    jitter_seconds: number;
+  };
+  debug: {
+    enabled: boolean;
+    inject_429_every: number;
+    inject_500_every: number;
+    inject_timeout_every: number;
+    inject_invalid_json_every: number;
+    inject_missing_segment_every: number;
+  };
+}
