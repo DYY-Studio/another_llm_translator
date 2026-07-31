@@ -83,8 +83,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 6（按文件筛选导出）；下一阶段是四阶段独立 LLM
-Preset。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 7（四阶段独立 LLM Preset）；下一阶段是外部项目
+位置。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 

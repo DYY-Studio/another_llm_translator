@@ -14,7 +14,7 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 6 已完成；下一阶段是四阶段独立 LLM Preset。
+- 产品路线 Stage 1 至 Stage 7 已完成；下一阶段是外部项目位置。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -113,7 +113,7 @@ Preset；内联 LLM 连接配置不再支持。
   失败。
 - 不增加按 Segment 导出或跨文件合并。
 
-## Stage 7：四阶段独立 LLM Preset
+## Stage 7：四阶段独立 LLM Preset（已完成）
 
 - 项目设置一个全局 Preset，术语、翻译、校对和润色可分别选择覆盖 Preset。
 - 未设置阶段覆盖时使用全局 Preset，不增加其他继承层。

@@ -313,6 +313,10 @@ fallback_encoding = "utf-8"
 
 [llm]
 preset = "default"
+preset_terminology = ""
+preset_translation = ""
+preset_proofreading = ""
+preset_polishing = ""
 
 temperature_terminology = 0.1
 temperature_translation = 0.2
@@ -380,7 +384,9 @@ Preset 中的 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别
 
 API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
 
-`llm.preset` 选择全局 `llm_presets/<id>.json`，Preset 再选择项目
+`llm.preset` 选择全局默认的 `llm_presets/<id>.json`；四个
+`llm.preset_<stage>` 可用非空 Preset ID 覆盖对应阶段，空字符串继承全局值。
+Preset 再选择项目
 `llm_adapters/<id>.json`。Adapter 定义是完整的 Header/body 模板和成功响应
 JSON Pointer；Preset 的 `extra_body` 可追加无冲突的 Provider 自定义字段。
 两者的内容 Hash 都进入阶段指纹，定义副本都进入 Run 快照，解析后的密钥不进入
@@ -406,7 +412,7 @@ warning
 
 ## 2.6 全局模板同步
 
-`init` 将全局配置、四个提示词和当前 Preset 所需的 Adapter 复制为项目工作
+`init` 将全局配置、四个提示词和全局及阶段 Preset 所需的 Adapter 复制为项目工作
 副本。项目配置和 Prompt 使用项目副本；LLM 连接通过项目保存的 Preset ID
 实时读取全局 `llm_presets/` 定义。
 
@@ -1077,11 +1083,14 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
 `/choices/0/message/content`。声明式 Adapter 只支持非流式 JSON POST。
 
-项目的 `llm.preset` 实时解析全局命名 Preset。Preset 提供 Adapter ID、URL、
+项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段
+只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、
 模型、API Key 环境变量名、代理、Token 能力、限速、并发、超时和
 `extra_body`。`extra_body` 必须是 JSON 对象，可以包含嵌套对象和数组；宿主在
 Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失
 Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
+`run-all` 对相同 Preset 复用 HTTP Client 和限速窗口，对不同 Preset 分别维护；
+Run 快照与阶段指纹始终记录当前阶段实际使用的 Preset 和 Adapter。
 Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset 内容进入 Run
 快照和阶段指纹，因此其中不得保存密钥。项目配置、全局配置和 Run 快照都必须
 包含 `llm.preset`；内联连接字段和缺失 `llm_preset.json` 的 Run 续作直接失败。
