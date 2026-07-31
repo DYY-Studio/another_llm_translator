@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1054,3 +1056,149 @@ def test_web_task_manager_allows_one_task_and_cancellation(
             if state["status"] == "cancelled":
                 break
         assert state["status"] == "cancelled"
+
+
+class FakeModelsResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        payload: object = None,
+        json_error: bool = False,
+    ) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self._json_error = json_error
+
+    def json(self) -> object:
+        if self._json_error:
+            raise ValueError("bad json")
+        return self._payload
+
+
+class FakeModelsClient:
+    instances: list["FakeModelsClient"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.raise_error: Exception | None = None
+        self.response = FakeModelsResponse()
+        self.request_url = ""
+        self.request_headers: dict[str, str] = {}
+        FakeModelsClient.instances.append(self)
+
+    async def __aenter__(self) -> "FakeModelsClient":
+        return self
+
+    async def __aexit__(self, *_: object) -> bool:
+        return False
+
+    async def get(self, url: str, headers: dict[str, str] | None = None) -> FakeModelsResponse:
+        self.request_url = url
+        self.request_headers = headers or {}
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.response
+
+
+def test_web_preset_models_discovery_fetches_and_parses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    fake = FakeModelsClient()
+    fake.response = FakeModelsResponse(
+        payload={
+            "data": [
+                {"id": "gpt-4o", "display_name": "GPT-4o"},
+                {"id": "gpt-4.1"},
+            ]
+        }
+    )
+    monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        result = client.post("/api/v1/global/presets/default/models")
+    finally:
+        del os.environ["LLM_API_KEY"]
+    assert result.status_code == 200
+    assert result.json() == {
+        "models": [
+            {"id": "gpt-4o", "display": "gpt-4o"},
+            {"id": "gpt-4.1", "display": "gpt-4.1"},
+        ],
+        "count": 2,
+    }
+    assert fake.request_url == "https://example.com/v1/v1/models"
+    assert fake.request_headers["Authorization"] == "Bearer test"
+
+
+def test_web_preset_models_discovery_fails_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    adapter = json.loads(
+        (app_root / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
+    )
+    adapter["adapter_id"] = "minimal"
+    adapter.pop("models")
+    adapter.pop("usage")
+    (app_root / "llm_adapters" / "minimal.json").write_text(
+        json.dumps(adapter), encoding="utf-8"
+    )
+    preset = json.loads(
+        (app_root / "llm_presets" / "default.json").read_text("utf-8")
+    )
+    preset["adapter_id"] = "minimal"
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    assert client.put(
+        "/api/v1/global/presets/default", json=preset
+    ).status_code == 200
+
+    no_spec = client.post("/api/v1/global/presets/default/models")
+    assert no_spec.status_code == 400
+    assert "未声明模型发现规格" in no_spec.json()["error"]
+
+    preset["adapter_id"] = "openai-compatible"
+    assert client.put(
+        "/api/v1/global/presets/default", json=preset
+    ).status_code == 200
+    missing_key = client.post("/api/v1/global/presets/default/models")
+    assert missing_key.status_code == 400
+    assert "缺少环境变量" in missing_key.json()["error"]
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        fake = FakeModelsClient()
+        fake.raise_error = httpx.ConnectError("no route")
+        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        network = client.post("/api/v1/global/presets/default/models")
+        assert network.status_code == 400
+        assert "模型列表请求失败" in network.json()["error"]
+
+        fake = FakeModelsClient()
+        fake.response = FakeModelsResponse(status_code=500)
+        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        http_error = client.post("/api/v1/global/presets/default/models")
+        assert http_error.status_code == 400
+        assert "HTTP 500" in http_error.json()["error"]
+
+        fake = FakeModelsClient()
+        fake.response = FakeModelsResponse(json_error=True)
+        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        bad_json = client.post("/api/v1/global/presets/default/models")
+        assert bad_json.status_code == 400
+        assert "不是合法 JSON" in bad_json.json()["error"]
+
+        fake = FakeModelsClient()
+        fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
+        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        bad_shape = client.post("/api/v1/global/presets/default/models")
+        assert bad_shape.status_code == 400
+        assert "不是数组" in bad_shape.json()["error"]
+    finally:
+        del os.environ["LLM_API_KEY"]
