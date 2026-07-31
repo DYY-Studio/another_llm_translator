@@ -16,7 +16,7 @@ _BODY_PLACEHOLDERS = frozenset(
     {"model", "messages", "temperature", "max_output_tokens", "stream"}
 )
 _HEADER_PLACEHOLDERS = _BODY_PLACEHOLDERS | {"api_key"}
-_ADAPTER_KEYS = frozenset(
+_REQUIRED_ADAPTER_KEYS = frozenset(
     {
         "schema_version",
         "adapter_id",
@@ -25,6 +25,13 @@ _ADAPTER_KEYS = frozenset(
         "response_content_pointer",
     }
 )
+_OPTIONAL_ADAPTER_KEYS = frozenset({"response_reasoning_content_pointer"})
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    content: str
+    reasoning_content: str | None
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,7 @@ class JSONLLMAdapter:
     headers_template: dict[str, str]
     body_template: dict[str, Any]
     response_content_pointer: str
+    response_reasoning_content_pointer: str | None
     digest: str
     definition: dict[str, Any]
 
@@ -70,11 +78,37 @@ class JSONLLMAdapter:
             body.update(deepcopy(extra_body))
         return headers, body
 
-    def parse_content(self, response: Any) -> str:
-        value = _resolve_json_pointer(response, self.response_content_pointer)
-        if not isinstance(value, str):
+    def parse_response(self, response: Any) -> LLMResponse:
+        try:
+            content = _resolve_json_pointer(
+                response, self.response_content_pointer
+            )
+        except ExternalError as exc:
+            raise ExternalError(
+                "LLM 响应缺少正文路径："
+                f"{self.response_content_pointer}"
+            ) from exc
+        if not isinstance(content, str):
             raise ExternalError("LLM 响应正文不是字符串")
-        return value
+        reasoning_content = None
+        if self.response_reasoning_content_pointer is not None:
+            try:
+                reasoning_content = _resolve_json_pointer(
+                    response, self.response_reasoning_content_pointer
+                )
+            except ExternalError as exc:
+                raise ExternalError(
+                    "LLM 响应缺少思考正文路径："
+                    f"{self.response_reasoning_content_pointer}"
+                ) from exc
+            if reasoning_content is not None and not isinstance(
+                reasoning_content, str
+            ):
+                raise ExternalError("LLM 响应思考正文不是字符串或 null")
+        return LLMResponse(
+            content=content,
+            reasoning_content=reasoning_content,
+        )
 
     def replace_content(self, response: Any, content: str) -> None:
         tokens = _parse_json_pointer(self.response_content_pointer)
@@ -109,8 +143,8 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError(f"LLM Adapter 不是合法 JSON：{path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigError(f"LLM Adapter 顶层必须是 JSON 对象：{path}")
-    unknown = set(value) - _ADAPTER_KEYS
-    missing = _ADAPTER_KEYS - set(value)
+    unknown = set(value) - _REQUIRED_ADAPTER_KEYS - _OPTIONAL_ADAPTER_KEYS
+    missing = _REQUIRED_ADAPTER_KEYS - set(value)
     if unknown:
         raise ConfigError(f"LLM Adapter 包含未知字段：{', '.join(sorted(unknown))}")
     if missing:
@@ -144,12 +178,24 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     if not isinstance(pointer, str) or not pointer.startswith("/"):
         raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
     _parse_json_pointer(pointer)
+    reasoning_pointer = value.get("response_reasoning_content_pointer")
+    if reasoning_pointer is not None:
+        if (
+            not isinstance(reasoning_pointer, str)
+            or not reasoning_pointer.startswith("/")
+        ):
+            raise ConfigError(
+                "LLM Adapter response_reasoning_content_pointer "
+                "必须是 JSON Pointer"
+            )
+        _parse_json_pointer(reasoning_pointer)
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
         headers_template=dict(headers),
         body_template=deepcopy(body),
         response_content_pointer=pointer,
+        response_reasoning_content_pointer=reasoning_pointer,
         digest=digest,
         definition=deepcopy(value),
     )

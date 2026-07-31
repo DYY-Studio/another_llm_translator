@@ -64,7 +64,9 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
         "reasoning_effort": "high",
     }
     assert "secret" not in json.dumps(body)
-    assert adapter.parse_content({"result": [{"text": "answer"}]}) == "answer"
+    response = adapter.parse_response({"result": [{"text": "answer"}]})
+    assert response.content == "answer"
+    assert response.reasoning_content is None
 
 
 @pytest.mark.parametrize(
@@ -88,6 +90,12 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
             ),
             "转义无效",
         ),
+        (
+            lambda value: value.update(
+                {"response_reasoning_content_pointer": "reasoning"}
+            ),
+            "必须是 JSON Pointer",
+        ),
     ],
 )
 def test_json_adapter_rejects_invalid_templates(
@@ -102,6 +110,28 @@ def test_json_adapter_rejects_invalid_templates(
 def test_json_adapter_response_path_fails_fast(tmp_path: Path) -> None:
     adapter = load_json_adapter(write_adapter(tmp_path, definition()))
     with pytest.raises(ExternalError, match="正文路径"):
-        adapter.parse_content({"result": []})
+        adapter.parse_response({"result": []})
     with pytest.raises(ExternalError, match="不是字符串"):
-        adapter.parse_content({"result": [{"text": 3}]})
+        adapter.parse_response({"result": [{"text": 3}]})
+
+
+def test_json_adapter_extracts_optional_reasoning_content(tmp_path: Path) -> None:
+    value = definition()
+    value["response_reasoning_content_pointer"] = "/result/0/reasoning"
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    response = adapter.parse_response(
+        {"result": [{"text": "answer", "reasoning": "thought"}]}
+    )
+    assert response.content == "answer"
+    assert response.reasoning_content == "thought"
+    assert adapter.parse_response(
+        {"result": [{"text": "answer", "reasoning": None}]}
+    ).reasoning_content is None
+
+    with pytest.raises(ExternalError, match="思考正文路径"):
+        adapter.parse_response({"result": [{"text": "answer"}]})
+    with pytest.raises(ExternalError, match="字符串或 null"):
+        adapter.parse_response(
+            {"result": [{"text": "answer", "reasoning": {}}]}
+        )
