@@ -477,12 +477,9 @@ def create_app(
     async def list_adapters(name: str) -> dict[str, Any]:
         root = project(name)
         config = load_config(root / "config.toml")
-        if "preset" in config["llm"]:
-            selected = load_llm_preset(
-                preset_path(app_root, str(config["llm"]["preset"]))
-            ).adapter_id
-        else:
-            selected = str(config["llm"]["adapter"])
+        selected = load_llm_preset(
+            preset_path(app_root, str(config["llm"]["preset"]))
+        ).adapter_id
         adapters = []
         for path in sorted((root / "llm_adapters").glob("*.json")):
             try:

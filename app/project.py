@@ -244,8 +244,6 @@ class TXTDocumentAdapter:
 
 
 def _global_adapter_id(config: dict[str, Any], app_root: Path) -> str:
-    if "preset" not in config["llm"]:
-        return str(config["llm"]["adapter"])
     preset_id = str(config["llm"]["preset"])
     return load_llm_preset(preset_path(app_root, preset_id)).adapter_id
 
