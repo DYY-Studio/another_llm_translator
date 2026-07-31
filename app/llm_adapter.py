@@ -45,6 +45,7 @@ class JSONLLMAdapter:
         temperature: float,
         max_output_tokens: int,
         stream: bool,
+        extra_body: dict[str, Any] | None = None,
     ) -> tuple[dict[str, str], dict[str, Any]]:
         values: dict[str, Any] = {
             "api_key": api_key,
@@ -59,6 +60,14 @@ class JSONLLMAdapter:
             for name, value in self.headers_template.items()
         }
         body = _render_body(deepcopy(self.body_template), values)
+        if extra_body:
+            conflicts = set(body) & set(extra_body)
+            if conflicts:
+                raise ConfigError(
+                    "LLM Preset extra_body 与 Adapter body 字段冲突："
+                    + ", ".join(sorted(conflicts))
+                )
+            body.update(deepcopy(extra_body))
         return headers, body
 
     def parse_content(self, response: Any) -> str:
