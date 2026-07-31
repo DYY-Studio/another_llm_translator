@@ -78,6 +78,10 @@ export default function App() {
     setOverview(await api<ProjectOverview>(`/api/v1/projects/${project}`));
   }, [project]);
 
+  const refreshProject = useCallback(async () => {
+    await Promise.all([loadProjects(), refresh()]);
+  }, [loadProjects, refresh]);
+
   useEffect(() => { void loadProjects().catch((value) => setError(String(value))); }, []);
   useEffect(() => { void refresh().catch((value) => setError(String(value))); }, [refresh]);
   useEffect(() => {
@@ -136,7 +140,13 @@ export default function App() {
 
   let content = <div className="empty-page">选择或创建项目后开始工作。</div>;
   if (project && overview) {
-    if (stage === "overview") content = <Overview value={overview} />;
+    if (stage === "overview") content = (
+      <Overview
+        project={project}
+        value={overview}
+        onFilesChanged={refreshProject}
+      />
+    );
     else if (stage === "terminology") content = <TermsView project={project} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} />;
@@ -156,7 +166,7 @@ export default function App() {
         onCreate={() => setCreateOpen(true)}
         onRun={openRunDialog}
         onCancel={cancelRun}
-        canRun={Boolean(runnable[stage])}
+        canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count)}
         runLoading={runOptionsLoading}
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
