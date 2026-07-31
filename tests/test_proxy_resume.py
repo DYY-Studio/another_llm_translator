@@ -382,6 +382,11 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     )
     preset_root = tmp_path / "current-global"
     (preset_root / "llm_presets").mkdir(parents=True)
+    (preset_root / "llm_adapters").mkdir(parents=True)
+    for adapter in (ROOT / "llm_adapters").glob("*.json"):
+        (preset_root / "llm_adapters" / adapter.name).write_text(
+            adapter.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     preset = json.loads(
         (ROOT / "llm_presets" / "default.json").read_text("utf-8")
     )

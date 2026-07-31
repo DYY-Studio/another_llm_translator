@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import ConfigError, dump_config, load_config
+from app.config import ConfigError, dump_config, load_config, load_project_config
 from app.errors import StorageError, UsageError
 from app.main import run
 from app.project import (
@@ -46,7 +46,7 @@ def make_app_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_init_copies_adapters_for_global_and_stage_presets(tmp_path: Path) -> None:
+def test_init_does_not_copy_adapters_into_project(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
     adapter = json.loads(
         (app_root / "llm_adapters" / "openai-compatible.json").read_text(
@@ -83,8 +83,13 @@ def test_init_copies_adapters_for_global_and_stage_presets(tmp_path: Path) -> No
     )
 
     assert project is not None
-    assert (project / "llm_adapters" / "openai-compatible.json").is_file()
-    assert (project / "llm_adapters" / "alternate.json").is_file()
+    assert not (project / "llm_adapters").exists()
+    terminology = load_project_config(project, presets_root=app_root)
+    translation = load_project_config(
+        project, stage="translation", presets_root=app_root
+    )
+    assert terminology["_llm_adapter"].adapter_id == "openai-compatible"
+    assert translation["_llm_adapter"].adapter_id == "alternate"
 
 
 def test_cli_init_creates_project_in_explicit_parent(

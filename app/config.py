@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
-from .llm_adapter import adapter_path, load_json_adapter
+from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 
 
@@ -291,7 +291,6 @@ def load_project_config(
 ) -> dict[str, Any]:
     return resolve_project_config(
         load_config(project / "config.toml"),
-        project,
         stage=stage,
         presets_root=presets_root,
     )
@@ -299,7 +298,6 @@ def load_project_config(
 
 def resolve_project_config(
     config: dict[str, Any],
-    project: Path,
     *,
     stage: str | None = None,
     presets_root: Path | None = None,
@@ -312,7 +310,11 @@ def resolve_project_config(
         raise ConfigError("LLM Preset 文件中的 preset_id 与项目配置不一致")
     return _resolve_llm_config(
         config,
-        adapter_file=adapter_path(project, preset.adapter_id),
+        adapter_file=(
+            (presets_root or APP_ROOT)
+            / "llm_adapters"
+            / f"{preset.adapter_id}.json"
+        ),
         preset=preset,
     )
 
@@ -396,7 +398,7 @@ def _resolve_llm_config(
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != adapter_id:
         raise ConfigError(
-            "LLM Adapter 文件中的 adapter_id 与项目配置不一致"
+            "LLM Adapter 文件中的 adapter_id 与配置不一致"
         )
     config["_llm_adapter"] = adapter
     config["_llm_adapter_hash"] = adapter.digest

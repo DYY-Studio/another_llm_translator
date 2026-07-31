@@ -216,7 +216,7 @@ def test_project_resolves_stage_preset_override_and_inherits_global(
     )
 
 
-def test_project_preset_requires_existing_project_adapter(tmp_path: Path) -> None:
+def test_project_preset_requires_existing_global_adapter(tmp_path: Path) -> None:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "input.txt"
     source.write_text("one", encoding="utf-8")
@@ -325,7 +325,7 @@ def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> 
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    assert (project / "llm_adapters" / "google-gemini.json").is_file()
+    assert not (project / "llm_adapters").exists()
 
     resolved = load_project_config(project, presets_root=app_root)
     assert resolved["llm"]["adapter"] == "google-gemini"
