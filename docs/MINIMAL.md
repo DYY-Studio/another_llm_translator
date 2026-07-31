@@ -1083,7 +1083,8 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失
 Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
 Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset 内容进入 Run
-快照和阶段指纹，因此其中不得保存密钥。
+快照和阶段指纹，因此其中不得保存密钥。项目配置、全局配置和 Run 快照都必须
+包含 `llm.preset`；内联连接字段和缺失 `llm_preset.json` 的 Run 续作直接失败。
 
 整个命令共享一个 `httpx.AsyncClient`：
 
@@ -1534,7 +1535,7 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - Web 项目配置表单覆盖完整配置 schema；非法类型或组合不改变原 TOML，保存
   后的规范 TOML 可由 CLI 原样读取。
 - Web 可在没有打开项目时管理全局配置、Prompt 和 Preset；全局模板修改不改变
-  现有项目，显式同步和旧内联配置迁移均通过严格校验。
+  现有项目，显式同步通过严格校验；内联 LLM 配置在读取边界直接拒绝。
 - React 生产构建、TypeScript 检查、桌面与窄屏关键交互、浏览器控制台均通过。
 
 ---

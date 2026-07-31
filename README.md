@@ -17,7 +17,8 @@ python -m pip check
 
 先编辑全局模板 `config/config.toml`、`prompts/*.middle.txt` 和选中的
 `llm_presets/<preset_id>.json`。将 Preset 中 `api_key_env` 指定的密钥放入
-环境变量：
+环境变量。项目、全局模板和 Run 续作只接受 `llm.preset`，不支持内联连接
+配置：
 
 ```bash
 export LLM_API_KEY="..."
