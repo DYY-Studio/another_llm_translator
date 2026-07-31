@@ -188,9 +188,12 @@ Preset；内联 LLM 连接配置不再支持。
 
 ### 声明式 JSON LLM Adapter（已实现）
 
-当前 schema 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header 和响应
-JSON Pointer。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主管理。
-API Key 不进入 URL、请求正文、项目副本、Run 快照或阶段指纹。
+当前 schema 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
+JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system}`
+占位符。内置 Anthropic、Gemini 原生与 OpenAI Responses 定义，Preset
+`endpoint` 支持 `${model}` 占位符。HTTP、限速、重试、取消、Run 收尾和
+调试记录始终由宿主管理。API Key 不进入 URL、请求正文、项目副本、Run
+快照或阶段指纹。
 
 Preset 与规范化思考响应已落地；相关 schema 仍可直接升级仓库内调用方，
 不保留未文档化旧字段。
