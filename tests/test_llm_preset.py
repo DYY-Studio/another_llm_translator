@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.config import (
+    dump_config,
     load_config,
     load_global_config,
     load_project_config,
@@ -159,6 +160,43 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     (run_dir / "llm_preset.json").unlink()
     with pytest.raises(ConfigError, match="无法读取 LLM Preset"):
         load_run_config(run_dir)
+
+
+def test_project_resolves_stage_preset_override_and_inherits_global(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    alternate = preset_definition()
+    alternate.update(preset_id="alternate", model="alternate-model")
+    (app_root / "llm_presets" / "alternate.json").write_text(
+        json.dumps(alternate), encoding="utf-8"
+    )
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="stage-preset-project",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    config = load_config(project / "config.toml")
+    config["llm"]["preset_translation"] = "alternate"
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+
+    terminology = load_project_config(
+        project, stage="terminology", presets_root=app_root
+    )
+    translation = load_project_config(
+        project, stage="translation", presets_root=app_root
+    )
+
+    assert terminology["_llm_preset_id"] == "default"
+    assert translation["_llm_preset_id"] == "alternate"
+    assert translation["llm"]["model"] == "alternate-model"
+    assert stage_fingerprint(terminology, "translation", "prompt") != (
+        stage_fingerprint(translation, "translation", "prompt")
+    )
 
 
 def test_project_preset_requires_existing_project_adapter(tmp_path: Path) -> None:

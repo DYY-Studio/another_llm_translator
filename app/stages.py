@@ -10,6 +10,7 @@ import sys
 import unicodedata
 import uuid
 from collections import Counter
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -75,14 +76,14 @@ KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
 
 
 def _project_context(
-    project: Path, *, dry_run: bool
+    project: Path, *, dry_run: bool, stage: str | None = None
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
     list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
-    config = load_project_config(project)
+    config = load_project_config(project, stage=stage)
     metadata = read_json(project / "project.json")
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
@@ -972,7 +973,9 @@ async def run_terminology(
             resumed_scope.force,
         )
         scope = resumed_scope
-    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    config, metadata, files, segments = _project_context(
+        project, dry_run=scope.dry_run, stage="terminology"
+    )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
@@ -1781,7 +1784,9 @@ async def run_translation(
             resumed_scope.force,
         )
         scope = resumed_scope
-    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    config, metadata, files, segments = _project_context(
+        project, dry_run=scope.dry_run, stage="translation"
+    )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, "translation")
     library = load_terms(project)
@@ -2630,7 +2635,9 @@ async def run_review(
             resumed_scope.force,
         )
         scope = resumed_scope
-    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    config, metadata, files, segments = _project_context(
+        project, dry_run=scope.dry_run, stage=stage
+    )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, stage)
     library = load_terms(project)
@@ -3587,14 +3594,34 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
-    config = load_project_config(project)
     _require_nonempty_segments(load_segments(project, repair_tail=not scope.dry_run))
-    limiter = SlidingWindowLimiter(
-        config["execution"]["requests_per_minute"],
-        config["execution"]["input_tokens_per_minute"],
-    )
+    stages = ("terminology", "translation", "proofreading", "polishing")
+    configs = {
+        stage: load_project_config(project, stage=stage) for stage in stages
+    }
+    resource_keys = {
+        stage: (
+            str(configs[stage]["_llm_preset_id"]),
+            str(configs[stage]["_llm_preset_hash"]),
+        )
+        for stage in stages
+    }
+    limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+    for stage, key in resource_keys.items():
+        if key not in limiters:
+            limiters[key] = SlidingWindowLimiter(
+                configs[stage]["execution"]["requests_per_minute"],
+                configs[stage]["execution"]["input_tokens_per_minute"],
+            )
 
-    async def execute(shared_client: httpx.AsyncClient | None) -> dict[str, Any]:
+    async def execute(
+        clients: dict[tuple[str, str], httpx.AsyncClient] | None,
+    ) -> dict[str, Any]:
+        def client_for(stage: str) -> httpx.AsyncClient | None:
+            if http_client is not None:
+                return http_client
+            return clients[resource_keys[stage]] if clients is not None else None
+
         summaries: list[dict[str, Any]] = []
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
@@ -3605,8 +3632,8 @@ async def run_all(
             term_summary = await run_terminology(
                 project,
                 scope,
-                http_client=shared_client,
-                limiter=limiter,
+                http_client=client_for("terminology"),
+                limiter=limiters[resource_keys["terminology"]],
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             )
             summaries.append(term_summary)
@@ -3614,8 +3641,8 @@ async def run_all(
         translation = await run_translation(
             project,
             scope,
-            http_client=shared_client,
-            limiter=limiter,
+            http_client=client_for("translation"),
+            limiter=limiters[resource_keys["translation"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(translation)
@@ -3624,8 +3651,8 @@ async def run_all(
             project,
             "proofreading",
             scope,
-            http_client=shared_client,
-            limiter=limiter,
+            http_client=client_for("proofreading"),
+            limiter=limiters[resource_keys["proofreading"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(proofreading)
@@ -3634,8 +3661,8 @@ async def run_all(
             project,
             "polishing",
             scope,
-            http_client=shared_client,
-            limiter=limiter,
+            http_client=client_for("polishing"),
+            limiter=limiters[resource_keys["polishing"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
         )
         summaries.append(polishing)
@@ -3648,18 +3675,25 @@ async def run_all(
         }
 
     if http_client is not None or scope.dry_run:
-        return await execute(http_client)
-    timeout = float(config["execution"]["request_timeout_seconds"])
-    limits = httpx.Limits(
-        max_connections=config["execution"]["max_parallel"],
-        max_keepalive_connections=config["execution"]["max_parallel"],
-    )
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        limits=limits,
-        proxy=config["llm"]["proxy_url"] or None,
-    ) as shared_client:
-        return await execute(shared_client)
+        return await execute(None)
+    async with AsyncExitStack() as stack:
+        clients: dict[tuple[str, str], httpx.AsyncClient] = {}
+        for stage, key in resource_keys.items():
+            if key in clients:
+                continue
+            config = configs[stage]
+            maximum = int(config["execution"]["max_parallel"])
+            clients[key] = await stack.enter_async_context(
+                httpx.AsyncClient(
+                    timeout=float(config["execution"]["request_timeout_seconds"]),
+                    limits=httpx.Limits(
+                        max_connections=maximum,
+                        max_keepalive_connections=maximum,
+                    ),
+                    proxy=config["llm"]["proxy_url"] or None,
+                )
+            )
+        return await execute(clients)
 
 
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
@@ -3698,7 +3732,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     current_term_fingerprint = stage_fingerprint(
-        config,
+        load_project_config(project, stage="terminology"),
         "terminology",
         _prompt(project, "terminology"),
     )
@@ -3783,7 +3817,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         }
         if stage in {"translation", "proofreading", "polishing"}:
             current_fingerprint = stage_fingerprint(
-                config,
+                load_project_config(project, stage=stage),
                 stage,
                 _prompt(project, stage),
                 terms_revision=terms_revision,

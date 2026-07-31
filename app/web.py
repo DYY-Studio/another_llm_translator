@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import (
+    LLM_STAGES,
     dump_config,
     load_config,
     load_project_config,
@@ -155,6 +156,8 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         resolve_global_config(config, app_root)
+        for stage in LLM_STAGES:
+            resolve_global_config(config, app_root, stage=stage)
         atomic_write_text(app_root / "config" / "config.toml", content)
         return {"saved": True}
 
@@ -440,6 +443,10 @@ def create_app(
         content = dump_config(config)
         root = project(name)
         resolve_project_config(config, root, presets_root=app_root)
+        for stage in LLM_STAGES:
+            resolve_project_config(
+                config, root, stage=stage, presets_root=app_root
+            )
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}
@@ -698,7 +705,9 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/adapter-preview")
     async def adapter_preview(name: str) -> dict[str, Any]:
-        config = load_project_config(project(name), presets_root=app_root)
+        config = load_project_config(
+            project(name), stage="translation", presets_root=app_root
+        )
         adapter = config["_llm_adapter"]
         headers, body = adapter.build_request(
             api_key="***",

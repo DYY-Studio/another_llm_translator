@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
 import pytest
 
+from app.config import load_project_config
 from app.errors import IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
@@ -351,6 +353,65 @@ async def test_run_all_shares_production_client_and_limiter(
     assert clients[0].closed
     assert {id(client) for _, client, _ in calls} == {id(clients[0])}
     assert len({id(limiter) for _, _, limiter in calls}) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_all_separates_clients_and_limiters_by_preset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    default = load_project_config(project)
+    alternate = deepcopy(default)
+    alternate["_llm_preset_id"] = "alternate"
+    alternate["_llm_preset_hash"] = "sha256:alternate"
+    clients: list[object] = []
+    calls: list[tuple[str, object, object]] = []
+
+    class DummyClient:
+        def __init__(self, **_: object) -> None:
+            clients.append(self)
+
+        async def __aenter__(self) -> "DummyClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    async def fake_stage(
+        _project: Path, _scope: Scope, **kwargs: object
+    ) -> dict[str, object]:
+        stage = "translation"
+        calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
+        return {"stage": stage, "failed": 0, "pending": 0}
+
+    async def fake_review(
+        _project: Path, stage: str, _scope: Scope, **kwargs: object
+    ) -> dict[str, object]:
+        calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
+        return {"stage": stage, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr(
+        "app.stages.load_project_config",
+        lambda _project, *, stage=None: (
+            alternate if stage in {"proofreading", "polishing"} else default
+        ),
+    )
+    monkeypatch.setattr("app.stages.httpx.AsyncClient", DummyClient)
+    monkeypatch.setattr("app.stages.run_translation", fake_stage)
+    monkeypatch.setattr("app.stages.run_review", fake_review)
+    monkeypatch.setattr(
+        "app.stages.load_terms", lambda _project: {"terms_revision": 1}
+    )
+    try:
+        await run_all(project, Scope())
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert len(clients) == 2
+    assert len({id(client) for _, client, _ in calls}) == 2
+    assert len({id(limiter) for _, _, limiter in calls}) == 2
+    assert calls[1][1:] == calls[2][1:]
 
 
 @pytest.mark.asyncio
