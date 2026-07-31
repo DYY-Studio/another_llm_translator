@@ -85,6 +85,13 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "复用已有结果",
         "强制重做全部",
         "续用原 Run",
+        "移除所选",
+        "清除所选",
+        "全部清除",
+        "应用所选",
+        "全部应用",
+        "导入术语表",
+        "导出术语表",
     ):
         assert text in script.text
 

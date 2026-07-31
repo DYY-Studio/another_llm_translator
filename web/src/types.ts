@@ -101,6 +101,11 @@ export interface Term {
   conflicts: {
     categories: string[];
     preferred_translations: string[];
+    alias_primaries: Array<{
+      alias: string;
+      primary_source: string;
+      reason: "policy" | "cycle" | "multiple_owners";
+    }>;
   };
   has_conflicts: boolean;
 }
