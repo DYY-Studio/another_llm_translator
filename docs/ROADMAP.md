@@ -76,8 +76,8 @@ Preset 固定包含：
 嵌套对象、数组、OpenRouter provider order、冲突和占位符拒绝、请求预览、
 Run 快照及指纹变化。
 
-Adapter 定义继续保存在项目中；Preset 只引用 Adapter ID。选择项目尚未拥有
-的 Adapter 时必须显式复制全局定义。项目、全局模板和 Run 续作均只接受
+Adapter 定义只保存在全局目录；Preset 只引用 Adapter ID，项目实时使用全局
+Adapter，不保存副本。项目、全局模板和 Run 续作均只接受
 Preset；内联 LLM 连接配置不再支持。
 
 ## Stage 4：规范化 LLM 思考响应（已完成）
@@ -192,8 +192,9 @@ Preset；内联 LLM 连接配置不再支持。
 当前 schema 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
 JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system}`
 占位符。内置 Anthropic、Gemini 原生与 OpenAI Responses 定义，Preset
-`endpoint` 支持 `${model}` 占位符。HTTP、限速、重试、取消、Run 收尾和
-调试记录始终由宿主管理。API Key 不进入 URL、请求正文、项目副本、Run
+`endpoint` 支持 `${model}` 占位符。项目实时引用全局 Adapter，不保存项目
+副本。HTTP、限速、重试、取消、Run 收尾和
+调试记录始终由宿主管理。API Key 不进入 URL、请求正文、Run
 快照或阶段指纹。
 
 Preset 与规范化思考响应已落地；相关 schema 仍可直接升级仓库内调用方，

@@ -6,8 +6,8 @@
 ## 1. 声明式 JSON LLM Adapter（已实现）
 
 全局定义位于 `llm_adapters/<adapter_id>.json`。LLM Preset 引用 Adapter ID；
-项目实时引用 Preset，但必须显式拥有对应 Adapter 的项目副本。每个 Run 保存
-实际使用的 Adapter 与 Preset 快照。
+项目实时引用全局 Adapter，不保存项目副本。每个 Run 保存实际使用的 Adapter
+与 Preset 快照。
 
 最小定义：
 
@@ -89,9 +89,9 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 
 ### 指纹与密钥
 
-阶段指纹包含 Adapter ID、项目定义内容 Hash、Preset ID 和 Preset 内容 Hash。
-项目 Adapter 副本与 Run 快照保存定义原文，但不解析或保存环境变量中的 API
-Key。调试请求记录仍经过敏感 Header 清理。
+阶段指纹包含 Adapter ID、全局定义内容 Hash、Preset ID 和 Preset 内容 Hash。
+Run 快照保存定义原文，但不解析或保存环境变量中的 API Key。调试请求记录
+仍经过敏感 Header 清理。
 
 ### 模型发现与 usage 映射
 
@@ -163,7 +163,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   快速失败；可改用 `/output/0/content/0/text`，但仅适用于输出首项为
   message 的非思考模型。
 
-三个新定义都需要 Preset 显式引用才会被项目复制；示例 Preset 见
+三个新定义都只存在于全局目录；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
 `openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。
@@ -296,9 +296,10 @@ Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 
 Run 快照和阶段指纹，因此不得保存密钥。非对象、非法 JSON、占位符和字段冲突
 都必须在创建 Run 或发送请求前拒绝。
 
-Preset 修改立即影响所有引用项目，不维护版本历史。项目缺少其引用的 Adapter
-时明确失败；Web 只在用户操作后复制全局 Adapter，不自动补齐或改用其他
-Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持内联连接配置。
+Preset 修改立即影响所有引用项目，不维护版本历史。Adapter 修改立即影响
+所有引用 Preset。项目缺少其引用的全局 Adapter 时明确失败，不自动补齐或
+改用其他 Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持内联
+连接配置。
 
 ### 后期能力（未实现）
 

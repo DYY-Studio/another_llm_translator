@@ -166,7 +166,6 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 project.json
 config.toml
 prompts/
-llm_adapters/
 input/
 source/files.jsonl
 source/segments.jsonl
@@ -390,8 +389,9 @@ API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
 
 `llm.preset` 选择全局默认的 `llm_presets/<id>.json`；四个
 `llm.preset_<stage>` 可用非空 Preset ID 覆盖对应阶段，空字符串继承全局值。
-Preset 再选择项目
-`llm_adapters/<id>.json`。Adapter 定义是完整的 Header/body 模板和成功响应
+Preset 再选择全局
+`llm_adapters/<id>.json`；项目不保存 Adapter 副本。Adapter 定义是完整的
+Header/body 模板和成功响应
 JSON Pointer；Preset 的 `extra_body` 可追加无冲突的 Provider 自定义字段。
 两者的内容 Hash 都进入阶段指纹，定义副本都进入 Run 快照，解析后的密钥不进入
 任何持久化内容。完整 schema 见 `docs/ADAPTERS.md`。
@@ -416,9 +416,9 @@ warning
 
 ## 2.6 全局模板同步
 
-`init` 将全局配置、四个提示词和全局及阶段 Preset 所需的 Adapter 复制为项目工作
-副本。项目配置和 Prompt 使用项目副本；LLM 连接通过项目保存的 Preset ID
-实时读取全局 `llm_presets/` 定义。
+`init` 将全局配置和四个提示词复制为项目工作副本。项目配置和 Prompt 使用
+项目副本；LLM 连接通过项目保存的 Preset ID 实时读取全局 `llm_presets/` 与
+`llm_adapters/` 定义，不保存 Adapter 副本。
 
 项目只记录：
 
