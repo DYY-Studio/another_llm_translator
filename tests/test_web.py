@@ -79,7 +79,12 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     css = client.get(stylesheet.group(1))
     assert css.status_code == 200
     assert ".segment-batch-actions" in css.text
-    assert ".settings-tabs{position:sticky;top:58px" in css.text
+    assert ".segment-row-boundary" in css.text
+    assert ".segment-row:after" not in css.text
+    assert ".settings-navigation{position:sticky;top:58px" in css.text
+    assert ".preset-list-body" in css.text
+    assert ".preset-editor-body" in css.text
+    assert "height:clamp(360px,52vh,520px)" in css.text
     for text in (
         "terms-workspace",
         "segment-batch-actions",
@@ -106,6 +111,8 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "参考上下文",
         "翻译校验与重试",
         "调试与故障注入",
+        "项目设置",
+        "全局设置",
         "全局配置",
         "全局 Prompt",
         "LLM Preset",
