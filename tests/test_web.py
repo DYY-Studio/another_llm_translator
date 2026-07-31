@@ -218,7 +218,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "附加 JSON Body",
         "最终请求预览",
         "同步全局模板",
-        "复制全局 Adapter",
+        "全局请求模板",
+        "不再保存副本",
+        "获取模型列表",
         "文件范围",
         "未选择时导出全部文件",
         "统一输出 TXT",
@@ -516,28 +518,35 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert "全局配置正在使用" in rejected.json()["error"]
 
 
-def test_web_explicitly_copies_adapter(
-    tmp_path: Path,
-) -> None:
-    projects_root, project = make_project(tmp_path)
+def test_web_manages_global_adapters(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
     app_root = tmp_path / "app-root"
     client = TestClient(create_app(
         projects_root=projects_root,
         app_root=app_root,
     ))
-    global_adapter = json.loads(
-        (app_root / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
-    )
+    global_adapter = client.get(
+        "/api/v1/global/adapters/openai-compatible"
+    ).json()
     global_adapter["adapter_id"] = "alternate"
-    (app_root / "llm_adapters" / "alternate.json").write_text(
-        json.dumps(global_adapter), encoding="utf-8"
+    saved = client.put(
+        "/api/v1/global/adapters/alternate",
+        json=global_adapter,
     )
-    copied = client.post(
-        "/api/v1/projects/sample/adapters/copy-global",
-        json={"adapter_id": "alternate"},
+    assert saved.status_code == 200
+    assert json.loads(
+        (app_root / "llm_adapters" / "alternate.json").read_text("utf-8")
+    )["adapter_id"] == "alternate"
+    listed = client.get("/api/v1/global/adapters").json()
+    assert {item["adapter_id"] for item in listed["adapters"]} >= {
+        "openai-compatible",
+        "alternate",
+    }
+    wrong_id = client.put(
+        "/api/v1/global/adapters/alternate",
+        json={**global_adapter, "adapter_id": "other"},
     )
-    assert copied.status_code == 200
-    assert (project / "llm_adapters" / "alternate.json").is_file()
+    assert wrong_id.status_code == 400
 
 
 def test_web_rejects_inline_config_and_has_no_migration_endpoint(
@@ -557,11 +566,13 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
     response = client.get("/api/v1/projects/sample/config")
     assert response.status_code == 400
     assert "未知配置键 config.llm: model" in response.json()["error"]
+    route_paths = {getattr(route, "path", "") for route in app.routes}
     assert not any(
-        route.path == "/api/v1/projects/{name}/migrate-llm-preset"
-        and "POST" in getattr(route, "methods", set())
-        for route in app.routes
+        path.startswith("/api/v1/projects/")
+        and "adapters" in path
+        for path in route_paths
     )
+    assert "/api/v1/global/adapters" in route_paths
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
@@ -774,24 +785,28 @@ def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> Non
 def test_web_adapter_validation_preview_and_secret_redaction(
     tmp_path: Path,
 ) -> None:
-    projects_root, project = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=app_root,
+    ))
     adapter = client.get(
-        "/api/v1/projects/sample/adapters/openai-compatible"
+        "/api/v1/global/adapters/openai-compatible"
     ).json()
     adapter["body"]["response_format"] = {"type": "json_object"}
     saved = client.put(
-        "/api/v1/projects/sample/adapters/openai-compatible",
+        "/api/v1/global/adapters/openai-compatible",
         json=adapter,
     )
     assert saved.status_code == 200
     assert json.loads(
         (
-            project / "llm_adapters" / "openai-compatible.json"
+            app_root / "llm_adapters" / "openai-compatible.json"
         ).read_text(encoding="utf-8")
     )["body"]["response_format"] == {"type": "json_object"}
     preview = client.get(
-        "/api/v1/projects/sample/adapter-preview"
+        "/api/v1/global/adapters/openai-compatible/preview"
     ).json()
     assert preview["headers"]["Authorization"] == "Bearer ***"
     assert "***" not in json.dumps(preview["body"])
