@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from .config import load_config
+from .config import load_project_config, load_run_config
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -30,7 +30,7 @@ from .errors import (
     UsageError,
 )
 from .logging_utils import get_logger
-from .llm_adapter import JSONLLMAdapter, adapter_path
+from .llm_adapter import JSONLLMAdapter
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -306,6 +306,8 @@ def stage_fingerprint(
             "model": config["llm"]["model"],
             "llm_adapter": config["llm"]["adapter"],
             "llm_adapter_hash": config.get("_llm_adapter_hash"),
+            "llm_preset": config.get("_llm_preset_id"),
+            "llm_preset_hash": config.get("_llm_preset_hash"),
             "prompt": prompt,
             "temperature": config["llm"][temperature_key],
             "context": config["context"][stage],
@@ -500,6 +502,7 @@ def materialize_chunks(run_id: str, stage: str, plans: list[ChunkPlan]) -> list[
 def create_run(
     project: Path,
     *,
+    config: dict[str, Any],
     stage: str,
     fingerprint: str,
     prompt: str | None,
@@ -515,11 +518,7 @@ def create_run(
     run_dir = project / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", run_dir / "config.toml")
-    config = load_config(project / "config.toml")
-    shutil.copy2(
-        adapter_path(project, str(config["llm"]["adapter"])),
-        run_dir / "llm_adapter.json",
-    )
+    _write_llm_snapshots(run_dir, config)
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = record_header(
@@ -619,8 +618,8 @@ def choose_running_run(
             f"{warning}；非交互环境必须指定 --resume-run 或 --decline-run"
         )
     if action is None:
-        old_config = load_config(project / "runs" / run_id / "config.toml")
-        current_config = load_config(project / "config.toml")
+        old_config = load_run_config(project / "runs" / run_id)
+        current_config = load_project_config(project)
         scope = latest.get("scope", {})
         print(
             f"{warning}\n"
@@ -680,6 +679,7 @@ def continue_run(
     project: Path,
     run_id: str,
     *,
+    config: dict[str, Any],
     stage: str,
     fingerprint: str,
     prompt: str,
@@ -698,11 +698,7 @@ def continue_run(
     snapshot_dir = run_dir / relative
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", snapshot_dir / "config.toml")
-    config = load_config(project / "config.toml")
-    shutil.copy2(
-        adapter_path(project, str(config["llm"]["adapter"])),
-        snapshot_dir / "llm_adapter.json",
-    )
+    _write_llm_snapshots(snapshot_dir, config)
     (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     continuations.append(
         {
@@ -725,6 +721,18 @@ def continue_run(
     manifest["continuations"] = continuations
     atomic_write_json(run_dir / "manifest.json", manifest)
     return run_id, run_dir
+
+
+def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
+    adapter = config.get("_llm_adapter")
+    if not isinstance(adapter, JSONLLMAdapter):
+        raise ConfigError("项目配置缺少已加载的 LLM Adapter")
+    atomic_write_json(path / "llm_adapter.json", adapter.definition)
+    preset = config.get("_llm_preset_definition")
+    if preset is not None:
+        if not isinstance(preset, dict):
+            raise ConfigError("项目配置中的 LLM Preset 快照无效")
+        atomic_write_json(path / "llm_preset.json", preset)
 
 
 def finalize_run(
@@ -955,6 +963,7 @@ class LLMClient:
             temperature=temperature,
             max_output_tokens=effective_output,
             stream=False,
+            extra_body=self.config.get("_llm_extra_body"),
         )
         url = (
             self.config["llm"]["base_url"].rstrip("/")

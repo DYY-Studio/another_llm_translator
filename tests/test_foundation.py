@@ -59,45 +59,14 @@ def test_config_rejects_unknown_key(tmp_path: Path) -> None:
 def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
     config = Path(__file__).parents[1] / "config" / "config.toml"
     text = re.sub(
-        r"(?m)^max_parallel\s*=.*$",
-        "max_parallel = 1.5",
+        r"(?m)^target_chunk_input_tokens\s*=.*$",
+        "target_chunk_input_tokens = 1.5",
         config.read_text(encoding="utf-8"),
     )
     path = tmp_path / "config.toml"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="max_parallel 必须是正整数"):
+    with pytest.raises(ConfigError, match="target_chunk_input_tokens 必须是正整数"):
         load_config(path)
-
-
-def test_config_allows_output_cap_larger_than_context(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = config.read_text(encoding="utf-8")
-    for key, value in (
-        ("max_output_tokens", "65536"),
-        ("context_window_tokens", "8192"),
-        ("context_safety_margin_tokens", "0"),
-        ("target_chunk_input_tokens", "11000"),
-    ):
-        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    loaded = load_config(path)
-    assert loaded["llm"]["max_output_tokens"] == 65536
-    assert loaded["llm"]["context_window_tokens"] == 8192
-
-
-def test_config_accepts_disabled_rate_limits(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = (
-        config.read_text(encoding="utf-8")
-        .replace("requests_per_minute = 30", "requests_per_minute = 0")
-        .replace("input_tokens_per_minute = 50000", "input_tokens_per_minute = 0")
-    )
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    loaded = load_config(path)
-    assert loaded["execution"]["requests_per_minute"] == 0
-    assert loaded["execution"]["input_tokens_per_minute"] == 0
 
 
 def test_config_rejects_unknown_alias_primary_collision_policy(
@@ -136,25 +105,10 @@ def test_config_defaults_alias_collision_for_existing_projects(
     )
 
 
-def test_config_accepts_token_safety_factor_below_one(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1] / "config" / "config.toml"
-    path = tmp_path / "config.toml"
-    path.write_text(
-        source.read_text(encoding="utf-8").replace(
-            "token_safety_factor = 1.25",
-            "token_safety_factor = 0.5",
-        ),
-        encoding="utf-8",
-    )
-    assert load_config(path)["execution"]["token_safety_factor"] == 0.5
-
-
 def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
     source = Path(__file__).parents[1] / "config" / "config.toml"
     config = load_config(source)
     config["project"]["target_language"] = '简体中文 "测试"'
-    config["llm"]["proxy_url"] = ""
-    config["execution"]["token_safety_factor"] = 0.75
 
     path = tmp_path / "config.toml"
     path.write_text(dump_config(config), encoding="utf-8")

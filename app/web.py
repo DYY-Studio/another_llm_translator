@@ -11,7 +11,12 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import dump_config, load_config, load_project_config
+from .config import (
+    dump_config,
+    load_config,
+    load_project_config,
+    resolve_project_config,
+)
 from .editor import EditorStore
 from .errors import AppError, UsageError
 from .execution import Scope
@@ -19,6 +24,7 @@ from .llm_adapter import adapter_path, load_json_adapter
 from .locking import project_write_lock
 from .plugins import document_adapter_summaries
 from .project import (
+    APP_ROOT as DEFAULT_APP_ROOT,
     PROJECTS_ROOT,
     add_project_files,
     init_project,
@@ -44,6 +50,7 @@ def create_app(
     *,
     projects_root: Path = PROJECTS_ROOT,
     web_dist: Path = WEB_DIST,
+    app_root: Path = DEFAULT_APP_ROOT,
 ) -> FastAPI:
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
@@ -263,10 +270,7 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        selected_id = str(config["llm"]["adapter"])
-        adapter = load_json_adapter(adapter_path(root, selected_id))
-        if adapter.adapter_id != selected_id:
-            raise UsageError("LLM Adapter 文件中的 adapter_id 与项目配置不一致")
+        resolve_project_config(config, root, presets_root=app_root)
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}
@@ -464,6 +468,7 @@ def create_app(
         with project_write_lock(root):
             warnings = sync_global_templates(
                 root,
+                app_root=app_root,
                 interactive=True,
                 choice=choice,
             )
@@ -471,7 +476,7 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/adapter-preview")
     async def adapter_preview(name: str) -> dict[str, Any]:
-        config = load_project_config(project(name))
+        config = load_project_config(project(name), presets_root=app_root)
         adapter = config["_llm_adapter"]
         headers, body = adapter.build_request(
             api_key="***",
@@ -480,6 +485,7 @@ def create_app(
             temperature=float(config["llm"]["temperature_translation"]),
             max_output_tokens=int(config["llm"]["max_output_tokens"]),
             stream=False,
+            extra_body=config.get("_llm_extra_body"),
         )
         return {
             "url": (

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import load_config
+from app.config import load_global_config
 from app.errors import FatalExternalError
 from app.execution import (
     LLMClient,
@@ -24,20 +24,13 @@ from app.execution import (
     select_scope,
     stage_fingerprint,
 )
-from app.llm_adapter import load_json_adapter
 
 
 ROOT = Path(__file__).parents[1]
 
 
 def config() -> dict:
-    value = load_config(ROOT / "config" / "config.toml")
-    adapter = load_json_adapter(
-        ROOT / "llm_adapters" / f"{value['llm']['adapter']}.json"
-    )
-    value["_llm_adapter"] = adapter
-    value["_llm_adapter_hash"] = adapter.digest
-    return value
+    return load_global_config(ROOT)
 
 
 def segments() -> list[dict]:

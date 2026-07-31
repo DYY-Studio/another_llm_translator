@@ -75,8 +75,6 @@ def load_llm_preset(path: Path) -> LLMPreset:
     preset_id = value["preset_id"]
     if not isinstance(preset_id, str) or not _PRESET_ID_RE.fullmatch(preset_id):
         raise ConfigError("LLM Preset preset_id 格式无效")
-    if path.stem != preset_id:
-        raise ConfigError("LLM Preset 文件名必须与 preset_id 一致")
     for key in (
         "adapter_id",
         "base_url",

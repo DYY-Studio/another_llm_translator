@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.editor import EditorStore
-from app.config import load_config
+from app.config import load_config, load_project_config
 from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
@@ -191,7 +191,10 @@ def test_web_creates_empty_project_and_manages_source_files(
 
 def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=tmp_path / "app-root",
+    ))
 
     response = client.get("/api/v1/projects/sample/config")
     assert response.status_code == 200
@@ -199,7 +202,7 @@ def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
     config["project"]["target_language"] = "繁体中文"
     config["input"]["encoding_confidence_threshold"] = 0.6
     config["llm"]["temperature_translation"] = 0.25
-    config["execution"]["max_parallel"] = 3
+    config["execution"]["scheduling_mode"] = "parallel"
     config["chunking"]["allow_split_oversized_segment"] = False
     config["context"]["translation"]["previous_segments"] = 4
     config["terminology"]["alias_primary_collision"] = "merge"
@@ -219,7 +222,7 @@ def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda config: config["execution"].__setitem__("max_parallel", 1.5),
+        lambda config: config["retry"].__setitem__("http_max_attempts", 1.5),
         lambda config: config["retry"].__setitem__("max_delay_seconds", -1),
         lambda config: config["project"].__setitem__("unknown", True),
         lambda config: config.__delitem__("chunking"),
@@ -230,7 +233,10 @@ def test_web_rejects_invalid_project_config_without_changing_file(
     mutate: object,
 ) -> None:
     projects_root, project = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=tmp_path / "app-root",
+    ))
     original = (project / "config.toml").read_bytes()
     config = client.get("/api/v1/projects/sample/config").json()["config"]
     mutate(config)  # type: ignore[operator]
@@ -256,7 +262,7 @@ def test_web_config_requires_object_and_existing_matching_adapter(
         json={"config": "raw toml"},
     ).status_code == 400
     config = client.get("/api/v1/projects/sample/config").json()["config"]
-    config["llm"]["adapter"] = "missing"
+    config["llm"]["preset"] = "missing"
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},
@@ -556,6 +562,7 @@ def test_web_task_options_require_explicit_running_run_action(
     projects_root, project = make_project(tmp_path)
     run_id, _ = create_run(
         project,
+        config=load_project_config(project),
         stage="translation",
         fingerprint="old",
         prompt="old prompt",
