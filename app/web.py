@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import dump_config, load_config, load_project_config, validate_config
+from .config import dump_config, load_config, load_project_config
 from .editor import EditorStore
 from .errors import AppError, UsageError
 from .execution import Scope
@@ -261,13 +261,12 @@ def create_app(
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
-        validate_config(config)
+        content = dump_config(config)
         root = project(name)
         selected_id = str(config["llm"]["adapter"])
         adapter = load_json_adapter(adapter_path(root, selected_id))
         if adapter.adapter_id != selected_id:
             raise UsageError("LLM Adapter 文件中的 adapter_id 与项目配置不一致")
-        content = dump_config(config)
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}
