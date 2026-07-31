@@ -89,6 +89,15 @@ def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> No
     assert external["external"] is True
     assert external["path"] == str(external_project)
     assert client.get(f"/api/v1/projects/{selector}").status_code == 200
+    assert client.post(
+        "/api/v1/projects",
+        data={
+            "name": "external-project",
+            "document_adapter": "txt",
+            "empty": "true",
+            "parent_dir": str(external_parent),
+        },
+    ).status_code == 400
 
     hidden, _ = init_project(
         [],
