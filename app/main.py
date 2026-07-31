@@ -11,7 +11,13 @@ from .execution import Scope, choose_running_run
 from .errors import AppError
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
-from .project import init_project, resolve_project, sync_global_templates
+from .project import (
+    add_project_files,
+    init_project,
+    remove_project_files,
+    resolve_project,
+    sync_global_templates,
+)
 from .stages import (
     export_terms,
     export_project,
@@ -30,15 +36,33 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="创建翻译项目")
-    init.add_argument("inputs", nargs="+")
+    init.add_argument("inputs", nargs="*")
     init.add_argument("--name", required=True)
     init.add_argument("--recursive", action="store_true")
+    init.add_argument(
+        "--empty",
+        action="store_true",
+        help="创建不包含源文件的空项目",
+    )
     init.add_argument(
         "--document-adapter",
         default="txt",
         help="输入输出格式 Adapter ID（默认：txt）",
     )
     init.add_argument("--dry-run", action="store_true")
+
+    files_add = subparsers.add_parser(
+        "files-add", help="向项目追加同格式源文件"
+    )
+    files_add.add_argument("project")
+    files_add.add_argument("inputs", nargs="+")
+    files_add.add_argument("--recursive", action="store_true")
+
+    files_remove = subparsers.add_parser(
+        "files-remove", help="从项目活动范围移除源文件"
+    )
+    files_remove.add_argument("project")
+    files_remove.add_argument("file_ids", nargs="+")
 
     inspect = subparsers.add_parser("inspect", help="检查项目状态")
     inspect.add_argument("project")
@@ -125,6 +149,7 @@ def run(argv: list[str] | None = None) -> int:
             name=args.name,
             recursive=args.recursive,
             document_adapter_id=args.document_adapter,
+            empty=args.empty,
             dry_run=args.dry_run,
         )
         if path is not None:
@@ -140,6 +165,36 @@ def run(argv: list[str] | None = None) -> int:
             logger.warning("%s", warning)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         logger.info("command complete command=init")
+        return 0
+    if args.command == "files-add":
+        project = resolve_project(args.project)
+        attach_project_log(project)
+        with project_write_lock(project):
+            summary = add_project_files(
+                project,
+                args.inputs,
+                recursive=args.recursive,
+            )
+        for warning in summary.get("warnings", []):
+            logger.warning("%s", warning)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=files-add files=%d segments=%d",
+            summary["added_files"],
+            summary["added_segments"],
+        )
+        return 0
+    if args.command == "files-remove":
+        project = resolve_project(args.project)
+        attach_project_log(project)
+        with project_write_lock(project):
+            summary = remove_project_files(project, args.file_ids)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info(
+            "command complete command=files-remove files=%d segments=%d",
+            summary["removed_files"],
+            summary["removed_segments"],
+        )
         return 0
     if args.command == "inspect":
         project = resolve_project(args.project)

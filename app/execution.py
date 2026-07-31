@@ -211,10 +211,13 @@ def classify_stage(
         and records_by_segment[str(segment["segment_id"])]
         and records_by_segment[str(segment["segment_id"])][-1].get("status") == "failed"
     )
+    reusable_ids = {
+        str(segment["segment_id"]) for segment in reusable
+    }
     fingerprints = frozenset(
-        str(record["stage_fingerprint"])
-        for record in completed.values()
-        if record.get("stage_fingerprint")
+        str(completed[segment_id]["stage_fingerprint"])
+        for segment_id in reusable_ids
+        if completed[segment_id].get("stage_fingerprint")
     )
     return StageSelection(
         selected=tuple(selected_list),

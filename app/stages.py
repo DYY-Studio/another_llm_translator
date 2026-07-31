@@ -89,6 +89,11 @@ def _project_context(
     return config, metadata, files, segments
 
 
+def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
+    if not any(not segment["is_empty"] for segment in segments):
+        raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
+
+
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     return {
         "all_nonempty": force_all
@@ -968,6 +973,7 @@ async def run_terminology(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    _require_nonempty_segments(segments)
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
     active_path = project / "terminology" / "active_task.json"
@@ -1774,6 +1780,7 @@ async def run_translation(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    _require_nonempty_segments(segments)
     prompt = _prompt(project, "translation")
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
@@ -2620,6 +2627,7 @@ async def run_review(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    _require_nonempty_segments(segments)
     prompt = _prompt(project, stage)
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
@@ -3223,6 +3231,7 @@ def run_apply(
         raise UsageError("apply 必须显式传入 --all")
     logger = get_logger("apply")
     config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    _require_nonempty_segments(segments)
     selected = select_scope(segments, files, scope)
     suggestions = classify_stage(
         selected,
@@ -3354,6 +3363,7 @@ def export_project(
         raise ValueError(f"unsupported export stage: {export_stage}")
     logger = get_logger("export")
     config, metadata, files, segments = _project_context(project, dry_run=False)
+    _require_nonempty_segments(segments)
     stage_name = {
         "translated": "translation",
         "proofread": "proofreading_applied",
@@ -3523,6 +3533,7 @@ async def run_all(
     reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
     config = load_project_config(project)
+    _require_nonempty_segments(load_segments(project, repair_tail=not scope.dry_run))
     limiter = SlidingWindowLimiter(
         config["execution"]["requests_per_minute"],
         config["execution"]["input_tokens_per_minute"],
@@ -3599,6 +3610,9 @@ async def run_all(
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     config, metadata, files, segments = _project_context(project, dry_run=dry_run)
     nonempty = [item for item in segments if not item["is_empty"]]
+    active_segment_ids = {
+        str(item["segment_id"]) for item in nonempty
+    }
     summary: dict[str, Any] = {
         "name": metadata["name"],
         "files": len(files),
@@ -3647,6 +3661,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
                     repair_tail=not dry_run,
                 )
                 if item.get("active_task_id") == active.get("active_task_id")
+                and str(item.get("segment_id")) in active_segment_ids
             ]
             completed = {
                 item["segment_id"] for item in scans if item["status"] == "completed"
@@ -3684,17 +3699,24 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         "polishing_applied",
     ):
         history = load_stage_history(project, stage, repair_tail=not dry_run)
-        histories[stage] = history
-        completed = classify_stage([], history, force=False).latest_completed
+        active_history = [
+            item
+            for item in history
+            if str(item.get("segment_id")) in active_segment_ids
+        ]
+        histories[stage] = active_history
+        completed = classify_stage(
+            nonempty, active_history, force=False
+        ).latest_completed
         failed = {
             str(item["segment_id"])
-            for item in history
+            for item in active_history
             if item.get("status") == "failed"
             and str(item.get("segment_id")) not in completed
         }
         latest_failed_after_success = 0
         by_segment: dict[str, list[dict[str, Any]]] = {}
-        for item in history:
+        for item in active_history:
             by_segment.setdefault(str(item.get("segment_id")), []).append(item)
         for segment_id in completed:
             if by_segment[segment_id][-1].get("status") == "failed":
@@ -3751,7 +3773,11 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
             for segment_id, suggestion in suggestions.items()
         )
     project_arg = shlex.quote(str(project))
-    if summary["terminology"]["pending"] or summary["terminology"]["failed"]:
+    if not nonempty:
+        summary["next_command"] = (
+            f"python -m app.main files-add {project_arg} INPUT"
+        )
+    elif summary["terminology"]["pending"] or summary["terminology"]["failed"]:
         summary["next_command"] = (
             f"python -m app.main terminology {project_arg}"
         )
