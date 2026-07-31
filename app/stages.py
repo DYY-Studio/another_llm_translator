@@ -92,10 +92,16 @@ def _project_context(
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     return {
         "all_nonempty": force_all
-        or not (scope.from_file or scope.only_file or scope.only_segment),
+        or not (
+            scope.from_file
+            or scope.only_file
+            or scope.only_segment
+            or scope.segment_ids
+        ),
         "from_file": None if force_all else scope.from_file,
         "only_file": None if force_all else scope.only_file,
         "only_segment": None if force_all else scope.only_segment,
+        "segment_ids": None if force_all else list(scope.segment_ids or []) or None,
         "force": scope.force,
     }
 

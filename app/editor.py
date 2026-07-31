@@ -28,6 +28,7 @@ from .stages import (
 from .storage import (
     append_jsonl,
     atomic_write_json,
+    new_record_id,
     read_json,
     record_header,
 )
@@ -332,6 +333,55 @@ class EditorStore:
             "applied": self._result_view(applied),
         }
 
+    def reset_results(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            stage = payload.get("stage")
+            if stage not in {"translation", *REVIEW_STAGES}:
+                raise UsageError(f"不支持的重置阶段：{stage}")
+            raw_ids = payload.get("segment_ids")
+            if (
+                not isinstance(raw_ids, list)
+                or not raw_ids
+                or not all(isinstance(value, str) for value in raw_ids)
+            ):
+                raise UsageError("segment_ids 必须是非空字符串数组")
+            segment_ids = tuple(dict.fromkeys(raw_ids))
+            for segment_id in segment_ids:
+                self._require_segment(segment_id)
+            stages = [str(stage)]
+            if stage in REVIEW_STAGES:
+                stages.append(f"{stage}_applied")
+            batch_id = new_record_id("RESET")
+            cleared_ids: set[str] = set()
+            reset_records = 0
+            for target_stage in stages:
+                current = self._history(target_stage)
+                for segment_id in segment_ids:
+                    if segment_id not in current:
+                        continue
+                    append_jsonl(
+                        stage_result_path(self.project, target_stage),
+                        record_header(
+                            "stage_reset",
+                            self.project_id,
+                            stage=target_stage,
+                            segment_id=segment_id,
+                            status="reset",
+                            reset_batch_id=batch_id,
+                            origin="web_editor",
+                        ),
+                    )
+                    cleared_ids.add(segment_id)
+                    reset_records += 1
+            return {
+                "stage": stage,
+                "selected": len(segment_ids),
+                "cleared": len(cleared_ids),
+                "unchanged": len(segment_ids) - len(cleared_ids),
+                "reset_records": reset_records,
+                "reset_batch_id": batch_id if cleared_ids else None,
+            }
+
     def terms(self) -> dict[str, Any]:
         library = load_terms(self.project)
         current = {
@@ -407,6 +457,108 @@ class EditorStore:
     def save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         with project_write_lock(self.project):
             return self._save_term(payload)
+
+    def _publish_terms(
+        self,
+        library: dict[str, Any] | None,
+        current: dict[str, dict[str, Any]],
+        overrides: dict[str, dict[str, Any]],
+        *,
+        origin: str,
+    ) -> dict[str, Any]:
+        override_record = record_header(
+            "terminology_overrides",
+            self.project_id,
+            record_id="TERMINOLOGY-OVERRIDES",
+            overrides=[overrides[key] for key in sorted(overrides)],
+            origin=origin,
+        )
+        atomic_write_json(
+            self.project / "terminology" / "overrides.json",
+            override_record,
+        )
+        revision = int(library["terms_revision"]) + 1 if library else 1
+        terms = build_term_library_rows(
+            self.project,
+            [current[key] for key in sorted(current)],
+            overrides,
+        )
+        term_record = record_header(
+            "terminology_library",
+            self.project_id,
+            record_id=f"TERMS-{revision}",
+            terms_revision=revision,
+            published_run_id=(
+                library.get("published_run_id") if library is not None else None
+            ),
+            active_task_id=(
+                library.get("active_task_id") if library is not None else None
+            ),
+            terms=terms,
+            origin=origin,
+        )
+        atomic_write_json(
+            self.project / "terminology" / "terms.json",
+            term_record,
+        )
+        return self.terms()
+
+    def remove_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            raw_values = payload.get("normalized")
+            if (
+                not isinstance(raw_values, list)
+                or not raw_values
+                or not all(isinstance(value, str) and value for value in raw_values)
+            ):
+                raise UsageError("normalized 必须是非空字符串数组")
+            values = tuple(dict.fromkeys(raw_values))
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_path = self.project / "terminology" / "overrides.json"
+            overrides_document = read_json(overrides_path)
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            unknown = [
+                value
+                for value in values
+                if value not in current and value not in overrides
+            ]
+            if unknown:
+                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            changed = 0
+            for normalized in values:
+                override = overrides.get(
+                    normalized,
+                    {
+                        "normalized": normalized,
+                        "source": current.get(normalized, {}).get(
+                            "source", normalized
+                        ),
+                    },
+                )
+                if override.get("disabled"):
+                    continue
+                overrides[normalized] = {**override, "disabled": True}
+                current.pop(normalized, None)
+                changed += 1
+            if not changed:
+                result = self.terms()
+            else:
+                result = self._publish_terms(
+                    library,
+                    current,
+                    overrides,
+                    origin="web_editor",
+                )
+            result["removed"] = changed
+            result["unchanged"] = len(values) - changed
+            return result
 
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = payload.get("source")
@@ -494,37 +646,12 @@ class EditorStore:
                 },
             }
 
-        override_record = record_header(
-            "terminology_overrides",
-            self.project_id,
-            record_id="TERMINOLOGY-OVERRIDES",
-            overrides=[overrides[key] for key in sorted(overrides)],
-            origin="project_editor",
-        )
-        atomic_write_json(overrides_path, override_record)
-
-        revision = int(library["terms_revision"]) + 1 if library else 1
-        terms = build_term_library_rows(
-            self.project,
-            [current[key] for key in sorted(current)],
+        return self._publish_terms(
+            library,
+            current,
             overrides,
-        )
-        term_record = record_header(
-            "terminology_library",
-            self.project_id,
-            record_id=f"TERMS-{revision}",
-            terms_revision=revision,
-            published_run_id=(
-                library.get("published_run_id") if library is not None else None
-            ),
-            active_task_id=(
-                library.get("active_task_id") if library is not None else None
-            ),
-            terms=terms,
             origin="project_editor",
         )
-        atomic_write_json(self.project / "terminology" / "terms.json", term_record)
-        return self.terms()
 
 
 def _handler(store: EditorStore, html: bytes) -> type[BaseHTTPRequestHandler]:

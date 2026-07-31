@@ -130,6 +130,58 @@ def test_editor_translation_appends_results_and_exports_latest(tmp_path: Path) -
     assert output.read_text(encoding="utf-8-sig") == "第二版"
 
 
+def test_editor_reset_masks_translation_until_new_result(tmp_path: Path) -> None:
+    project = create_editor_project(tmp_path, "one")
+    store = EditorStore(project)
+    store.save_translation({"segment_id": "F0001-S000001", "text": "first"})
+
+    reset = store.reset_results(
+        {"stage": "translation", "segment_ids": ["F0001-S000001"]}
+    )
+    assert reset["cleared"] == 1
+    assert store.segment_detail("F0001-S000001")["translation"] is None
+
+    store.save_translation({"segment_id": "F0001-S000001", "text": "second"})
+    assert store.segment_detail("F0001-S000001")["translation"]["text"] == "second"
+
+
+def test_editor_reset_review_also_clears_applied_without_cascade(
+    tmp_path: Path,
+) -> None:
+    project = create_editor_project(tmp_path, "one")
+    store = EditorStore(project)
+    segment_id = "F0001-S000001"
+    store.save_translation({"segment_id": segment_id, "text": "base"})
+    store.save_review(
+        {
+            "stage": "proofreading",
+            "segment_id": segment_id,
+            "review_status": "suggested",
+            "suggested_text": "proofread",
+            "reason": None,
+            "apply": True,
+        }
+    )
+    store.save_review(
+        {
+            "stage": "polishing",
+            "segment_id": segment_id,
+            "review_status": "accepted",
+            "apply": False,
+        }
+    )
+
+    reset = store.reset_results(
+        {"stage": "proofreading", "segment_ids": [segment_id]}
+    )
+    assert reset["cleared"] == 1
+    assert reset["reset_records"] == 2
+    detail = store.segment_detail(segment_id)
+    assert detail["reviews"]["proofreading"]["suggestion"] is None
+    assert detail["reviews"]["proofreading"]["applied"] is None
+    assert detail["reviews"]["polishing"]["suggestion"] is not None
+
+
 def test_editor_translation_records_enabled_validator_warning(tmp_path: Path) -> None:
     project = create_editor_project(tmp_path, "one")
     config_path = project / "config.toml"

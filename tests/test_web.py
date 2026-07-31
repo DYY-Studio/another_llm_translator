@@ -208,6 +208,105 @@ def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
     assert "类别冲突尚未裁决" in unresolved.json()["error"]
 
 
+def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    document = {
+        "schema_version": 1,
+        "record_type": "terminology_exchange",
+        "terms": [
+            {
+                "source": source,
+                "preferred_translation": translated,
+                "category": "人物",
+                "description": "imported",
+                "aliases": [],
+                "disabled": False,
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                },
+            }
+            for source, translated in (("Alice", "爱丽丝"), ("Bob", "鲍勃"))
+        ],
+    }
+    imported = client.post(
+        "/api/v1/projects/sample/terms/import",
+        files={
+            "file": (
+                "terms.json",
+                json.dumps(document).encode(),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    assert imported.json()["imported"] == 2
+
+    removed = client.post(
+        "/api/v1/projects/sample/terms/remove",
+        json={"normalized": ["alice", "bob"]},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == 2
+    assert removed.json()["terms_revision"] == 2
+
+    visible = client.get(
+        "/api/v1/projects/sample/terms/export",
+        params={"format": "json"},
+    )
+    assert visible.status_code == 200
+    assert json.loads(visible.content)["terms"] == []
+    complete = client.get(
+        "/api/v1/projects/sample/terms/export",
+        params={"format": "csv", "include_disabled": "true"},
+    )
+    assert complete.status_code == 200
+    assert "Alice" in complete.content.decode("utf-8-sig")
+
+
+def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    store = EditorStore(project)
+    for segment_id in ("F0001-S000001", "F0001-S000002"):
+        store.save_translation({"segment_id": segment_id, "text": segment_id})
+        store.save_review(
+            {
+                "stage": "proofreading",
+                "segment_id": segment_id,
+                "review_status": "accepted",
+                "apply": False,
+            }
+        )
+    client = TestClient(create_app(projects_root=projects_root))
+    applied = client.post(
+        "/api/v1/projects/sample/apply",
+        json={
+            "stage": "proofreading",
+            "segment_ids": ["F0001-S000001"],
+            "all": True,
+            "allow_outdated_base": False,
+        },
+    )
+    assert applied.status_code == 200
+    overview = client.get("/api/v1/projects/sample").json()
+    assert overview["segments"][0]["reviews"]["proofreading"]["applied"] is not None
+    assert overview["segments"][1]["reviews"]["proofreading"]["applied"] is None
+
+    reset = client.post(
+        "/api/v1/projects/sample/results/reset",
+        json={
+            "stage": "proofreading",
+            "segment_ids": ["F0001-S000001"],
+        },
+    )
+    assert reset.status_code == 200
+    assert reset.json()["reset_records"] == 2
+    overview = client.get("/api/v1/projects/sample").json()
+    assert overview["segments"][0]["reviews"]["proofreading"]["suggestion"] is None
+    assert overview["segments"][0]["reviews"]["proofreading"]["applied"] is None
+
+
 def test_web_adapter_validation_preview_and_secret_redaction(
     tmp_path: Path,
 ) -> None:
