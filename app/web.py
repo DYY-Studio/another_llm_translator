@@ -8,7 +8,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import load_config, load_project_config
@@ -24,7 +24,7 @@ from .project import (
     resolve_project,
     sync_global_templates,
 )
-from .stages import export_project, run_apply
+from .stages import export_project, export_terms, import_terms, run_apply
 from .storage import atomic_write_json, atomic_write_text, read_json
 from .web_tasks import WebTaskManager, task_options
 
@@ -146,6 +146,71 @@ def create_app(
     @app.post("/api/v1/projects/{name}/terms")
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return EditorStore(project(name)).save_term(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/remove")
+    async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return EditorStore(project(name)).remove_terms(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/import")
+    async def import_term_file(
+        name: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        suffix = Path(file.filename or "").suffix.casefold()
+        if suffix not in {".json", ".csv"}:
+            raise UsageError("术语文件扩展名必须是 .json 或 .csv")
+        root = project(name)
+        with tempfile.NamedTemporaryFile(
+            dir=root,
+            prefix=".terms-import.",
+            suffix=suffix,
+            delete=False,
+        ) as handle:
+            handle.write(await file.read())
+            temporary = Path(handle.name)
+        try:
+            with project_write_lock(root):
+                return import_terms(root, temporary, dry_run=False)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get("/api/v1/projects/{name}/terms/export")
+    async def export_term_file(
+        name: str,
+        format: str = "json",
+        include_disabled: bool = False,
+    ) -> Response:
+        if format not in {"json", "csv"}:
+            raise UsageError("术语导出格式必须是 json 或 csv")
+        root = project(name)
+        with tempfile.TemporaryDirectory(
+            dir=root, prefix=".terms-export."
+        ) as raw:
+            output = Path(raw) / f"{name}-terms.{format}"
+            export_terms(
+                root,
+                output,
+                include_disabled=include_disabled,
+            )
+            content = output.read_bytes()
+        media_type = (
+            "application/json"
+            if format == "json"
+            else "text/csv; charset=utf-8"
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="terms.{format}"'
+                )
+            },
+        )
+
+    @app.post("/api/v1/projects/{name}/results/reset")
+    async def reset_results(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return EditorStore(project(name)).reset_results(payload)
 
     @app.get("/api/v1/projects/{name}/config")
     async def get_config(name: str) -> dict[str, str]:
@@ -317,20 +382,36 @@ def create_app(
     ) -> dict[str, Any]:
         root = project(name)
         stage = str(payload.get("stage", ""))
+        segment_ids = payload.get("segment_ids")
+        if segment_ids is not None and (
+            not isinstance(segment_ids, list)
+            or not segment_ids
+            or not all(isinstance(value, str) for value in segment_ids)
+        ):
+            raise UsageError("segment_ids 必须是非空字符串数组")
+        allow_outdated = payload.get("allow_outdated_base", False)
+        confirmed_all = payload.get("all", False)
+        if not isinstance(allow_outdated, bool):
+            raise UsageError("allow_outdated_base 必须是布尔值")
+        if not isinstance(confirmed_all, bool):
+            raise UsageError("all 必须是布尔值")
         scope = Scope(
             from_file=payload.get("from_file"),
             only_file=payload.get("only_file"),
             only_segment=payload.get("only_segment"),
+            segment_ids=(
+                tuple(dict.fromkeys(segment_ids))
+                if isinstance(segment_ids, list)
+                else None
+            ),
         )
         with project_write_lock(root):
             return run_apply(
                 root,
                 stage,
                 scope,
-                allow_outdated_base=bool(
-                    payload.get("allow_outdated_base", False)
-                ),
-                confirmed_all=bool(payload.get("all", False)),
+                allow_outdated_base=allow_outdated,
+                confirmed_all=confirmed_all,
             )
 
     @app.post("/api/v1/projects/{name}/export")

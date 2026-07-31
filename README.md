@@ -39,6 +39,7 @@ python -m app.main run-all novel
 python -m app.main inspect novel
 python -m app.main apply novel --stage proofreading --all
 python -m app.main export novel --stage proofread --bilingual
+python -m app.main terms-export novel glossary.csv
 ```
 
 项目默认保存在 `projects/<name>/`。`run-all` 只生成校对和润色建议，不会自动
@@ -48,6 +49,10 @@ python -m app.main export novel --stage proofread --bilingual
 未完成 Run，交互终端会询问继续还是新建。脚本或 CI 中需明确使用
 `--resume-run` 或 `--decline-run`；续作沿用旧范围，但使用当前项目配置和
 Prompt。
+
+术语表可通过 `terms-import` 和 `terms-export` 在 JSON/CSV 间交换。重新执行
+`terminology --force` 会把新扫描结果合并到当前术语库；未再次发现的术语不会
+自动删除，人工移除决定持续生效。
 
 EPUB 项目使用：
 
@@ -76,9 +81,12 @@ python -m app.web
 打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
 限速与恢复逻辑，不建立第二套数据库。可创建 TXT/EPUB 项目、编辑配置、Prompt
 和 JSON LLM Adapter，运行或取消阶段任务，并审校、apply 与导出。术语工作区
-支持搜索、冲突裁决、新增、编辑、移除和恢复；顶栏外观按钮可在跟随系统、浅色
-和深色之间切换，选择只保存在当前浏览器。启动术语、翻译、校对或润色前会显示
-运行选项，明确选择未完成 Run 的续用/新建，以及已有结果的复用/强制重做。
+支持搜索、冲突裁决、JSON/CSV 导入导出、新增、编辑、移除和恢复；术语与
+Segment 列表支持 Ctrl/Cmd/Shift 经典多选。翻译、校对和润色可按所选或当前
+过滤范围清除结果，校对和润色还可批量应用建议。顶栏外观按钮可在跟随系统、
+浅色和深色之间切换，选择只保存在当前浏览器。启动术语、翻译、校对或润色前
+会显示运行选项，明确选择未完成 Run 的续用/新建，以及已有结果的复用/强制
+重做。
 
 ## 开发期结果编辑器
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { ProjectOverview, Segment, Stage } from "../types";
+import { useClassicSelection } from "../useClassicSelection";
 
 function resultFor(segment: Segment, stage: Stage) {
   if (stage === "translation") return segment.translation;
@@ -49,11 +50,20 @@ export function SegmentWorkspace({
   overview: ProjectOverview;
   onRefresh: () => Promise<void>;
 }) {
-  const [selectedId, setSelectedId] = useState(overview.segments[0]?.segment_id ?? "");
+  const selection = useClassicSelection(
+    overview.segments[0]?.segment_id ?? "",
+  );
   const [file, setFile] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
-  const selected = overview.segments.find((item) => item.segment_id === selectedId) ?? overview.segments[0];
+  const [batchAction, setBatchAction] = useState<{
+    kind: "reset" | "apply";
+    scope: "selected" | "filtered";
+  } | null>(null);
+  const [batchMessage, setBatchMessage] = useState("");
+  const selected = overview.segments.find(
+    (item) => item.segment_id === selection.focusedKey,
+  ) ?? overview.segments[0];
   const [text, setText] = useState("");
   const [reason, setReason] = useState("");
   const [reviewStatus, setReviewStatus] = useState<"accepted" | "suggested">("suggested");
@@ -68,7 +78,7 @@ export function SegmentWorkspace({
     setReviewStatus(suggestion?.review_status ?? "suggested");
     setText(suggestion?.suggested_text ?? selected.reviews[stage].base?.text ?? "");
     setReason(suggestion?.reason ?? "");
-  }, [selectedId, stage, overview, selected]);
+  }, [selection.focusedKey, stage, overview, selected]);
 
   const visible = useMemo(() => overview.segments.filter((item) => {
     const result = resultFor(item, stage);
@@ -83,6 +93,14 @@ export function SegmentWorkspace({
       && (status === "all" || statusFor(item, stage) === status)
       && haystack.includes(search.toLocaleLowerCase());
   }), [overview, file, status, search, stage]);
+  const visibleKeys = visible.map((item) => item.segment_id);
+  const selectedVisibleIds = visibleKeys.filter((segmentId) => (
+    selection.selectedKeys.has(segmentId)
+  ));
+
+  useEffect(() => {
+    selection.reset(visibleKeys[0] ?? "");
+  }, [project, stage, file, status, search]);
 
   const neighbors = selected
     ? overview.segments.filter((item) => item.file_id === selected.file_id)
@@ -91,6 +109,11 @@ export function SegmentWorkspace({
   const before = neighbors.slice(Math.max(0, selectedIndex - 2), selectedIndex);
   const after = neighbors.slice(selectedIndex + 1, selectedIndex + 3);
   const showContext = status !== "all" || search.trim() !== "";
+
+  function resetFilterSelection() {
+    selection.reset();
+    setBatchMessage("");
+  }
 
   async function save(apply = false) {
     if (!selected) return;
@@ -115,21 +138,89 @@ export function SegmentWorkspace({
     await onRefresh();
   }
 
+  const batchIds = batchAction?.scope === "filtered"
+    ? visibleKeys
+    : selectedVisibleIds;
+  const batchSegments = overview.segments.filter((item) => (
+    batchIds.includes(item.segment_id)
+  ));
+  const missingApply = batchAction?.kind === "apply" && stage !== "translation"
+    ? batchSegments.filter((item) => {
+      const review = item.reviews[stage];
+      return !review.base || !review.suggestion;
+    })
+    : [];
+  const outdatedApply = batchAction?.kind === "apply" && stage !== "translation"
+    ? batchSegments.filter((item) => item.reviews[stage].outdated)
+    : [];
+
+  async function runBatch(allowOutdated = false) {
+    if (!batchAction || !batchIds.length) return;
+    if (batchAction.kind === "reset") {
+      const result = await api<{ cleared: number }>(
+        `/api/v1/projects/${project}/results/reset`,
+        {
+          method: "POST",
+          body: JSON.stringify({ stage, segment_ids: batchIds }),
+        },
+      );
+      setBatchMessage(`已清除 ${result.cleared} 个 Segment 的当前结果`);
+    } else {
+      const result = await api<{ completed: number }>(
+        `/api/v1/projects/${project}/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            stage,
+            segment_ids: batchIds,
+            all: true,
+            allow_outdated_base: allowOutdated,
+          }),
+        },
+      );
+      setBatchMessage(`已应用 ${result.completed} 个 Segment`);
+    }
+    setBatchAction(null);
+    selection.reset();
+    await onRefresh();
+  }
+
   const review = stage === "translation" || !selected ? null : selected.reviews[stage];
   return (
     <div className="workspace">
       <section className="segment-browser">
         <div className="filters">
-          <select value={file} onChange={(event) => setFile(event.target.value)}>
+          <select value={file} onChange={(event) => {
+            setFile(event.target.value);
+            resetFilterSelection();
+          }}>
             <option value="all">全部文件</option>
             {overview.files.map((item) => <option value={item.file_id} key={item.file_id}>{item.name}</option>)}
           </select>
           <div className="filter-row">
-            <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <select value={status} onChange={(event) => {
+              setStatus(event.target.value);
+              resetFilterSelection();
+            }}>
               {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索原文或译文" />
+            <input value={search} onChange={(event) => {
+              setSearch(event.target.value);
+              resetFilterSelection();
+            }} placeholder="搜索原文或译文" />
           </div>
+          <div className="batch-toolbar">
+            <span>已选择 {selectedVisibleIds.length} / 当前 {visible.length}</span>
+            {stage !== "translation" && (
+              <>
+                <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>应用所选</button>
+                <button className="quiet-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
+              </>
+            )}
+            <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>清除所选</button>
+            <button className="danger-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
+          </div>
+          {batchMessage && <span className="success-text">{batchMessage}</span>}
         </div>
         <div className="list-header"><span>ID / 状态</span><span>原文 / 结果预览</span></div>
         <div className="segment-list">
@@ -140,8 +231,12 @@ export function SegmentWorkspace({
             return (
               <button
                 key={item.segment_id}
-                className={item.segment_id === selected?.segment_id ? "segment-row selected" : "segment-row"}
-                onClick={() => setSelectedId(item.segment_id)}
+                className={`segment-row${selection.selectedKeys.has(item.segment_id) ? " selected" : ""}${selection.focusedKey === item.segment_id ? " focused" : ""}`}
+                onClick={(event) => selection.select(
+                  item.segment_id,
+                  visibleKeys,
+                  event,
+                )}
               >
                 <span className={`status-dot ${itemStatus}`} />
                 <span className="segment-id">{item.segment_id.replace("F0001-S", "")}</span>
@@ -195,6 +290,88 @@ export function SegmentWorkspace({
           </>
         )}
       </section>
+      {batchAction && (
+        <BatchActionDialog
+          kind={batchAction.kind}
+          stage={stage}
+          count={batchIds.length}
+          missing={missingApply.length}
+          outdated={outdatedApply.length}
+          onClose={() => setBatchAction(null)}
+          onConfirm={runBatch}
+        />
+      )}
+    </div>
+  );
+}
+
+function BatchActionDialog({
+  kind,
+  stage,
+  count,
+  missing,
+  outdated,
+  onClose,
+  onConfirm,
+}: {
+  kind: "reset" | "apply";
+  stage: "translation" | "proofreading" | "polishing";
+  count: number;
+  missing: number;
+  outdated: number;
+  onClose: () => void;
+  onConfirm: (allowOutdated?: boolean) => Promise<void>;
+}) {
+  const [allowOutdated, setAllowOutdated] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const reviewLabel = stage === "proofreading" ? "校对" : "润色";
+  const blocked = kind === "apply" && (
+    missing > 0 || (outdated > 0 && !allowOutdated)
+  );
+
+  async function confirm() {
+    setWorking(true);
+    setError("");
+    try {
+      await onConfirm(allowOutdated);
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-modal="true" aria-label={kind === "apply" ? "批量应用" : "批量清除"}>
+        <h2>{kind === "apply" ? `批量应用${reviewLabel}结果` : "批量清除结果"}</h2>
+        <p>本次范围包含 {count} 个 Segment。</p>
+        {kind === "reset" ? (
+          <p>
+            {stage === "translation"
+              ? "当前译文将回到待处理；校对和润色历史不会级联删除。"
+              : `${reviewLabel}建议及其已应用结果将一起撤销；其他阶段不会级联删除。`}
+          </p>
+        ) : (
+          <>
+            {!!missing && <div className="warning-banner">其中 {missing} 项缺少建议或基准，整批不能应用。请调整过滤范围。</div>}
+            {!!outdated && (
+              <label className="check-row">
+                <input type="checkbox" checked={allowOutdated} onChange={(event) => setAllowOutdated(event.target.checked)} />
+                允许应用 {outdated} 项基于旧上游的建议
+              </label>
+            )}
+          </>
+        )}
+        {error && <p className="error-text">{error}</p>}
+        <div className="modal-actions">
+          <button className="quiet-button" disabled={working} onClick={onClose}>取消</button>
+          <button className={kind === "reset" ? "danger-button" : "primary-button"} disabled={working || blocked || !count} onClick={confirm}>
+            {kind === "reset" ? "确认清除" : "确认应用"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

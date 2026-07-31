@@ -68,14 +68,20 @@ class Scope:
     from_file: str | None = None
     only_file: str | None = None
     only_segment: str | None = None
+    segment_ids: tuple[str, ...] | None = None
     force: bool = False
     dry_run: bool = False
 
     def validate(self) -> None:
-        selectors = [self.from_file, self.only_file, self.only_segment]
+        selectors = [
+            self.from_file,
+            self.only_file,
+            self.only_segment,
+            self.segment_ids,
+        ]
         if sum(value is not None for value in selectors) > 1:
             raise UsageError(
-                "--from-file、--only-file 和 --only-segment 不能同时使用"
+                "--from-file、--only-file、--only-segment 和 segment_ids 不能同时使用"
             )
 
 
@@ -113,7 +119,18 @@ def select_scope(
     scope.validate()
     file_order = {str(item["file_id"]): int(item["file_order"]) for item in files}
     selected = [item for item in segments if not item["is_empty"]]
-    if scope.only_segment:
+    if scope.segment_ids is not None:
+        requested = set(scope.segment_ids)
+        if not requested:
+            raise UsageError("segment_ids 不能为空")
+        selected = [
+            item for item in selected if str(item["segment_id"]) in requested
+        ]
+        found = {str(item["segment_id"]) for item in selected}
+        missing = sorted(requested - found)
+        if missing:
+            raise UsageError(f"未知或空 Segment：{', '.join(missing[:10])}")
+    elif scope.only_segment:
         selected = [
             item for item in selected if item["segment_id"] == scope.only_segment
         ]
@@ -126,7 +143,7 @@ def select_scope(
         selected = [
             item for item in selected if file_order[str(item["file_id"])] >= start
         ]
-    if (scope.only_file or scope.only_segment) and not selected:
+    if (scope.only_file or scope.only_segment or scope.segment_ids) and not selected:
         raise UsageError("选择范围为空或 ID 不存在")
     return selected
 
@@ -150,8 +167,13 @@ def latest_completed_by_segment(
 ) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
     for record in history:
-        if record.get("status") == "completed" and record.get("segment_id"):
-            latest[str(record["segment_id"])] = record
+        segment_id = record.get("segment_id")
+        if not segment_id:
+            continue
+        if record.get("status") == "reset":
+            latest.pop(str(segment_id), None)
+        elif record.get("status") == "completed":
+            latest[str(segment_id)] = record
     return latest
 
 
@@ -641,6 +663,11 @@ def scope_from_run(
         from_file=raw.get("from_file"),
         only_file=raw.get("only_file"),
         only_segment=raw.get("only_segment"),
+        segment_ids=(
+            tuple(str(value) for value in raw["segment_ids"])
+            if isinstance(raw.get("segment_ids"), list)
+            else None
+        ),
         force=False,
         dry_run=dry_run,
     )

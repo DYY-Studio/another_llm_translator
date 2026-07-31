@@ -125,7 +125,7 @@ export function RunDialog({
                 <strong>强制重做全部</strong>
                 <small>
                   {options.stage === "terminology"
-                    ? "创建完整替换扫描；新 revision 发布前继续使用当前术语库。"
+                    ? "重新扫描全部 Segment，并将新结果合并到当前术语库。"
                     : `重新处理全部 ${options.selected} 个非空 Segment。`}
                 </small>
               </span>

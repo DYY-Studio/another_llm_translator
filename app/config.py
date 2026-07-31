@@ -50,6 +50,7 @@ SCHEMA: dict[str, Any] = {
         "unicode_normalization": None,
         "case_insensitive": None,
         "max_terms_per_segment": None,
+        "alias_primary_collision": None,
     },
     "validation": {
         "translation": {
@@ -234,6 +235,11 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("terminology.case_insensitive 必须是布尔值")
     if not config["terminology"]["case_insensitive"]:
         raise ConfigError("MVP 仅支持 terminology.case_insensitive = true")
+    alias_collision = config["terminology"]["alias_primary_collision"]
+    if alias_collision not in {"conflict", "merge"}:
+        raise ConfigError(
+            "terminology.alias_primary_collision 必须是 conflict 或 merge"
+        )
     max_terms = config["terminology"]["max_terms_per_segment"]
     if (
         not isinstance(max_terms, int)
@@ -273,6 +279,9 @@ def load_config(path: Path) -> dict[str, Any]:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
+    terminology = config.get("terminology")
+    if isinstance(terminology, dict):
+        terminology.setdefault("alias_primary_collision", "conflict")
     validate_config(config)
     return config
 

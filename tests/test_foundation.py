@@ -95,6 +95,42 @@ def test_config_accepts_disabled_rate_limits(tmp_path: Path) -> None:
     assert loaded["execution"]["input_tokens_per_minute"] == 0
 
 
+def test_config_rejects_unknown_alias_primary_collision_policy(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'alias_primary_collision = "conflict"',
+            'alias_primary_collision = "guess"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ConfigError,
+        match="alias_primary_collision 必须是 conflict 或 merge",
+    ):
+        load_config(config_path)
+
+
+def test_config_defaults_alias_collision_for_existing_projects(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'alias_primary_collision = "conflict"\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(config_path)["terminology"]["alias_primary_collision"] == (
+        "conflict"
+    )
+
+
 def test_config_accepts_token_safety_factor_below_one(tmp_path: Path) -> None:
     source = Path(__file__).parents[1] / "config" / "config.toml"
     path = tmp_path / "config.toml"

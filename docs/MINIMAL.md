@@ -332,6 +332,7 @@ previous_segments = 3
 unicode_normalization = "NFKC"
 case_insensitive = true
 max_terms_per_segment = 100
+alias_primary_collision = "conflict"
 
 [validation.translation]
 japanese_kana = false
@@ -618,6 +619,10 @@ Prompt，并在 manifest 追加本次指纹、原始范围和请求/复用数量
 `review_status` 是阶段 payload，不等于记录的 `status`。结构有效的 accepted 和 suggested 都保存为 completed。
 accepted 的持久化记录将 `suggested_text` 和 `reason` 规范化保存为 `null`。
 
+Web 人工重置在同一阶段 JSONL 中追加 `status = "reset"`。reset 屏蔽该
+Segment 此前的 completed；之后的新 completed 重新成为当前结果。重置校对或
+润色时同时重置该阶段 applied 结果，但不级联删除其他阶段。
+
 applied 结果保存：
 
 - 实际输出文本
@@ -708,7 +713,10 @@ previous_segments = 3
 7. 所有非空 Segment 扫描 completed 后，合并候选、应用 overrides，并原子发布。
 8. 发布成功后 `terms_revision` 加一。
 
-`terminology --force` 创建新的全量活动任务，忽略此前扫描进度。上一份术语库在新任务完整发布前继续可用。旧任务记录可以留在追加文件中，但不再参与产品逻辑，也不提供历史代次管理功能。
+`terminology --force` 创建新的全量活动任务，忽略此前扫描进度。上一份术语库
+在新任务发布前继续可用；发布时新候选合并到上一份术语库，未再次发现的旧术语
+不会自动删除。术语移除只能通过人工 disabled override 完成。旧任务记录可以
+留在追加文件中，但不再参与产品逻辑，也不提供历史代次管理功能。
 
 每条 scan 和 candidate 都记录 `active_task_id`；读取和发布时只使用 `active_task.json` 当前指向的任务记录。
 
@@ -752,6 +760,14 @@ normalized = normalized.casefold().strip()
 - 推荐译名或类别冲突时保留冲突信息，MVP 不自动裁决。
 - 未解决冲突可以注入来源、候选类别和说明，但不注入歧义推荐译名。
 
+alias 与另一条术语的主 source 相同时，由
+`terminology.alias_primary_collision` 决定：
+
+- `conflict`（默认）：保留两条主术语并标记冲突；碰撞 alias 不参与注入。
+- `merge`：声明 alias 的术语吸收另一条主术语；元数据不一致继续进入冲突。
+
+循环 alias 或多个术语争用同一主条目无法安全自动合并，始终进入人工冲突。
+
 人工 override 以 normalized source 定位：
 
 ```json
@@ -768,6 +784,19 @@ normalized = normalized.casefold().strip()
 override 在自动合并后应用。`disabled = true` 的术语不发布、不匹配也不注入。
 
 发布时可以按确定性排序重新分配只在当前库内有效的记录 ID，不承诺跨 revision 稳定。
+
+### 术语交换
+
+`terms-import` 和 `terms-export` 只接受 `.json`、`.csv`。JSON 顶层固定为
+`schema_version = 1`、`record_type = "terminology_exchange"` 和 `terms`。
+术语字段为 source、preferred_translation、category、description、aliases、
+disabled，以及类别和推荐译名冲突候选。CSV 使用同一字段集合，数组字段保存为
+JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
+
+导入在完整校验后按 normalized source 合并到自动扫描基线；文件缺项不删除
+现有术语，人工 override 始终优先。`disabled = true` 是显式人工移除；
+`disabled = false` 不自动撤销项目中已有的 disabled override。无实际变化时
+不增加 revision。
 
 ### 翻译时匹配
 
@@ -1139,6 +1168,8 @@ python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init BOOK.epub --name PROJECT_NAME --document-adapter epub
 python -m app.main inspect PROJECT
 python -m app.main terminology PROJECT
+python -m app.main terms-import PROJECT terms.json
+python -m app.main terms-export PROJECT terms.csv
 python -m app.main translate PROJECT
 python -m app.main translate PROJECT --resume-run
 python -m app.main translate PROJECT --decline-run
@@ -1186,6 +1217,10 @@ python -m app.main run-all PROJECT
 - `--allow-missing`：仅用于 export，允许使用阶段回退。
 - `--bilingual`：仅用于 export。
 - `--all`：apply 的必需批量确认。
+- `terms-import` 根据 `.json` 或 `.csv` 扩展名增量导入术语；`--dry-run`
+  只校验并报告变化。
+- `terms-export` 根据输出扩展名导出术语；默认不含 disabled，
+  `--include-disabled` 用于完整备份人工移除决定。
 - `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
 - `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
@@ -1313,6 +1348,11 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 时不接受会被忽略的 force 或复用参数。所有决策在创建后台任务和阶段 Run 前
 再次校验；并发修改导致条件变化时明确失败，不自动降级。桌面和窄屏使用同一
 运行决策流程。
+
+术语页支持 JSON/CSV 导入导出、经典 Ctrl/Cmd/Shift 多选和批量移除。翻译、
+校对、润色列表使用相同多选规则；批量清除采用追加 reset。校对和润色可应用
+所选或当前过滤范围，缺建议或缺基准时整批拒绝，旧基准必须显式允许。批量
+清除不会改变阶段运行 scope；随后启动仍处理项目内全部 pending/failed。
 
 ---
 
