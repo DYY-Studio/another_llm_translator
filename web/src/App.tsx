@@ -5,11 +5,21 @@ import { SegmentWorkspace } from "./components/SegmentWorkspace";
 import { TermsView } from "./components/TermsView";
 import { CreateProjectDialog, ExportView, Overview } from "./components/UtilityViews";
 import { SettingsView } from "./components/SettingsView";
-import type { ProjectOverview, ProjectSummary, Stage, TaskState, ThemeMode } from "./types";
+import { RunDialog } from "./components/RunDialog";
+import type {
+  LLMStage,
+  ProjectOverview,
+  ProjectSummary,
+  RunDecision,
+  Stage,
+  TaskOptions,
+  TaskState,
+  ThemeMode,
+} from "./types";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
-const runnable: Partial<Record<Stage, string>> = {
+const runnable: Partial<Record<Stage, LLMStage>> = {
   terminology: "terminology",
   translation: "translation",
   proofreading: "proofreading",
@@ -24,6 +34,9 @@ export default function App() {
   const [task, setTask] = useState<TaskState | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState("");
+  const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
+  const [runOptionsLoading, setRunOptionsLoading] = useState(false);
+  const [runStarting, setRunStarting] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -78,15 +91,42 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [task, refresh]);
 
-  async function startRun() {
+  async function openRunDialog() {
     const taskStage = runnable[stage];
     if (!project || !taskStage) return;
+    setRunOptionsLoading(true);
+    try {
+      setRunOptions(await api<TaskOptions>(
+        `/api/v1/projects/${project}/task-options/${taskStage}`,
+      ));
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setRunOptionsLoading(false);
+    }
+  }
+
+  async function startRun(decision: RunDecision) {
+    if (!project || !runOptions) return;
+    setRunStarting(true);
     try {
       setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
-        body: JSON.stringify({ stage: taskStage, reuse_mixed_fingerprints: false }),
+        body: JSON.stringify({ stage: runOptions.stage, ...decision }),
       }));
-    } catch (value) { setError(String(value)); }
+      setRunOptions(null);
+    } catch (value) {
+      setError(String(value));
+      try {
+        setRunOptions(await api<TaskOptions>(
+          `/api/v1/projects/${project}/task-options/${runOptions.stage}`,
+        ));
+      } catch {
+        setRunOptions(null);
+      }
+    } finally {
+      setRunStarting(false);
+    }
   }
 
   async function cancelRun() {
@@ -114,8 +154,10 @@ export default function App() {
         onProject={setProject}
         onStage={setStage}
         onCreate={() => setCreateOpen(true)}
-        onRun={startRun}
+        onRun={openRunDialog}
         onCancel={cancelRun}
+        canRun={Boolean(runnable[stage])}
+        runLoading={runOptionsLoading}
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
       >
@@ -123,6 +165,15 @@ export default function App() {
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (name) => { setCreateOpen(false); await loadProjects(); setProject(name); }} />}
+      {runOptions && (
+        <RunDialog
+          key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
+          options={runOptions}
+          starting={runStarting}
+          onClose={() => setRunOptions(null)}
+          onStart={startRun}
+        />
+      )}
     </>
   );
 }

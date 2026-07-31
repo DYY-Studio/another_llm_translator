@@ -26,7 +26,7 @@ from .project import (
 )
 from .stages import export_project, run_apply
 from .storage import atomic_write_json, atomic_write_text, read_json
-from .web_tasks import WebTaskManager
+from .web_tasks import WebTaskManager, task_options
 
 
 WEB_DIST = Path(__file__).with_name("web_dist")
@@ -268,23 +268,40 @@ def create_app(
     async def start_task(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        stage = str(payload.get("stage", ""))
+
+        def boolean_option(key: str) -> bool:
+            value = payload.get(key, False)
+            if not isinstance(value, bool):
+                raise UsageError(f"{key} 必须是布尔值")
+            return value
+
+        force = boolean_option("force")
+        reuse_mixed_fingerprints = boolean_option(
+            "reuse_mixed_fingerprints"
+        )
+        run_action = payload.get("run_action")
+        if run_action is not None and not isinstance(run_action, str):
+            raise UsageError("run_action 必须是字符串或 null")
         scope = Scope(
             from_file=payload.get("from_file"),
             only_file=payload.get("only_file"),
             only_segment=payload.get("only_segment"),
-            force=bool(payload.get("force", False)),
+            force=force,
             dry_run=False,
         )
         scope.validate()
         return await app.state.tasks.start(
             project(name),
-            str(payload.get("stage", "")),
+            stage,
             scope=scope,
-            reuse_mixed_fingerprints=bool(
-                payload.get("reuse_mixed_fingerprints", False)
-            ),
-            run_action=payload.get("run_action"),
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            run_action=run_action,
         )
+
+    @app.get("/api/v1/projects/{name}/task-options/{stage}")
+    async def get_task_options(name: str, stage: str) -> dict[str, Any]:
+        return task_options(project(name), stage)
 
     @app.get("/api/v1/tasks/{task_id}")
     async def task(task_id: str) -> dict[str, Any]:

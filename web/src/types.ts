@@ -7,6 +7,12 @@ export type Stage =
   | "export"
   | "settings";
 
+export type LLMStage =
+  | "terminology"
+  | "translation"
+  | "proofreading"
+  | "polishing";
+
 export interface ResultView {
   record_id: string;
   text?: string;
@@ -57,6 +63,31 @@ export interface TaskState {
   status: string;
   error?: string | null;
   summary?: Record<string, unknown> | null;
+}
+
+export interface TaskOptions {
+  stage: LLMStage;
+  selected: number;
+  completed: number;
+  pending: number;
+  failed: number;
+  fingerprint_count: number;
+  current_fingerprint: string;
+  current_fingerprint_completed: number;
+  mismatched_fingerprint_completed: number;
+  running_run: {
+    run_id: string;
+    started_at: string | null;
+    scope: Record<string, unknown> | null;
+    previous: { model: string; endpoint: string };
+    current: { model: string; endpoint: string };
+  } | null;
+}
+
+export interface RunDecision {
+  force: boolean;
+  reuse_mixed_fingerprints: boolean;
+  run_action: "resume" | "decline" | null;
 }
 
 export interface Term {

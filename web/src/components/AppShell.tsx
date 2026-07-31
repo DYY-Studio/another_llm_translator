@@ -21,6 +21,8 @@ export function AppShell({
   onCreate,
   onRun,
   onCancel,
+  canRun,
+  runLoading,
   themeMode,
   onTheme,
   children,
@@ -34,11 +36,15 @@ export function AppShell({
   onCreate: () => void;
   onRun: () => void;
   onCancel: () => void;
+  canRun: boolean;
+  runLoading: boolean;
   themeMode: ThemeMode;
   onTheme: () => void;
   children: ReactNode;
 }) {
-  const running = task && ["queued", "running", "cancelling"].includes(task.status);
+  const running = Boolean(
+    task && ["queued", "running", "cancelling"].includes(task.status),
+  );
   const themeLabels: Record<ThemeMode, string> = {
     system: "跟随系统",
     light: "浅色",
@@ -85,10 +91,12 @@ export function AppShell({
             </button>
           ))}
         </nav>
-        <div className="run-panel">
-          <button className="primary-button run-button" disabled={!project || !!running} onClick={onRun}>
-            {running ? "正在执行" : "开始当前阶段"}
-          </button>
+        {(canRun || running) && <div className="run-panel">
+          {canRun && (
+            <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
+              {running ? "正在执行" : runLoading ? "正在检查" : "开始当前阶段"}
+            </button>
+          )}
           {task && (
             <div className="task-summary">
               <strong>{task.status === "running" ? "运行中" : task.status}</strong>
@@ -97,9 +105,26 @@ export function AppShell({
               {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
             </div>
           )}
-        </div>
+        </div>}
       </aside>
-      <main className="main">{children}</main>
+      <main className="main">
+        {(canRun || running) && (
+          <div className="mobile-run-bar">
+            {canRun && (
+              <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
+                {running ? "正在执行" : runLoading ? "正在检查" : "运行当前阶段"}
+              </button>
+            )}
+            {running && (
+              <>
+                <span>{task?.stage} · {task?.status}</span>
+                <button className="danger-link" onClick={onCancel}>取消任务</button>
+              </>
+            )}
+          </div>
+        )}
+        {children}
+      </main>
     </div>
   );
 }
