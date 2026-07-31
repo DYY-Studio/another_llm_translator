@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "preset_id": "anthropic-claude",
+  "adapter_id": "anthropic",
+  "base_url": "https://api.anthropic.com",
+  "endpoint": "/v1/messages",
+  "model": "claude-sonnet-4-5",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "proxy_url": "",
+  "context_window_tokens": 200000,
+  "max_output_tokens": 4096,
+  "context_safety_margin_tokens": 512,
+  "token_safety_factor": 1.25,
+  "requests_per_minute": 30,
+  "input_tokens_per_minute": 50000,
+  "max_parallel": 4,
+  "request_timeout_seconds": 120,
+  "extra_body": {}
+}

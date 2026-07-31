@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "adapter_id": "google-gemini",
+  "messages_format": "gemini",
+  "headers": {
+    "x-goog-api-key": "${api_key}"
+  },
+  "body": {
+    "system_instruction": {
+      "parts": [
+        {
+          "text": "${system}"
+        }
+      ]
+    },
+    "contents": "${messages}",
+    "generationConfig": {
+      "temperature": "${temperature}",
+      "maxOutputTokens": "${max_output_tokens}"
+    }
+  },
+  "response_content_pointer": "/candidates/0/content/parts/-1/text"
+}
