@@ -167,6 +167,11 @@ def test_web_export_accepts_explicit_file_range(tmp_path: Path) -> None:
         json={"stage": "translated", "file_ids": "F0001"},
     )
     assert invalid.status_code == 400
+    invalid_format = client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "format": "pdf"},
+    )
+    assert invalid_format.status_code == 400
 
 
 def test_web_creates_empty_project_and_manages_source_files(
