@@ -14,8 +14,7 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 4 已完成；下一阶段是 File 级 Document Adapter
-  与多格式项目。
+- 产品路线 Stage 1 至 Stage 5 已完成；下一阶段是按文件筛选导出。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -91,7 +90,7 @@ Preset 并切换”的明确迁移操作；新项目只使用 Preset，旧兼容
 - debug 模式继续保存原始响应，不额外复制结构化思考记录。
 - 本阶段不设计展示、开关、分析工具或思考持久化。
 
-## Stage 5：File 级 Document Adapter 与多格式项目
+## Stage 5：File 级 Document Adapter 与多格式项目（已完成）
 
 - 将 Adapter ID、版本和不透明状态从项目级下沉到 File 级。
 - 迁移现有项目时把项目级 Adapter 信息写入每个活动 File，Segment ID 和历史

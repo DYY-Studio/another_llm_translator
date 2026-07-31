@@ -197,17 +197,17 @@ llm_adapters/openai-compatible.json
 
 ## 2.3 初始化与文件发现
 
-TXT 支持目录或显式文件；EPUB 每个项目接受一个显式文件。项目也可先按指定
-格式创建为空项目：
+TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。项目也可先创建
+不预设格式的空项目：
 
 ```bash
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
-python -m app.main init --empty --document-adapter epub --name PROJECT_NAME
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-add PROJECT INPUT_DIR --recursive
+python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
 python -m app.main files-remove PROJECT FILE_ID...
 ```
 
@@ -222,10 +222,10 @@ python -m app.main files-remove PROJECT FILE_ID...
 - 多个输入映射到同一导出相对路径时拒绝初始化。
 - 目录输入保存相对目录树；显式文件使用 basename。
 - 输入文件复制到项目 `input/`，后续阶段只读取项目数据。
-- 项目记录 `document_adapter_id`、版本和不透明状态位置；旧 TXT 项目缺少这些
-  字段时按内置 `txt` 解释。
-- TXT 项目可追加多个 TXT。EPUB 只允许从 0 文件项目添加一个 EPUB，已有文件
-  时拒绝继续添加。本阶段不允许外部 Document Adapter 修改现有项目文件。
+- 每个 File 记录来源 `document_adapter_id`、版本和可选不透明状态位置；旧项目
+  的项目级字段在读取时解释为各活动 File 的来源，下一次文件变更时规范化。
+- 空项目不锁定格式，可混合追加 TXT 和 EPUB。省略 `--document-adapter` 时只按
+  `.txt`、`.epub` 选择内置 Adapter；其他格式必须显式指定已安装 Adapter。
 - 新 File 追加到活动顺序末尾。`next_file_sequence` 单调增加；旧项目缺少该
   字段时从活动 File ID 最大值初始化。删除后重新添加不会复用 File 或 Segment
   ID。
@@ -236,8 +236,7 @@ python -m app.main files-remove PROJECT FILE_ID...
   更新。移除会删除项目内输入副本；Run、阶段 JSONL、术语和既有输出保留。
 - 被移除 Segment 的历史阶段记录仍是审计数据，但不再参与 inspect、指纹差异、
   结果复用、校验警告、过期建议统计或导出。
-- 移除 EPUB 的唯一文件时同时清除项目内 Adapter 不透明状态；重新添加生成新
-  状态。
+- 移除 File 时同时清除该 File 独占的 Adapter 不透明状态；重新添加生成新状态。
 
 空项目以及只含空白 Segment 的项目仍可打开、inspect、编辑配置、Prompt 和
 Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
@@ -1262,10 +1261,11 @@ python -m app.main run-all PROJECT
 - `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
   仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
-- `--document-adapter`：仅用于 init，选择输入与输出格式，默认 `txt`。
+- `--document-adapter`：用于带输入的 init 或 files-add，显式选择输入 Adapter；
+  init 默认 `txt`，空项目不保存该选择。
 - `--empty`：仅用于 init，显式创建 0 文件项目，不能同时提供输入。
-- `files-add`：按项目已有 Document Adapter 追加同格式输入；TXT 支持
-  `--recursive`。
+- `files-add`：追加源文件；内置 TXT/EPUB 可按扩展名识别，外部或其他扩展名
+  使用 `--document-adapter`。TXT 目录支持 `--recursive`。
 - `files-remove`：按 File ID 从活动项目移除文件，不清理历史结果。
 
 两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
@@ -1338,14 +1338,22 @@ output/bilingual/polished/
 
 - 缺少选定阶段结果时停止并报告。
 - validation warning 和混合设置必须出现在导出摘要。
-- 使用项目初始化时的 Document Adapter；插件缺失、版本不兼容、状态损坏或
-  能力不足时明确失败，不回退为 TXT。
-- Adapter 先在宿主临时目录生成全部文件，成功后原子移动到正式输出目录。
+- 默认逐 File 使用其来源 Document Adapter；`--format txt` 改用宿主内置 TXT
+  导出。插件缺失、版本不兼容、状态损坏或能力不足时明确失败，不静默转换。
+- 所有 Adapter 先在同一宿主临时目录生成并完成路径校验，再移动到正式目录；
+  任一生成或校验失败时不发布输出。
 
 TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，并使用
 `project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
 EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
 XHTML 槽位。
+
+```bash
+python -m app.main export PROJECT --stage translated --format original
+python -m app.main export PROJECT --stage translated --format txt
+```
+
+除各 File 来源格式和 TXT 外，不提供任意格式转换。
 
 `--allow-missing` 回退：
 
@@ -1377,7 +1385,7 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
 本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
-追加或经典多选移除同格式源文件。项目配置使用覆盖全部现有字段的分组表单；
+追加或经典多选移除 TXT/EPUB 源文件。项目配置使用覆盖全部现有字段的分组表单；
 项目 Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还提供全局配置、
 全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
