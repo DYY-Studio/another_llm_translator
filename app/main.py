@@ -16,6 +16,7 @@ from .project import (
     init_project,
     remove_project_files,
     resolve_project,
+    resolve_project_parent,
     sync_global_templates,
 )
 from .stages import (
@@ -50,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="输入输出格式 Adapter ID（默认：txt）",
     )
     init.add_argument("--dry-run", action="store_true")
+    init.add_argument(
+        "--parent-dir",
+        help="在指定父目录中创建项目（默认：内置 projects 目录）",
+    )
 
     files_add = subparsers.add_parser("files-add", help="向项目追加源文件")
     files_add.add_argument("project")
@@ -155,6 +160,11 @@ def run(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logger.info("command start command=%s", args.command)
     if args.command == "init":
+        projects_root = (
+            resolve_project_parent(args.parent_dir)
+            if args.parent_dir
+            else None
+        )
         path, summary = init_project(
             args.inputs,
             name=args.name,
@@ -162,6 +172,7 @@ def run(argv: list[str] | None = None) -> int:
             document_adapter_id=args.document_adapter,
             empty=args.empty,
             dry_run=args.dry_run,
+            projects_root=projects_root,
         )
         if path is not None:
             attach_project_log(path)

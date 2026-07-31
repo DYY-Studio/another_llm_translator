@@ -356,12 +356,18 @@ def init_project(
     if dry_run:
         return None, summary
 
-    projects_root.mkdir(parents=True, exist_ok=True)
+    try:
+        projects_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise UsageError(f"无法使用项目父目录：{projects_root}: {exc}") from exc
     target = projects_root / name
     if target.exists():
         raise UsageError(f"项目已存在：{target}")
     project_id = new_record_id("PRJ")
-    temp = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=projects_root))
+    try:
+        temp = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=projects_root))
+    except OSError as exc:
+        raise UsageError(f"无法写入项目父目录：{projects_root}: {exc}") from exc
     try:
         _copy_bundle(app_root, temp)
         (temp / "input").mkdir()
@@ -871,7 +877,24 @@ def resolve_project(value: str, projects_root: Path = PROJECTS_ROOT) -> Path:
     path = direct if direct.is_dir() else projects_root / value
     if not (path / "project.json").is_file():
         raise ProjectError(f"项目不存在或无效：{value}")
-    return path
+    return path.resolve()
+
+
+def resolve_project_parent(
+    value: str | Path, *, require_absolute: bool = False
+) -> Path:
+    path = Path(value).expanduser()
+    if require_absolute and not path.is_absolute():
+        raise UsageError("项目父目录必须是绝对路径")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise UsageError(f"项目父目录不存在或无法访问：{path}: {exc}") from exc
+    if not resolved.is_dir():
+        raise UsageError(f"项目父目录不是目录：{resolved}")
+    if not os.access(resolved, os.W_OK | os.X_OK):
+        raise UsageError(f"项目父目录不可写：{resolved}")
+    return resolved
 
 
 def sync_global_templates(

@@ -8,11 +8,13 @@ import pytest
 
 from app.config import ConfigError, dump_config, load_config
 from app.errors import StorageError, UsageError
+from app.main import run
 from app.project import (
     bundle_hash,
     decode_txt,
     discover_inputs,
     init_project,
+    resolve_project_parent,
     sync_global_templates,
 )
 from app.storage import append_jsonl, read_json, read_jsonl, record_header
@@ -83,6 +85,39 @@ def test_init_copies_adapters_for_global_and_stage_presets(tmp_path: Path) -> No
     assert project is not None
     assert (project / "llm_adapters" / "openai-compatible.json").is_file()
     assert (project / "llm_adapters" / "alternate.json").is_file()
+
+
+def test_cli_init_creates_project_in_explicit_parent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parent = tmp_path / "external"
+    parent.mkdir()
+
+    assert run(
+        [
+            "init",
+            "--name",
+            "external-project",
+            "--empty",
+            "--parent-dir",
+            str(parent),
+        ]
+    ) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert Path(summary["project_path"]) == parent / "external-project"
+    assert (parent / "external-project" / "project.json").is_file()
+
+
+def test_project_parent_rejects_relative_and_unwritable_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(UsageError, match="必须是绝对路径"):
+        resolve_project_parent("relative", require_absolute=True)
+
+    monkeypatch.setattr("app.project.os.access", lambda *_: False)
+    with pytest.raises(UsageError, match="不可写"):
+        resolve_project_parent(tmp_path)
 
 
 def test_config_rejects_unknown_key(tmp_path: Path) -> None:
