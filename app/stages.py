@@ -1182,6 +1182,7 @@ async def run_terminology(
         run_id, run_dir = continue_run(
             project,
             resume_run_id,
+            config=config,
             stage="terminology",
             fingerprint=fingerprint,
             prompt=prompt,
@@ -1193,6 +1194,7 @@ async def run_terminology(
     else:
         run_id, run_dir = create_run(
             project,
+            config=config,
             stage="terminology",
             fingerprint=fingerprint,
             prompt=prompt,
@@ -1943,6 +1945,7 @@ async def run_translation(
         run_id, run_dir = continue_run(
             project,
             resume_run_id,
+            config=config,
             stage="translation",
             fingerprint=fingerprint,
             prompt=prompt,
@@ -1954,6 +1957,7 @@ async def run_translation(
     else:
         run_id, run_dir = create_run(
             project,
+            config=config,
             stage="translation",
             fingerprint=fingerprint,
             prompt=prompt,
@@ -2823,6 +2827,7 @@ async def run_review(
         run_id, run_dir = continue_run(
             project,
             resume_run_id,
+            config=config,
             stage=stage,
             fingerprint=fingerprint,
             prompt=prompt,
@@ -2834,6 +2839,7 @@ async def run_review(
     else:
         run_id, run_dir = create_run(
             project,
+            config=config,
             stage=stage,
             fingerprint=fingerprint,
             prompt=prompt,
@@ -3281,6 +3287,7 @@ def run_apply(
         }
     run_id, run_dir = create_run(
         project,
+        config=config,
         stage=applied_stage,
         fingerprint=fingerprint,
         prompt=None,

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .config import load_project_config, load_run_config
 from .errors import UsageError
 from .execution import Scope, choose_running_run, find_running_runs
 from .locking import project_write_lock
@@ -54,8 +54,8 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
     if candidates:
         manifest = candidates[0]
         run_id = str(manifest["run_id"])
-        old_config = load_config(project / "runs" / run_id / "config.toml")
-        current_config = load_config(project / "config.toml")
+        old_config = load_run_config(project / "runs" / run_id)
+        current_config = load_project_config(project)
         running_run = {
             "run_id": run_id,
             "started_at": manifest.get("started_at"),

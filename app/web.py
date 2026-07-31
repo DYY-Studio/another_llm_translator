@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import tempfile
 from pathlib import Path
@@ -11,14 +12,22 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import dump_config, load_config, load_project_config
+from .config import (
+    dump_config,
+    load_config,
+    load_project_config,
+    resolve_global_config,
+    resolve_project_config,
+)
 from .editor import EditorStore
 from .errors import AppError, UsageError
 from .execution import Scope
 from .llm_adapter import adapter_path, load_json_adapter
+from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .plugins import document_adapter_summaries
 from .project import (
+    APP_ROOT as DEFAULT_APP_ROOT,
     PROJECTS_ROOT,
     add_project_files,
     init_project,
@@ -44,9 +53,11 @@ def create_app(
     *,
     projects_root: Path = PROJECTS_ROOT,
     web_dist: Path = WEB_DIST,
+    app_root: Path = DEFAULT_APP_ROOT,
 ) -> FastAPI:
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
+    app.state.app_root = app_root
     app.state.tasks = WebTaskManager()
 
     @app.middleware("http")
@@ -95,6 +106,171 @@ def create_app(
     async def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
 
+    def validate_preset_payload(
+        preset_id: str, payload: dict[str, Any]
+    ) -> LLMPreset:
+        if payload.get("preset_id") != preset_id:
+            raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
+        presets = app_root / "llm_presets"
+        presets.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=presets,
+            prefix=".preset.",
+            suffix=".json",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            temporary = Path(handle.name)
+        try:
+            preset = load_llm_preset(temporary)
+            adapter = load_json_adapter(
+                app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+            )
+            if adapter.adapter_id != preset.adapter_id:
+                raise UsageError(
+                    "全局 Adapter 文件中的 adapter_id 与 Preset 不一致"
+                )
+            adapter.build_request(
+                api_key="***",
+                model=str(preset.definition["model"]),
+                messages=[],
+                temperature=0,
+                max_output_tokens=int(preset.definition["max_output_tokens"]),
+                stream=False,
+                extra_body=preset.definition["extra_body"],
+            )
+            return preset
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get("/api/v1/global/config")
+    async def get_global_config() -> dict[str, Any]:
+        return {"config": load_config(app_root / "config" / "config.toml")}
+
+    @app.put("/api/v1/global/config")
+    async def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            raise UsageError("config 必须是对象")
+        content = dump_config(config)
+        resolve_global_config(config, app_root)
+        atomic_write_text(app_root / "config" / "config.toml", content)
+        return {"saved": True}
+
+    @app.get("/api/v1/global/prompts/{stage}")
+    async def get_global_prompt(stage: str) -> dict[str, str]:
+        try:
+            filename = PROMPT_FILES[stage]
+        except KeyError as exc:
+            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        return {
+            "content": (app_root / "prompts" / filename).read_text(
+                encoding="utf-8"
+            )
+        }
+
+    @app.put("/api/v1/global/prompts/{stage}")
+    async def put_global_prompt(
+        stage: str, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        try:
+            filename = PROMPT_FILES[stage]
+        except KeyError as exc:
+            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise UsageError("Prompt 必须是非空字符串")
+        atomic_write_text(app_root / "prompts" / filename, content)
+        return {"saved": True}
+
+    @app.get("/api/v1/global/presets")
+    async def list_global_presets() -> dict[str, Any]:
+        selected = str(
+            load_config(app_root / "config" / "config.toml")["llm"].get(
+                "preset", ""
+            )
+        )
+        values = []
+        for path in sorted((app_root / "llm_presets").glob("*.json")):
+            try:
+                preset = load_llm_preset(path)
+                values.append(
+                    {
+                        "preset_id": preset.preset_id,
+                        "adapter_id": preset.adapter_id,
+                        "model": preset.definition["model"],
+                        "selected": preset.preset_id == selected,
+                        "valid": True,
+                        "digest": preset.digest,
+                    }
+                )
+            except AppError as exc:
+                values.append(
+                    {
+                        "preset_id": path.stem,
+                        "selected": path.stem == selected,
+                        "valid": False,
+                        "error": str(exc),
+                    }
+                )
+        return {"presets": values}
+
+    @app.get("/api/v1/global/presets/{preset_id}")
+    async def get_global_preset(preset_id: str) -> dict[str, Any]:
+        return load_llm_preset(preset_path(app_root, preset_id)).definition
+
+    @app.put("/api/v1/global/presets/{preset_id}")
+    async def put_global_preset(
+        preset_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        preset = validate_preset_payload(preset_id, payload)
+        atomic_write_json(preset_path(app_root, preset_id), payload)
+        return {"saved": True, "digest": preset.digest}
+
+    @app.delete("/api/v1/global/presets/{preset_id}")
+    async def delete_global_preset(preset_id: str) -> dict[str, bool]:
+        config = load_config(app_root / "config" / "config.toml")
+        if config["llm"].get("preset") == preset_id:
+            raise UsageError("不能删除全局配置正在使用的 LLM Preset")
+        for item in projects_root.iterdir() if projects_root.exists() else ():
+            if not (item / "project.json").is_file():
+                continue
+            project_config = load_config(item / "config.toml")
+            if project_config["llm"].get("preset") == preset_id:
+                raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
+        path = preset_path(app_root, preset_id)
+        if not path.is_file():
+            raise UsageError(f"LLM Preset 不存在：{preset_id}")
+        path.unlink()
+        return {"deleted": True}
+
+    @app.get("/api/v1/global/presets/{preset_id}/preview")
+    async def preview_global_preset(preset_id: str) -> dict[str, Any]:
+        preset = load_llm_preset(preset_path(app_root, preset_id))
+        adapter = load_json_adapter(
+            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+        )
+        headers, body = adapter.build_request(
+            api_key="***",
+            model=str(preset.definition["model"]),
+            messages=[{"role": "user", "content": "…"}],
+            temperature=0.2,
+            max_output_tokens=int(preset.definition["max_output_tokens"]),
+            stream=False,
+            extra_body=preset.definition["extra_body"],
+        )
+        return {
+            "url": (
+                str(preset.definition["base_url"]).rstrip("/")
+                + "/"
+                + str(preset.definition["endpoint"]).lstrip("/")
+            ),
+            "headers": headers,
+            "body": body,
+        }
+
     @app.post("/api/v1/projects")
     async def create_project(
         name: str = Form(...),
@@ -119,6 +295,7 @@ def create_app(
                 name=name,
                 document_adapter_id=document_adapter,
                 empty=empty,
+                app_root=app_root,
                 projects_root=projects_root,
             )
         summary["project_path"] = str(path)
@@ -263,10 +440,7 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        selected_id = str(config["llm"]["adapter"])
-        adapter = load_json_adapter(adapter_path(root, selected_id))
-        if adapter.adapter_id != selected_id:
-            raise UsageError("LLM Adapter 文件中的 adapter_id 与项目配置不一致")
+        resolve_project_config(config, root, presets_root=app_root)
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}
@@ -302,7 +476,13 @@ def create_app(
     @app.get("/api/v1/projects/{name}/adapters")
     async def list_adapters(name: str) -> dict[str, Any]:
         root = project(name)
-        selected = str(load_config(root / "config.toml")["llm"]["adapter"])
+        config = load_config(root / "config.toml")
+        if "preset" in config["llm"]:
+            selected = load_llm_preset(
+                preset_path(app_root, str(config["llm"]["preset"]))
+            ).adapter_id
+        else:
+            selected = str(config["llm"]["adapter"])
         adapters = []
         for path in sorted((root / "llm_adapters").glob("*.json")):
             try:
@@ -320,6 +500,29 @@ def create_app(
                     {
                         "adapter_id": path.stem,
                         "selected": path.stem == selected,
+                        "valid": False,
+                        "error": str(exc),
+                    }
+                )
+        return {"adapters": adapters}
+
+    @app.get("/api/v1/global/adapters")
+    async def list_global_adapters() -> dict[str, Any]:
+        adapters = []
+        for path in sorted((app_root / "llm_adapters").glob("*.json")):
+            try:
+                adapter = load_json_adapter(path)
+                adapters.append(
+                    {
+                        "adapter_id": adapter.adapter_id,
+                        "valid": True,
+                        "digest": adapter.digest,
+                    }
+                )
+            except AppError as exc:
+                adapters.append(
+                    {
+                        "adapter_id": path.stem,
                         "valid": False,
                         "error": str(exc),
                     }
@@ -356,6 +559,92 @@ def create_app(
         finally:
             temporary.unlink(missing_ok=True)
         return {"saved": True, "digest": adapter.digest}
+
+    @app.post("/api/v1/projects/{name}/adapters/copy-global")
+    async def copy_global_adapter(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        adapter_id = payload.get("adapter_id")
+        if not isinstance(adapter_id, str):
+            raise UsageError("adapter_id 必须是字符串")
+        source = app_root / "llm_adapters" / f"{adapter_id}.json"
+        adapter = load_json_adapter(source)
+        if adapter.adapter_id != adapter_id:
+            raise UsageError("全局 Adapter 文件中的 adapter_id 不一致")
+        root = project(name)
+        destination = adapter_path(root, adapter_id)
+        if destination.exists():
+            raise UsageError(f"项目已存在 LLM Adapter：{adapter_id}")
+        with project_write_lock(root):
+            atomic_write_json(destination, adapter.definition)
+        return {"copied": True, "adapter_id": adapter_id}
+
+    @app.post("/api/v1/projects/{name}/migrate-llm-preset")
+    async def migrate_llm_preset(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        preset_id = payload.get("preset_id")
+        if not isinstance(preset_id, str):
+            raise UsageError("preset_id 必须是字符串")
+        root = project(name)
+        raw = load_config(root / "config.toml")
+        if "preset" in raw["llm"]:
+            raise UsageError("项目已经使用 LLM Preset")
+        load_project_config(root, presets_root=app_root)
+        destination = preset_path(app_root, preset_id)
+        if destination.exists():
+            raise UsageError(f"LLM Preset 已存在：{preset_id}")
+        definition = {
+            "schema_version": 1,
+            "preset_id": preset_id,
+            "adapter_id": raw["llm"]["adapter"],
+            **{
+                key: raw["llm"][key]
+                for key in (
+                    "base_url",
+                    "endpoint",
+                    "model",
+                    "api_key_env",
+                    "proxy_url",
+                    "context_window_tokens",
+                    "max_output_tokens",
+                    "context_safety_margin_tokens",
+                )
+            },
+            **{
+                key: raw["execution"][key]
+                for key in (
+                    "token_safety_factor",
+                    "requests_per_minute",
+                    "input_tokens_per_minute",
+                    "max_parallel",
+                    "request_timeout_seconds",
+                )
+            },
+            "extra_body": {},
+        }
+        validate_preset_payload(preset_id, definition)
+        migrated = deepcopy(raw)
+        migrated["llm"] = {
+            "preset": preset_id,
+            **{
+                key: raw["llm"][key]
+                for key in (
+                    "temperature_terminology",
+                    "temperature_translation",
+                    "temperature_proofreading",
+                    "temperature_polishing",
+                )
+            },
+        }
+        migrated["execution"] = {
+            "scheduling_mode": raw["execution"]["scheduling_mode"]
+        }
+        content = dump_config(migrated)
+        with project_write_lock(root):
+            atomic_write_json(destination, definition)
+            atomic_write_text(root / "config.toml", content)
+        return {"migrated": True, "preset_id": preset_id}
 
     @app.post("/api/v1/projects/{name}/tasks")
     async def start_task(
@@ -464,6 +753,7 @@ def create_app(
         with project_write_lock(root):
             warnings = sync_global_templates(
                 root,
+                app_root=app_root,
                 interactive=True,
                 choice=choice,
             )
@@ -471,7 +761,7 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/adapter-preview")
     async def adapter_preview(name: str) -> dict[str, Any]:
-        config = load_project_config(project(name))
+        config = load_project_config(project(name), presets_root=app_root)
         adapter = config["_llm_adapter"]
         headers, body = adapter.build_request(
             api_key="***",
@@ -480,6 +770,7 @@ def create_app(
             temperature=float(config["llm"]["temperature_translation"]),
             max_output_tokens=int(config["llm"]["max_output_tokens"]),
             stream=False,
+            extra_body=config.get("_llm_extra_body"),
         )
         return {
             "url": (

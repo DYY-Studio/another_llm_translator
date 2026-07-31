@@ -19,7 +19,7 @@ from app.stages import (
     run_translation,
 )
 from app.storage import read_json, read_jsonl
-from tests.helpers import llm_jsonl
+from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_foundation import make_app_root
 
 
@@ -416,17 +416,16 @@ async def test_dynamic_itpm_failure_finalizes_translation_run(
 @pytest.mark.asyncio
 async def test_translation_reports_dynamic_output_budget_warning(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = await create_project(tmp_path, "one")
-    config_path = project / "config.toml"
-    text = config_path.read_text(encoding="utf-8")
-    for key, value in (
-        ("context_window_tokens", "1000"),
-        ("context_safety_margin_tokens", "100"),
-        ("max_output_tokens", "5000"),
-    ):
-        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
-    config_path.write_text(text, encoding="utf-8")
+    use_llm_preset(
+        tmp_path,
+        monkeypatch,
+        context_window_tokens=1000,
+        context_safety_margin_tokens=100,
+        max_output_tokens=5000,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -502,7 +501,10 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None:
+async def test_oversized_segment_is_split_and_saved_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = await create_project(
         tmp_path,
         " \t\u3000" + "A" * 5000,
@@ -510,12 +512,14 @@ async def test_oversized_segment_is_split_and_saved_once(tmp_path: Path) -> None
     )
     config_path = project / "config.toml"
     text = config_path.read_text(encoding="utf-8")
-    for key, value in (
-        ("context_window_tokens", "1200"),
-        ("max_output_tokens", "300"),
-        ("context_safety_margin_tokens", "100"),
-        ("target_chunk_input_tokens", "700"),
-    ):
+    use_llm_preset(
+        tmp_path,
+        monkeypatch,
+        context_window_tokens=1200,
+        max_output_tokens=300,
+        context_safety_margin_tokens=100,
+    )
+    for key, value in (("target_chunk_input_tokens", "700"),):
         text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
     config_path.write_text(text, encoding="utf-8")
     requested_ids: list[str] = []

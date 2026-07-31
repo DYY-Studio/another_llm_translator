@@ -8,8 +8,8 @@ from typing import Any
 import httpx
 import pytest
 
-from app.config import load_config
-from app.llm_adapter import load_json_adapter
+from app.config import load_global_config, load_project_config
+from app.llm_preset import load_llm_preset
 from app.errors import ConfigError, UsageError
 from app.execution import (
     LLMClient,
@@ -41,13 +41,7 @@ ROOT = Path(__file__).parents[1]
 
 
 def load_test_config() -> dict:
-    value = load_config(ROOT / "config" / "config.toml")
-    adapter = load_json_adapter(
-        ROOT / "llm_adapters" / f"{value['llm']['adapter']}.json"
-    )
-    value["_llm_adapter"] = adapter
-    value["_llm_adapter_hash"] = adapter.digest
-    return value
+    return load_global_config(ROOT)
 
 
 def _replace_config(project: Path, old: str, new: str) -> None:
@@ -77,6 +71,7 @@ def _new_running_run(
         details["active_task_id"] = active_task_id
     run_id, _ = create_run(
         project,
+        config=load_project_config(project),
         stage=stage,
         fingerprint="old-fingerprint",
         prompt="old prompt",
@@ -210,14 +205,14 @@ def test_fingerprint_reuse_interactive_prompt_uses_stderr(
 
 
 def test_proxy_config_accepts_empty_http_and_https(tmp_path: Path) -> None:
-    source = (ROOT / "config" / "config.toml").read_text(encoding="utf-8")
+    source = json.loads((ROOT / "llm_presets" / "default.json").read_text("utf-8"))
     for value in ("", "http://127.0.0.1:7890", "https://proxy.example:8443"):
-        path = tmp_path / f"{len(value)}.toml"
-        path.write_text(
-            source.replace('proxy_url = ""', f'proxy_url = "{value}"'),
-            encoding="utf-8",
-        )
-        assert load_config(path)["llm"]["proxy_url"] == value
+        directory = tmp_path / str(len(value))
+        directory.mkdir()
+        path = directory / "default.json"
+        definition = {**source, "proxy_url": value}
+        path.write_text(json.dumps(definition), encoding="utf-8")
+        assert load_llm_preset(path).definition["proxy_url"] == value
 
 
 @pytest.mark.parametrize(
@@ -227,14 +222,11 @@ def test_proxy_config_accepts_empty_http_and_https(tmp_path: Path) -> None:
 def test_proxy_config_rejects_unsupported_or_incomplete_url(
     tmp_path: Path, value: str
 ) -> None:
-    source = (ROOT / "config" / "config.toml").read_text(encoding="utf-8")
-    path = tmp_path / "config.toml"
-    path.write_text(
-        source.replace('proxy_url = ""', f'proxy_url = "{value}"'),
-        encoding="utf-8",
-    )
+    source = json.loads((ROOT / "llm_presets" / "default.json").read_text("utf-8"))
+    path = tmp_path / "default.json"
+    path.write_text(json.dumps({**source, "proxy_url": value}), encoding="utf-8")
     with pytest.raises(ConfigError, match="proxy_url"):
-        load_config(path)
+        load_llm_preset(path)
 
 
 @pytest.mark.asyncio
@@ -366,6 +358,7 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
 @pytest.mark.asyncio
 async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
     metadata = read_json(project / "project.json")
@@ -387,7 +380,16 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
             request_id="REQ-OLD",
         ),
     )
-    _replace_config(project, 'model = "example-model"', 'model = "current-model"')
+    preset_root = tmp_path / "current-global"
+    (preset_root / "llm_presets").mkdir(parents=True)
+    preset = json.loads(
+        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
+    )
+    preset["model"] = "current-model"
+    (preset_root / "llm_presets" / "default.json").write_text(
+        json.dumps(preset), encoding="utf-8"
+    )
+    monkeypatch.setattr("app.config.APP_ROOT", preset_root)
     prompt_path = project / "prompts" / "translation.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nCURRENT PROMPT",
@@ -429,7 +431,9 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     assert summary["selected"] == 3
     assert requested == ["F0001-S000002", "F0001-S000003"]
     continuation = project / "runs" / run_id / "continuations" / "0001"
-    assert "current-model" in (continuation / "config.toml").read_text("utf-8")
+    assert "current-model" in (continuation / "llm_preset.json").read_text(
+        "utf-8"
+    )
     assert "CURRENT PROMPT" in (continuation / "prompt.txt").read_text("utf-8")
     manifest = read_json(project / "runs" / run_id / "manifest.json")
     assert manifest["status"] == "completed"

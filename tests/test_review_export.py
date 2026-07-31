@@ -20,7 +20,7 @@ from app.stages import (
     run_translation,
 )
 from app.storage import read_jsonl, write_jsonl
-from tests.helpers import llm_jsonl
+from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 
 
@@ -480,19 +480,24 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
 
 
 @pytest.mark.asyncio
-async def test_oversized_review_segment_is_combined_once(tmp_path: Path) -> None:
+async def test_oversized_review_segment_is_combined_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = await create_project(tmp_path, "A" * 5000)
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
     try:
         await run_translation(project, Scope(), http_client=client)
         config_path = project / "config.toml"
         text = config_path.read_text(encoding="utf-8")
-        for key, value in (
-            ("context_window_tokens", "1200"),
-            ("max_output_tokens", "300"),
-            ("context_safety_margin_tokens", "100"),
-            ("target_chunk_input_tokens", "700"),
-        ):
+        use_llm_preset(
+            tmp_path,
+            monkeypatch,
+            context_window_tokens=1200,
+            max_output_tokens=300,
+            context_safety_margin_tokens=100,
+        )
+        for key, value in (("target_chunk_input_tokens", "700"),):
             text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
         config_path.write_text(text, encoding="utf-8")
         summary = await run_review(

@@ -17,6 +17,7 @@ from .config import load_config
 from .documents import DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .llm_adapter import load_json_adapter
+from .llm_preset import load_llm_preset, preset_path
 from .storage import (
     atomic_write_json,
     new_record_id,
@@ -253,9 +254,16 @@ class TXTDocumentAdapter:
         return generated
 
 
+def _global_adapter_id(config: dict[str, Any], app_root: Path) -> str:
+    if "preset" not in config["llm"]:
+        return str(config["llm"]["adapter"])
+    preset_id = str(config["llm"]["preset"])
+    return load_llm_preset(preset_path(app_root, preset_id)).adapter_id
+
+
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
     config = load_config(app_root / "config" / "config.toml")
-    adapter_id = str(config["llm"]["adapter"])
+    adapter_id = _global_adapter_id(config, app_root)
     adapter = load_json_adapter(
         app_root / "llm_adapters" / f"{adapter_id}.json"
     )
@@ -286,7 +294,7 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
     for name in PROMPT_NAMES:
         shutil.copy2(source_root / "prompts" / name, prompt_target / name)
     config = load_config(source_root / "config" / "config.toml")
-    adapter_id = str(config["llm"]["adapter"])
+    adapter_id = _global_adapter_id(config, source_root)
     adapter_source = source_root / "llm_adapters" / f"{adapter_id}.json"
     if not adapter_source.is_file():
         raise ConfigError(f"全局 LLM Adapter 缺失：{adapter_source}")
@@ -828,7 +836,7 @@ def sync_global_templates(
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
     global_config = load_config(app_root / "config" / "config.toml")
-    adapter_id = str(global_config["llm"]["adapter"])
+    adapter_id = _global_adapter_id(global_config, app_root)
     bundle_files = [Path("config.toml")] + [
         Path("prompts") / name for name in PROMPT_NAMES
     ] + [Path("llm_adapters") / f"{adapter_id}.json"]

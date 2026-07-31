@@ -1,5 +1,6 @@
 # 全局配置模板。
-# 创建项目时，本文件会被复制为项目自己的 config.toml；项目运行时只读取项目副本。
+# 创建项目时，本文件会被复制为项目自己的 config.toml；除实时 LLM Preset 外，
+# 项目运行时读取项目副本。
 # 修改本文件不会直接改变已有项目，已有项目会在下次命令执行前收到模板更新提示。
 
 [project]
@@ -18,20 +19,8 @@ encoding_confidence_threshold = 0.60
 fallback_encoding = "utf-8"
 
 [llm]
-# 项目使用的命名 JSON LLM Adapter。
-adapter = "openai-compatible"
-# OpenAI-compatible 服务的基础 URL；发送请求时会与 endpoint 拼接。
-base_url = "https://example.com/v1"
-# Chat Completions 端点路径。
-endpoint = "/chat/completions"
-# 四个 LLM 阶段共同使用的模型标识。
-model = "example-model"
-# 保存 API Key 的环境变量名称。这里只写变量名，不能填写真实密钥。
-api_key_env = "LLM_API_KEY"
-# LLM 请求使用的 HTTP/HTTPS 代理 URL；空字符串表示不显式设置，
-# 此时仍允许 HTTPX 使用 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 环境变量。
-# 示例：http://127.0.0.1:7890
-proxy_url = ""
+# 全局实时引用的命名 LLM Preset。连接、模型、Token 能力和限速由 Preset 提供。
+preset = "default"
 
 # 术语提取阶段的采样温度。
 temperature_terminology = 0.1
@@ -42,29 +31,10 @@ temperature_proofreading = 0.1
 # 润色建议阶段的采样温度。
 temperature_polishing = 0.3
 
-# 单次 Chat Completions 请求允许模型生成的最大 Token 数，对应 max_tokens。
-max_output_tokens = 4096
-# 所选模型的总上下文窗口 Token 数，包含输入 Prompt 和模型输出。
-context_window_tokens = 16384
-# 从可用输入预算中额外扣除的安全余量，用于降低估算误差导致的超限风险。
-context_safety_margin_tokens = 512
-
 [execution]
-# 同时在途的最大 LLM 请求数，也用于设置 HTTP 连接池上限。
-max_parallel = 4
-# 每 60 秒允许的实际 HTTP 尝试次数；重试也计数。设为 0 可禁用 RPM 限速。
-requests_per_minute = 30
-# 每 60 秒允许的估算输入 Token 总量；每次 HTTP 尝试都会计数。
-# 设为 0 可禁用 ITPM 限速，并取消 ITPM 对 Chunk 和单请求输入的限制。
-input_tokens_per_minute = 50000
-# 单次 HTTP 请求的超时时间（秒），统一用于连接、读取、写入和连接池等待。
-request_timeout_seconds = 120
 # Chunk 调度方式：ordered_by_file 为文件内顺序、文件间并发；
 # parallel 为所有 Chunk 并发，且参考上文只携带源文。
 scheduling_mode = "ordered_by_file"
-# Token 启发式估算乘数，必须大于 0。小于 1 可提高部分模型的上下文利用率，
-# 但会增加服务端上下文超限或实际 ITPM 超限风险；应按实际分词器调节。
-token_safety_factor = 1.25
 
 [chunking]
 # 单个请求完整输入 Prompt 的期望 Token 上限；这是软目标。

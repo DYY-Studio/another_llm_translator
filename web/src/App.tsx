@@ -139,7 +139,8 @@ export default function App() {
   }
 
   let content = <div className="empty-page">选择或创建项目后开始工作。</div>;
-  if (project && overview) {
+  if (stage === "settings") content = <SettingsView project={project} />;
+  else if (project && overview) {
     if (stage === "overview") content = (
       <Overview
         project={project}
@@ -151,7 +152,6 @@ export default function App() {
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} />;
     } else if (stage === "export") content = <ExportView project={project} />;
-    else if (stage === "settings") content = <SettingsView project={project} />;
   }
 
   return (

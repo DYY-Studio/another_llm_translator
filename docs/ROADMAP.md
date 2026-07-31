@@ -14,8 +14,8 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 和 Stage 2 已完成；下一阶段是全局设置、Prompt 与实时
-  LLM Preset。
+- 产品路线 Stage 1、Stage 2 和 Stage 3 已完成；下一阶段是规范化 LLM 思考
+  响应。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -40,7 +40,7 @@ LLM Adapter JSON 继续使用独立高级编辑器。
 配置校验并原子写入规范 TOML；非法输入不会破坏原配置。桌面和移动端浏览器
 QA 已纳入本阶段验收。
 
-## Stage 3：全局设置、Prompt 与实时 LLM Preset
+## Stage 3：全局设置、Prompt 与实时 LLM Preset（已完成）
 
 Web 增加全局配置、全局 Prompt 和命名 Preset 管理。全局配置和 Prompt 修改
 只影响新项目或显式同步的项目。
@@ -185,7 +185,7 @@ Preset 并切换”的明确迁移操作；新项目只使用 Preset，旧兼容
 JSON Pointer。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主管理。
 API Key 不进入 URL、请求正文、项目副本、Run 快照或阶段指纹。
 
-Stage 3 的 Preset 和 Stage 4 的规范化思考响应落地前，相关 schema 仍可直接
+Preset 已落地；Stage 4 的规范化思考响应落地前，相关响应 schema 仍可直接
 升级仓库内调用方，不保留未文档化旧字段。
 
 ### Document Adapter 与可信 Python 插件（Beta）

@@ -15,18 +15,20 @@ python -m pip install -r requirements-dev.txt
 python -m pip check
 ```
 
-先编辑全局模板 `config/config.toml` 和 `prompts/*.middle.txt`。将配置中
-`llm.api_key_env` 指定的密钥放入环境变量：
+先编辑全局模板 `config/config.toml`、`prompts/*.middle.txt` 和选中的
+`llm_presets/<preset_id>.json`。将 Preset 中 `api_key_env` 指定的密钥放入
+环境变量：
 
 ```bash
 export LLM_API_KEY="..."
 ```
 
-如需为 LLM 请求使用显式 HTTP/HTTPS 代理，在全局配置或项目副本中设置：
+如需为 LLM 请求使用显式 HTTP/HTTPS 代理，在 Preset 中设置：
 
-```toml
-[llm]
-proxy_url = "http://127.0.0.1:7890"
+```json
+{
+  "proxy_url": "http://127.0.0.1:7890"
+}
 ```
 
 留空时仍允许 HTTPX 使用标准代理环境变量。
@@ -77,8 +79,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 2（Web 结构化项目设置）；下一阶段是全局设置、
-Prompt 与实时 LLM Preset。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 3（全局设置、Prompt 与实时 LLM Preset）；下一阶段
+是规范化 LLM 思考响应。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 
@@ -95,7 +97,9 @@ python -m app.web
 打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
 限速与恢复逻辑，不建立第二套数据库。可创建空的或带文件的 TXT/EPUB 项目，
 并在概览追加或批量移除同格式源文件；项目配置通过覆盖全部现有字段的分组
-表单编辑，Prompt 和 JSON LLM Adapter 保持独立高级编辑器。也可运行或取消
+表单编辑，Prompt 和 JSON LLM Adapter 保持独立高级编辑器。设置页还可在未
+打开项目时管理全局配置、全局 Prompt 和实时 LLM Preset；Preset 支持经过
+冲突检查的自定义附加 JSON body 和脱敏请求预览。也可运行或取消
 阶段任务，并审校、apply 与导出。术语工作区
 支持搜索、冲突裁决、JSON/CSV 导入导出、新增、编辑、移除和恢复；术语与
 Segment 列表支持 Ctrl/Cmd/Shift 经典多选。翻译、校对和润色可按所选或当前

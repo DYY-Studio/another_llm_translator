@@ -130,27 +130,14 @@ export interface ProjectConfig {
     fallback_encoding: string;
   };
   llm: {
-    adapter: string;
-    base_url: string;
-    endpoint: string;
-    model: string;
-    api_key_env: string;
-    proxy_url: string;
+    preset: string;
     temperature_terminology: number;
     temperature_translation: number;
     temperature_proofreading: number;
     temperature_polishing: number;
-    max_output_tokens: number;
-    context_window_tokens: number;
-    context_safety_margin_tokens: number;
   };
   execution: {
-    max_parallel: number;
-    requests_per_minute: number;
-    input_tokens_per_minute: number;
-    request_timeout_seconds: number;
     scheduling_mode: "ordered_by_file" | "parallel";
-    token_safety_factor: number;
   };
   chunking: {
     target_chunk_input_tokens: number;
@@ -189,4 +176,34 @@ export interface ProjectConfig {
     inject_invalid_json_every: number;
     inject_missing_segment_every: number;
   };
+}
+
+export interface LLMPresetSummary {
+  preset_id: string;
+  adapter_id?: string;
+  model?: string;
+  selected: boolean;
+  valid: boolean;
+  digest?: string;
+  error?: string;
+}
+
+export interface LLMPreset {
+  schema_version: 1;
+  preset_id: string;
+  adapter_id: string;
+  base_url: string;
+  endpoint: string;
+  model: string;
+  api_key_env: string;
+  proxy_url: string;
+  context_window_tokens: number;
+  max_output_tokens: number;
+  context_safety_margin_tokens: number;
+  token_safety_factor: number;
+  requests_per_minute: number;
+  input_tokens_per_minute: number;
+  max_parallel: number;
+  request_timeout_seconds: number;
+  extra_body: Record<string, unknown>;
 }

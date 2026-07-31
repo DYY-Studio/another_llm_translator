@@ -300,7 +300,8 @@ F0001-S000002
 配置严格拒绝未知键。CLI 和执行流程继续从项目 `config.toml` 读取配置。本地
 Web 不暴露完整 TOML 编辑器，而是读取和提交覆盖下列全部字段的类型化分组
 表单；服务端通过同一严格校验后原子写入规范 TOML。非法类型、缺失或未知字段、
-非法字段组合及不存在的 LLM Adapter 均在写入前整体拒绝，原配置保持不变。
+非法字段组合、Preset 缺失及项目不存在对应 LLM Adapter 均在写入前整体拒绝，
+原配置保持不变。
 
 ```toml
 [project]
@@ -312,29 +313,15 @@ encoding_confidence_threshold = 0.60
 fallback_encoding = "utf-8"
 
 [llm]
-adapter = "openai-compatible"
-base_url = "https://example.com/v1"
-endpoint = "/chat/completions"
-model = "example-model"
-api_key_env = "LLM_API_KEY"
-proxy_url = ""
+preset = "default"
 
 temperature_terminology = 0.1
 temperature_translation = 0.2
 temperature_proofreading = 0.1
 temperature_polishing = 0.3
 
-max_output_tokens = 4096
-context_window_tokens = 16384
-context_safety_margin_tokens = 512
-
 [execution]
-max_parallel = 4
-requests_per_minute = 30
-input_tokens_per_minute = 50000
-request_timeout_seconds = 120
 scheduling_mode = "ordered_by_file"
-token_safety_factor = 1.25
 
 [chunking]
 target_chunk_input_tokens = 11000
@@ -388,18 +375,19 @@ inject_missing_segment_every = 0
 能力占位。术语实现固定使用 `NFKC` 和 `casefold`，因此现阶段只接受上述值。
 待核心主流程完成全面验证后，再基于真实用例实现其他取值并补充测试。
 
-`requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示禁用 RPM
-和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标及单请求
-Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
+Preset 中的 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示
+禁用 RPM 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标
+及单请求 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
 
 API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
 
-`llm.adapter` 选择项目 `llm_adapters/<id>.json`。定义是完整的 Header/body
-模板和成功响应 JSON Pointer；可加入 Provider 自定义 JSON 字段。定义 Hash
-进入阶段指纹，定义副本进入 Run 快照，解析后的密钥不进入任何持久化内容。完整
-schema 见 `docs/ADAPTERS.md`。
+`llm.preset` 选择全局 `llm_presets/<id>.json`，Preset 再选择项目
+`llm_adapters/<id>.json`。Adapter 定义是完整的 Header/body 模板和成功响应
+JSON Pointer；Preset 的 `extra_body` 可追加无冲突的 Provider 自定义字段。
+两者的内容 Hash 都进入阶段指纹，定义副本都进入 Run 快照，解析后的密钥不进入
+任何持久化内容。完整 schema 见 `docs/ADAPTERS.md`。
 
-`proxy_url` 为空时不显式设置代理，HTTPX 仍按默认行为读取 `HTTP_PROXY`、
+Preset 的 `proxy_url` 为空时不显式设置代理，HTTPX 仍按默认行为读取 `HTTP_PROXY`、
 `HTTPS_PROXY` 和 `NO_PROXY`。非空值只接受 `http://` 或 `https://` URL；
 MVP 不增加 SOCKS 依赖。代理属于传输设置，不进入阶段指纹。
 
@@ -419,7 +407,9 @@ warning
 
 ## 2.6 全局模板同步
 
-`init` 将全局配置和四个提示词完整复制为项目工作副本。项目执行始终使用项目副本。
+`init` 将全局配置、四个提示词和当前 Preset 所需的 Adapter 复制为项目工作
+副本。项目配置和 Prompt 使用项目副本；LLM 连接通过项目保存的 Preset ID
+实时读取全局 `llm_presets/` 定义。
 
 项目只记录：
 
@@ -427,7 +417,8 @@ warning
 global_bundle_hash_seen
 ```
 
-Bundle Hash 对全局配置和四个提示词的相对路径及内容计算。它只用于发现新的全局模板，不参与阶段结果判断。
+Bundle Hash 对全局配置和四个提示词的相对路径及内容计算。它只用于发现新的
+全局模板，不包含实时 Preset 内容，也不参与阶段结果判断。
 
 项目命令执行前：
 
@@ -519,6 +510,7 @@ failed
 - 影响阶段语义的配置
 - 使用的 `terms_revision`，适用时
 - LLM Adapter ID 与定义内容 Hash
+- LLM Preset ID 与定义内容 Hash
 
 翻译还包含启用的文字校验器及 `exhausted_mode`。最大校验重试次数只影响执行，不进入指纹。
 
@@ -580,10 +572,11 @@ failed
 interrupted
 ```
 
-Run 创建时复制项目配置；LLM 阶段另保存本阶段实际完整 Prompt。续作不覆盖
-原快照，而是在 `continuations/0001/` 等顺序目录保存本次当前项目配置和完整
-Prompt，并在 manifest 追加本次指纹、原始范围和请求/复用数量。续作结果仍引用
-原 `run_id`。
+Run 创建时复制项目配置；LLM 阶段另保存本阶段实际完整 Prompt、解析后的
+`llm_preset.json` 和项目 `llm_adapter.json`。续作不覆盖原快照，而是在
+`continuations/0001/` 等顺序目录保存本次当前项目配置、Prompt、Preset 和
+Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复用数量。续作
+结果仍引用原 `run_id`。快照只记录 API Key 环境变量名，不读取或保存密钥值。
 
 `terminology`、`translate`、`proofread`、`polish` 独立命令发现同阶段
 `running` Run 时，最新一个是续作候选，更旧者标记为 `interrupted` 和
@@ -1085,6 +1078,14 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
 `/choices/0/message/content`。声明式 Adapter 只支持非流式 JSON POST。
 
+项目的 `llm.preset` 实时解析全局命名 Preset。Preset 提供 Adapter ID、URL、
+模型、API Key 环境变量名、代理、Token 能力、限速、并发、超时和
+`extra_body`。`extra_body` 必须是 JSON 对象，可以包含嵌套对象和数组；宿主在
+Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失
+Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
+Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset 内容进入 Run
+快照和阶段指纹，因此其中不得保存密钥。
+
 整个命令共享一个 `httpx.AsyncClient`：
 
 - connect、read、write 和 pool timeout 都使用 `request_timeout_seconds`。
@@ -1373,8 +1374,10 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
 本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
 追加或经典多选移除同格式源文件。项目配置使用覆盖全部现有字段的分组表单；
-Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还可运行/取消阶段任务、
-人工审校、apply 和 export。
+项目 Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还提供全局配置、
+全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
+同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
+审校、apply 和 export。
 
 Web 不建立数据库；项目目录与 CLI 使用相同应用内核和持久化记录。同一项目的
 写任务通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web
@@ -1497,6 +1500,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - JSON LLM Adapter 的类型化占位符、自定义嵌套字段、认证 Header 和 RFC 6901
   响应路径生效；非法 schema、未知占位符、缺失路径和非字符串正文快速失败。
 - Adapter 定义副本与 Run 快照不包含 API Key，定义 Hash 进入阶段指纹。
+- LLM Preset 的实时解析、嵌套 `extra_body`、顶层冲突和占位符拒绝生效；实际
+  Preset 快照与内容 Hash 进入 Run 和阶段指纹，请求预览不泄露认证 Header。
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
@@ -1508,6 +1513,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
   失败，取消后的 Run 有正确收尾。
 - Web 项目配置表单覆盖完整配置 schema；非法类型或组合不改变原 TOML，保存
   后的规范 TOML 可由 CLI 原样读取。
+- Web 可在没有打开项目时管理全局配置、Prompt 和 Preset；全局模板修改不改变
+  现有项目，显式同步和旧内联配置迁移均通过严格校验。
 - React 生产构建、TypeScript 检查、桌面与窄屏关键交互、浏览器控制台均通过。
 
 ---
