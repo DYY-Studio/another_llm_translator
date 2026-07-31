@@ -51,6 +51,9 @@ Alpha 不承诺远程部署、多用户、账号系统、数据库或分布式�
 统一 Document Adapter、内置 TXT 和首个 EPUB Adapter 已实现。EPUB 保存原包
 和不透明定位状态，可导出纯译文或双语 EPUB，并保留未修改资源。可信 Python
 插件通过 `minimal_llm_translator.plugins` entry-point 组发现。
+项目现已支持按既有内置 Adapter 创建空项目及增删同格式文件：TXT 可多文件，
+EPUB 保持单文件。多格式项目仍需等待 per-file Adapter 状态设计，不由当前项目
+级不透明状态推测实现。
 
 仍需通过更多真实文档完成 Beta：
 

@@ -45,6 +45,17 @@ python -m app.main terms-export novel glossary.csv
 项目默认保存在 `projects/<name>/`。`run-all` 只生成校对和润色建议，不会自动
 应用。可先为任一阶段加入 `--dry-run` 查看范围、Chunk 数和 Token 估算。
 
+也可先建立指定格式的空项目，再追加或移除项目源文件：
+
+```bash
+python -m app.main init --empty --name novel
+python -m app.main files-add novel chapter-1.txt chapter-2.txt
+python -m app.main files-remove novel F0001
+```
+
+TXT 项目可包含多个 TXT；EPUB 项目只能从空项目添加一个 EPUB。移除文件不会
+清理历史阶段记录和既有输出，但被移除 Segment 不再参与统计、复用和导出。
+
 独立运行 `terminology`、`translate`、`proofread` 或 `polish` 时，如发现同阶段
 未完成 Run，交互终端会询问继续还是新建。脚本或 CI 中需明确使用
 `--resume-run` 或 `--decline-run`；续作沿用旧范围，但使用当前项目配置和
@@ -79,7 +90,8 @@ python -m app.web
 ```
 
 打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
-限速与恢复逻辑，不建立第二套数据库。可创建 TXT/EPUB 项目、编辑配置、Prompt
+限速与恢复逻辑，不建立第二套数据库。可创建空的或带文件的 TXT/EPUB 项目，
+并在概览追加或批量移除同格式源文件；也可编辑配置、Prompt
 和 JSON LLM Adapter，运行或取消阶段任务，并审校、apply 与导出。术语工作区
 支持搜索、冲突裁决、JSON/CSV 导入导出、新增、编辑、移除和恢复；术语与
 Segment 列表支持 Ctrl/Cmd/Shift 经典多选。翻译、校对和润色可按所选或当前

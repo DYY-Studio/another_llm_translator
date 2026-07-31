@@ -170,7 +170,7 @@ llm_adapters/
 input/
 source/files.jsonl
 source/segments.jsonl
-source/adapters/{document_adapter_id}/state.json
+source/adapters/{document_adapter_id}/state.json  # 格式需要时存在
 terminology/terms.json
 terminology/overrides.json
 terminology/active_task.json
@@ -197,16 +197,23 @@ llm_adapters/openai-compatible.json
 
 ## 2.3 初始化与文件发现
 
-TXT 支持目录或显式文件；EPUB 每个项目接受一个显式文件：
+TXT 支持目录或显式文件；EPUB 每个项目接受一个显式文件。项目也可先按指定
+格式创建为空项目：
 
 ```bash
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
+python -m app.main init --empty --name PROJECT_NAME
+python -m app.main init --empty --document-adapter epub --name PROJECT_NAME
+python -m app.main files-add PROJECT INPUT...
+python -m app.main files-add PROJECT INPUT_DIR --recursive
+python -m app.main files-remove PROJECT FILE_ID...
 ```
 
 规则：
 
+- init 必须在输入和 `--empty` 中恰好选择一种。
 - 显式文件按参数顺序处理。
 - 目录按相对路径进行确定性的简单自然排序。
 - TXT 未传 `--recursive` 时只读取目录第一层。
@@ -217,6 +224,24 @@ python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 - 输入文件复制到项目 `input/`，后续阶段只读取项目数据。
 - 项目记录 `document_adapter_id`、版本和不透明状态位置；旧 TXT 项目缺少这些
   字段时按内置 `txt` 解释。
+- TXT 项目可追加多个 TXT。EPUB 只允许从 0 文件项目添加一个 EPUB，已有文件
+  时拒绝继续添加。本阶段不允许外部 Document Adapter 修改现有项目文件。
+- 新 File 追加到活动顺序末尾。`next_file_sequence` 单调增加；旧项目缺少该
+  字段时从活动 File ID 最大值初始化。删除后重新添加不会复用 File 或 Segment
+  ID。
+- 活动文件的导出相对路径按大小写不敏感比较；追加产生冲突时整体拒绝。
+- 文件增删发现任意 `running` Run 时整体拒绝，不自动中断。未知或部分非法的
+  删除选择也必须在写入前整体失败。
+- 增删在项目写锁内预写新索引、元数据和输入副本；普通发布异常不得留下部分
+  更新。移除会删除项目内输入副本；Run、阶段 JSONL、术语和既有输出保留。
+- 被移除 Segment 的历史阶段记录仍是审计数据，但不再参与 inspect、指纹差异、
+  结果复用、校验警告、过期建议统计或导出。
+- 移除 EPUB 的唯一文件时同时清除项目内 Adapter 不透明状态；重新添加生成新
+  状态。
+
+空项目以及只含空白 Segment 的项目仍可打开、inspect、编辑配置、Prompt 和
+Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
+export 必须在创建 Run 或请求前快速失败，提示先添加含非空 Segment 的文件。
 
 EPUB Adapter 按 OPF spine 顺序读取 XHTML 中可见的非空 `text` 和 `tail`
 槽位。原 EPUB 及定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他
@@ -1166,6 +1191,9 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 ```bash
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init BOOK.epub --name PROJECT_NAME --document-adapter epub
+python -m app.main init --empty --name PROJECT_NAME
+python -m app.main files-add PROJECT INPUT...
+python -m app.main files-remove PROJECT FILE_ID...
 python -m app.main inspect PROJECT
 python -m app.main terminology PROJECT
 python -m app.main terms-import PROJECT terms.json
@@ -1207,6 +1235,7 @@ python -m app.main run-all PROJECT
 --decline-run
 --reuse-mixed-fingerprints
 --document-adapter
+--empty
 ```
 
 语义：
@@ -1226,6 +1255,10 @@ python -m app.main run-all PROJECT
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
   仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
 - `--document-adapter`：仅用于 init，选择输入与输出格式，默认 `txt`。
+- `--empty`：仅用于 init，显式创建 0 文件项目，不能同时提供输入。
+- `files-add`：按项目已有 Document Adapter 追加同格式输入；TXT 支持
+  `--recursive`。
+- `files-remove`：按 File ID 从活动项目移除文件，不清理历史结果。
 
 两项续作参数互斥。没有候选时 `--resume-run` 是用法错误；
 `--decline-run` 直接按当前范围创建新 Run。`--dry-run` 不询问、不修改
@@ -1335,12 +1368,17 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 ## 6.4 本地 Web Alpha
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
-本机 Host 和跨站 Origin。Web 可创建 TXT/EPUB 项目、编辑项目配置、Prompt 与
-JSON LLM Adapter、运行/取消阶段任务、人工审校、apply 和 export。
+本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
+追加或经典多选移除同格式源文件，并可编辑项目配置、Prompt 与 JSON LLM
+Adapter、运行/取消阶段任务、人工审校、apply 和 export。
 
 Web 不建立数据库；项目目录与 CLI 使用相同应用内核和持久化记录。同一项目的
 写任务通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web
 进程，重启后仍由项目 Run 与 Segment 记录恢复业务进度。
+
+0 个非空 Segment 时，阶段运行入口不可用，服务端预检也拒绝创建后台 WebTask。
+文件移除确认必须说明源副本和活动 Segment 会删除，而历史阶段结果及既有输出
+保留，重新添加会获得新 ID。
 
 Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每次启动前读取当前阶段
 统计和最近的 running Run：存在未完成 Run 时必须明确续用或结束后新建；存在
