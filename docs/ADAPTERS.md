@@ -5,8 +5,9 @@
 
 ## 1. 声明式 JSON LLM Adapter（已实现）
 
-全局定义位于 `llm_adapters/<adapter_id>.json`，项目通过
-`llm.adapter` 选择。初始化时定义复制到项目；每个 Run 再保存实际定义快照。
+全局定义位于 `llm_adapters/<adapter_id>.json`。LLM Preset 引用 Adapter ID；
+项目实时引用 Preset，但必须显式拥有对应 Adapter 的项目副本。每个 Run 保存
+实际使用的 Adapter 与 Preset 快照。
 
 最小定义：
 
@@ -30,7 +31,7 @@
 
 ### 请求边界
 
-- 请求地址只由项目 `llm.base_url` 与 `llm.endpoint` 组成。
+- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。
 - 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
   重试、取消和日志由宿主负责。
 - `body` 是完整模板。可直接加入 `reasoning_effort`、`response_format` 或
@@ -53,9 +54,9 @@
 
 ### 指纹与密钥
 
-阶段指纹包含 Adapter ID 和项目定义内容 Hash。项目副本与 Run 快照保存定义
-原文，但不解析或保存环境变量中的 API Key。调试请求记录仍经过敏感 Header
-清理。
+阶段指纹包含 Adapter ID、项目定义内容 Hash、Preset ID 和 Preset 内容 Hash。
+项目 Adapter 副本与 Run 快照保存定义原文，但不解析或保存环境变量中的 API
+Key。调试请求记录仍经过敏感 Header 清理。
 
 ## 2. Document Adapter（Beta）
 
@@ -153,10 +154,10 @@ def descriptor() -> PluginDescriptor:
 具体 Python 方法签名、错误类型和配置接口必须等待第一个 JSON 模板无法支持的
 真实端点，再与第二个实现共同验证；当前不提供动态加载器或兼容承诺。
 
-## 5. LLM Preset（计划）
+## 5. LLM Preset（已实现）
 
-Preset 的实现安排在产品路线 Stage 3，当前尚不是已实现接口。Preset 将实时
-引用一个 Adapter ID，并保存端点、模型、鉴权环境变量名、模型 Token 能力和
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，
+并保存端点、模型、鉴权环境变量名、模型 Token 能力和
 端点限速等连接设置。项目引用 Preset ID；Run 保存实际解析的 Preset 快照，
 阶段指纹包含 Preset ID 和定义内容 Hash。
 
@@ -179,3 +180,8 @@ Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 
 `extra_body` 不支持模板占位符，尤其禁止 `${api_key}`。它会进入请求预览、
 Run 快照和阶段指纹，因此不得保存密钥。非对象、非法 JSON、占位符和字段冲突
 都必须在创建 Run 或发送请求前拒绝。
+
+Preset 修改立即影响所有引用项目，不维护版本历史。项目缺少其引用的 Adapter
+时明确失败；Web 只在用户操作后复制全局 Adapter，不自动补齐或改用其他
+Preset。旧内联连接配置仍可读取，并可通过 Web 明确保存为 Preset 后切换；该
+兼容路径不扩张新字段。
