@@ -1242,7 +1242,7 @@ async def run_terminology(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                content, _ = await llm.chat(
+                response, _ = await llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1250,7 +1250,7 @@ async def run_terminology(
                     parent_request_id=parent_request_id,
                 )
                 terms, parse_errors, response_complete = _validate_term_items(
-                    content
+                    response.content
                 )
             except FatalExternalError:
                 raise
@@ -2160,7 +2160,7 @@ async def run_translation(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                content, _ = await llm.chat(
+                response, _ = await llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_translation"],
                     estimated_input_tokens=estimated,
@@ -2168,7 +2168,7 @@ async def run_translation(
                     parent_request_id=parent_request_id,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_translation_items(content, expected)
+                    _parse_translation_items(response.content, expected)
                 )
             except FatalExternalError:
                 raise
@@ -3021,7 +3021,7 @@ async def run_review(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                content, _ = await llm.chat(
+                response, _ = await llm.chat(
                     messages=messages,
                     temperature=config["llm"][f"temperature_{stage}"],
                     estimated_input_tokens=estimated,
@@ -3029,7 +3029,7 @@ async def run_review(
                     parent_request_id=parent_request_id,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_review_items(content, expected)
+                    _parse_review_items(response.content, expected)
                 )
             except FatalExternalError:
                 raise

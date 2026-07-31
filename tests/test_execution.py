@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.config import load_global_config
-from app.errors import FatalExternalError
+from app.errors import ExternalError, FatalExternalError
 from app.execution import (
     LLMClient,
     Scope,
@@ -24,6 +24,7 @@ from app.execution import (
     select_scope,
     stage_fingerprint,
 )
+from app.llm_adapter import load_json_adapter
 
 
 ROOT = Path(__file__).parents[1]
@@ -345,7 +346,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
             stage="translation",
             client=client,
         ) as llm:
-            content, request_id = await llm.chat(
+            response, request_id = await llm.chat(
                 messages=render_messages("prompt", {"segments": []}),
                 temperature=0.2,
                 estimated_input_tokens=10,
@@ -353,10 +354,115 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     finally:
         del os.environ["LLM_API_KEY"]
         await client.aclose()
-    assert content == '{"type":"end"}'
+    assert response.content == '{"type":"end"}'
+    assert response.reasoning_content is None
     assert calls == 2
     assert len(list((tmp_path / "payloads").glob(f"{request_id}-A*.request.json"))) == 2
     assert (tmp_path / "attempts.jsonl").is_file()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
+    current = config()
+    current["debug"]["enabled"] = True
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "\ufeff \r\n<thought>reasoning</thought>\r\n"
+                                '{"type":"end"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+    assert response.content == '{"type":"end"}'
+    assert response.reasoning_content == "reasoning"
+    saved_response = next((tmp_path / "payloads").glob("*.response.json"))
+    assert "<thought>reasoning</thought>" in saved_response.read_text("utf-8")
+    assert not list(tmp_path.rglob("*reasoning*"))
+
+
+@pytest.mark.asyncio
+async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    definition = dict(current["_llm_adapter"].definition)
+    definition["response_reasoning_content_pointer"] = (
+        "/choices/0/message/reasoning_content"
+    )
+    adapter_file = tmp_path / "adapter.json"
+    adapter_file.write_text(json.dumps(definition), encoding="utf-8")
+    current["_llm_adapter"] = load_json_adapter(adapter_file)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "<think>embedded</think>\n"
+                                '{"type":"end"}'
+                            ),
+                            "reasoning_content": "structured",
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            with pytest.raises(ExternalError, match="同时包含结构化"):
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
 
 
 @pytest.mark.asyncio

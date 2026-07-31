@@ -14,8 +14,8 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1、Stage 2 和 Stage 3 已完成；下一阶段是规范化 LLM 思考
-  响应。
+- 产品路线 Stage 1 至 Stage 4 已完成；下一阶段是 File 级 Document Adapter
+  与多格式项目。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -80,7 +80,7 @@ Adapter 定义继续保存在项目中；Preset 只引用 Adapter ID。选择项
 的 Adapter 时必须显式复制全局定义。现有内联 LLM 配置提供“保存当前连接为
 Preset 并切换”的明确迁移操作；新项目只使用 Preset，旧兼容路径不继续扩张。
 
-## Stage 4：规范化 LLM 思考响应
+## Stage 4：规范化 LLM 思考响应（已完成）
 
 - LLM Adapter 规范化返回 `content` 和可空的 `reasoning_content`。
 - content 前导思考标签被剥离后，正文与思考正文分别进入两个字段。
@@ -185,8 +185,8 @@ Preset 并切换”的明确迁移操作；新项目只使用 Preset，旧兼容
 JSON Pointer。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主管理。
 API Key 不进入 URL、请求正文、项目副本、Run 快照或阶段指纹。
 
-Preset 已落地；Stage 4 的规范化思考响应落地前，相关响应 schema 仍可直接
-升级仓库内调用方，不保留未文档化旧字段。
+Preset 与规范化思考响应已落地；相关 schema 仍可直接升级仓库内调用方，
+不保留未文档化旧字段。
 
 ### Document Adapter 与可信 Python 插件（Beta）
 

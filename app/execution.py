@@ -30,7 +30,7 @@ from .errors import (
     UsageError,
 )
 from .logging_utils import get_logger
-from .llm_adapter import JSONLLMAdapter
+from .llm_adapter import JSONLLMAdapter, LLMResponse
 from .storage import (
     append_jsonl,
     atomic_write_json,
@@ -930,7 +930,7 @@ class LLMClient:
         estimated_input_tokens: int,
         request_id: str | None = None,
         parent_request_id: str | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
         api_key = os.getenv(str(self.config["llm"]["api_key_env"]))
@@ -1055,8 +1055,8 @@ class LLMClient:
                     and self.send_count % debug["inject_missing_segment_every"] == 0
                 ):
                     try:
-                        content = self.adapter.parse_content(response_data)
-                        lines = extract_jsonl_content(str(content)).splitlines()
+                        content = self.adapter.parse_response(response_data).content
+                        lines = extract_jsonl_content(content).splitlines()
                         segment_indexes = []
                         for index, line in enumerate(lines):
                             value = json.loads(line)
@@ -1083,7 +1083,8 @@ class LLMClient:
                     status=response.status_code,
                     parent_request_id=parent_request_id,
                 )
-                content = self.adapter.parse_content(response_data)
+                parsed = self.adapter.parse_response(response_data)
+                normalized = normalize_llm_response(parsed)
                 self.logger.info(
                     "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
                     request_id,
@@ -1091,7 +1092,7 @@ class LLMClient:
                     response.status_code,
                     elapsed,
                 )
-                return content, request_id
+                return normalized, request_id
             retryable = response.status_code in {408, 429} or response.status_code >= 500
             await self._debug_attempt(
                 request_id,
@@ -1223,7 +1224,21 @@ _THOUGHT_BLOCK_TAGS = (
 )
 
 
-def extract_jsonl_content(content: str) -> str:
+def normalize_llm_response(response: LLMResponse) -> LLMResponse:
+    embedded = _extract_embedded_reasoning(response.content)
+    if response.reasoning_content and embedded.reasoning_content:
+        raise ExternalError(
+            "LLM 响应同时包含结构化和 content 内嵌思考正文"
+        )
+    return LLMResponse(
+        content=embedded.content,
+        reasoning_content=(
+            response.reasoning_content or embedded.reasoning_content
+        ),
+    )
+
+
+def _extract_embedded_reasoning(content: str) -> LLMResponse:
     normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     stripped = normalized.lstrip()
     for opening, closing in _THOUGHT_BLOCK_TAGS:
@@ -1231,7 +1246,7 @@ def extract_jsonl_content(content: str) -> str:
             continue
         closing_at = stripped.find(closing, len(opening))
         if closing_at < 0:
-            return stripped.strip()
+            return LLMResponse(stripped.strip(), None)
         thought = stripped[len(opening) : closing_at]
         remainder = stripped[closing_at + len(closing) :].lstrip()
         if any(
@@ -1243,9 +1258,13 @@ def extract_jsonl_content(content: str) -> str:
             for pair in _THOUGHT_BLOCK_TAGS
             for tag in pair
         ):
-            return stripped.strip()
-        normalized = remainder
-        break
+            return LLMResponse(stripped.strip(), None)
+        return LLMResponse(remainder, thought)
+    return LLMResponse(stripped.strip(), None)
+
+
+def extract_jsonl_content(content: str) -> str:
+    normalized = _extract_embedded_reasoning(content).content
     for match in _FENCE_RE.finditer(normalized):
         label = match.group("label").strip().casefold()
         body = match.group("body").strip()
