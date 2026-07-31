@@ -121,15 +121,31 @@ export function Overview({
   );
 }
 
-export function ExportView({ project }: { project: string }) {
+export function ExportView({
+  project,
+  overview,
+}: {
+  project: string;
+  overview: ProjectOverview;
+}) {
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
   const [result, setResult] = useState("");
+  const selection = useClassicSelection();
+  const fileIds = overview.files.map((item) => item.file_id);
   async function run() {
     const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
       method: "POST",
-      body: JSON.stringify({ stage, format, bilingual, allow_missing: false }),
+      body: JSON.stringify({
+        stage,
+        format,
+        bilingual,
+        allow_missing: false,
+        file_ids: selection.selectedKeys.size
+          ? [...selection.selectedKeys]
+          : null,
+      }),
     });
     setResult(JSON.stringify(value, null, 2));
   }
@@ -138,6 +154,25 @@ export function ExportView({ project }: { project: string }) {
       <div className="page-heading"><div><h1>导出</h1><p>从已持久化结果生成输出文件。</p></div></div>
       <label>结果阶段<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">翻译</option><option value="proofread">已应用校对</option><option value="polished">已应用润色</option></select></label>
       <label>输出格式<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">保留各文件原格式</option><option value="txt">统一输出 TXT</option></select></label>
+      <div className="export-file-heading">
+        <div>
+          <strong>文件范围</strong>
+          <small>{selection.selectedKeys.size ? `已选择 ${selection.selectedKeys.size} 个文件` : "未选择时导出全部文件"}</small>
+        </div>
+        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>清除选择</button>
+      </div>
+      <div className="file-list export-file-list">
+        {overview.files.map((item) => (
+          <button
+            type="button"
+            key={item.file_id}
+            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
+            onClick={(event) => selection.select(item.file_id, fileIds, event)}
+          >
+            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+          </button>
+        ))}
+      </div>
       <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> 生成双语对照</label>
       <button className="primary-button" onClick={run}>生成输出</button>
       {result && <pre className="result-box">{result}</pre>}

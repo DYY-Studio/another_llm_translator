@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from app.errors import UsageError
+from app.errors import ProjectError, UsageError
 from app.execution import Scope, stage_result_path
+from app.main import build_parser
 from app.project import (
     add_project_files,
     init_project,
@@ -45,6 +46,22 @@ def init_empty(
     assert summary["file_count"] == summary["segment_count"] == 0
     assert (project / "input").is_dir()
     return project
+
+
+def test_export_cli_collects_repeated_file_ids() -> None:
+    args = build_parser().parse_args(
+        [
+            "export",
+            "sample",
+            "--stage",
+            "translated",
+            "--file",
+            "F0001",
+            "--file",
+            "F0003",
+        ]
+    )
+    assert args.file_ids == ["F0001", "F0003"]
 
 
 def test_empty_project_can_open_inspect_and_add_txt_files(
@@ -231,6 +248,83 @@ def test_implicit_file_format_rejects_unknown_extension(tmp_path: Path) -> None:
     source.write_text("text", encoding="utf-8")
     with pytest.raises(UsageError, match="--document-adapter"):
         add_project_files(project, [str(source)])
+
+
+def test_export_file_filter_limits_result_validation_and_output(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(first), str(second)])
+    metadata = read_json(project / "project.json")
+    first_segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    append_jsonl(
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=first_segment["segment_id"],
+            status="completed",
+            text="一",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:selected",
+            terms_revision=0,
+            run_id="RUN-SELECTED",
+            request_id="REQ-SELECTED",
+        ),
+    )
+
+    summary = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=False,
+        file_ids=["F0001"],
+    )
+
+    assert summary["selected_file_ids"] == ["F0001"]
+    assert [Path(item).name for item in summary["written"]] == ["first.txt"]
+    with pytest.raises(UsageError, match="未知文件 ID"):
+        export_project(
+            project,
+            "translated",
+            bilingual=False,
+            allow_missing=False,
+            file_ids=["F9999"],
+        )
+    with pytest.raises(UsageError, match="范围不能为空"):
+        export_project(
+            project,
+            "translated",
+            bilingual=False,
+            allow_missing=False,
+            file_ids=[],
+        )
+
+
+def test_txt_export_name_collision_fails_before_publish(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    text = tmp_path / "book.txt"
+    epub = tmp_path / "book.epub"
+    text.write_text("plain", encoding="utf-8")
+    make_epub(epub)
+    add_project_files(project, [str(text), str(epub)])
+
+    output_dir = project / "output" / "translated"
+    with pytest.raises(ProjectError, match="重复输出路径"):
+        export_project(
+            project,
+            "translated",
+            bilingual=False,
+            allow_missing=True,
+            output_format="txt",
+        )
+    assert not output_dir.exists()
 
 
 @pytest.mark.parametrize("blank_text", [None, "", " \t\u3000"])

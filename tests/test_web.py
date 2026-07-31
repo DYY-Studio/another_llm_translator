@@ -115,6 +115,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "同步全局模板",
         "保存当前连接并切换",
         "复制全局 Adapter",
+        "文件范围",
+        "未选择时导出全部文件",
+        "统一输出 TXT",
     ):
         assert text in script.text
     assert "保存前会严格验证完整 TOML" not in script.text
@@ -141,6 +144,29 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     ]
     adapters = client.get("/api/v1/document-adapters").json()["adapters"]
     assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
+
+
+def test_web_export_accepts_explicit_file_range(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects/sample/export",
+        json={
+            "stage": "translated",
+            "format": "txt",
+            "allow_missing": True,
+            "file_ids": ["F0001"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["selected_file_ids"] == ["F0001"]
+    invalid = client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "file_ids": "F0001"},
+    )
+    assert invalid.status_code == 400
 
 
 def test_web_creates_empty_project_and_manages_source_files(
