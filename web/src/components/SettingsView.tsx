@@ -290,28 +290,24 @@ function PresetSettings() {
 
   return (
     <div className="preset-layout">
-      <aside className="preset-list">
-        <div className="page-heading preset-list-heading"><div><h1>LLM Preset</h1><p>全局实时连接设置</p></div><button className="quiet-button" disabled={!preset} onClick={createPreset}>新建</button></div>
-        <div className="preset-list-body">
-          {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
-        </div>
+      <div className="page-heading preset-list-heading"><div><h1>LLM Preset</h1><p>全局实时连接设置</p></div><button className="quiet-button" disabled={!preset} onClick={createPreset}>新建</button></div>
+      <aside className="preset-list-body">
+        {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
-      <section className="preset-editor">
+      <div className="page-heading settings-action-heading preset-editor-heading">
+        <div><h1>{preset?.preset_id ?? "Preset 编辑"}</h1><p>{preset ? "修改后会立即影响所有引用项目，并产生新的阶段指纹。" : "选择一个有效 Preset。"}</p></div>
+        {preset && <div className="button-group"><button className="danger-button" onClick={removePreset}>删除</button><button className="primary-button" onClick={save}>验证并保存</button></div>}
+      </div>
+      <section className="preset-editor-body">
         {!preset ? (
-          <div className="preset-editor-body">{error && <div className="error-banner">{error}</div>}<p className="muted">选择一个有效 Preset。</p></div>
+          <>{error && <div className="error-banner">{error}</div>}<p className="muted">选择一个有效 Preset。</p></>
         ) : (
           <>
-            <div className="page-heading settings-action-heading preset-editor-heading">
-              <div><h1>{preset.preset_id}</h1><p>修改后会立即影响所有引用项目，并产生新的阶段指纹。</p></div>
-              <div className="button-group"><button className="danger-button" onClick={removePreset}>删除</button><button className="primary-button" onClick={save}>验证并保存</button></div>
-            </div>
-            <div className="preset-editor-body">
-              {error && <div className="error-banner">{error}</div>}
-              {message && <p className="success-text">{message}</p>}
-              <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => update((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => update((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field><Field label="模型标识"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => update((draft) => { draft.api_key_env = event.target.value; })} /></Field><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
-              <h2 className="preview-heading">最终请求预览（Header 已脱敏）</h2>
-              <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : "保存后加载预览"}</pre>
-            </div>
+            {error && <div className="error-banner">{error}</div>}
+            {message && <p className="success-text">{message}</p>}
+            <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => update((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => update((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field><Field label="模型标识"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => update((draft) => { draft.api_key_env = event.target.value; })} /></Field><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
+            <h2 className="preview-heading">最终请求预览（Header 已脱敏）</h2>
+            <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : "保存后加载预览"}</pre>
           </>
         )}
       </section>
