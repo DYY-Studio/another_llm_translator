@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -20,7 +22,7 @@ from .config import (
     resolve_project_config,
 )
 from .editor import EditorStore
-from .errors import AppError, ProjectError, UsageError
+from .errors import AppError, ExternalError, ProjectError, UsageError
 from .execution import Scope
 from .llm_adapter import adapter_path, load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
@@ -322,6 +324,44 @@ def create_app(
             "headers": headers,
             "body": body,
         }
+
+    @app.post("/api/v1/global/presets/{preset_id}/models")
+    async def discover_preset_models(preset_id: str) -> dict[str, Any]:
+        preset = load_llm_preset(preset_path(app_root, preset_id))
+        adapter = load_json_adapter(
+            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+        )
+        if adapter.models_spec is None:
+            raise UsageError("该 Adapter 未声明模型发现规格")
+        api_key = os.getenv(str(preset.definition["api_key_env"]))
+        if not api_key:
+            raise UsageError(
+                f"缺少环境变量：{preset.definition['api_key_env']}"
+            )
+        endpoint, headers = adapter.build_models_request(api_key=api_key)
+        url = (
+            str(preset.definition["base_url"]).rstrip("/")
+            + "/"
+            + endpoint.lstrip("/")
+        )
+        timeout = float(preset.definition["request_timeout_seconds"])
+        proxy = str(preset.definition["proxy_url"]) or None
+        try:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+                response = await client.get(url, headers=headers)
+        except (httpx.HTTPError, OSError) as exc:
+            raise UsageError(f"模型列表请求失败：{exc}") from exc
+        if response.status_code >= 400:
+            raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise UsageError("模型列表响应不是合法 JSON") from exc
+        try:
+            models = adapter.parse_models_response(data)
+        except ExternalError as exc:
+            raise UsageError(str(exc)) from exc
+        return {"models": models, "count": len(models)}
 
     @app.post("/api/v1/projects")
     async def create_project(

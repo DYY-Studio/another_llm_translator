@@ -26,15 +26,38 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
     }
 )
 _OPTIONAL_ADAPTER_KEYS = frozenset(
-    {"messages_format", "response_reasoning_content_pointer"}
+    {"messages_format", "models", "response_reasoning_content_pointer", "usage"}
 )
 _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
+_MODELS_KEYS = frozenset(
+    {
+        "endpoint",
+        "headers",
+        "response_models_pointer",
+        "response_model_id",
+        "response_model_display",
+        "response_model_strip_prefix",
+    }
+)
+_MODELS_REQUIRED_KEYS = frozenset(
+    {"endpoint", "headers", "response_models_pointer", "response_model_id"}
+)
+_USAGE_KEYS = frozenset(
+    {"input_tokens_pointer", "output_tokens_pointer", "total_tokens_pointer"}
+)
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
     reasoning_content: str | None
+
+
+@dataclass(frozen=True)
+class Usage:
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 @dataclass(frozen=True)
@@ -45,6 +68,8 @@ class JSONLLMAdapter:
     response_content_pointer: str
     response_reasoning_content_pointer: str | None
     messages_format: str
+    models_spec: dict[str, Any] | None
+    usage_pointers: tuple[str | None, str | None, str | None] | None
     digest: str
     definition: dict[str, Any]
 
@@ -137,6 +162,62 @@ class JSONLLMAdapter:
                 f"LLM 响应缺少正文路径：{self.response_content_pointer}"
             ) from exc
 
+    def build_models_request(
+        self, *, api_key: str
+    ) -> tuple[str, dict[str, str]]:
+        if self.models_spec is None:
+            raise ExternalError("该 Adapter 未声明模型发现规格")
+        headers = {
+            name: _render_header(template, {"api_key": api_key})
+            for name, template in self.models_spec["headers"].items()
+        }
+        return self.models_spec["endpoint"], headers
+
+    def parse_models_response(self, response: Any) -> list[dict[str, str]]:
+        if self.models_spec is None:
+            raise ExternalError("该 Adapter 未声明模型发现规格")
+        items = _resolve_json_pointer(
+            response, self.models_spec["response_models_pointer"]
+        )
+        if not isinstance(items, list):
+            raise ExternalError("LLM 模型列表响应不是数组")
+        id_key = self.models_spec["response_model_id"]
+        display_key = self.models_spec.get("response_model_display")
+        strip_prefix = self.models_spec.get("response_model_strip_prefix", "")
+        result: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get(id_key), str):
+                raise ExternalError("LLM 模型列表条目缺少模型 ID")
+            model_id = item[id_key]
+            if strip_prefix and model_id.startswith(strip_prefix):
+                model_id = model_id[len(strip_prefix) :]
+            display = item.get(display_key) if display_key else None
+            if not isinstance(display, str) or not display:
+                display = model_id
+            result.append({"id": model_id, "display": display})
+        return result
+
+    def extract_usage(self, response: Any) -> Usage | None:
+        if self.usage_pointers is None:
+            return None
+        values: list[int] = []
+        for pointer in self.usage_pointers:
+            if pointer is None:
+                values.append(0)
+                continue
+            try:
+                value = _resolve_json_pointer(response, pointer)
+            except ExternalError:
+                return None
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return None
+            values.append(value)
+        return Usage(
+            input_tokens=values[0],
+            output_tokens=values[1],
+            total_tokens=values[2],
+        )
+
 
 def load_json_adapter(path: Path) -> JSONLLMAdapter:
     try:
@@ -197,6 +278,8 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
                 "必须是 JSON Pointer"
             )
         _parse_json_pointer(reasoning_pointer)
+    models_spec = _validate_models_spec(value.get("models"))
+    usage_pointers = _validate_usage_mapping(value.get("usage"))
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
@@ -205,9 +288,92 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         response_content_pointer=pointer,
         response_reasoning_content_pointer=reasoning_pointer,
         messages_format=messages_format,
+        models_spec=models_spec,
+        usage_pointers=usage_pointers,
         digest=digest,
         definition=deepcopy(value),
     )
+
+
+def _validate_models_spec(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("LLM Adapter models 必须是 JSON 对象")
+    unknown = set(value) - _MODELS_KEYS
+    missing = _MODELS_REQUIRED_KEYS - set(value)
+    if unknown:
+        raise ConfigError(
+            f"LLM Adapter models 包含未知字段：{', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise ConfigError(
+            f"LLM Adapter models 缺少字段：{', '.join(sorted(missing))}"
+        )
+    endpoint = value["endpoint"]
+    if not isinstance(endpoint, str) or not endpoint.strip() or "${" in endpoint:
+        raise ConfigError("LLM Adapter models endpoint 必须是无占位符的非空字符串")
+    headers = value["headers"]
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str)
+        and name
+        and isinstance(template, str)
+        for name, template in headers.items()
+    ):
+        raise ConfigError("LLM Adapter models headers 必须是字符串到字符串的对象")
+    for template in headers.values():
+        _validate_placeholders(
+            template, allowed=frozenset({"api_key"}), location="models headers"
+        )
+    models_pointer = value["response_models_pointer"]
+    if (
+        not isinstance(models_pointer, str)
+        or not models_pointer.startswith("/")
+    ):
+        raise ConfigError(
+            "LLM Adapter models response_models_pointer 必须是 JSON Pointer"
+        )
+    _parse_json_pointer(models_pointer)
+    model_id = value["response_model_id"]
+    if not isinstance(model_id, str) or not model_id:
+        raise ConfigError("LLM Adapter models response_model_id 必须是非空字符串")
+    for key in ("response_model_display", "response_model_strip_prefix"):
+        if key in value and (
+            not isinstance(value[key], str) or not value[key]
+        ):
+            raise ConfigError(f"LLM Adapter models {key} 必须是非空字符串")
+    return deepcopy(value)
+
+
+def _validate_usage_mapping(
+    value: Any,
+) -> tuple[str | None, str | None, str | None] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("LLM Adapter usage 必须是 JSON 对象")
+    unknown = set(value) - _USAGE_KEYS
+    if unknown:
+        raise ConfigError(
+            f"LLM Adapter usage 包含未知字段：{', '.join(sorted(unknown))}"
+        )
+    if not value:
+        raise ConfigError("LLM Adapter usage 至少需要一个 token 指针")
+    pointers: list[str | None] = []
+    for key in (
+        "input_tokens_pointer",
+        "output_tokens_pointer",
+        "total_tokens_pointer",
+    ):
+        pointer = value.get(key)
+        if pointer is None:
+            pointers.append(None)
+            continue
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ConfigError(f"LLM Adapter usage {key} 必须是 JSON Pointer")
+        _parse_json_pointer(pointer)
+        pointers.append(pointer)
+    return (pointers[0], pointers[1], pointers[2])
 
 
 def adapter_path(project: Path, adapter_id: str) -> Path:

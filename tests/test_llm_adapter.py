@@ -285,3 +285,147 @@ def test_json_adapter_negative_index_replace_content(tmp_path: Path) -> None:
     response = {"result": [{"text": "old"}, {"text": "target"}]}
     adapter.replace_content(response, "new")
     assert response == {"result": [{"text": "old"}, {"text": "new"}]}
+
+
+def models_definition() -> dict[str, object]:
+    value = definition()
+    value["models"] = {
+        "endpoint": "/v1/models",
+        "headers": {"Authorization": "Bearer ${api_key}"},
+        "response_models_pointer": "/data",
+        "response_model_id": "id",
+        "response_model_display": "display_name",
+        "response_model_strip_prefix": "models/",
+    }
+    return value
+
+
+def test_json_adapter_models_spec_builds_and_parses(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, models_definition()))
+
+    endpoint, headers = adapter.build_models_request(api_key="secret")
+    assert endpoint == "/v1/models"
+    assert headers == {"Authorization": "Bearer secret"}
+
+    models = adapter.parse_models_response(
+        {
+            "data": [
+                {"id": "models/gemini-1", "display_name": "One"},
+                {"id": "models/gemini-2"},
+            ]
+        }
+    )
+    assert models == [
+        {"id": "gemini-1", "display": "One"},
+        {"id": "gemini-2", "display": "gemini-2"},
+    ]
+    with pytest.raises(ExternalError, match="模型发现规格"):
+        load_json_adapter(write_adapter(tmp_path, definition())).parse_models_response(
+            {"data": []}
+        )
+
+
+def test_json_adapter_models_response_fails_fast(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, models_definition()))
+    with pytest.raises(ExternalError, match="不是数组"):
+        adapter.parse_models_response({"data": {"id": "x"}})
+    with pytest.raises(ExternalError, match="缺少模型 ID"):
+        adapter.parse_models_response({"data": [{"label": "x"}]})
+    with pytest.raises(ExternalError, match="缺少模型 ID"):
+        adapter.parse_models_response({"data": [3]})
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda value: value["models"].update({"endpoint": "/v1/${model}"}),
+            "endpoint 必须是无占位符",
+        ),
+        (
+            lambda value: value["models"]["headers"].update({"X": "${model}"}),
+            "未知占位符",
+        ),
+        (
+            lambda value: value["models"].update({"response_models_pointer": "data"}),
+            "必须是 JSON Pointer",
+        ),
+        (
+            lambda value: value["models"].pop("response_model_id"),
+            "缺少字段",
+        ),
+        (
+            lambda value: value["models"].update({"extra": 1}),
+            "包含未知字段",
+        ),
+    ],
+)
+def test_json_adapter_models_spec_rejects_invalid(
+    tmp_path: Path, mutate: object, message: str
+) -> None:
+    value = models_definition()
+    mutate(value)
+    with pytest.raises(ConfigError, match=message):
+        load_json_adapter(write_adapter(tmp_path, value))
+
+
+def usage_definition() -> dict[str, object]:
+    value = definition()
+    value["usage"] = {
+        "input_tokens_pointer": "/usage/prompt_tokens",
+        "output_tokens_pointer": "/usage/completion_tokens",
+        "total_tokens_pointer": "/usage/total_tokens",
+    }
+    return value
+
+
+def test_json_adapter_usage_mapping_extracts_counts(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, usage_definition()))
+    usage = adapter.extract_usage(
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+    )
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (10, 5, 15)
+
+    assert adapter.extract_usage(
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+    ) is None
+    assert adapter.extract_usage(
+        {"usage": {"prompt_tokens": "x", "completion_tokens": 5, "total_tokens": 15}}
+    ) is None
+    assert adapter.extract_usage({"choices": []}) is None
+    no_mapping = load_json_adapter(write_adapter(tmp_path, definition()))
+    assert no_mapping.extract_usage({"usage": {"prompt_tokens": 1}}) is None
+
+
+def test_json_adapter_partial_usage_mapping_defaults_zeros(tmp_path: Path) -> None:
+    value = definition()
+    value["usage"] = {"input_tokens_pointer": "/usage/input_tokens"}
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    usage = adapter.extract_usage({"usage": {"input_tokens": 7}})
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (7, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value.update({"usage": {}}), "至少需要一个"),
+        (
+            lambda value: value["usage"].update({"input_tokens_pointer": "usage"}),
+            "必须是 JSON Pointer",
+        ),
+        (
+            lambda value: value["usage"].update({"extra": 1}),
+            "包含未知字段",
+        ),
+        (lambda value: value.update({"usage": []}), "必须是 JSON 对象"),
+    ],
+)
+def test_json_adapter_usage_mapping_rejects_invalid(
+    tmp_path: Path, mutate: object, message: str
+) -> None:
+    value = usage_definition()
+    mutate(value)
+    with pytest.raises(ConfigError, match=message):
+        load_json_adapter(write_adapter(tmp_path, value))

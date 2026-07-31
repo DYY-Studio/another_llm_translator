@@ -12,5 +12,18 @@
     "stream": "${stream}",
     "store": false
   },
-  "response_content_pointer": "/output_text"
+  "response_content_pointer": "/output_text",
+  "models": {
+    "endpoint": "/v1/models",
+    "headers": {
+      "Authorization": "Bearer ${api_key}"
+    },
+    "response_models_pointer": "/data",
+    "response_model_id": "id"
+  },
+  "usage": {
+    "input_tokens_pointer": "/usage/input_tokens",
+    "output_tokens_pointer": "/usage/output_tokens",
+    "total_tokens_pointer": "/usage/total_tokens"
+  }
 }

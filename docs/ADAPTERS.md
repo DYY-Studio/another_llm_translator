@@ -93,6 +93,54 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 项目 Adapter 副本与 Run 快照保存定义原文，但不解析或保存环境变量中的 API
 Key。调试请求记录仍经过敏感 Header 清理。
 
+### 模型发现与 usage 映射
+
+Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时执行连通性检测
+并读取模型列表，用于填写 Preset；不自动判断 Provider、选择模型或切换端点：
+
+```json
+{
+  "models": {
+    "endpoint": "/v1/models",
+    "headers": {
+      "Authorization": "Bearer ${api_key}"
+    },
+    "response_models_pointer": "/data",
+    "response_model_id": "id",
+    "response_model_display": "display_name",
+    "response_model_strip_prefix": "models/"
+  }
+}
+```
+
+- models 请求固定为非流式 GET，URL 由 Preset `base_url` 与 `endpoint`
+  组成；headers 只允许 `${api_key}` 占位符。
+- `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
+  必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
+- 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
+  剥离（如 Gemini 的 `models/`）。条目缺少 ID 或响应形状非法时快速失败。
+- 缺少 `models` 规格、缺失 API Key 环境变量、HTTP 错误或网络异常都明确
+  报告，不猜测、不 fallback。请求使用 Preset 的代理与超时设置。
+
+Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
+
+```json
+{
+  "usage": {
+    "input_tokens_pointer": "/usage/prompt_tokens",
+    "output_tokens_pointer": "/usage/completion_tokens",
+    "total_tokens_pointer": "/usage/total_tokens"
+  }
+}
+```
+
+- 三个指针均可选；指针缺失或值非法（非非负整数）时该请求不计消耗，整个
+  任务标记为「usage 不可用」，不使用本地启发式估算冒充端点账单。
+- 宿主在每个成功请求后累计规范化计数，任务结束时写入任务摘要与 Run
+  `manifest.json` 的 `usage` 字段。Adapter 未声明 `usage` 时任务与 Run
+  摘要不包含 usage 字段。
+- 主请求的限速、重试与错误语义不受影响。
+
 ### 内置 Adapter 定义
 
 - `openai-compatible`：Bearer API Key，Chat Completions body，
@@ -117,7 +165,8 @@ Key。调试请求记录仍经过敏感 Header 清理。
 
 三个新定义都需要 Preset 显式引用才会被项目复制；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
-`openai-responses.json`。
+`openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。
 
 ## 2. Document Adapter（Beta）
 
@@ -253,9 +302,9 @@ Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持�
 
 ### 后期能力（未实现）
 
-路线 Stage 10 将按真实端点需求，为声明式 Adapter 增加可选的 models 请求与
-响应映射，以及规范化 usage 映射。宿主仍负责鉴权、代理、超时、HTTP 生命周期
-和任务内汇总；模型发现只由用户手动触发，缺少 usage 时明确显示不可用。
+路线 Stage 10 的 `models` 请求与响应映射、规范化 `usage` 映射和任务内
+汇总已实现（见 §1）。模型发现只由用户手动触发，缺少 usage 时明确显示
+不可用。
 
 路线 Stage 11 才考虑单 Preset 多 API Key。Preset 仍只记录密钥环境变量名；
 每 Key 限流、调度、失效恢复和 Run 审计必须先形成可测试规则。该能力不提供
