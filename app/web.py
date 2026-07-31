@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import json
 import tempfile
 from pathlib import Path
@@ -575,73 +574,6 @@ def create_app(
         with project_write_lock(root):
             atomic_write_json(destination, adapter.definition)
         return {"copied": True, "adapter_id": adapter_id}
-
-    @app.post("/api/v1/projects/{name}/migrate-llm-preset")
-    async def migrate_llm_preset(
-        name: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        preset_id = payload.get("preset_id")
-        if not isinstance(preset_id, str):
-            raise UsageError("preset_id 必须是字符串")
-        root = project(name)
-        raw = load_config(root / "config.toml")
-        if "preset" in raw["llm"]:
-            raise UsageError("项目已经使用 LLM Preset")
-        load_project_config(root, presets_root=app_root)
-        destination = preset_path(app_root, preset_id)
-        if destination.exists():
-            raise UsageError(f"LLM Preset 已存在：{preset_id}")
-        definition = {
-            "schema_version": 1,
-            "preset_id": preset_id,
-            "adapter_id": raw["llm"]["adapter"],
-            **{
-                key: raw["llm"][key]
-                for key in (
-                    "base_url",
-                    "endpoint",
-                    "model",
-                    "api_key_env",
-                    "proxy_url",
-                    "context_window_tokens",
-                    "max_output_tokens",
-                    "context_safety_margin_tokens",
-                )
-            },
-            **{
-                key: raw["execution"][key]
-                for key in (
-                    "token_safety_factor",
-                    "requests_per_minute",
-                    "input_tokens_per_minute",
-                    "max_parallel",
-                    "request_timeout_seconds",
-                )
-            },
-            "extra_body": {},
-        }
-        validate_preset_payload(preset_id, definition)
-        migrated = deepcopy(raw)
-        migrated["llm"] = {
-            "preset": preset_id,
-            **{
-                key: raw["llm"][key]
-                for key in (
-                    "temperature_terminology",
-                    "temperature_translation",
-                    "temperature_proofreading",
-                    "temperature_polishing",
-                )
-            },
-        }
-        migrated["execution"] = {
-            "scheduling_mode": raw["execution"]["scheduling_mode"]
-        }
-        content = dump_config(migrated)
-        with project_write_lock(root):
-            atomic_write_json(destination, definition)
-            atomic_write_text(root / "config.toml", content)
-        return {"migrated": True, "preset_id": preset_id}
 
     @app.post("/api/v1/projects/{name}/tasks")
     async def start_task(

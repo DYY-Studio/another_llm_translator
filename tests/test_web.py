@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
 import re
 from pathlib import Path
@@ -10,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.editor import EditorStore
-from app.config import dump_config, load_config, load_project_config
+from app.config import load_config, load_project_config
 from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
@@ -113,7 +112,6 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "附加 JSON Body",
         "最终请求预览",
         "同步全局模板",
-        "保存当前连接并切换",
         "复制全局 Adapter",
         "文件范围",
         "未选择时导出全部文件",
@@ -405,7 +403,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert "全局配置正在使用" in rejected.json()["error"]
 
 
-def test_web_explicitly_copies_adapter_and_migrates_legacy_config(
+def test_web_explicitly_copies_adapter(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -414,49 +412,6 @@ def test_web_explicitly_copies_adapter_and_migrates_legacy_config(
         projects_root=projects_root,
         app_root=app_root,
     ))
-    raw = load_config(project / "config.toml")
-    resolved = load_project_config(project, presets_root=app_root)
-    legacy = deepcopy(raw)
-    legacy["llm"].pop("preset")
-    legacy["llm"].update(
-        {
-            key: resolved["llm"][key]
-            for key in (
-                "adapter",
-                "base_url",
-                "endpoint",
-                "model",
-                "api_key_env",
-                "proxy_url",
-                "max_output_tokens",
-                "context_window_tokens",
-                "context_safety_margin_tokens",
-            )
-        }
-    )
-    legacy["execution"].update(
-        {
-            key: resolved["execution"][key]
-            for key in (
-                "max_parallel",
-                "requests_per_minute",
-                "input_tokens_per_minute",
-                "request_timeout_seconds",
-                "token_safety_factor",
-            )
-        }
-    )
-    (project / "config.toml").write_text(dump_config(legacy), encoding="utf-8")
-    migrated = client.post(
-        "/api/v1/projects/sample/migrate-llm-preset",
-        json={"preset_id": "legacy-saved"},
-    )
-    assert migrated.status_code == 200
-    assert (app_root / "llm_presets" / "legacy-saved.json").is_file()
-    migrated_config = load_config(project / "config.toml")
-    assert migrated_config["llm"]["preset"] == "legacy-saved"
-    assert "model" not in migrated_config["llm"]
-
     global_adapter = json.loads(
         (app_root / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
     )
@@ -470,6 +425,30 @@ def test_web_explicitly_copies_adapter_and_migrates_legacy_config(
     )
     assert copied.status_code == 200
     assert (project / "llm_adapters" / "alternate.json").is_file()
+
+
+def test_web_rejects_inline_config_and_has_no_migration_endpoint(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset = "default"', 'model = "legacy-model"'
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/v1/projects/sample/config")
+    assert response.status_code == 400
+    assert "未知配置键 config.llm: model" in response.json()["error"]
+    assert not any(
+        route.path == "/api/v1/projects/{name}/migrate-llm-preset"
+        and "POST" in getattr(route, "methods", set())
+        for route in app.routes
+    )
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:

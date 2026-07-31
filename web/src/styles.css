@@ -264,7 +264,6 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .config-toggle > span { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; }
 .config-toggle input { margin: 0; }
 .context-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, .7fr); gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
-.migration-card { max-width: 620px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .warning-banner .quiet-button { margin-left: 12px; }
 .preset-layout { min-height: calc(100vh - 108px); display: grid; grid-template-columns: 310px minmax(0, 1fr); background: var(--surface-soft); }
 .preset-list { min-width: 0; padding: 24px 18px; border-right: 1px solid var(--border); background: var(--surface); }
@@ -384,7 +383,6 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .config-grid { grid-template-columns: 1fr; }
   .config-section { padding: 16px 14px; }
   .context-config-row { grid-template-columns: 1fr; gap: 6px; }
-  .migration-card { grid-template-columns: 1fr; }
   .preset-layout { display: block; }
   .preset-list { padding: 18px 14px; border-right: 0; border-bottom: 1px solid var(--border); }
   .preset-editor { padding: 22px 14px 60px; }
