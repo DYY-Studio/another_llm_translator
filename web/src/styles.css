@@ -121,9 +121,9 @@ input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; margin: 0; pa
 select:focus, input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .list-header { display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 650; }
 .segment-list { min-height: 0; overflow: auto; }
-.segment-row { position: relative; width: 100%; min-height: 70px; display: grid; grid-template-columns: 14px 72px 1fr; align-items: start; gap: 8px; padding: 12px 16px; border: 0; background: var(--surface); text-align: left; }
+.segment-row-boundary { border-bottom: 1px solid var(--row-border); }
+.segment-row { width: 100%; min-height: 70px; display: grid; grid-template-columns: 14px 72px 1fr; align-items: start; gap: 8px; padding: 12px 16px; border: 0; background: var(--surface); text-align: left; }
 .segment-row { content-visibility: auto; contain-intrinsic-size: 70px; }
-.segment-row::after { position: absolute; right: 0; bottom: 0; left: 0; height: 1px; background: var(--row-border); content: ""; pointer-events: none; }
 .segment-row:hover { background: var(--sidebar); }
 .segment-row.selected { background: var(--selected); }
 .segment-row.focused { box-shadow: inset 3px 0 var(--accent); }
