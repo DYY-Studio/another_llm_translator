@@ -3,9 +3,9 @@ import { api } from "../api";
 import type { LLMPreset, LLMPresetSummary, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 
-type SettingsTab = "project-config" | "project-prompts" | "project-adapter" | "global-config" | "global-prompts" | "presets";
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
+type SettingsSection = "config" | "prompts" | "integration";
 
 interface AdapterRow {
   adapter_id: string;
@@ -13,26 +13,32 @@ interface AdapterRow {
 }
 
 export function SettingsView({ project }: { project: string }) {
-  const [tab, setTab] = useState<SettingsTab>(project ? "project-config" : "presets");
+  const [scope, setScope] = useState<ConfigScope>(project ? "project" : "global");
+  const [section, setSection] = useState<SettingsSection>("config");
   useEffect(() => {
-    if (!project && tab.startsWith("project-")) setTab("presets");
-  }, [project, tab]);
+    if (!project && scope === "project") setScope("global");
+  }, [project, scope]);
+  const activeScope: ConfigScope = project ? scope : "global";
+  const integrationLabel = activeScope === "project" ? "Adapter" : "LLM Preset";
   return (
     <div className="settings-page">
-      <div className="settings-tabs" aria-label="设置">
-        <button disabled={!project} className={tab === "project-config" ? "active" : ""} onClick={() => setTab("project-config")}>项目配置</button>
-        <button disabled={!project} className={tab === "project-prompts" ? "active" : ""} onClick={() => setTab("project-prompts")}>项目 Prompt</button>
-        <button disabled={!project} className={tab === "project-adapter" ? "active" : ""} onClick={() => setTab("project-adapter")}>项目 Adapter</button>
-        <button className={tab === "global-config" ? "active" : ""} onClick={() => setTab("global-config")}>全局配置</button>
-        <button className={tab === "global-prompts" ? "active" : ""} onClick={() => setTab("global-prompts")}>全局 Prompt</button>
-        <button className={tab === "presets" ? "active" : ""} onClick={() => setTab("presets")}>LLM Preset</button>
+      <nav className="settings-navigation" aria-label="设置">
+        <div className="settings-scope-tabs" aria-label="设置范围">
+          <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>项目设置</button>
+          <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>全局设置</button>
+        </div>
+        <div className="settings-section-tabs" aria-label={`${activeScope === "project" ? "项目" : "全局"}设置类别`}>
+          <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>配置</button>
+          <button className={section === "prompts" ? "active" : ""} onClick={() => setSection("prompts")}>Prompt</button>
+          <button className={section === "integration" ? "active" : ""} onClick={() => setSection("integration")}>{integrationLabel}</button>
+        </div>
+      </nav>
+      <div className="settings-content">
+        {section === "config" && <ConfigSettings project={project} scope={activeScope} />}
+        {section === "prompts" && <PromptSettings project={project} scope={activeScope} />}
+        {section === "integration" && activeScope === "project" && <AdapterSettings project={project} />}
+        {section === "integration" && activeScope === "global" && <PresetSettings />}
       </div>
-      {tab === "project-config" && project && <ConfigSettings project={project} scope="project" />}
-      {tab === "project-prompts" && project && <PromptSettings project={project} scope="project" />}
-      {tab === "project-adapter" && project && <AdapterSettings project={project} />}
-      {tab === "global-config" && <ConfigSettings project={project} scope="global" />}
-      {tab === "global-prompts" && <PromptSettings project={project} scope="global" />}
-      {tab === "presets" && <PresetSettings />}
     </div>
   );
 }
@@ -132,7 +138,7 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
   const contextLabels: Array<[ContextStage, string]> = [["terminology", "术语"], ["translation", "翻译"], ["proofreading", "校对"], ["polishing", "润色"]];
   return (
     <section className="config-settings">
-      <div className="page-heading config-heading">
+      <div className="page-heading config-heading settings-action-heading">
         <div><h1>{scope === "global" ? "全局配置模板" : "项目配置"}</h1><p>{scope === "global" ? "只影响新项目或明确同步的项目。" : "Prompt 与 Adapter 仍保留项目副本；连接设置实时引用全局 Preset。"}</p></div>
         <div className="button-group">
           {scope === "project" && <button className="quiet-button" onClick={syncGlobal}>同步全局模板</button>}

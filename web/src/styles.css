@@ -229,13 +229,25 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .term-actions { bottom: -90px; }
 .danger-button { min-height: 38px; padding: 0 16px; border: 1px solid var(--danger-border); border-radius: 6px; background: var(--surface); color: var(--danger); font-size: 13px; font-weight: 650; }
 .danger-button:disabled { opacity: .5; cursor: not-allowed; }
-.settings-layout { min-height: calc(100vh - 58px); display: grid; grid-template-columns: minmax(560px, 1fr) 350px; background: var(--surface-soft); }
-.settings-page { min-height: calc(100vh - 58px); padding-top: 50px; background: var(--surface-soft); }
-.settings-tabs { position: absolute; top: 58px; left: 238px; right: 0; height: 50px; display: flex; align-items: end; gap: 22px; padding: 0 30px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.settings-tabs button { height: 50px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; font-weight: 650; }
-.settings-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); }
-.settings-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.settings-layout { height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(560px, 1fr) 350px; background: var(--surface-soft); }
+.settings-page { height: 100%; min-height: 0; display: grid; grid-template-rows: 78px minmax(0, 1fr); overflow: hidden; background: var(--surface-soft); }
+.settings-navigation { z-index: 3; display: grid; grid-template-rows: 36px 42px; padding: 7px 30px 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+.settings-scope-tabs { display: flex; align-items: center; gap: 5px; }
+.settings-scope-tabs button { min-height: 28px; padding: 0 12px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; }
+.settings-scope-tabs button:hover { background: var(--hover); }
+.settings-scope-tabs button.active { border-color: var(--input-border); background: var(--surface-raised); color: var(--text); }
+.settings-scope-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.settings-section-tabs { display: flex; align-items: end; gap: 22px; overflow-x: auto; }
+.settings-section-tabs button { height: 42px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); white-space: nowrap; font-size: 13px; font-weight: 650; }
+.settings-section-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); }
+.settings-content { min-width: 0; min-height: 0; overflow: hidden; }
+.settings-main, .reference-rail { min-width: 0; min-height: 0; overflow: auto; }
 .settings-main { padding: 28px 30px; background: var(--surface); border-right: 1px solid var(--border); }
+.settings-action-heading { flex-wrap: wrap; }
+.settings-action-heading > div:first-child { flex: 1 1 280px; }
+.settings-action-heading > .button-group { flex: none; margin-left: auto; }
+.settings-action-heading > .button-group button, .settings-action-heading > button { white-space: nowrap; }
+.settings-sticky-heading { position: sticky; top: -28px; z-index: 2; margin: -28px -30px 24px; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .settings-row { display: flex; align-items: flex-end; gap: 20px; padding: 16px 0; border-block: 1px solid var(--border); }
 .settings-row label { display: grid; gap: 7px; min-width: 330px; font-size: 13px; font-weight: 650; }
 .code-field { display: grid; gap: 10px; margin-top: 18px; font-size: 13px; font-weight: 650; }
@@ -245,10 +257,10 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .reference-rail code { display: block; width: fit-content; margin-bottom: 8px; padding: 4px 7px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; }
 .reference-rail pre, .result-box { overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
 .info-box, .warning-banner { padding: 12px; margin: 18px 0; border: 1px solid var(--info-border); border-radius: 6px; background: var(--info-bg); color: var(--info-text); font-size: 12px; line-height: 1.6; }
-.text-settings { min-height: calc(100vh - 108px); padding: 30px; background: var(--surface); }
+.text-settings { height: 100%; min-height: 0; overflow: auto; padding: 30px; background: var(--surface); }
 .stage-select { display: grid; grid-template-columns: 80px 260px; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 13px; font-weight: 650; }
 .settings-editor { width: 100%; min-height: calc(100vh - 270px); margin-top: 14px; padding: 16px; resize: vertical; font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.config-settings { min-height: calc(100vh - 108px); padding: 30px; background: var(--surface-soft); }
+.config-settings { height: 100%; min-height: 0; overflow: auto; padding: 30px; background: var(--surface-soft); }
 .config-heading { position: sticky; top: 0; z-index: 2; margin: -30px -30px 24px; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .config-heading h1 { margin-top: 0; }
 .config-form { display: grid; gap: 20px; max-width: 1180px; margin: 0 auto; }
@@ -324,7 +336,6 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .workspace { grid-template-columns: minmax(330px, 42%) minmax(0, 1fr); }
   .terms-workspace { grid-template-columns: minmax(330px, 42%) minmax(430px, 1fr); }
   .settings-layout { grid-template-columns: 1fr 300px; }
-  .settings-tabs { left: 76px; }
 }
 
 @media (max-width: 1300px) {
@@ -366,20 +377,22 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .editor-pane { padding: 18px 14px 50px; }
   .comparison, .context-groups { grid-template-columns: 1fr; }
   .settings-layout { display: block; }
-  .settings-page { padding-top: 0; }
-  .settings-tabs { position: sticky; top: 58px; right: auto; left: auto; z-index: 3; height: 48px; padding-inline: 14px; overflow-x: auto; }
-  .settings-tabs button { height: 48px; white-space: nowrap; }
-  .settings-main, .reference-rail { padding: 20px 14px; border: 0; }
+  .settings-page { height: auto; display: block; overflow: visible; }
+  .settings-navigation { position: sticky; top: 58px; grid-template-rows: 36px 42px; padding-inline: 14px; }
+  .settings-scope-tabs, .settings-section-tabs { overflow-x: auto; }
+  .settings-content { overflow: visible; }
+  .settings-main, .reference-rail { overflow: visible; padding: 20px 14px; border: 0; }
   .settings-row { display: grid; }
   .settings-row label { min-width: 0; }
-  .text-settings { padding-inline: 14px; }
+  .text-settings { height: auto; overflow: visible; padding-inline: 14px; }
   .stage-select { grid-template-columns: 80px minmax(0, 1fr); }
   .stage-select select { min-width: 0; width: 100%; }
   .code-field textarea { min-height: 440px; }
-  .config-settings { padding: 20px 14px; }
+  .config-settings { height: auto; overflow: visible; padding: 20px 14px; }
   .config-heading { position: static; margin: -20px -14px 20px; padding: 20px 14px; }
   .config-heading { display: grid; }
   .config-heading .primary-button { width: 100%; }
+  .settings-sticky-heading { position: static; margin: -20px -14px 20px; padding: 20px 14px; }
   .config-grid { grid-template-columns: 1fr; }
   .config-section { padding: 16px 14px; }
   .context-config-row { grid-template-columns: 1fr; gap: 6px; }

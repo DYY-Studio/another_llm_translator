@@ -59,7 +59,7 @@ export function AdapterSettings({ project }: { project: string }) {
   return (
     <div className="settings-layout">
       <section className="settings-main">
-        <div className="page-heading">
+        <div className="page-heading settings-action-heading settings-sticky-heading">
           <div><h1>LLM Adapter</h1><p>使用完整 JSON 模板构造请求并映射响应正文。</p></div>
           <div className="button-group">
             <button className="quiet-button" onClick={copyAdapter}>复制</button>
