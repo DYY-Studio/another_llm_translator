@@ -659,3 +659,175 @@ async def test_concurrent_requests_reserve_one_shared_rate_window() -> None:
 def test_token_safety_factor_below_one_scales_estimate() -> None:
     messages = render_messages("prompt", {"segments": [{"source": "one"}]})
     assert estimate_messages(messages, 0.5) < estimate_messages(messages, 1.0)
+
+
+def _use_adapter(config: dict, name: str) -> None:
+    config["_llm_adapter"] = load_json_adapter(
+        ROOT / "llm_adapters" / f"{name}.json"
+    )
+    config["_llm_adapter_hash"] = config["_llm_adapter"].digest
+
+
+@pytest.mark.asyncio
+async def test_llm_client_sends_anthropic_format_request(tmp_path: Path) -> None:
+    current = config()
+    _use_adapter(current, "anthropic")
+    sent: dict | None = None
+    sent_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent, sent_headers
+        sent = json.loads(request.content)
+        sent_headers = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": '{"type":"end"}'}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+    assert response.content == '{"type":"end"}'
+    assert response.reasoning_content is None
+    assert sent is not None
+    assert sent_headers["x-api-key"] == "test"
+    assert sent_headers["anthropic-version"] == "2023-06-01"
+    assert sent["system"] == "prompt"
+    assert sent["messages"] == [
+        {"role": "user", "content": '{"segments":[]}'}
+    ]
+    assert sent["max_tokens"] == current["llm"]["max_output_tokens"]
+    assert sent["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_llm_client_sends_gemini_format_request(tmp_path: Path) -> None:
+    current = config()
+    _use_adapter(current, "google-gemini")
+    current["llm"]["model"] = "gemini-2.5-flash"
+    current["llm"]["base_url"] = "https://example.com"
+    current["llm"]["endpoint"] = "/v1beta/models/${model}:generateContent"
+    sent: dict | None = None
+    sent_url = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent, sent_url
+        sent_url = str(request.url)
+        sent = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {"text": "thought", "thought": True},
+                                {"text": '{"type":"end"}'},
+                            ],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+    assert response.content == '{"type":"end"}'
+    assert response.reasoning_content is None
+    assert sent_url == (
+        "https://example.com/v1beta/models/gemini-2.5-flash:generateContent"
+    )
+    assert sent is not None
+    assert sent["system_instruction"] == {"parts": [{"text": "prompt"}]}
+    assert sent["contents"] == [
+        {"role": "user", "parts": [{"text": '{"segments":[]}'}]}
+    ]
+    assert sent["generationConfig"] == {
+        "temperature": 0.2,
+        "maxOutputTokens": current["llm"]["max_output_tokens"],
+    }
+    assert "api_key" not in sent_url
+
+
+@pytest.mark.asyncio
+async def test_llm_client_sends_openai_responses_format_request(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    _use_adapter(current, "openai-responses")
+    current["llm"]["endpoint"] = "/v1/responses"
+    sent: dict | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"output_text": '{"type":"end"}'},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+    assert response.content == '{"type":"end"}'
+    assert sent is not None
+    assert sent["input"] == render_messages("prompt", {"segments": []})
+    assert sent["store"] is False
+    assert sent["stream"] is False
