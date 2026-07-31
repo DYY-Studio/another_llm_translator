@@ -279,6 +279,9 @@ def load_config(path: Path) -> dict[str, Any]:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
+    terminology = config.get("terminology")
+    if isinstance(terminology, dict):
+        terminology.setdefault("alias_primary_collision", "conflict")
     validate_config(config)
     return config
 

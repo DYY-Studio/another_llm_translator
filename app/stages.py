@@ -302,6 +302,13 @@ def _seed_published_terms(
 ) -> None:
     for term in (library or {}).get("terms", []):
         _add_term_candidate(merged, term)
+        description = term.get("description")
+        if description and "；" in str(description):
+            current = merged[normalize_term(str(term["source"]))]
+            current["descriptions"].remove(str(description))
+            current["descriptions"].extend(
+                part for part in str(description).split("；") if part
+            )
 
 
 def _apply_term_overrides(
@@ -1004,7 +1011,7 @@ async def run_terminology(
 
     selected = select_scope(segments, files, scope)
     if scope.force:
-        # A forced terminology run always starts a complete replacement scan.
+        # A forced terminology run rescans the full project and merges at publish.
         selected = [segment for segment in segments if not segment["is_empty"]]
     scans = [
         record

@@ -7,7 +7,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.errors import UsageError
 from app.execution import Scope
+from app.main import run
 from app.project import init_project
 from app.stages import (
     export_terms,
@@ -102,9 +104,29 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
 
     invalid = tmp_path / "invalid.json"
     write_exchange(invalid, [{"source": "Broken", "aliases": "wrong"}])
-    with pytest.raises(Exception, match="aliases"):
+    with pytest.raises(UsageError, match="aliases"):
         import_terms(project, invalid, dry_run=False)
     assert (project / "terminology" / "terms.json").read_bytes() == before
+
+
+def test_terms_cli_import_dry_run_and_export(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = make_project(tmp_path)
+    source = tmp_path / "terms.json"
+    write_exchange(source, [term("Alpha")])
+
+    assert run(["terms-import", str(project), str(source), "--dry-run"]) == 0
+    assert load_terms(project) is None
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+
+    assert run(["terms-import", str(project), str(source)]) == 0
+    capsys.readouterr()
+    output = tmp_path / "terms.csv"
+    assert run(["terms-export", str(project), str(output)]) == 0
+    assert json.loads(capsys.readouterr().out)["exported"] == 1
+    assert "Alpha" in output.read_text(encoding="utf-8-sig")
 
 
 def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
@@ -140,6 +162,72 @@ def test_alias_primary_merge_absorbs_the_alias_entry(tmp_path: Path) -> None:
     assert library is not None
     assert [item["source"] for item in library["terms"]] == ["Alpha"]
     assert "Beta" in library["terms"][0]["aliases"]
+
+
+@pytest.mark.parametrize(
+    ("terms", "reason"),
+    [
+        (
+            [
+                term("Alpha", aliases=["Beta"]),
+                term("Beta", aliases=["Alpha"]),
+            ],
+            "cycle",
+        ),
+        (
+            [
+                term("Alpha", aliases=["Gamma"]),
+                term("Beta", aliases=["Gamma"]),
+                term("Gamma"),
+            ],
+            "multiple_owners",
+        ),
+    ],
+)
+def test_alias_primary_ambiguous_graph_requires_manual_conflict(
+    tmp_path: Path,
+    terms: list[dict],
+    reason: str,
+) -> None:
+    project = make_project(tmp_path)
+    source = tmp_path / "terms.json"
+    write_exchange(source, terms)
+    import_terms(project, source, dry_run=False)
+    library = load_terms(project)
+    assert library is not None
+    collisions = [
+        collision
+        for item in library["terms"]
+        for collision in item["conflicts"]["alias_primaries"]
+    ]
+    assert collisions
+    assert {collision["reason"] for collision in collisions} == {reason}
+
+
+def test_alias_primary_merge_supports_a_chain(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'alias_primary_collision = "conflict"',
+            'alias_primary_collision = "merge"',
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "terms.json"
+    write_exchange(
+        source,
+        [
+            term("Alpha", aliases=["Beta"]),
+            term("Beta", aliases=["Gamma"]),
+            term("Gamma"),
+        ],
+    )
+    import_terms(project, source, dry_run=False)
+    library = load_terms(project)
+    assert library is not None
+    assert [item["source"] for item in library["terms"]] == ["Alpha"]
+    assert set(library["terms"][0]["aliases"]) == {"Beta", "Gamma"}
 
 
 @pytest.mark.asyncio
