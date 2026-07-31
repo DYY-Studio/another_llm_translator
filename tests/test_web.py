@@ -73,8 +73,15 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert asset is not None
     script = client.get(asset.group(1))
     assert script.status_code == 200
+    stylesheet = re.search(r'<link rel="stylesheet"[^>]+href="([^"]+)"', page.text)
+    assert stylesheet is not None
+    css = client.get(stylesheet.group(1))
+    assert css.status_code == 200
+    assert ".segment-batch-actions" in css.text
+    assert ".settings-tabs{position:sticky;top:58px" in css.text
     for text in (
         "terms-workspace",
+        "segment-batch-actions",
         "只看冲突",
         "显示已移除",
         "全部状态",

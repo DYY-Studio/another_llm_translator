@@ -292,7 +292,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 @media (max-width: 780px) {
   .app { display: block; height: auto; min-height: 100vh; overflow: visible; padding-bottom: 62px; }
   .main { overflow: visible; }
-  .topbar { position: sticky; top: 0; z-index: 4; padding: 0 12px; }
+  .topbar { position: sticky; top: 0; z-index: 4; min-height: 58px; padding: 0 12px; }
   .brand { font-size: 19px; }
   .topbar { gap: 7px; padding-inline: 10px; }
   .topbar select { min-width: 0; max-width: 132px; }
@@ -318,8 +318,8 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .review-controls { grid-template-columns: 1fr 1fr; }
   .review-controls input:last-child { grid-column: 1 / -1; }
   .settings-layout { display: block; }
-  .settings-page { padding-top: 48px; }
-  .settings-tabs { position: absolute; top: 58px; left: 0; height: 48px; padding-inline: 14px; overflow-x: auto; }
+  .settings-page { padding-top: 0; }
+  .settings-tabs { position: sticky; top: 58px; right: auto; left: auto; z-index: 3; height: 48px; padding-inline: 14px; overflow-x: auto; }
   .settings-tabs button { height: 48px; white-space: nowrap; }
   .settings-main, .reference-rail { padding: 20px 14px; border: 0; }
   .settings-row { display: grid; }
