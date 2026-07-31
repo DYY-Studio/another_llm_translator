@@ -618,6 +618,7 @@ def add_project_files(
     )
     new_state = old_state
     state_record: dict[str, Any] | None = None
+    committed = False
     try:
         for offset, item in enumerate(imported.files):
             sequence = next_sequence + offset
@@ -690,17 +691,18 @@ def add_project_files(
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging / "input" / relative, destination)
             moved_inputs.append(destination)
-        try:
-            _publish_source_snapshot(
-                project,
-                staging,
-                old_state_path=old_state,
-                new_state_path=new_state if state_record is not None else None,
-            )
-        except Exception:
+        _publish_source_snapshot(
+            project,
+            staging,
+            old_state_path=old_state,
+            new_state_path=new_state if state_record is not None else None,
+        )
+        committed = True
+    except Exception:
+        if not committed:
             for destination in moved_inputs:
                 destination.unlink(missing_ok=True)
-            raise
+        raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {
@@ -757,6 +759,7 @@ def remove_project_files(
     )
     staging = Path(tempfile.mkdtemp(prefix=".files-remove.", dir=project))
     moved_inputs: list[tuple[Path, Path]] = []
+    committed = False
     try:
         _write_source_snapshot(
             staging,
@@ -774,19 +777,20 @@ def remove_project_files(
                 held.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, held)
                 moved_inputs.append((held, source))
-        try:
-            _publish_source_snapshot(
-                project,
-                staging,
-                old_state_path=old_state,
-                new_state_path=new_state,
-            )
-        except Exception:
+        _publish_source_snapshot(
+            project,
+            staging,
+            old_state_path=old_state,
+            new_state_path=new_state,
+        )
+        committed = True
+    except Exception:
+        if not committed:
             for held, source in moved_inputs:
                 if held.exists():
                     source.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(held, source)
-            raise
+        raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {

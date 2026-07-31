@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -212,3 +213,51 @@ def test_init_requires_exactly_input_or_empty(tmp_path: Path) -> None:
             app_root=app_root,
             projects_root=tmp_path / "projects",
         )
+
+
+def test_add_and_remove_restore_inputs_when_staging_move_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    original_replace = os.replace
+    add_moves = 0
+
+    def fail_second_add_move(source: str | Path, target: str | Path) -> None:
+        nonlocal add_moves
+        if ".files-add." in str(source) and "/input/" in str(source):
+            add_moves += 1
+            if add_moves == 2:
+                raise OSError("copy publish failed")
+        original_replace(source, target)
+
+    monkeypatch.setattr("app.project.os.replace", fail_second_add_move)
+    with pytest.raises(OSError, match="copy publish failed"):
+        add_project_files(project, [str(first), str(second)])
+    assert read_jsonl(project / "source" / "files.jsonl") == []
+    assert not list((project / "input").rglob("F*"))
+
+    monkeypatch.setattr("app.project.os.replace", original_replace)
+    add_project_files(project, [str(first), str(second)])
+    stored = [
+        project / "input" / str(item["stored_name"])
+        for item in read_jsonl(project / "source" / "files.jsonl")
+    ]
+    remove_moves = 0
+
+    def fail_second_remove_move(source: str | Path, target: str | Path) -> None:
+        nonlocal remove_moves
+        if "/input/" in str(source) and "/removed-input/" in str(target):
+            remove_moves += 1
+            if remove_moves == 2:
+                raise OSError("remove staging failed")
+        original_replace(source, target)
+
+    monkeypatch.setattr("app.project.os.replace", fail_second_remove_move)
+    with pytest.raises(OSError, match="remove staging failed"):
+        remove_project_files(project, ["F0001", "F0002"])
+    assert all(path.is_file() for path in stored)
+    assert len(read_jsonl(project / "source" / "files.jsonl")) == 2
