@@ -126,6 +126,71 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
 
 
+def test_web_creates_empty_project_and_manages_source_files(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "empty",
+            "document_adapter": "txt",
+            "empty": "true",
+        },
+    )
+    assert created.status_code == 200
+    overview = client.get("/api/v1/projects/empty").json()
+    assert overview["document_adapter_id"] == "txt"
+    assert overview["nonempty_segment_count"] == 0
+    assert overview["files"] == []
+    assert (
+        client.get(
+            "/api/v1/projects/empty/task-options/translation"
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/v1/projects/empty/tasks",
+            json={"stage": "translation"},
+        ).status_code
+        == 400
+    )
+    assert app.state.tasks.tasks == {}
+
+    added = client.post(
+        "/api/v1/projects/empty/files",
+        files=[
+            ("files", ("first.txt", b"one", "text/plain")),
+            ("files", ("second.txt", b"two", "text/plain")),
+        ],
+    )
+    assert added.status_code == 200
+    assert added.json()["added_file_ids"] == ["F0001", "F0002"]
+    removed = client.post(
+        "/api/v1/projects/empty/files/remove",
+        json={"file_ids": ["F0001", "F0002"]},
+    )
+    assert removed.status_code == 200
+    overview = client.get("/api/v1/projects/empty").json()
+    assert overview["files"] == []
+    assert overview["segments"] == []
+
+
+def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    before = (project / "source" / "files.jsonl").read_bytes()
+    response = client.post(
+        "/api/v1/projects/sample/files/remove",
+        json={"file_ids": ["F0001", "F9999"]},
+    )
+    assert response.status_code == 400
+    assert (project / "source" / "files.jsonl").read_bytes() == before
+
+
 def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))

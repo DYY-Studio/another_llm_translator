@@ -20,7 +20,9 @@ from .locking import project_write_lock
 from .plugins import document_adapter_summaries
 from .project import (
     PROJECTS_ROOT,
+    add_project_files,
     init_project,
+    remove_project_files,
     resolve_project,
     sync_global_templates,
 )
@@ -97,14 +99,16 @@ def create_app(
     async def create_project(
         name: str = Form(...),
         document_adapter: str = Form("txt"),
-        files: list[UploadFile] = File(...),
+        empty: bool = Form(False),
+        files: list[UploadFile] | None = File(None),
     ) -> dict[str, Any]:
-        if not files:
-            raise UsageError("至少上传一个输入文件")
+        uploads = files or []
+        if empty == bool(uploads):
+            raise UsageError("必须上传输入文件，或显式选择创建空项目")
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
             inputs = []
-            for index, upload in enumerate(files, start=1):
+            for index, upload in enumerate(uploads, start=1):
                 filename = Path(upload.filename or f"input-{index}.txt").name
                 target = upload_root / f"{index:04d}" / filename
                 target.parent.mkdir()
@@ -114,6 +118,7 @@ def create_app(
                 inputs,
                 name=name,
                 document_adapter_id=document_adapter,
+                empty=empty,
                 projects_root=projects_root,
             )
         summary["project_path"] = str(path)
@@ -122,6 +127,41 @@ def create_app(
     @app.get("/api/v1/projects/{name}")
     async def overview(name: str) -> dict[str, Any]:
         return EditorStore(project(name)).overview()
+
+    @app.post("/api/v1/projects/{name}/files")
+    async def add_files(
+        name: str,
+        files: list[UploadFile] = File(...),
+    ) -> dict[str, Any]:
+        if not files:
+            raise UsageError("至少上传一个输入文件")
+        root = project(name)
+        with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
+            upload_root = Path(raw)
+            inputs = []
+            for index, upload in enumerate(files, start=1):
+                filename = Path(upload.filename or f"input-{index}").name
+                target = upload_root / f"{index:04d}" / filename
+                target.parent.mkdir()
+                target.write_bytes(await upload.read())
+                inputs.append(str(target))
+            with project_write_lock(root):
+                return add_project_files(root, inputs)
+
+    @app.post("/api/v1/projects/{name}/files/remove")
+    async def remove_files(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        file_ids = payload.get("file_ids")
+        if (
+            not isinstance(file_ids, list)
+            or not file_ids
+            or not all(isinstance(value, str) and value for value in file_ids)
+        ):
+            raise UsageError("file_ids 必须是非空字符串数组")
+        root = project(name)
+        with project_write_lock(root):
+            return remove_project_files(root, file_ids)
 
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")
     async def segment(name: str, segment_id: str) -> dict[str, Any]:

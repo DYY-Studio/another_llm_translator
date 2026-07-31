@@ -182,6 +182,13 @@ class EditorStore:
         return {
             "name": self.metadata["name"],
             "path": str(self.project),
+            "document_adapter_id": str(
+                self.metadata.get("document_adapter_id") or "txt"
+            ),
+            "nonempty_segment_count": sum(
+                not bool(item["is_empty"])
+                for item in self.segments_by_id.values()
+            ),
             "files": files,
             "segments": segments,
         }

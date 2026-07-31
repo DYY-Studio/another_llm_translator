@@ -46,6 +46,8 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         else inspection["stages"][stage]
     )
     completed = int(stage_summary["completed"])
+    if not int(inspection["segments"]) - int(inspection["empty_segments"]):
+        raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
     current_completed = int(stage_summary["current_fingerprint_completed"])
     candidates = find_running_runs(project, stage)
     running_run = None

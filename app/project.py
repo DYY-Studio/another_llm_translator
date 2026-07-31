@@ -9,7 +9,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import chardet
 
@@ -301,6 +301,7 @@ def init_project(
     name: str,
     recursive: bool = False,
     document_adapter_id: str = "txt",
+    empty: bool = False,
     dry_run: bool = False,
     app_root: Path = APP_ROOT,
     projects_root: Path | None = None,
@@ -313,6 +314,8 @@ def init_project(
         or "\0" in name
     ):
         raise UsageError("项目名不能为空，也不能包含路径分隔符")
+    if empty == bool(inputs):
+        raise UsageError("必须提供输入文件，或显式使用 --empty 创建空项目")
     projects_root = projects_root or app_root / "projects"
     global_config = load_config(app_root / "config" / "config.toml")
     global_hash = bundle_hash(app_root)
@@ -323,10 +326,14 @@ def init_project(
         raise UsageError(
             f"Document Adapter 不支持导入：{document_adapter.adapter_id}"
         )
-    imported = document_adapter.import_sources(
-        inputs,
-        recursive=recursive,
-        config=global_config,
+    imported = (
+        DocumentImport(files=(), warnings=())
+        if empty
+        else document_adapter.import_sources(
+            inputs,
+            recursive=recursive,
+            config=global_config,
+        )
     )
 
     summary: dict[str, object] = {
@@ -347,6 +354,7 @@ def init_project(
     temp = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=projects_root))
     try:
         _copy_bundle(app_root, temp)
+        (temp / "input").mkdir()
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
         for file_order, item in enumerate(imported.files, start=1):
@@ -433,6 +441,7 @@ def init_project(
                 global_bundle_hash_seen=global_hash,
                 file_count=len(file_records),
                 segment_count=len(segment_records),
+                next_file_sequence=len(file_records) + 1,
                 document_adapter_id=document_adapter.adapter_id,
                 document_adapter_version=document_adapter.version,
                 document_adapter_state=(
@@ -446,6 +455,352 @@ def init_project(
         shutil.rmtree(temp, ignore_errors=True)
         raise
     return target, summary
+
+
+def _next_file_sequence(
+    metadata: dict[str, Any], files: list[dict[str, Any]]
+) -> int:
+    configured = metadata.get("next_file_sequence")
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        return configured
+    maximum = 0
+    for file_record in files:
+        match = re.fullmatch(r"F(\d+)", str(file_record.get("file_id", "")))
+        if match:
+            maximum = max(maximum, int(match.group(1)))
+    return maximum + 1
+
+
+def _running_run_ids(project: Path) -> list[str]:
+    running: list[str] = []
+    runs_dir = project / "runs"
+    if not runs_dir.is_dir():
+        return running
+    for manifest_path in runs_dir.glob("*/manifest.json"):
+        manifest = read_json(manifest_path)
+        if manifest.get("status") == "running":
+            running.append(str(manifest.get("run_id") or manifest_path.parent.name))
+    return sorted(running)
+
+
+def _require_mutable_document_adapter(
+    metadata: dict[str, Any],
+) -> tuple[str, object]:
+    adapter_id = str(metadata.get("document_adapter_id") or "txt")
+    if adapter_id not in {"txt", "epub"}:
+        raise UsageError(
+            f"Document Adapter {adapter_id} 暂不支持现有项目文件变更"
+        )
+    from .plugins import get_document_adapter
+
+    return adapter_id, get_document_adapter(adapter_id)
+
+
+def _source_records(
+    project: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    return (
+        read_json(project / "project.json"),
+        read_jsonl(project / "source" / "files.jsonl"),
+        read_jsonl(project / "source" / "segments.jsonl"),
+    )
+
+
+def _write_source_snapshot(
+    root: Path,
+    *,
+    metadata: dict[str, Any],
+    files: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    adapter_state_path: Path | None,
+    adapter_state: dict[str, Any] | None,
+) -> None:
+    write_jsonl(root / "source" / "files.jsonl", files)
+    write_jsonl(root / "source" / "segments.jsonl", segments)
+    atomic_write_json(root / "project.json", metadata)
+    if adapter_state_path is not None and adapter_state is not None:
+        atomic_write_json(root / adapter_state_path, adapter_state)
+
+
+def _publish_source_snapshot(
+    project: Path,
+    staging: Path,
+    *,
+    old_state_path: Path | None,
+    new_state_path: Path | None,
+) -> None:
+    targets = [
+        Path("source/files.jsonl"),
+        Path("source/segments.jsonl"),
+        Path("project.json"),
+    ]
+    if new_state_path is not None:
+        targets.append(new_state_path)
+    backup = staging / "backup"
+    published: list[Path] = []
+    removed_old_state: Path | None = None
+    try:
+        for relative in targets:
+            current = project / relative
+            if current.exists():
+                saved = backup / relative
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(current, saved)
+            replacement = staging / relative
+            current.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(replacement, current)
+            published.append(relative)
+        if old_state_path is not None and old_state_path != new_state_path:
+            current = project / old_state_path
+            if current.exists():
+                removed_old_state = backup / old_state_path
+                removed_old_state.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(current, removed_old_state)
+    except Exception:
+        for relative in reversed(published):
+            saved = backup / relative
+            current = project / relative
+            if saved.exists():
+                os.replace(saved, current)
+            elif current.exists():
+                current.unlink()
+        if removed_old_state is not None and removed_old_state.exists():
+            destination = project / old_state_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(removed_old_state, destination)
+        raise
+
+
+def add_project_files(
+    project: Path,
+    inputs: list[str],
+    *,
+    recursive: bool = False,
+) -> dict[str, object]:
+    running = _running_run_ids(project)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能添加文件：{', '.join(running)}"
+        )
+    metadata, files, segments = _source_records(project)
+    adapter_id, adapter = _require_mutable_document_adapter(metadata)
+    if adapter_id == "epub" and files:
+        raise UsageError("EPUB 项目已有文件，不能继续添加")
+    config = load_config(project / "config.toml")
+    imported = adapter.import_sources(
+        inputs,
+        recursive=recursive,
+        config=config,
+    )
+    if adapter_id == "epub" and len(imported.files) != 1:
+        raise UsageError("EPUB 项目一次只能添加一个 EPUB 文件")
+    existing_names = {
+        str(record["original_name"]).casefold() for record in files
+    }
+    duplicate_names = sorted(
+        item.original_name
+        for item in imported.files
+        if item.original_name.casefold() in existing_names
+    )
+    if duplicate_names:
+        raise UsageError(f"活动文件已存在同名导出路径：{', '.join(duplicate_names)}")
+
+    project_id = str(metadata["project_id"])
+    next_sequence = _next_file_sequence(metadata, files)
+    next_order = max((int(item["file_order"]) for item in files), default=0) + 1
+    added_files: list[dict[str, Any]] = []
+    added_segments: list[dict[str, Any]] = []
+    staging = Path(tempfile.mkdtemp(prefix=".files-add.", dir=project))
+    moved_inputs: list[Path] = []
+    old_state = (
+        Path(str(metadata["document_adapter_state"]))
+        if metadata.get("document_adapter_state")
+        else None
+    )
+    new_state = old_state
+    state_record: dict[str, Any] | None = None
+    committed = False
+    try:
+        for offset, item in enumerate(imported.files):
+            sequence = next_sequence + offset
+            file_id = f"F{sequence:04d}"
+            relative = Path(item.original_name)
+            stored_name = relative.parent / f"{file_id}__{relative.name}"
+            staged_input = staging / "input" / stored_name
+            staged_input.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item.source_path, staged_input)
+            file_record = record_header(
+                "source_file",
+                project_id,
+                record_id=f"FILE-{file_id}",
+                file_id=file_id,
+                file_order=next_order + offset,
+                original_name=item.original_name,
+                stored_name=stored_name.as_posix(),
+                encoding_detected=item.encoding_detected,
+                encoding_confidence=item.encoding_confidence,
+                encoding_used=item.encoding_used,
+                segment_count=len(item.segments),
+            )
+            added_files.append(file_record)
+            for line_index, source in enumerate(item.segments):
+                segment_id = f"{file_id}-S{line_index + 1:06d}"
+                added_segments.append(
+                    record_header(
+                        "source_segment",
+                        project_id,
+                        record_id=segment_id,
+                        segment_id=segment_id,
+                        file_id=file_id,
+                        line_index=line_index,
+                        source=source,
+                        is_empty=source == "" or source.isspace(),
+                    )
+                )
+        if imported.opaque_state is not None:
+            new_state = Path("source") / "adapters" / adapter_id / "state.json"
+            state_record = record_header(
+                "document_adapter_state",
+                project_id,
+                record_id=f"DOCUMENT-{adapter_id}",
+                adapter_id=adapter_id,
+                adapter_version=adapter.version,
+                state=imported.opaque_state,
+            )
+        new_files = [*files, *added_files]
+        new_segments = [*segments, *added_segments]
+        new_metadata = dict(metadata)
+        new_metadata.update(
+            file_count=len(new_files),
+            segment_count=len(new_segments),
+            next_file_sequence=next_sequence + len(added_files),
+            document_adapter_state=(
+                new_state.as_posix() if new_state is not None else None
+            ),
+        )
+        _write_source_snapshot(
+            staging,
+            metadata=new_metadata,
+            files=new_files,
+            segments=new_segments,
+            adapter_state_path=new_state if state_record is not None else None,
+            adapter_state=state_record,
+        )
+        for file_record in added_files:
+            relative = Path(str(file_record["stored_name"]))
+            destination = project / "input" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging / "input" / relative, destination)
+            moved_inputs.append(destination)
+        _publish_source_snapshot(
+            project,
+            staging,
+            old_state_path=old_state,
+            new_state_path=new_state if state_record is not None else None,
+        )
+        committed = True
+    except Exception:
+        if not committed:
+            for destination in moved_inputs:
+                destination.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return {
+        "added_file_ids": [str(item["file_id"]) for item in added_files],
+        "added_files": len(added_files),
+        "added_segments": len(added_segments),
+        "file_count": len(files) + len(added_files),
+        "segment_count": len(segments) + len(added_segments),
+        "warnings": list(imported.warnings),
+    }
+
+
+def remove_project_files(
+    project: Path,
+    file_ids: list[str],
+) -> dict[str, object]:
+    if not file_ids:
+        raise UsageError("必须选择至少一个文件")
+    if len(set(file_ids)) != len(file_ids):
+        raise UsageError("文件 ID 不能重复")
+    running = _running_run_ids(project)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能移除文件：{', '.join(running)}"
+        )
+    metadata, files, segments = _source_records(project)
+    _require_mutable_document_adapter(metadata)
+    known = {str(item["file_id"]): item for item in files}
+    unknown = [file_id for file_id in file_ids if file_id not in known]
+    if unknown:
+        raise UsageError(f"未知文件 ID：{', '.join(unknown)}")
+    selected = set(file_ids)
+    new_files = [item for item in files if str(item["file_id"]) not in selected]
+    removed_segments = [
+        item for item in segments if str(item["file_id"]) in selected
+    ]
+    new_segments = [
+        item for item in segments if str(item["file_id"]) not in selected
+    ]
+    old_state = (
+        Path(str(metadata["document_adapter_state"]))
+        if metadata.get("document_adapter_state")
+        else None
+    )
+    new_state = old_state if new_files else None
+    new_metadata = dict(metadata)
+    new_metadata.update(
+        file_count=len(new_files),
+        segment_count=len(new_segments),
+        next_file_sequence=_next_file_sequence(metadata, files),
+        document_adapter_state=(
+            new_state.as_posix() if new_state is not None else None
+        ),
+    )
+    staging = Path(tempfile.mkdtemp(prefix=".files-remove.", dir=project))
+    moved_inputs: list[tuple[Path, Path]] = []
+    committed = False
+    try:
+        _write_source_snapshot(
+            staging,
+            metadata=new_metadata,
+            files=new_files,
+            segments=new_segments,
+            adapter_state_path=None,
+            adapter_state=None,
+        )
+        for file_id in file_ids:
+            relative = Path(str(known[file_id]["stored_name"]))
+            source = project / "input" / relative
+            if source.exists():
+                held = staging / "removed-input" / relative
+                held.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, held)
+                moved_inputs.append((held, source))
+        _publish_source_snapshot(
+            project,
+            staging,
+            old_state_path=old_state,
+            new_state_path=new_state,
+        )
+        committed = True
+    except Exception:
+        if not committed:
+            for held, source in moved_inputs:
+                if held.exists():
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(held, source)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return {
+        "removed_file_ids": file_ids,
+        "removed_files": len(file_ids),
+        "removed_segments": len(removed_segments),
+        "file_count": len(new_files),
+        "segment_count": len(new_segments),
+    }
 
 
 def resolve_project(value: str, projects_root: Path = PROJECTS_ROOT) -> Path:
