@@ -81,6 +81,10 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "上下文",
         "当前外观",
         "跟随系统",
+        "运行当前阶段",
+        "复用已有结果",
+        "强制重做全部",
+        "续用原 Run",
     ):
         assert text in script.text
 

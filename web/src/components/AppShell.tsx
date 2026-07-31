@@ -22,6 +22,7 @@ export function AppShell({
   onRun,
   onCancel,
   canRun,
+  runLoading,
   themeMode,
   onTheme,
   children,
@@ -36,6 +37,7 @@ export function AppShell({
   onRun: () => void;
   onCancel: () => void;
   canRun: boolean;
+  runLoading: boolean;
   themeMode: ThemeMode;
   onTheme: () => void;
   children: ReactNode;
@@ -91,8 +93,8 @@ export function AppShell({
         </nav>
         {(canRun || running) && <div className="run-panel">
           {canRun && (
-            <button className="primary-button run-button" disabled={!project || running} onClick={onRun}>
-              {running ? "正在执行" : "开始当前阶段"}
+            <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
+              {running ? "正在执行" : runLoading ? "正在检查" : "开始当前阶段"}
             </button>
           )}
           {task && (
@@ -105,7 +107,24 @@ export function AppShell({
           )}
         </div>}
       </aside>
-      <main className="main">{children}</main>
+      <main className="main">
+        {(canRun || running) && (
+          <div className="mobile-run-bar">
+            {canRun && (
+              <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
+                {running ? "正在执行" : runLoading ? "正在检查" : "运行当前阶段"}
+              </button>
+            )}
+            {running && (
+              <>
+                <span>{task?.stage} · {task?.status}</span>
+                <button className="danger-link" onClick={onCancel}>取消任务</button>
+              </>
+            )}
+          </div>
+        )}
+        {children}
+      </main>
     </div>
   );
 }
