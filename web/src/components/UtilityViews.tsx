@@ -20,26 +20,6 @@ export function Overview({ value }: { value: ProjectOverview }) {
   );
 }
 
-export function TermsView({ project }: { project: string }) {
-  const [data, setData] = useState<{ terms_revision: number | null; conflict_count: number; terms: Array<Record<string, unknown>> } | null>(null);
-  useEffect(() => { void api<typeof data>(`/api/v1/projects/${project}/terms`).then(setData); }, [project]);
-  return (
-    <div className="page">
-      <div className="page-heading"><div><h1>术语</h1><p>优先处理冲突，再检查已发布术语。</p></div></div>
-      <div className="term-table">
-        <div className="table-head"><span>原文</span><span>类别</span><span>推荐译名</span><span>状态</span></div>
-        {data?.terms.map((item) => <div className="table-row" key={String(item.normalized)}>
-          <strong>{String(item.source)}</strong>
-          <span>{String(item.category ?? "—")}</span>
-          <span>{String(item.preferred_translation ?? "—")}</span>
-          <span>{item.has_conflicts ? "待裁决" : item.disabled ? "已移除" : "有效"}</span>
-        </div>)}
-        {!data?.terms.length && <div className="empty">尚无已发布术语</div>}
-      </div>
-    </div>
-  );
-}
-
 export function ExportView({ project }: { project: string }) {
   const [stage, setStage] = useState("translated");
   const [bilingual, setBilingual] = useState(false);

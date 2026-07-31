@@ -90,6 +90,7 @@ export function SegmentWorkspace({
   const selectedIndex = neighbors.findIndex((item) => item.segment_id === selected?.segment_id);
   const before = neighbors.slice(Math.max(0, selectedIndex - 2), selectedIndex);
   const after = neighbors.slice(selectedIndex + 1, selectedIndex + 3);
+  const showContext = status !== "all" || search.trim() !== "";
 
   async function save(apply = false) {
     if (!selected) return;
@@ -178,11 +179,15 @@ export function SegmentWorkspace({
                 <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="修改原因（可选）" />
               </div>
             )}
-            <div className="context-heading"><h2>上下文</h2></div>
-            <div className="context-groups">
-              <ContextGroup title="上文" items={before} empty="无更多上文" />
-              <ContextGroup title="下文" items={after} empty="无更多下文" />
-            </div>
+            {showContext && (
+              <>
+                <div className="context-heading"><h2>上下文</h2></div>
+                <div className="context-groups">
+                  <ContextGroup title="上文" items={before} empty="无更多上文" stage={stage} />
+                  <ContextGroup title="下文" items={after} empty="无更多下文" stage={stage} />
+                </div>
+              </>
+            )}
             <div className="editor-actions">
               <button className="primary-button" disabled={!!review && !review.base} onClick={() => save(false)}>保存</button>
               {stage !== "translation" && <button className="quiet-button" disabled={!review?.base} onClick={() => save(true)}>保存并应用</button>}
@@ -194,17 +199,38 @@ export function SegmentWorkspace({
   );
 }
 
-function ContextGroup({ title, items, empty }: { title: string; items: Segment[]; empty: string }) {
+function ContextGroup({
+  title,
+  items,
+  empty,
+  stage,
+}: {
+  title: string;
+  items: Segment[];
+  empty: string;
+  stage: "translation" | "proofreading" | "polishing";
+}) {
   return (
     <div className="context-group">
       <h3>{title}</h3>
-      {!items.length ? <p className="muted">{empty}</p> : items.map((item) => (
-        <div className="context-item" key={item.segment_id}>
-          <small>{item.segment_id}</small>
-          <p>{item.source}</p>
-          {item.translation?.text && <p className="muted">{item.translation.text}</p>}
-        </div>
-      ))}
+      {!items.length ? <p className="muted">{empty}</p> : items.map((item) => {
+        const result = contextResult(item, stage);
+        return (
+          <div className="context-item" key={item.segment_id}>
+            <small>{item.segment_id}</small>
+            <p>{item.source}</p>
+            {result && <p className="muted">{result}</p>}
+          </div>
+        );
+      })}
     </div>
   );
+}
+
+function contextResult(
+  segment: Segment,
+  stage: "translation" | "proofreading" | "polishing",
+) {
+  if (stage === "translation") return segment.translation?.text;
+  return segment.reviews[stage].base?.text;
 }

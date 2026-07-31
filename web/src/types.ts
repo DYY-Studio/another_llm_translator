@@ -58,3 +58,26 @@ export interface TaskState {
   error?: string | null;
   summary?: Record<string, unknown> | null;
 }
+
+export interface Term {
+  normalized: string;
+  source: string;
+  category: string | null;
+  description: string | null;
+  preferred_translation: string | null;
+  aliases: string[];
+  disabled: boolean;
+  conflicts: {
+    categories: string[];
+    preferred_translations: string[];
+  };
+  has_conflicts: boolean;
+}
+
+export interface TermsResponse {
+  terms_revision: number | null;
+  conflict_count: number;
+  terms: Term[];
+}
+
+export type ThemeMode = "system" | "light" | "dark";

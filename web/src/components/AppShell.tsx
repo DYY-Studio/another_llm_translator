@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ProjectSummary, Stage, TaskState } from "../types";
+import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 
 const items: Array<{ id: Stage; label: string }> = [
@@ -21,6 +21,8 @@ export function AppShell({
   onCreate,
   onRun,
   onCancel,
+  themeMode,
+  onTheme,
   children,
 }: {
   projects: ProjectSummary[];
@@ -32,9 +34,27 @@ export function AppShell({
   onCreate: () => void;
   onRun: () => void;
   onCancel: () => void;
+  themeMode: ThemeMode;
+  onTheme: () => void;
   children: ReactNode;
 }) {
   const running = task && ["queued", "running", "cancelling"].includes(task.status);
+  const themeLabels: Record<ThemeMode, string> = {
+    system: "跟随系统",
+    light: "浅色",
+    dark: "深色",
+  };
+  const nextTheme: Record<ThemeMode, ThemeMode> = {
+    system: "light",
+    light: "dark",
+    dark: "system",
+  };
+  const themeIcon = themeMode === "system"
+    ? icons.themeSystem
+    : themeMode === "light"
+      ? icons.themeLight
+      : icons.themeDark;
+  const themeTitle = `当前外观：${themeLabels[themeMode]}；切换为${themeLabels[nextTheme[themeMode]]}`;
   return (
     <div className="app">
       <header className="topbar">
@@ -45,6 +65,9 @@ export function AppShell({
         </select>
         <button className="quiet-button create-button" onClick={onCreate}>新建项目</button>
         <div className="topbar-spacer" />
+        <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
+          {themeIcon}
+        </button>
         <button className="icon-button" aria-label="设置" onClick={() => onStage("settings")}>
           {icons.settings}
         </button>
