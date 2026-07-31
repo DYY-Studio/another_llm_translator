@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.editor import EditorStore
+from app.config import load_config
 from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
@@ -99,8 +100,17 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "全部应用",
         "导入术语表",
         "导出术语表",
+        "项目与输入",
+        "LLM 连接",
+        "模型与采样",
+        "执行与分块",
+        "参考上下文",
+        "翻译校验与重试",
+        "调试与故障注入",
+        "写入规范 TOML",
     ):
         assert text in script.text
+    assert "保存前会严格验证完整 TOML" not in script.text
 
 
 def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
@@ -177,6 +187,81 @@ def test_web_creates_empty_project_and_manages_source_files(
     overview = client.get("/api/v1/projects/empty").json()
     assert overview["files"] == []
     assert overview["segments"] == []
+
+
+def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.get("/api/v1/projects/sample/config")
+    assert response.status_code == 200
+    config = response.json()["config"]
+    config["project"]["target_language"] = "繁体中文"
+    config["input"]["encoding_confidence_threshold"] = 0.6
+    config["llm"]["temperature_translation"] = 0.25
+    config["execution"]["max_parallel"] = 3
+    config["chunking"]["allow_split_oversized_segment"] = False
+    config["context"]["translation"]["previous_segments"] = 4
+    config["terminology"]["alias_primary_collision"] = "merge"
+    config["validation"]["translation"]["exhausted_mode"] = "warning"
+    config["retry"]["jitter_seconds"] = 0.2
+    config["debug"]["inject_429_every"] = 7
+
+    saved = client.put(
+        "/api/v1/projects/sample/config",
+        json={"config": config},
+    )
+    assert saved.status_code == 200
+    assert client.get("/api/v1/projects/sample/config").json()["config"] == config
+    assert load_config(project / "config.toml") == config
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda config: config["execution"].__setitem__("max_parallel", 1.5),
+        lambda config: config["retry"].__setitem__("max_delay_seconds", -1),
+        lambda config: config["project"].__setitem__("unknown", True),
+        lambda config: config.__delitem__("chunking"),
+    ],
+)
+def test_web_rejects_invalid_project_config_without_changing_file(
+    tmp_path: Path,
+    mutate: object,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    original = (project / "config.toml").read_bytes()
+    config = client.get("/api/v1/projects/sample/config").json()["config"]
+    mutate(config)  # type: ignore[operator]
+
+    response = client.put(
+        "/api/v1/projects/sample/config",
+        json={"config": config},
+    )
+
+    assert response.status_code == 400
+    assert (project / "config.toml").read_bytes() == original
+
+
+def test_web_config_requires_object_and_existing_matching_adapter(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    original = (project / "config.toml").read_bytes()
+
+    assert client.put(
+        "/api/v1/projects/sample/config",
+        json={"config": "raw toml"},
+    ).status_code == 400
+    config = client.get("/api/v1/projects/sample/config").json()["config"]
+    config["llm"]["adapter"] = "missing"
+    assert client.put(
+        "/api/v1/projects/sample/config",
+        json={"config": config},
+    ).status_code == 400
+    assert (project / "config.toml").read_bytes() == original
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:

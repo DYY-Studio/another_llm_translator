@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import load_config, load_project_config
+from .config import dump_config, load_config, load_project_config
 from .editor import EditorStore
 from .errors import AppError, UsageError
 from .execution import Scope
@@ -253,34 +253,22 @@ def create_app(
         return EditorStore(project(name)).reset_results(payload)
 
     @app.get("/api/v1/projects/{name}/config")
-    async def get_config(name: str) -> dict[str, str]:
-        path = project(name) / "config.toml"
-        return {"content": path.read_text(encoding="utf-8")}
+    async def get_config(name: str) -> dict[str, Any]:
+        return {"config": load_config(project(name) / "config.toml")}
 
     @app.put("/api/v1/projects/{name}/config")
     async def put_config(name: str, payload: dict[str, Any]) -> dict[str, bool]:
-        content = payload.get("content")
-        if not isinstance(content, str):
-            raise UsageError("config content 必须是字符串")
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            raise UsageError("config 必须是对象")
+        content = dump_config(config)
         root = project(name)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=root,
-            prefix=".config.",
-            suffix=".toml",
-            delete=False,
-        ) as handle:
-            handle.write(content)
-            temporary = Path(handle.name)
-        try:
-            config = load_config(temporary)
-            selected = adapter_path(root, str(config["llm"]["adapter"]))
-            load_json_adapter(selected)
-            with project_write_lock(root):
-                temporary.replace(root / "config.toml")
-        finally:
-            temporary.unlink(missing_ok=True)
+        selected_id = str(config["llm"]["adapter"])
+        adapter = load_json_adapter(adapter_path(root, selected_id))
+        if adapter.adapter_id != selected_id:
+            raise UsageError("LLM Adapter 文件中的 adapter_id 与项目配置不一致")
+        with project_write_lock(root):
+            atomic_write_text(root / "config.toml", content)
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")

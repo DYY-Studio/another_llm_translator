@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -272,6 +273,39 @@ def validate_config(config: dict[str, Any]) -> None:
             or context["previous_segments"] < 0
         ):
             raise ConfigError(f"context.{stage}.previous_segments 必须是非负整数")
+
+
+def dump_config(config: dict[str, Any]) -> str:
+    """Serialize a validated project config in the canonical schema order."""
+    validate_config(config)
+    lines: list[str] = []
+
+    def write_table(
+        path: tuple[str, ...],
+        value: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> None:
+        if lines:
+            lines.append("")
+        lines.append("[" + ".".join(path) + "]")
+        for key, child_schema in schema.items():
+            if child_schema is None:
+                lines.append(f"{key} = {_toml_scalar(value[key])}")
+        for key, child_schema in schema.items():
+            if child_schema is not None:
+                write_table((*path, key), value[key], child_schema)
+
+    for section, section_schema in SCHEMA.items():
+        write_table((section,), config[section], section_schema)
+    return "\n".join(lines) + "\n"
+
+
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def load_config(path: Path) -> dict[str, Any]:

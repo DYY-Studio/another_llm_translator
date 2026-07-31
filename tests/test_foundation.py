@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import ConfigError, load_config
+from app.config import ConfigError, dump_config, load_config
 from app.errors import StorageError, UsageError
 from app.project import (
     bundle_hash,
@@ -142,6 +142,22 @@ def test_config_accepts_token_safety_factor_below_one(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_config(path)["execution"]["token_safety_factor"] == 0.5
+
+
+def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    config = load_config(source)
+    config["project"]["target_language"] = '简体中文 "测试"'
+    config["llm"]["proxy_url"] = ""
+    config["execution"]["token_safety_factor"] = 0.75
+
+    path = tmp_path / "config.toml"
+    path.write_text(dump_config(config), encoding="utf-8")
+
+    assert load_config(path) == config
+    text = path.read_text(encoding="utf-8")
+    assert "[context.translation]" in text
+    assert 'target_language = "简体中文 \\"测试\\""' in text
 
 
 def test_decode_gbk_as_gb18030() -> None:
