@@ -135,6 +135,10 @@ export interface ProjectConfig {
   };
   llm: {
     preset: string;
+    preset_terminology: string;
+    preset_translation: string;
+    preset_proofreading: string;
+    preset_polishing: string;
     temperature_terminology: number;
     temperature_translation: number;
     temperature_proofreading: number;

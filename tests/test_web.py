@@ -107,6 +107,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "导出术语表",
         "项目与输入",
         "LLM 与采样",
+        "全局 LLM Preset",
+        "使用全局 Preset",
+        "翻译 Preset",
         "执行与分块",
         "参考上下文",
         "翻译校验与重试",
@@ -310,6 +313,13 @@ def test_web_config_requires_object_and_existing_matching_adapter(
     ).status_code == 400
     config = client.get("/api/v1/projects/sample/config").json()["config"]
     config["llm"]["preset"] = "missing"
+    assert client.put(
+        "/api/v1/projects/sample/config",
+        json={"config": config},
+    ).status_code == 400
+    assert (project / "config.toml").read_bytes() == original
+    config = client.get("/api/v1/projects/sample/config").json()["config"]
+    config["llm"]["preset_translation"] = "missing"
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},

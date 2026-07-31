@@ -105,16 +105,15 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     }
   }
 
-  async function copyRequiredAdapter() {
-    const selected = presets.find((item) => item.preset_id === config?.llm.preset);
-    if (!project || !selected?.adapter_id) return;
+  async function copyRequiredAdapter(adapterId: string) {
+    if (!project) return;
     try {
       await api(`/api/v1/projects/${project}/adapters/copy-global`, {
         method: "POST",
-        body: JSON.stringify({ adapter_id: selected.adapter_id }),
+        body: JSON.stringify({ adapter_id: adapterId }),
       });
       await load();
-      setMessage(`已显式复制 Adapter：${selected.adapter_id}`);
+      setMessage(`已显式复制 Adapter：${adapterId}`);
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -136,9 +135,20 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || "正在加载配置…"}</p></section>;
 
-  const selectedPreset = presets.find((item) => item.preset_id === config.llm.preset);
-  const missingAdapter = scope === "project" && selectedPreset?.adapter_id && !projectAdapters.some((item) => item.valid !== false && item.adapter_id === selectedPreset.adapter_id);
+  const configuredPresetIds = [
+    config.llm.preset,
+    config.llm.preset_terminology,
+    config.llm.preset_translation,
+    config.llm.preset_proofreading,
+    config.llm.preset_polishing,
+  ].filter(Boolean);
+  const missingAdapterIds = scope === "project" ? Array.from(new Set(configuredPresetIds
+    .map((presetId) => presets.find((item) => item.preset_id === presetId)?.adapter_id)
+    .filter((adapterId): adapterId is string => Boolean(adapterId))
+    .filter((adapterId) => !projectAdapters.some((item) => item.valid !== false && item.adapter_id === adapterId)))) : [];
   const contextLabels: Array<[ContextStage, string]> = [["terminology", "术语"], ["translation", "翻译"], ["proofreading", "校对"], ["polishing", "润色"]];
+  const presetOptions = presets.filter((item) => item.valid);
+  const stagePresetFields: Array<[ContextStage, string]> = [["terminology", "术语 Preset"], ["translation", "翻译 Preset"], ["proofreading", "校对 Preset"], ["polishing", "润色 Preset"]];
   return (
     <section className="config-settings">
       <div className="page-heading config-heading settings-action-heading">
@@ -150,7 +160,7 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
       {message && <p className="success-text">{message}</p>}
-      {missingAdapter && <div className="warning-banner">所选 Preset 需要项目尚未拥有的 Adapter：{selectedPreset?.adapter_id}。<button className="quiet-button" onClick={copyRequiredAdapter}>显式复制全局 Adapter</button></div>}
+      {missingAdapterIds.map((adapterId) => <div className="warning-banner" key={adapterId}>所选 Preset 需要项目尚未拥有的 Adapter：{adapterId}。<button className="quiet-button" onClick={() => copyRequiredAdapter(adapterId)}>显式复制全局 Adapter</button></div>)}
       <div className="config-form">
         <ConfigSection title="项目与输入" description="新项目默认目标、TXT 输出和源文件编码策略。">
           <Field label="目标语言"><input value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
@@ -159,7 +169,8 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
           <Field label="备用输入编码"><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
         </ConfigSection>
         <ConfigSection title="LLM 与采样" description="Preset 提供连接、模型、Token 能力与限速；温度仍属于项目。">
-          <Field label="LLM Preset"><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          <Field label="全局 LLM Preset"><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          {stagePresetFields.map(([stage, label]) => <Field label={label} help="不选择时使用全局 Preset。" key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">使用全局 Preset</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
           <NumberField label="术语温度" value={config.llm.temperature_terminology} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
           <NumberField label="翻译温度" value={config.llm.temperature_translation} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
           <NumberField label="校对温度" value={config.llm.temperature_proofreading} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
