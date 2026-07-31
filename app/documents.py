@@ -17,13 +17,13 @@ class ImportedFile:
     encoding_detected: str
     encoding_used: str
     encoding_confidence: float
+    opaque_state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class DocumentImport:
     files: tuple[ImportedFile, ...]
     warnings: tuple[str, ...] = ()
-    opaque_state: dict[str, Any] | None = None
 
 
 class DocumentAdapter(Protocol):
@@ -44,7 +44,7 @@ class DocumentAdapter(Protocol):
         *,
         project: Path,
         staging_dir: Path,
-        files: list[dict[str, Any]],
+        file: dict[str, Any],
         segments: list[dict[str, Any]],
         output_text: dict[str, str],
         bilingual: bool,
@@ -53,54 +53,60 @@ class DocumentAdapter(Protocol):
     ) -> list[Path]: ...
 
 
-def publish_document_export(
-    adapter: DocumentAdapter,
+@dataclass(frozen=True)
+class DocumentExportJob:
+    adapter: DocumentAdapter
+    file: dict[str, Any]
+    segments: list[dict[str, Any]]
+    opaque_state: dict[str, Any] | None
+
+
+def publish_document_exports(
+    jobs: list[DocumentExportJob],
     *,
     project: Path,
     directory: Path,
-    files: list[dict[str, Any]],
-    segments: list[dict[str, Any]],
     output_text: dict[str, str],
     bilingual: bool,
     output_encoding: str,
-    opaque_state: dict[str, Any] | None,
 ) -> list[str]:
     staging_parent = project / "output" / ".staging"
     staging_parent.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     with tempfile.TemporaryDirectory(
-        prefix=f"{adapter.adapter_id}-", dir=staging_parent
+        prefix="documents-", dir=staging_parent
     ) as raw:
         staging_dir = Path(raw)
-        generated = adapter.export_sources(
-            project=project,
-            staging_dir=staging_dir,
-            files=files,
-            segments=segments,
-            output_text=output_text,
-            bilingual=bilingual,
-            output_encoding=output_encoding,
-            opaque_state=opaque_state,
-        )
         sources: list[tuple[Path, Path]] = []
         seen: set[Path] = set()
-        for relative in generated:
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ProjectError(
-                    f"Document Adapter 返回了不安全输出路径：{relative}"
-                )
-            if relative in seen:
-                raise ProjectError(
-                    f"Document Adapter 返回了重复输出路径：{relative}"
-                )
-            seen.add(relative)
-            source = staging_dir / relative
-            if not source.is_file():
-                raise ProjectError(
-                    f"Document Adapter 未生成声明的输出：{relative}"
-                )
-            destination = directory / relative
-            sources.append((source, destination))
+        for job in jobs:
+            generated = job.adapter.export_sources(
+                project=project,
+                staging_dir=staging_dir,
+                file=job.file,
+                segments=job.segments,
+                output_text=output_text,
+                bilingual=bilingual,
+                output_encoding=output_encoding,
+                opaque_state=job.opaque_state,
+            )
+            for relative in generated:
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ProjectError(
+                        f"Document Adapter 返回了不安全输出路径：{relative}"
+                    )
+                if relative in seen:
+                    raise ProjectError(
+                        f"Document Adapter 返回了重复输出路径：{relative}"
+                    )
+                seen.add(relative)
+                source = staging_dir / relative
+                if not source.is_file():
+                    raise ProjectError(
+                        f"Document Adapter 未生成声明的输出：{relative}"
+                    )
+                destination = directory / relative
+                sources.append((source, destination))
         for source, destination in sources:
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)

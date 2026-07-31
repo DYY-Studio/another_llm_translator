@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
-from app.documents import publish_document_export
+from app.documents import DocumentExportJob, publish_document_exports
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -102,9 +102,9 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    metadata = read_json(project / "project.json")
-    assert metadata["document_adapter_id"] == "epub"
-    assert metadata["document_adapter_state"]
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    assert file_record["document_adapter_id"] == "epub"
+    assert file_record["document_adapter_state"]
     segments = add_translations(project)
     assert [item["source"] for item in segments] == [
         "Chapter ",
@@ -137,8 +137,8 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    metadata = read_json(project / "project.json")
-    state_path = project / str(metadata["document_adapter_state"])
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    state_path = project / str(file_record["document_adapter_state"])
     state_path.write_text('{"schema_version":1,"state":[]}\n', encoding="utf-8")
     with pytest.raises(IncompleteError, match="状态损坏"):
         export_project(
@@ -152,11 +152,11 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    metadata_path = project / "project.json"
-    metadata = read_json(metadata_path)
-    metadata["document_adapter_version"] = "future"
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+    files_path = project / "source" / "files.jsonl"
+    file_record = read_jsonl(files_path)[0]
+    file_record["document_adapter_version"] = "future"
+    files_path.write_text(
+        json.dumps(file_record, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     with pytest.raises(IncompleteError, match="版本不兼容"):
         export_project(
@@ -244,16 +244,16 @@ def test_document_export_failure_publishes_nothing(tmp_path: Path) -> None:
     project = tmp_path / "project"
     directory = project / "output" / "translated"
     with pytest.raises(ProjectError, match="fixture failure"):
-        publish_document_export(
-            FailingExportAdapter(),  # type: ignore[arg-type]
+        publish_document_exports(
+            [DocumentExportJob(
+                adapter=FailingExportAdapter(),  # type: ignore[arg-type]
+                file={}, segments=[], opaque_state=None,
+            )],
             project=project,
             directory=directory,
-            files=[],
-            segments=[],
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
-            opaque_state=None,
         )
     assert not directory.exists()
 
@@ -264,16 +264,16 @@ def test_document_export_validates_all_files_before_publish(
     project = tmp_path / "project"
     directory = project / "output" / "translated"
     with pytest.raises(ProjectError, match="未生成声明的输出"):
-        publish_document_export(
-            IncompleteExportAdapter(),  # type: ignore[arg-type]
+        publish_document_exports(
+            [DocumentExportJob(
+                adapter=IncompleteExportAdapter(),  # type: ignore[arg-type]
+                file={}, segments=[], opaque_state=None,
+            )],
             project=project,
             directory=directory,
-            files=[],
-            segments=[],
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
-            opaque_state=None,
         )
     assert not directory.exists()
 

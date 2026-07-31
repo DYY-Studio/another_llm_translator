@@ -51,12 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--dry-run", action="store_true")
 
-    files_add = subparsers.add_parser(
-        "files-add", help="向项目追加同格式源文件"
-    )
+    files_add = subparsers.add_parser("files-add", help="向项目追加源文件")
     files_add.add_argument("project")
     files_add.add_argument("inputs", nargs="+")
     files_add.add_argument("--recursive", action="store_true")
+    files_add.add_argument(
+        "--document-adapter",
+        help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
+    )
 
     files_remove = subparsers.add_parser(
         "files-remove", help="从项目活动范围移除源文件"
@@ -120,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--bilingual", action="store_true")
     export.add_argument("--allow-missing", action="store_true")
+    export.add_argument(
+        "--format", choices=("original", "txt"), default="original"
+    )
 
     terms_import = subparsers.add_parser(
         "terms-import", help="合并导入 JSON 或 CSV 术语表"
@@ -174,6 +179,7 @@ def run(argv: list[str] | None = None) -> int:
                 project,
                 args.inputs,
                 recursive=args.recursive,
+                document_adapter_id=args.document_adapter,
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)
@@ -361,6 +367,7 @@ def run(argv: list[str] | None = None) -> int:
                 args.stage,
                 bilingual=args.bilingual,
                 allow_missing=args.allow_missing,
+                output_format=args.format,
             )
         summary["warnings"] = warnings
         print(json.dumps(summary, ensure_ascii=False, indent=2))

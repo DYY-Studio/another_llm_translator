@@ -144,24 +144,93 @@ def test_add_rejects_active_name_collision_and_running_run(
     assert (project / "source" / "files.jsonl").read_bytes() == before
 
 
-def test_epub_can_only_be_added_to_empty_project_and_state_is_removed(
+def test_epub_file_state_is_removed_and_new_id_is_allocated(
     tmp_path: Path,
 ) -> None:
     project = init_empty(tmp_path, adapter_id="epub")
     source = tmp_path / "book.epub"
     make_epub(source)
     add_project_files(project, [str(source)])
-    metadata = read_json(project / "project.json")
-    state_path = project / str(metadata["document_adapter_state"])
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    state_path = project / str(file_record["document_adapter_state"])
     assert state_path.is_file()
-    with pytest.raises(UsageError, match="已有文件"):
-        add_project_files(project, [str(source)])
 
     remove_project_files(project, ["F0001"])
-    assert read_json(project / "project.json")["document_adapter_state"] is None
     assert not state_path.exists()
     add_project_files(project, [str(source)])
     assert read_jsonl(project / "source" / "files.jsonl")[0]["file_id"] == "F0002"
+
+
+def test_empty_project_accepts_mixed_txt_and_epub_files(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    text = tmp_path / "notes.txt"
+    epub = tmp_path / "book.epub"
+    text.write_text("plain text", encoding="utf-8")
+    make_epub(epub)
+
+    summary = add_project_files(project, [str(text), str(epub)])
+
+    assert summary["added_files"] == 2
+    files = read_jsonl(project / "source" / "files.jsonl")
+    assert [item["document_adapter_id"] for item in files] == ["txt", "epub"]
+    assert files[0]["document_adapter_state"] is None
+    assert (project / str(files[1]["document_adapter_state"])).is_file()
+    metadata = read_json(project / "project.json")
+    assert "document_adapter_id" not in metadata
+
+
+def test_mixed_project_exports_original_formats_or_txt(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    text = tmp_path / "notes.txt"
+    epub = tmp_path / "book.epub"
+    text.write_text("plain text", encoding="utf-8")
+    make_epub(epub)
+    add_project_files(project, [str(text), str(epub)])
+    metadata = read_json(project / "project.json")
+    for segment in read_jsonl(project / "source" / "segments.jsonl"):
+        append_jsonl(
+            stage_result_path(project, "translation"),
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=segment["segment_id"],
+                status="completed",
+                text=f"译：{segment['source']}",
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:mixed",
+                terms_revision=0,
+                run_id="RUN-MIXED",
+                request_id="REQ-MIXED",
+            ),
+        )
+
+    original = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=False,
+        output_format="original",
+    )
+    txt = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=False,
+        output_format="txt",
+    )
+
+    assert {Path(item).suffix for item in original["written"]} == {".txt", ".epub"}
+    assert {Path(item).name for item in txt["written"]} == {"notes.txt", "book.txt"}
+
+
+def test_implicit_file_format_rejects_unknown_extension(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    source = tmp_path / "notes.md"
+    source.write_text("text", encoding="utf-8")
+    with pytest.raises(UsageError, match="--document-adapter"):
+        add_project_files(project, [str(source)])
 
 
 @pytest.mark.parametrize("blank_text", [None, "", " \t\u3000"])
