@@ -152,3 +152,30 @@ def descriptor() -> PluginDescriptor:
 它不得自行创建 HTTP Client、发送请求、限速、重试、写 Run 或读取密钥存储。
 具体 Python 方法签名、错误类型和配置接口必须等待第一个 JSON 模板无法支持的
 真实端点，再与第二个实现共同验证；当前不提供动态加载器或兼容承诺。
+
+## 5. LLM Preset（计划）
+
+Preset 的实现安排在产品路线 Stage 3，当前尚不是已实现接口。Preset 将实时
+引用一个 Adapter ID，并保存端点、模型、鉴权环境变量名、模型 Token 能力和
+端点限速等连接设置。项目引用 Preset ID；Run 保存实际解析的 Preset 快照，
+阶段指纹包含 Preset ID 和定义内容 Hash。
+
+Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等
+端点专属请求字段：
+
+```json
+{
+  "provider": {
+    "order": ["anthropic", "google"],
+    "allow_fallbacks": false
+  }
+}
+```
+
+宿主先渲染 Adapter 的完整 body，再添加 `extra_body` 的顶层字段。任一顶层
+字段已存在于 Adapter body 时必须快速失败，不允许覆盖或递归合并。修改 Adapter
+固有字段应复制或编辑 Adapter。
+
+`extra_body` 不支持模板占位符，尤其禁止 `${api_key}`。它会进入请求预览、
+Run 快照和阶段指纹，因此不得保存密钥。非对象、非法 JSON、占位符和字段冲突
+都必须在创建 Run 或发送请求前拒绝。
