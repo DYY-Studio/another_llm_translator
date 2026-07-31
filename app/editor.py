@@ -20,6 +20,7 @@ from .execution import (
 from .locking import project_write_lock
 from .project import load_segments, load_source_files, resolve_project
 from .stages import (
+    build_term_library_rows,
     load_terms,
     normalize_term,
     validate_translation_text,
@@ -352,6 +353,9 @@ class EditorStore:
                 "preferred_translations": list(
                     raw_conflicts.get("preferred_translations", [])
                 ),
+                "alias_primaries": list(
+                    raw_conflicts.get("alias_primaries", [])
+                ),
             }
             disabled = bool(override.get("disabled", False))
             rows.append(
@@ -372,6 +376,7 @@ class EditorStore:
                     and bool(
                         conflicts["categories"]
                         or conflicts["preferred_translations"]
+                        or conflicts["alias_primaries"]
                     ),
                 }
             )
@@ -499,11 +504,11 @@ class EditorStore:
         atomic_write_json(overrides_path, override_record)
 
         revision = int(library["terms_revision"]) + 1 if library else 1
-        terms = []
-        for index, key in enumerate(sorted(current), start=1):
-            item = dict(current[key])
-            item["record_id"] = f"TERM-{index:06d}"
-            terms.append(item)
+        terms = build_term_library_rows(
+            self.project,
+            [current[key] for key in sorted(current)],
+            overrides,
+        )
         term_record = record_header(
             "terminology_library",
             self.project_id,

@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 from contextlib import nullcontext
+from pathlib import Path
 
 from .execution import Scope, choose_running_run
 from .errors import AppError
@@ -12,7 +13,9 @@ from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
 from .project import init_project, resolve_project, sync_global_templates
 from .stages import (
+    export_terms,
     export_project,
+    import_terms,
     inspect_full,
     run_all,
     run_apply,
@@ -93,6 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--bilingual", action="store_true")
     export.add_argument("--allow-missing", action="store_true")
+
+    terms_import = subparsers.add_parser(
+        "terms-import", help="合并导入 JSON 或 CSV 术语表"
+    )
+    terms_import.add_argument("project")
+    terms_import.add_argument("file")
+    terms_import.add_argument("--dry-run", action="store_true")
+
+    terms_export = subparsers.add_parser(
+        "terms-export", help="导出 JSON 或 CSV 术语表"
+    )
+    terms_export.add_argument("project")
+    terms_export.add_argument("output")
+    terms_export.add_argument("--include-disabled", action="store_true")
     return parser
 
 
@@ -297,6 +314,30 @@ def run(argv: list[str] | None = None) -> int:
             args.stage,
             summary["files"],
         )
+        return 0
+    if args.command == "terms-import":
+        project = resolve_project(args.project)
+        attach_project_log(project)
+        warnings = sync_global_templates(project, dry_run=args.dry_run)
+        lock = nullcontext() if args.dry_run else project_write_lock(project)
+        with lock:
+            summary = import_terms(
+                project,
+                Path(args.file),
+                dry_run=args.dry_run,
+            )
+        summary["warnings"] = [*warnings, *summary["warnings"]]
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "terms-export":
+        project = resolve_project(args.project)
+        attach_project_log(project)
+        summary = export_terms(
+            project,
+            Path(args.output),
+            include_disabled=args.include_disabled,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
     parser.error("unknown command")
     return 2

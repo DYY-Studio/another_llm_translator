@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
+import json
 import re
 import shlex
 import sys
@@ -56,6 +59,7 @@ from .plugins import get_document_adapter
 from .storage import (
     append_jsonl,
     atomic_write_json,
+    atomic_write_text,
     new_record_id,
     read_json,
     read_jsonl,
@@ -241,6 +245,606 @@ def normalize_term(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold().strip()
 
 
+def _term_bucket() -> dict[str, Any]:
+    return {
+        "sources": [],
+        "categories": [],
+        "descriptions": [],
+        "translations": [],
+        "aliases": [],
+        "alias_conflicts": [],
+        "canonical_source": None,
+    }
+
+
+def _add_term_candidate(
+    merged: dict[str, dict[str, Any]],
+    candidate: dict[str, Any],
+) -> None:
+    normalized = normalize_term(str(candidate["source"]))
+    current = merged.setdefault(normalized, _term_bucket())
+    current["sources"].append(str(candidate["source"]))
+    category = candidate.get("category")
+    if category:
+        current["categories"].append(str(category))
+    current["categories"].extend(
+        str(value)
+        for value in candidate.get("conflicts", {}).get("categories", [])
+        if value
+    )
+    description = candidate.get("description")
+    if description:
+        current["descriptions"].append(str(description))
+    preferred = candidate.get("preferred_translation")
+    if preferred:
+        current["translations"].append(str(preferred))
+    current["translations"].extend(
+        str(value)
+        for value in candidate.get("conflicts", {}).get(
+            "preferred_translations", []
+        )
+        if value
+    )
+    current["aliases"].extend(
+        str(alias) for alias in candidate.get("aliases", []) if alias
+    )
+
+
+def _seed_published_terms(
+    merged: dict[str, dict[str, Any]],
+    library: dict[str, Any] | None,
+) -> None:
+    for term in (library or {}).get("terms", []):
+        _add_term_candidate(merged, term)
+
+
+def _apply_term_overrides(
+    merged: dict[str, dict[str, Any]],
+    overrides: dict[str, dict[str, Any]],
+) -> None:
+    for normalized, override in overrides.items():
+        if override.get("disabled"):
+            merged.pop(normalized, None)
+            continue
+        current = merged.setdefault(normalized, _term_bucket())
+        if override.get("source"):
+            current["sources"] = [override["source"]]
+        for source_key, target_key in (
+            ("category", "categories"),
+            ("description", "descriptions"),
+            ("preferred_translation", "translations"),
+        ):
+            if override.get(source_key):
+                current[target_key] = [override[source_key]]
+        if "aliases" in override:
+            current["aliases"] = list(override.get("aliases") or [])
+
+
+def _alias_primary_collisions(
+    merged: dict[str, dict[str, Any]],
+    *,
+    policy: str,
+) -> None:
+    primary_sources = {
+        normalized: sorted(
+            set(item["sources"]), key=lambda text: (len(text), text)
+        )[0]
+        for normalized, item in merged.items()
+        if item["sources"]
+    }
+    claims: dict[str, list[tuple[str, str]]] = {}
+    for owner, item in merged.items():
+        for alias in sorted(set(item["aliases"])):
+            target = normalize_term(alias)
+            if target in merged and target != owner:
+                claims.setdefault(target, []).append((owner, alias))
+    if not claims:
+        return
+
+    parent = {
+        target: owners[0][0]
+        for target, owners in claims.items()
+        if len({owner for owner, _ in owners}) == 1
+    }
+    cycle_nodes: set[str] = set()
+    for node in parent:
+        seen: list[str] = []
+        current = node
+        while current in parent:
+            if current in seen:
+                cycle_nodes.update(seen[seen.index(current) :])
+                break
+            seen.append(current)
+            current = parent[current]
+
+    unsafe_targets = {
+        target for target, owners in claims.items() if len({o for o, _ in owners}) > 1
+    } | cycle_nodes
+    if policy == "merge":
+        roots: dict[str, str] = {}
+        for node in merged:
+            current = node
+            path: set[str] = set()
+            while (
+                current in parent
+                and current not in unsafe_targets
+                and parent[current] not in unsafe_targets
+                and current not in path
+            ):
+                path.add(current)
+                current = parent[current]
+            roots[node] = current
+        for node, root in list(roots.items()):
+            if node == root or node not in merged or root not in merged:
+                continue
+            target = merged[node]
+            owner = merged[root]
+            if owner["canonical_source"] is None and owner["sources"]:
+                owner["canonical_source"] = sorted(
+                    set(owner["sources"]), key=lambda text: (len(text), text)
+                )[0]
+            owner["categories"].extend(target["categories"])
+            owner["descriptions"].extend(target["descriptions"])
+            owner["translations"].extend(target["translations"])
+            owner["aliases"].extend(target["aliases"])
+            owner["aliases"].extend(target["sources"])
+            merged.pop(node)
+
+    for target, owners in claims.items():
+        if policy == "merge" and target not in unsafe_targets:
+            continue
+        reason = (
+            "multiple_owners"
+            if len({owner for owner, _ in owners}) > 1
+            else "cycle"
+            if target in cycle_nodes
+            else "policy"
+        )
+        for owner, alias in owners:
+            if owner not in merged:
+                continue
+            merged[owner]["alias_conflicts"].append(
+                {
+                    "alias": alias,
+                    "primary_source": primary_sources.get(target, target),
+                    "reason": reason,
+                }
+            )
+
+
+def _build_term_rows(
+    merged: dict[str, dict[str, Any]],
+    *,
+    alias_policy: str,
+) -> list[dict[str, Any]]:
+    _alias_primary_collisions(merged, policy=alias_policy)
+    terms: list[dict[str, Any]] = []
+    for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
+        categories = sorted(set(item["categories"]))
+        descriptions = sorted(set(item["descriptions"]))
+        translations = sorted(set(item["translations"]))
+        sources = sorted(set(item["sources"]), key=lambda text: (len(text), text))
+        aliases = sorted(
+            {
+                alias
+                for alias in item["aliases"]
+                if normalize_term(alias) != normalized
+            }
+        )
+        terms.append(
+            {
+                "record_id": f"TERM-{index:06d}",
+                "source": item["canonical_source"]
+                or (sources[0] if sources else normalized),
+                "normalized": normalized,
+                "category": categories[0] if len(categories) == 1 else None,
+                "description": "；".join(descriptions),
+                "preferred_translation": (
+                    translations[0] if len(translations) == 1 else None
+                ),
+                "aliases": aliases,
+                "conflicts": {
+                    "categories": categories if len(categories) > 1 else [],
+                    "preferred_translations": (
+                        translations if len(translations) > 1 else []
+                    ),
+                    "alias_primaries": sorted(
+                        item["alias_conflicts"],
+                        key=lambda value: (
+                            value["alias"],
+                            value["primary_source"],
+                            value["reason"],
+                        ),
+                    ),
+                },
+            }
+        )
+    return terms
+
+
+def build_term_library_rows(
+    project: Path,
+    base_terms: list[dict[str, Any]],
+    overrides: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    _seed_published_terms(merged, {"terms": base_terms})
+    _apply_term_overrides(merged, overrides)
+    config = load_project_config(project)
+    return _build_term_rows(
+        merged,
+        alias_policy=str(config["terminology"]["alias_primary_collision"]),
+    )
+
+
+TERM_CSV_FIELDS = (
+    "source",
+    "preferred_translation",
+    "category",
+    "description",
+    "aliases_json",
+    "disabled",
+    "category_conflicts_json",
+    "preferred_translation_conflicts_json",
+)
+
+
+def _exchange_term(value: Any, location: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise UsageError(f"术语必须是对象：{location}")
+    allowed = {
+        "source",
+        "preferred_translation",
+        "category",
+        "description",
+        "aliases",
+        "disabled",
+        "conflicts",
+    }
+    unknown = set(value) - allowed
+    if unknown:
+        raise UsageError(
+            f"术语包含未知字段：{location}: {', '.join(sorted(unknown))}"
+        )
+    source = value.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise UsageError(f"术语 source 不能为空：{location}")
+    for key in ("preferred_translation", "category", "description"):
+        field = value.get(key)
+        if field is not None and not isinstance(field, str):
+            raise UsageError(f"术语 {key} 必须是字符串或 null：{location}")
+    aliases = value.get("aliases", [])
+    if not isinstance(aliases, list) or not all(
+        isinstance(alias, str) for alias in aliases
+    ):
+        raise UsageError(f"术语 aliases 必须是字符串数组：{location}")
+    disabled = value.get("disabled", False)
+    if not isinstance(disabled, bool):
+        raise UsageError(f"术语 disabled 必须是布尔值：{location}")
+    conflicts = value.get("conflicts", {})
+    if not isinstance(conflicts, dict):
+        raise UsageError(f"术语 conflicts 必须是对象：{location}")
+    unknown_conflicts = set(conflicts) - {
+        "categories",
+        "preferred_translations",
+    }
+    if unknown_conflicts:
+        raise UsageError(
+            f"术语 conflicts 包含未知字段：{location}: "
+            f"{', '.join(sorted(unknown_conflicts))}"
+        )
+    for key in ("categories", "preferred_translations"):
+        candidates = conflicts.get(key, [])
+        if not isinstance(candidates, list) or not all(
+            isinstance(candidate, str) for candidate in candidates
+        ):
+            raise UsageError(f"术语冲突 {key} 必须是字符串数组：{location}")
+    return {
+        "source": source.strip(),
+        "preferred_translation": (
+            value["preferred_translation"].strip()
+            if value.get("preferred_translation")
+            else None
+        ),
+        "category": value["category"].strip() if value.get("category") else None,
+        "description": (
+            value["description"].strip() if value.get("description") else ""
+        ),
+        "aliases": [
+            alias.strip()
+            for alias in aliases
+            if alias.strip()
+            and normalize_term(alias) != normalize_term(source)
+        ],
+        "disabled": disabled,
+        "conflicts": {
+            "categories": [
+                candidate.strip()
+                for candidate in conflicts.get("categories", [])
+                if candidate.strip()
+            ],
+            "preferred_translations": [
+                candidate.strip()
+                for candidate in conflicts.get("preferred_translations", [])
+                if candidate.strip()
+            ],
+        },
+    }
+
+
+def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
+    suffix = path.suffix.casefold()
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise UsageError(f"无法读取术语文件：{path}: {exc}") from exc
+    if suffix == ".json":
+        try:
+            document = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise UsageError(f"术语 JSON 无效：{path}: {exc}") from exc
+        if not isinstance(document, dict):
+            raise UsageError("术语 JSON 顶层必须是对象")
+        if set(document) != {"schema_version", "record_type", "terms"}:
+            raise UsageError("术语 JSON 必须只包含 schema_version、record_type、terms")
+        if (
+            document.get("schema_version") != 1
+            or document.get("record_type") != "terminology_exchange"
+        ):
+            raise UsageError("不支持的术语交换格式版本")
+        values = document.get("terms")
+        if not isinstance(values, list):
+            raise UsageError("术语 JSON 的 terms 必须是数组")
+        return [
+            _exchange_term(value, f"terms[{index}]")
+            for index, value in enumerate(values)
+        ]
+    if suffix != ".csv":
+        raise UsageError("术语文件扩展名必须是 .json 或 .csv")
+    try:
+        reader = csv.DictReader(io.StringIO(content))
+        if tuple(reader.fieldnames or ()) != TERM_CSV_FIELDS:
+            raise UsageError(
+                "术语 CSV 表头必须是：" + ",".join(TERM_CSV_FIELDS)
+            )
+        values = []
+        for index, row in enumerate(reader, start=2):
+            try:
+                aliases = json.loads(row["aliases_json"] or "[]")
+                category_conflicts = json.loads(
+                    row["category_conflicts_json"] or "[]"
+                )
+                preferred_conflicts = json.loads(
+                    row["preferred_translation_conflicts_json"] or "[]"
+                )
+            except json.JSONDecodeError as exc:
+                raise UsageError(f"术语 CSV 数组字段无效：第 {index} 行") from exc
+            disabled_text = (row["disabled"] or "").strip().casefold()
+            if disabled_text not in {"true", "false"}:
+                raise UsageError(f"术语 CSV disabled 必须是 true 或 false：第 {index} 行")
+            values.append(
+                _exchange_term(
+                    {
+                        "source": row["source"],
+                        "preferred_translation": row["preferred_translation"] or None,
+                        "category": row["category"] or None,
+                        "description": row["description"] or "",
+                        "aliases": aliases,
+                        "disabled": disabled_text == "true",
+                        "conflicts": {
+                            "categories": category_conflicts,
+                            "preferred_translations": preferred_conflicts,
+                        },
+                    },
+                    f"第 {index} 行",
+                )
+            )
+        return values
+    except csv.Error as exc:
+        raise UsageError(f"术语 CSV 无效：{path}: {exc}") from exc
+
+
+def _term_exchange_rows(
+    project: Path,
+    *,
+    include_disabled: bool,
+) -> list[dict[str, Any]]:
+    library = load_terms(project)
+    current = {
+        str(item["normalized"]): dict(item)
+        for item in (library or {}).get("terms", [])
+    }
+    overrides_document = read_json(project / "terminology" / "overrides.json")
+    overrides = {
+        str(item["normalized"]): dict(item)
+        for item in overrides_document.get("overrides", [])
+    }
+    rows: list[dict[str, Any]] = []
+    for normalized in sorted(set(current) | set(overrides)):
+        term = current.get(normalized, {})
+        override = overrides.get(normalized, {})
+        disabled = bool(override.get("disabled", False))
+        if disabled and not include_disabled:
+            continue
+        conflicts = term.get("conflicts", {})
+        rows.append(
+            {
+                "source": override.get("source", term.get("source", normalized)),
+                "preferred_translation": override.get(
+                    "preferred_translation", term.get("preferred_translation")
+                ),
+                "category": override.get("category", term.get("category")),
+                "description": override.get(
+                    "description", term.get("description", "")
+                ),
+                "aliases": list(override.get("aliases", term.get("aliases", []))),
+                "disabled": disabled,
+                "conflicts": {
+                    "categories": list(conflicts.get("categories", [])),
+                    "preferred_translations": list(
+                        conflicts.get("preferred_translations", [])
+                    ),
+                },
+            }
+        )
+    return rows
+
+
+def export_terms(
+    project: Path,
+    output: Path,
+    *,
+    include_disabled: bool,
+) -> dict[str, Any]:
+    rows = _term_exchange_rows(project, include_disabled=include_disabled)
+    if output.suffix.casefold() == ".json":
+        atomic_write_text(
+            output,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": "terminology_exchange",
+                    "terms": rows,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+    elif output.suffix.casefold() == ".csv":
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=TERM_CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "source": row["source"],
+                    "preferred_translation": row["preferred_translation"] or "",
+                    "category": row["category"] or "",
+                    "description": row["description"] or "",
+                    "aliases_json": json.dumps(
+                        row["aliases"], ensure_ascii=False, separators=(",", ":")
+                    ),
+                    "disabled": "true" if row["disabled"] else "false",
+                    "category_conflicts_json": json.dumps(
+                        row["conflicts"]["categories"],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "preferred_translation_conflicts_json": json.dumps(
+                        row["conflicts"]["preferred_translations"],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+        atomic_write_text(output, "\ufeff" + buffer.getvalue())
+    else:
+        raise UsageError("术语输出扩展名必须是 .json 或 .csv")
+    return {
+        "output": str(output),
+        "format": output.suffix.casefold().removeprefix("."),
+        "exported": len(rows),
+        "include_disabled": include_disabled,
+    }
+
+
+def import_terms(
+    project: Path,
+    input_path: Path,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    imported = _load_term_exchange(input_path)
+    disabled_by_normalized: dict[str, bool] = {}
+    merged_import: dict[str, dict[str, Any]] = {}
+    for item in imported:
+        normalized = normalize_term(item["source"])
+        previous_disabled = disabled_by_normalized.setdefault(
+            normalized, item["disabled"]
+        )
+        if previous_disabled != item["disabled"]:
+            raise UsageError(f"同一 normalized 术语的 disabled 冲突：{item['source']}")
+        if not item["disabled"]:
+            _add_term_candidate(merged_import, item)
+
+    library = load_terms(project)
+    merged: dict[str, dict[str, Any]] = {}
+    _seed_published_terms(merged, library)
+    for normalized, item in merged_import.items():
+        target = merged.setdefault(normalized, _term_bucket())
+        for key in (
+            "sources",
+            "categories",
+            "descriptions",
+            "translations",
+            "aliases",
+        ):
+            target[key].extend(item[key])
+
+    overrides_path = project / "terminology" / "overrides.json"
+    overrides_document = read_json(overrides_path)
+    original_overrides = [
+        dict(item) for item in overrides_document.get("overrides", [])
+    ]
+    overrides = {
+        str(item["normalized"]): dict(item) for item in original_overrides
+    }
+    for item in imported:
+        if not item["disabled"]:
+            continue
+        normalized = normalize_term(item["source"])
+        current = overrides.get(normalized, {"normalized": normalized})
+        overrides[normalized] = {
+            **current,
+            "source": current.get("source", item["source"]),
+            "disabled": True,
+        }
+    _apply_term_overrides(merged, overrides)
+    config = load_project_config(project)
+    terms = _build_term_rows(
+        merged,
+        alias_policy=str(config["terminology"]["alias_primary_collision"]),
+    )
+    overrides_list = [overrides[key] for key in sorted(overrides)]
+    existing_terms = list((library or {}).get("terms", []))
+    changed = terms != existing_terms or overrides_list != original_overrides
+    next_revision = int(library["terms_revision"]) + 1 if library else 1
+    summary = {
+        "input": str(input_path),
+        "format": input_path.suffix.casefold().removeprefix("."),
+        "imported": len(imported),
+        "changed": changed,
+        "terms_revision": next_revision if changed else (
+            int(library["terms_revision"]) if library else None
+        ),
+        "dry_run": dry_run,
+        "warnings": [],
+    }
+    if dry_run or not changed:
+        return summary
+    override_record = record_header(
+        "terminology_overrides",
+        str(read_json(project / "project.json")["project_id"]),
+        record_id="TERMINOLOGY-OVERRIDES",
+        overrides=overrides_list,
+        origin="terms_import",
+    )
+    library_record = record_header(
+        "terminology_library",
+        str(read_json(project / "project.json")["project_id"]),
+        record_id=f"TERMS-{next_revision}",
+        terms_revision=next_revision,
+        published_run_id=library.get("published_run_id") if library else None,
+        active_task_id=library.get("active_task_id") if library else None,
+        terms=terms,
+        origin="terms_import",
+    )
+    atomic_write_json(overrides_path, override_record)
+    atomic_write_json(project / "terminology" / "terms.json", library_record)
+    return summary
+
+
 def _validate_term_items(
     content: str,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
@@ -284,95 +888,27 @@ def _merge_and_publish_terms(
     project_id: str,
     published_run_id: str,
 ) -> dict[str, Any]:
+    previous = load_terms(project)
     candidates = [
         record
         for record in read_jsonl(project / "terminology" / "candidates.jsonl")
         if record.get("active_task_id") == task_id
     ]
     merged: dict[str, dict[str, Any]] = {}
+    _seed_published_terms(merged, previous)
     for record in candidates:
         for candidate in record.get("terms", []):
-            normalized = normalize_term(str(candidate["source"]))
-            current = merged.setdefault(
-                normalized,
-                {
-                    "normalized": normalized,
-                    "sources": [],
-                    "categories": [],
-                    "descriptions": [],
-                    "translations": [],
-                    "aliases": [],
-                },
-            )
-            current["sources"].append(candidate["source"])
-            current["categories"].append(candidate["category"])
-            current["descriptions"].append(candidate["description"])
-            if candidate.get("preferred_translation"):
-                current["translations"].append(candidate["preferred_translation"])
-            current["aliases"].extend(candidate.get("aliases", []))
+            _add_term_candidate(merged, candidate)
 
     overrides_data = read_json(project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): item for item in overrides_data.get("overrides", [])
     }
-    for normalized, override in overrides.items():
-        if override.get("disabled"):
-            merged.pop(normalized, None)
-            continue
-        current = merged.setdefault(
-            normalized,
-            {
-                "normalized": normalized,
-                "sources": [override.get("source", normalized)],
-                "categories": [],
-                "descriptions": [],
-                "translations": [],
-                "aliases": [],
-            },
-        )
-        for source_key, target_key in (
-            ("category", "categories"),
-            ("description", "descriptions"),
-            ("preferred_translation", "translations"),
-        ):
-            if override.get(source_key):
-                current[target_key] = [override[source_key]]
-        if override.get("aliases"):
-            current["aliases"] = list(override["aliases"])
-
-    terms: list[dict[str, Any]] = []
-    for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
-        categories = sorted(set(item["categories"]))
-        descriptions = sorted(set(item["descriptions"]))
-        translations = sorted(set(item["translations"]))
-        sources = sorted(set(item["sources"]), key=lambda text: (len(text), text))
-        aliases = sorted(
-            {
-                alias
-                for alias in item["aliases"]
-                if normalize_term(alias) != normalized
-            }
-        )
-        terms.append(
-            {
-                "record_id": f"TERM-{index:06d}",
-                "source": sources[0] if sources else normalized,
-                "normalized": normalized,
-                "category": categories[0] if len(categories) == 1 else None,
-                "description": "；".join(descriptions),
-                "preferred_translation": (
-                    translations[0] if len(translations) == 1 else None
-                ),
-                "aliases": aliases,
-                "conflicts": {
-                    "categories": categories if len(categories) > 1 else [],
-                    "preferred_translations": (
-                        translations if len(translations) > 1 else []
-                    ),
-                },
-            }
-        )
-    previous = load_terms(project)
+    _apply_term_overrides(merged, overrides)
+    alias_policy = str(
+        load_project_config(project)["terminology"]["alias_primary_collision"]
+    )
+    terms = _build_term_rows(merged, alias_policy=alias_policy)
     revision = int(previous["terms_revision"]) + 1 if previous else 1
     library = record_header(
         "terminology_library",
@@ -1044,8 +1580,14 @@ def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list
     matched: list[tuple[int, int, int, dict[str, Any]]] = []
     for term in library.get("terms", []):
         main_name = normalize_term(str(term.get("source", "")))
+        conflicted_aliases = {
+            normalize_term(str(item.get("alias", "")))
+            for item in term.get("conflicts", {}).get("alias_primaries", [])
+        }
         alias_names = [
-            normalize_term(str(name)) for name in term.get("aliases", []) if name
+            normalize_term(str(name))
+            for name in term.get("aliases", [])
+            if name and normalize_term(str(name)) not in conflicted_aliases
         ]
         main_hit = bool(main_name and main_name in normalized_source)
         hits = [
