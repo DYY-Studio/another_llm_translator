@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
+import type { ProjectSummary, Stage, TaskState, TaskUsage, ThemeMode } from "../types";
 import { icons } from "./Icons";
 
 const items: Array<{ id: Stage; label: string }> = [
@@ -45,6 +45,7 @@ export function AppShell({
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
+  const usage = task?.summary?.usage as TaskUsage | undefined;
   const themeLabels: Record<ThemeMode, string> = {
     system: "跟随系统",
     light: "浅色",
@@ -102,6 +103,7 @@ export function AppShell({
               <strong>{task.status === "running" ? "运行中" : task.status}</strong>
               <span>{task.stage}</span>
               {task.error && <span className="error-text">{task.error}</span>}
+              {usage && <span>{usage.available ? `用量 ${usage.input_tokens}/${usage.output_tokens}/${usage.total_tokens} tokens` : "端点未返回用量"}</span>}
               {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
             </div>
           )}

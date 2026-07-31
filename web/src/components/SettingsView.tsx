@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
-import type { LLMPreset, LLMPresetSummary, ProjectConfig } from "../types";
+import type { LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 
 type ContextStage = keyof ProjectConfig["context"];
@@ -221,6 +221,8 @@ function PresetSettings() {
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [extraBody, setExtraBody] = useState("{}");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
+  const [models, setModels] = useState<ModelRow[] | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -242,6 +244,7 @@ function PresetSettings() {
     setError("");
     setPreset(null);
     setPreview(null);
+    setModels(null);
     void Promise.all([
       api<LLMPreset>(`/api/v1/global/presets/${selected}`),
       api<Record<string, unknown>>(`/api/v1/global/presets/${selected}/preview`),
@@ -251,6 +254,19 @@ function PresetSettings() {
       setPreview(requestPreview);
     }).catch((reason) => setError(errorMessage(reason)));
   }, [selected]);
+
+  async function discoverModels() {
+    if (!preset) return;
+    setModels(null);
+    setModelsLoading(true);
+    setMessage(""); setError("");
+    try {
+      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST" });
+      setModels(result.models);
+      if (result.models.length === 0) setMessage("端点返回空模型列表");
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setModelsLoading(false); }
+  }
 
   function update(change: (draft: LLMPreset) => void) {
     setMessage(""); setError("");
@@ -305,9 +321,15 @@ function PresetSettings() {
           <>
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
-            <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => update((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => update((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field><Field label="模型标识"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => update((draft) => { draft.api_key_env = event.target.value; })} /></Field><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
+            <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => update((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => update((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>            <Field label="模型标识"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field><div className="model-tools"><button className="quiet-button" disabled={modelsLoading} onClick={() => void discoverModels()}>{modelsLoading ? "正在获取" : "获取模型列表"}</button><small>手动触发连通性检测；结果仅用于填写模型标识。</small></div><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => update((draft) => { draft.api_key_env = event.target.value; })} /></Field><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
             <h2 className="preview-heading">最终请求预览（Header 已脱敏）</h2>
             <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : "保存后加载预览"}</pre>
+            {models !== null && (
+              <>
+                <h2 className="preview-heading">模型列表（{models.length}）</h2>
+                <div className="model-list">{models.map((item) => <button key={item.id} className="preset-row" onClick={() => { update((draft) => { draft.model = item.id; }); setMessage(`已填入 ${item.id}；保存后生效`); }}><strong>{item.display}</strong><small>{item.id !== item.display ? item.id : "点击填入模型标识"}</small></button>)}</div>
+              </>
+            )}
           </>
         )}
       </section>

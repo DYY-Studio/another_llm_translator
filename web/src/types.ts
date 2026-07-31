@@ -74,6 +74,18 @@ export interface TaskState {
   summary?: Record<string, unknown> | null;
 }
 
+export interface TaskUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  available: boolean;
+}
+
+export interface ModelRow {
+  id: string;
+  display: string;
+}
+
 export interface TaskOptions {
   stage: LLMStage;
   selected: number;
