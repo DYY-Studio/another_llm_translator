@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError
 from .llm_adapter import adapter_path, load_json_adapter
-from .llm_preset import load_llm_preset, preset_path
+from .llm_preset import LLMPreset, load_llm_preset, preset_path
 
 
 APP_ROOT = Path(__file__).parents[1]
@@ -377,7 +377,7 @@ def resolve_project_config(
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    preset_file = None
+    preset = None
     if "preset" in config["llm"]:
         configured_preset_id = str(config["llm"]["preset"])
         preset_file = preset_path(
@@ -395,7 +395,7 @@ def resolve_project_config(
     return _resolve_llm_config(
         config,
         adapter_file=adapter_path(project, adapter_id),
-        preset_file=preset_file,
+        preset=preset,
     )
 
 
@@ -407,11 +407,10 @@ def resolve_global_config(
     config: dict[str, Any], root: Path
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    preset_file = None
+    preset = None
     if "preset" in config["llm"]:
         configured_preset_id = str(config["llm"]["preset"])
-        preset_file = preset_path(root, configured_preset_id)
-        preset = load_llm_preset(preset_file)
+        preset = load_llm_preset(preset_path(root, configured_preset_id))
         if preset.preset_id != configured_preset_id:
             raise ConfigError(
                 "LLM Preset 文件中的 preset_id 与全局配置不一致"
@@ -422,20 +421,21 @@ def resolve_global_config(
     return _resolve_llm_config(
         config,
         adapter_file=root / "llm_adapters" / f"{adapter_id}.json",
-        preset_file=preset_file,
+        preset=preset,
     )
 
 
 def load_run_config(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.toml")
+    preset = (
+        load_llm_preset(run_dir / "llm_preset.json")
+        if "preset" in config["llm"]
+        else None
+    )
     return _resolve_llm_config(
         config,
         adapter_file=run_dir / "llm_adapter.json",
-        preset_file=(
-            run_dir / "llm_preset.json"
-            if "preset" in config["llm"]
-            else None
-        ),
+        preset=preset,
     )
 
 
@@ -443,9 +443,8 @@ def _resolve_llm_config(
     config: dict[str, Any],
     *,
     adapter_file: Path,
-    preset_file: Path | None,
+    preset: LLMPreset | None,
 ) -> dict[str, Any]:
-    preset = load_llm_preset(preset_file) if preset_file is not None else None
     if preset is not None:
         definition = preset.definition
         config["llm"].update(

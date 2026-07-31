@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.editor import EditorStore
-from app.config import load_config, load_project_config
+from app.config import dump_config, load_config, load_project_config
 from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
@@ -101,13 +102,19 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "导入术语表",
         "导出术语表",
         "项目与输入",
-        "LLM 连接",
-        "模型与采样",
+        "LLM 与采样",
         "执行与分块",
         "参考上下文",
         "翻译校验与重试",
         "调试与故障注入",
-        "写入规范 TOML",
+        "全局配置",
+        "全局 Prompt",
+        "LLM Preset",
+        "附加 JSON Body",
+        "最终请求预览",
+        "同步全局模板",
+        "保存当前连接并切换",
+        "复制全局 Adapter",
     ):
         assert text in script.text
     assert "保存前会严格验证完整 TOML" not in script.text
@@ -268,6 +275,166 @@ def test_web_config_requires_object_and_existing_matching_adapter(
         json={"config": config},
     ).status_code == 400
     assert (project / "config.toml").read_bytes() == original
+
+
+def test_web_edits_global_templates_without_changing_existing_project(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=app_root,
+    ))
+    project_config = (project / "config.toml").read_bytes()
+    project_prompt = (
+        project / "prompts" / "translation.middle.txt"
+    ).read_bytes()
+    config = client.get("/api/v1/global/config").json()["config"]
+    config["project"]["target_language"] = "繁體中文"
+
+    assert client.put(
+        "/api/v1/global/config", json={"config": config}
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/global/prompts/translation",
+        json={"content": "GLOBAL TRANSLATION PROMPT"},
+    ).status_code == 200
+    assert (project / "config.toml").read_bytes() == project_config
+    assert (
+        project / "prompts" / "translation.middle.txt"
+    ).read_bytes() == project_prompt
+
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "new-project", "document_adapter": "txt", "empty": "true"},
+    )
+    assert created.status_code == 200
+    new_project = projects_root / "new-project"
+    assert load_config(new_project / "config.toml")["project"][
+        "target_language"
+    ] == "繁體中文"
+    assert (
+        new_project / "prompts" / "translation.middle.txt"
+    ).read_text("utf-8") == "GLOBAL TRANSLATION PROMPT"
+
+
+def test_web_manages_presets_and_previews_merged_extra_body(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=app_root,
+    ))
+    default = client.get("/api/v1/global/presets/default").json()
+    custom = {
+        **default,
+        "preset_id": "openrouter",
+        "model": "provider/model",
+        "extra_body": {
+            "provider": {
+                "order": ["anthropic", "google"],
+                "allow_fallbacks": False,
+            }
+        },
+    }
+    saved = client.put("/api/v1/global/presets/openrouter", json=custom)
+    assert saved.status_code == 200
+    preview = client.get(
+        "/api/v1/global/presets/openrouter/preview"
+    ).json()
+    assert preview["headers"]["Authorization"] == "Bearer ***"
+    assert preview["body"]["provider"] == custom["extra_body"]["provider"]
+    assert preview["body"]["model"] == "provider/model"
+
+    conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
+    assert client.put(
+        "/api/v1/global/presets/conflict", json=conflict
+    ).status_code == 400
+    secret = {**custom, "preset_id": "secret", "extra_body": {"x": "${api_key}"}}
+    assert client.put(
+        "/api/v1/global/presets/secret", json=secret
+    ).status_code == 400
+    assert not (app_root / "llm_presets" / "conflict.json").exists()
+    assert not (app_root / "llm_presets" / "secret.json").exists()
+
+    config = client.get("/api/v1/global/config").json()["config"]
+    config["llm"]["preset"] = "openrouter"
+    assert client.put(
+        "/api/v1/global/config", json={"config": config}
+    ).status_code == 200
+    rejected = client.delete("/api/v1/global/presets/openrouter")
+    assert rejected.status_code == 400
+    assert "全局配置正在使用" in rejected.json()["error"]
+
+
+def test_web_explicitly_copies_adapter_and_migrates_legacy_config(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    client = TestClient(create_app(
+        projects_root=projects_root,
+        app_root=app_root,
+    ))
+    raw = load_config(project / "config.toml")
+    resolved = load_project_config(project, presets_root=app_root)
+    legacy = deepcopy(raw)
+    legacy["llm"].pop("preset")
+    legacy["llm"].update(
+        {
+            key: resolved["llm"][key]
+            for key in (
+                "adapter",
+                "base_url",
+                "endpoint",
+                "model",
+                "api_key_env",
+                "proxy_url",
+                "max_output_tokens",
+                "context_window_tokens",
+                "context_safety_margin_tokens",
+            )
+        }
+    )
+    legacy["execution"].update(
+        {
+            key: resolved["execution"][key]
+            for key in (
+                "max_parallel",
+                "requests_per_minute",
+                "input_tokens_per_minute",
+                "request_timeout_seconds",
+                "token_safety_factor",
+            )
+        }
+    )
+    (project / "config.toml").write_text(dump_config(legacy), encoding="utf-8")
+    migrated = client.post(
+        "/api/v1/projects/sample/migrate-llm-preset",
+        json={"preset_id": "legacy-saved"},
+    )
+    assert migrated.status_code == 200
+    assert (app_root / "llm_presets" / "legacy-saved.json").is_file()
+    migrated_config = load_config(project / "config.toml")
+    assert migrated_config["llm"]["preset"] == "legacy-saved"
+    assert "model" not in migrated_config["llm"]
+
+    global_adapter = json.loads(
+        (app_root / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
+    )
+    global_adapter["adapter_id"] = "alternate"
+    (app_root / "llm_adapters" / "alternate.json").write_text(
+        json.dumps(global_adapter), encoding="utf-8"
+    )
+    copied = client.post(
+        "/api/v1/projects/sample/adapters/copy-global",
+        json={"adapter_id": "alternate"},
+    )
+    assert copied.status_code == 200
+    assert (project / "llm_adapters" / "alternate.json").is_file()
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
