@@ -1085,7 +1085,10 @@ Content-Type: application/json
 
 Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
-`/choices/0/message/content`。声明式 Adapter 只支持非流式 JSON POST。
+`/choices/0/message/content`。另内置 `anthropic`、`google-gemini` 与
+`openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
+`endpoint` 的 `${model}` 占位符与 `/output_text` 响应路径。声明式 Adapter
+只支持非流式 JSON POST。
 
 项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段
 只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、

@@ -968,7 +968,9 @@ class LLMClient:
         url = (
             self.config["llm"]["base_url"].rstrip("/")
             + "/"
-            + self.config["llm"]["endpoint"].lstrip("/")
+            + str(self.config["llm"]["endpoint"])
+            .replace("${model}", str(self.config["llm"]["model"]))
+            .lstrip("/")
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
         for attempt in range(1, attempts + 1):

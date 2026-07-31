@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "preset_id": "google-gemini",
+  "adapter_id": "google-gemini",
+  "base_url": "https://generativelanguage.googleapis.com",
+  "endpoint": "/v1beta/models/${model}:generateContent",
+  "model": "gemini-2.5-flash",
+  "api_key_env": "GEMINI_API_KEY",
+  "proxy_url": "",
+  "context_window_tokens": 1048576,
+  "max_output_tokens": 8192,
+  "context_safety_margin_tokens": 512,
+  "token_safety_factor": 1.25,
+  "requests_per_minute": 30,
+  "input_tokens_per_minute": 50000,
+  "max_parallel": 4,
+  "request_timeout_seconds": 120,
+  "extra_body": {}
+}

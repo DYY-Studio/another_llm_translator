@@ -74,6 +74,14 @@ def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
         ({"requests_per_minute": -1}, "requests_per_minute 必须是非负整数"),
         ({"token_safety_factor": 0}, "token_safety_factor 必须大于 0"),
         ({"base_url": "not-a-url"}, "base_url 必须是有效"),
+        (
+            {"endpoint": "/v1/models/${other}:generateContent"},
+            "endpoint 只允许",
+        ),
+        (
+            {"endpoint": "/v1/models/${model"},
+            "endpoint 只允许",
+        ),
     ],
 )
 def test_preset_rejects_invalid_values(
@@ -85,6 +93,15 @@ def test_preset_rejects_invalid_values(
     value.update(change)
     with pytest.raises(ConfigError, match=message):
         load_llm_preset(write_preset(tmp_path, value))
+
+
+def test_preset_endpoint_allows_model_placeholder(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["endpoint"] = "/v1beta/models/${model}:generateContent"
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["endpoint"] == (
+        "/v1beta/models/${model}:generateContent"
+    )
 
 
 def test_adapter_merges_extra_body_without_overwriting(tmp_path: Path) -> None:
@@ -254,3 +271,65 @@ def test_inline_global_config_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="未知配置键 config.llm: model"):
         load_global_config(app_root)
+
+
+def test_shipped_adapters_and_presets_load_and_dry_run() -> None:
+    adapters = {path.stem for path in (ROOT / "llm_adapters").glob("*.json")}
+    presets = {path.stem for path in (ROOT / "llm_presets").glob("*.json")}
+    assert adapters >= {
+        "openai-compatible",
+        "anthropic",
+        "google-gemini",
+        "openai-responses",
+    }
+    assert presets >= {
+        "default",
+        "anthropic-claude",
+        "google-gemini",
+        "openai-responses",
+    }
+    for preset_file in sorted((ROOT / "llm_presets").glob("*.json")):
+        preset = load_llm_preset(preset_file)
+        adapter = load_json_adapter(
+            ROOT / "llm_adapters" / f"{preset.adapter_id}.json"
+        )
+        adapter.build_request(
+            api_key="***",
+            model=preset.definition["model"],
+            messages=[
+                {"role": "system", "content": "prompt"},
+                {"role": "user", "content": '{"segments":[]}'},
+            ],
+            temperature=0.2,
+            max_output_tokens=int(preset.definition["max_output_tokens"]),
+            stream=False,
+            extra_body=preset.definition["extra_body"],
+        )
+
+
+def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset = "default"', 'preset = "google-gemini"'
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="gemini-project",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    assert (project / "llm_adapters" / "google-gemini.json").is_file()
+
+    resolved = load_project_config(project, presets_root=app_root)
+    assert resolved["llm"]["adapter"] == "google-gemini"
+    assert resolved["llm"]["endpoint"] == (
+        "/v1beta/models/${model}:generateContent"
+    )
+    assert resolved["_llm_adapter"].messages_format == "gemini"

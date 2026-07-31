@@ -39,14 +39,30 @@
 
 该字段可省略；内置 OpenAI-compatible 定义未配置。
 
+需要把规范化的 system/user/assistant 消息转换为 Provider 原生形状时，可设置
+`messages_format`（可选，默认 `openai` 原样透传）：
+
+- `anthropic`：system 消息剥离到顶层字段，其余 user/assistant 消息保留
+  字符串 content；
+- `gemini`：system 消息剥离到顶层字段，user/assistant 映射为 `contents`
+  数组的 `role: "user"/"model"` 与 `parts: [{"text": ...}]`。
+
+`body` 模板可使用 `${system}` 占位符读取剥离后的 system 文本（多条消息以
+空行拼接），例如 Anthropic 的顶层 `system` 与 Gemini 的 `system_instruction`。
+该占位符对 `openai` 格式同样可渲染，但 system 消息仍保留在 `${messages}`
+中，通常不应同时使用。
+
 ### 请求边界
 
 - 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。
+- Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
+  `/v1beta/models/${model}:generateContent`），请求时由宿主替换为模型名；
+  其他占位符立即失败。
 - 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
   重试、取消和日志由宿主负责。
 - `body` 是完整模板。可直接加入 `reasoning_effort`、`response_format` 或
   Provider 自定义嵌套字段，不存在与宿主默认字段合并的覆盖顺序。
-- body 支持 `${model}`、`${messages}`、`${temperature}`、
+- body 支持 `${model}`、`${system}`、`${messages}`、`${temperature}`、
   `${max_output_tokens}`、`${stream}`。占位符必须独占一个 JSON 字符串值，
   替换后保留数组、数字和布尔类型。
 - Header 可使用上述占位符及 `${api_key}`；嵌入字符串时结果为字符串。
@@ -56,6 +72,10 @@
 ### 响应边界
 
 `response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。
+JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为
+最后一个元素、`-2` 为倒数第二。当思考块总是排在最前、文本块在最后时
+（Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。
+越界、空数组与普通缺失路径同样快速失败。
 可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。任一路径
 不存在或类型错误时当前请求失败，不猜测备用字段。
 
@@ -72,6 +92,32 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 阶段指纹包含 Adapter ID、项目定义内容 Hash、Preset ID 和 Preset 内容 Hash。
 项目 Adapter 副本与 Run 快照保存定义原文，但不解析或保存环境变量中的 API
 Key。调试请求记录仍经过敏感 Header 清理。
+
+### 内置 Adapter 定义
+
+- `openai-compatible`：Bearer API Key，Chat Completions body，
+  `/choices/0/message/content`。
+- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层
+  `system`，pointer `/content/-1/text`。未启用 thinking 时 content 首块即
+  文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。
+  不配置 reasoning 指针；需要思考正文时可复制定义并设
+  `/content/-2/thinking`，但仅当启用 thinking 且思考块存在时可用，否则该
+  请求快速失败（预期行为，非静默降级）。
+- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset
+  `endpoint` 的 `${model}` 占位符进入请求路径，pointer
+  `/candidates/0/content/parts/-1/text`。不内置 thinkingConfig，思考模型
+  默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配
+  `/candidates/0/content/parts/-2/text`，仅思考模型且思考块存在时可用，
+  否则快速失败。
+- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），
+  body 含 `"store": false`，pointer `/output_text`（官方定义为聚合全部
+  output_text 项、不含 reasoning 文本）。若端点实际响应缺失该字段，请求
+  快速失败；可改用 `/output/0/content/0/text`，但仅适用于输出首项为
+  message 的非思考模型。
+
+三个新定义都需要 Preset 显式引用才会被项目复制；示例 Preset 见
+`llm_presets/anthropic-claude.json`、`google-gemini.json` 与
+`openai-responses.json`。
 
 ## 2. Document Adapter（Beta）
 

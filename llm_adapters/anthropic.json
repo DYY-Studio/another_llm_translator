@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "adapter_id": "anthropic",
+  "messages_format": "anthropic",
+  "headers": {
+    "x-api-key": "${api_key}",
+    "anthropic-version": "2023-06-01"
+  },
+  "body": {
+    "model": "${model}",
+    "system": "${system}",
+    "messages": "${messages}",
+    "max_tokens": "${max_output_tokens}",
+    "temperature": "${temperature}",
+    "stream": "${stream}"
+  },
+  "response_content_pointer": "/content/-1/text"
+}

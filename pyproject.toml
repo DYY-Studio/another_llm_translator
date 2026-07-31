@@ -36,4 +36,9 @@ prompts = [
   "prompts/terminology.middle.txt",
   "prompts/translation.middle.txt",
 ]
-llm_adapters = ["llm_adapters/openai-compatible.json"]
+llm_adapters = [
+  "llm_adapters/anthropic.json",
+  "llm_adapters/google-gemini.json",
+  "llm_adapters/openai-compatible.json",
+  "llm_adapters/openai-responses.json",
+]
