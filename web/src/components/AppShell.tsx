@@ -67,9 +67,9 @@ export function AppShell({
         <div className="brand">译工坊</div>
         <select value={project} onChange={(event) => onProject(event.target.value)}>
           <option value="">选择项目</option>
-          {projects.map((item) => <option key={item.name}>{item.name}</option>)}
+          {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
         </select>
-        <button className="quiet-button create-button" onClick={onCreate}>新建项目</button>
+        <button className="quiet-button create-button" onClick={onCreate}>新建 / 打开</button>
         <div className="topbar-spacer" />
         <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
           {themeIcon}

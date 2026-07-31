@@ -47,6 +47,8 @@ python -m app.main terms-export novel glossary.csv
 
 项目默认保存在 `projects/<name>/`。`run-all` 只生成校对和润色建议，不会自动
 应用。可先为任一阶段加入 `--dry-run` 查看范围、Chunk 数和 Token 估算。
+使用 `init --parent-dir /absolute/or/relative/parent` 可在指定父目录创建项目；
+后续命令可直接使用项目目录绝对路径。
 
 也可先建立不预设格式的空项目，再混合追加或移除项目源文件：
 
@@ -83,8 +85,8 @@ python -m app.main export book --stage translated --bilingual
 [`docs/ADAPTERS.md`](docs/ADAPTERS.md)，贡献与分支流程见
 [`AGENTS.md`](AGENTS.md)。
 
-当前产品路线已完成 Stage 7（四阶段独立 LLM Preset）；下一阶段是外部项目
-位置。未来行为以路线图为准，不属于当前 MVP 契约。
+当前产品路线已完成 Stage 8（外部项目位置）；下一阶段是 SQLite 标准项目
+存储。未来行为以路线图为准，不属于当前 MVP 契约。
 
 ## 本地 Web Alpha
 
@@ -100,8 +102,10 @@ python -m app.web
 
 打开 `http://127.0.0.1:8765`。Web 与 CLI 共用同一项目目录、阶段执行、Run、
 限速与恢复逻辑，不建立第二套数据库。可创建空的或带文件的 TXT/EPUB 项目，
-并在概览追加或批量移除 TXT/EPUB 源文件；项目配置通过覆盖全部现有字段的分组
-表单编辑，Prompt 和 JSON LLM Adapter 保持独立高级编辑器。设置页还可在未
+可指定绝对父目录创建，也可输入绝对路径打开已有项目；最近外部项目路径仅保存
+在当前浏览器，启动时逐一打开，不扫描父目录或移动项目。概览可追加或批量移除
+TXT/EPUB 源文件；项目配置通过覆盖全部现有字段的分组表单编辑，Prompt 和
+JSON LLM Adapter 保持独立高级编辑器。设置页还可在未
 打开项目时管理全局配置、全局 Prompt 和实时 LLM Preset；Preset 支持经过
 冲突检查的自定义附加 JSON body 和脱敏请求预览。也可运行或取消
 阶段任务，并审校、apply 与导出。术语工作区

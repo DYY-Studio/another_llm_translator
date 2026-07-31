@@ -56,8 +56,11 @@ export interface ProjectOverview {
 }
 
 export interface ProjectSummary {
+  selector: string;
   name: string;
   project_id: string;
+  path: string;
+  external: boolean;
   file_count: number;
   segment_count: number;
 }

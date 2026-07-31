@@ -19,12 +19,41 @@ import type {
 import "./styles.css";
 
 const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
+const RECENT_PROJECTS_STORAGE_KEY = "minimal-llm-translator.recent-projects.v1";
 const runnable: Partial<Record<Stage, LLMStage>> = {
   terminology: "terminology",
   translation: "translation",
   proofreading: "proofreading",
   polishing: "polishing",
 };
+
+function readRecentProjectPaths(): string[] {
+  try {
+    const stored: unknown = JSON.parse(
+      window.localStorage.getItem(RECENT_PROJECTS_STORAGE_KEY) ?? "[]",
+    );
+    return Array.isArray(stored)
+      ? Array.from(new Set(stored.filter((value): value is string => typeof value === "string")))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentProjectPaths(paths: string[]) {
+  try {
+    window.localStorage.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(paths));
+  } catch {
+    // The projects remain available for this server session.
+  }
+}
+
+function rememberProjectPath(path: string) {
+  writeRecentProjectPaths([
+    path,
+    ...readRecentProjectPaths().filter((value) => value !== path),
+  ]);
+}
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -70,7 +99,7 @@ export default function App() {
   const loadProjects = useCallback(async () => {
     const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
     setProjects(value.projects);
-    if (!project && value.projects[0]) setProject(value.projects[0].name);
+    if (!project && value.projects[0]) setProject(value.projects[0].selector);
   }, [project]);
 
   const refresh = useCallback(async () => {
@@ -82,7 +111,21 @@ export default function App() {
     await Promise.all([loadProjects(), refresh()]);
   }, [loadProjects, refresh]);
 
-  useEffect(() => { void loadProjects().catch((value) => setError(String(value))); }, []);
+  useEffect(() => {
+    const paths = readRecentProjectPaths();
+    void Promise.allSettled(paths.map((path) => api<{ path: string }>(
+      "/api/v1/projects/open",
+      { method: "POST", body: JSON.stringify({ path }) },
+    ))).then(async (results) => {
+      const validPaths = results.flatMap((result) => (
+        result.status === "fulfilled" ? [result.value.path] : []
+      ));
+      writeRecentProjectPaths(validPaths);
+      const failures = results.length - validPaths.length;
+      if (failures) setError(`${failures} 个最近项目路径已失效并移除`);
+      await loadProjects();
+    }).catch((value) => setError(String(value)));
+  }, []);
   useEffect(() => { void refresh().catch((value) => setError(String(value))); }, [refresh]);
   useEffect(() => {
     if (!task || !["queued", "running", "cancelling"].includes(task.status)) return;
@@ -174,7 +217,7 @@ export default function App() {
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}
       </AppShell>
-      {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (name) => { setCreateOpen(false); await loadProjects(); setProject(name); }} />}
+      {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}
       {runOptions && (
         <RunDialog
           key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}

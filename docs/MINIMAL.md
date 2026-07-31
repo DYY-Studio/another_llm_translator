@@ -205,6 +205,7 @@ python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
+python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
@@ -214,6 +215,9 @@ python -m app.main files-remove PROJECT FILE_ID...
 规则：
 
 - init 必须在输入和 `--empty` 中恰好选择一种。
+- init 默认写入内置 `projects/`；`--parent-dir` 在已存在、可写的明确父目录下
+  创建项目。相对路径按当前工作目录解析，后续命令可直接使用项目绝对路径。
+- 项目目录是自包含边界；选择外部位置不会移动或复制已有项目。
 - 显式文件按参数顺序处理。
 - 目录按相对路径进行确定性的简单自然排序。
 - TXT 未传 `--recursive` 时只读取目录第一层。
@@ -1209,6 +1213,7 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init BOOK.epub --name PROJECT_NAME --document-adapter epub
 python -m app.main init --empty --name PROJECT_NAME
+python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-remove PROJECT FILE_ID...
 python -m app.main inspect PROJECT
@@ -1253,6 +1258,7 @@ python -m app.main run-all PROJECT
 --reuse-mixed-fingerprints
 --document-adapter
 --empty
+--parent-dir
 ```
 
 语义：
@@ -1274,6 +1280,8 @@ python -m app.main run-all PROJECT
 - `--document-adapter`：用于带输入的 init 或 files-add，显式选择输入 Adapter；
   init 默认 `txt`，空项目不保存该选择。
 - `--empty`：仅用于 init，显式创建 0 文件项目，不能同时提供输入。
+- `--parent-dir`：仅用于 init，在指定的现有可写父目录创建项目；省略时使用
+  内置 `projects/`。
 - `files-add`：追加源文件；内置 TXT/EPUB 可按扩展名识别，外部或其他扩展名
   使用 `--document-adapter`。TXT 目录支持 `--recursive`。
 - `files-remove`：按 File ID 从活动项目移除文件，不清理历史结果。
@@ -1400,8 +1408,15 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
 本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
-追加或经典多选移除 TXT/EPUB 源文件。导出页用 Ctrl/Cmd/Shift 经典多选限定
-文件范围，未选择时导出全部。项目配置使用覆盖全部现有字段的分组表单；
+追加或经典多选移除 TXT/EPUB 源文件。创建时可填写绝对父目录，也可输入项目
+目录绝对路径打开已有项目。外部项目使用项目自身 ID 作为 Web 路由标识；路径
+规范化并去重，无效项目、不可写父目录和目标冲突在写入前失败。
+
+Web 只在当前浏览器的版本化 localStorage 保存最近外部项目路径。页面加载时
+逐一向本机服务提交这些精确路径；不扫描父目录，不自动移动项目。失效路径会
+明确提示并从最近列表移除，默认 `projects/` 项目继续直接列出。导出页用
+Ctrl/Cmd/Shift 经典多选限定文件范围，未选择时导出全部。项目配置使用覆盖
+全部现有字段的分组表单；
 项目 Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还提供全局配置、
 全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
@@ -1532,6 +1547,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - Adapter 定义副本与 Run 快照不包含 API Key，定义 Hash 进入阶段指纹。
 - LLM Preset 的实时解析、嵌套 `extra_body`、顶层冲突和占位符拒绝生效；实际
   Preset 快照与内容 Hash 进入 Run 和阶段指纹，请求预览不泄露认证 Header。
+- 四阶段可分别覆盖全局 Preset；相同 Preset 在 `run-all` 中共享 HTTP Client
+  和限速窗口，不同 Preset 使用独立资源，Run 与指纹记录实际阶段 Preset。
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
@@ -1545,6 +1562,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
   后的规范 TOML 可由 CLI 原样读取。
 - Web 可在没有打开项目时管理全局配置、Prompt 和 Preset；全局模板修改不改变
   现有项目，显式同步通过严格校验；内联 LLM 配置在读取边界直接拒绝。
+- CLI 可在指定父目录创建并通过绝对路径打开项目；Web 可创建、打开、去重并
+  恢复最近外部项目，且不会扫描父目录或移动项目。
 - React 生产构建、TypeScript 检查、桌面与窄屏关键交互、浏览器控制台均通过。
 
 ---
