@@ -1223,6 +1223,7 @@ def test_web_preset_models_discovery_fails_fast(
     assert "未声明模型发现规格" in no_spec.json()["error"]
 
     preset["adapter_id"] = "openai-compatible"
+    monkeypatch.delenv(preset["api_key_env"], raising=False)
     missing_key = client.post(
         "/api/v1/global/presets/default/models", json=preset
     )
