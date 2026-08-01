@@ -174,8 +174,17 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     css = client.get(stylesheet.group(1))
     assert css.status_code == 200
     assert ".segment-batch-actions" in css.text
-    assert ".segment-row-boundary" in css.text
+    assert script.text.count("segment-row-stack") == 1
+    assert "segment-row-boundary" not in script.text
+    assert (
+        ".segment-row-stack{display:grid;grid-auto-rows:max-content;"
+        "gap:1px;background:var(--border)}"
+    ) in css.text
+    assert ".segment-row-boundary" not in css.text
     assert ".segment-row:after" not in css.text
+    segment_row = re.search(r"\.segment-row\{([^}]*)\}", css.text)
+    assert segment_row is not None
+    assert "border-bottom" not in segment_row.group(1)
     assert ".settings-navigation{position:sticky;top:58px" in css.text
     assert "grid-template-rows:auto minmax(0,1fr)" in css.text
     assert ".config-settings{height:100%;min-height:0;overflow:auto;padding:0 30px 30px" in css.text

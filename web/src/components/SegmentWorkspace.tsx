@@ -226,13 +226,14 @@ export function SegmentWorkspace({
         </div>
         <div className="list-header"><span>ID / 状态</span><span>原文 / 结果预览</span></div>
         <div className="segment-list">
-          {visible.map((item) => {
-            const itemStatus = statusFor(item, stage);
-            const result = resultFor(item, stage);
-            const preview = stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
-            return (
-              <div className="segment-row-boundary" key={item.segment_id}>
+          <div className="segment-row-stack">
+            {visible.map((item) => {
+              const itemStatus = statusFor(item, stage);
+              const result = resultFor(item, stage);
+              const preview = stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
+              return (
                 <button
+                  key={item.segment_id}
                   className={`segment-row${selection.selectedKeys.has(item.segment_id) ? " selected" : ""}${selection.focusedKey === item.segment_id ? " focused" : ""}`}
                   onClick={(event) => selection.select(
                     item.segment_id,
@@ -244,9 +245,9 @@ export function SegmentWorkspace({
                   <span className="segment-id">{item.segment_id.replace("F0001-S", "")}</span>
                   <span className="preview"><strong>{item.source}</strong><small>{preview || "尚无结果"}</small></span>
                 </button>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
           {!visible.length && <div className="empty">当前筛选下没有 Segment</div>}
         </div>
       </section>
