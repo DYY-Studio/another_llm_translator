@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.editor import EditorStore
 from app.config import load_config, load_project_config
+from app.diagnostics import Diagnostics
 from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
@@ -1214,7 +1215,8 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
         }
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    manager = WebTaskManager()
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    manager = WebTaskManager(diagnostics)
     started = await manager.start(
         project,
         "translation",
@@ -1229,6 +1231,8 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
     assert state["processed_segments"] == state["total_segments"] == 2
     assert state["usage"]["input_tokens"] == 12
     assert state["usage"]["output_tokens"] == 5
+    assert diagnostics.snapshot()["metrics"]["input_tokens"] == 12
+    assert diagnostics.snapshot()["metrics"]["output_tokens"] == 5
 
 
 def test_web_task_options_include_completed_terminology_scans(
