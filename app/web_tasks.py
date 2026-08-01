@@ -8,7 +8,13 @@ from typing import Any
 
 from .config import load_project_config, load_run_config
 from .errors import UsageError
-from .execution import Scope, choose_running_run, find_running_runs
+from .execution import (
+    Scope,
+    choose_running_run,
+    combine_usage,
+    find_running_runs,
+    unavailable_usage,
+)
 from .locking import project_write_lock
 from .stages import (
     inspect_full,
@@ -17,7 +23,7 @@ from .stages import (
     run_terminology,
     run_translation,
 )
-from .storage import utc_now
+from .storage import read_json, utc_now
 
 
 WEB_LLM_STAGES = frozenset(
@@ -96,6 +102,16 @@ class WebTask:
     completed_at: str | None = None
     summary: dict[str, Any] | None = None
     error: str | None = None
+    processed_segments: int = 0
+    total_segments: int = 0
+    usage: dict[str, Any] = field(
+        default_factory=lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "available": False,
+        }
+    )
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
@@ -109,6 +125,9 @@ class WebTask:
             "completed_at": self.completed_at,
             "summary": self.summary,
             "error": self.error,
+            "processed_segments": self.processed_segments,
+            "total_segments": self.total_segments,
+            "usage": self.usage,
         }
 
 
@@ -178,7 +197,14 @@ class WebTaskManager:
                             "必须明确选择复用或 force"
                         )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
-            state = WebTask(task_id=task_id, project=project, stage=stage)
+            state = WebTask(
+                task_id=task_id,
+                project=project,
+                stage=stage,
+                total_segments=(
+                    int(options["selected"]) if stage != "run-all" else 0
+                ),
+            )
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
             state.asyncio_task = asyncio.create_task(
@@ -201,6 +227,16 @@ class WebTaskManager:
     ) -> None:
         state.status = "running"
         state.started_at = utc_now()
+        usage_base: dict[str, Any] | None = None
+        resuming = False
+
+        def progress(processed: int, total: int) -> None:
+            state.processed_segments = processed
+            state.total_segments = total
+
+        def usage_changed(current: dict[str, Any] | None) -> None:
+            state.usage = _task_usage(usage_base, current, resuming=resuming)
+
         try:
             with project_write_lock(state.project):
                 resume_run_id = None
@@ -212,12 +248,26 @@ class WebTaskManager:
                         dry_run=False,
                         interactive=False,
                     )
+                    if resume_run_id is not None:
+                        resuming = True
+                        manifest = read_json(
+                            state.project
+                            / "runs"
+                            / resume_run_id
+                            / "manifest.json"
+                        )
+                        if type(manifest.get("usage_invocation_count")) is int:
+                            raw_usage = manifest.get("usage")
+                            if isinstance(raw_usage, dict):
+                                usage_base = raw_usage
                 if state.stage == "terminology":
                     summary = await run_terminology(
                         state.project,
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        on_progress=progress,
+                        on_usage=usage_changed,
                     )
                 elif state.stage == "translation":
                     summary = await run_translation(
@@ -225,6 +275,8 @@ class WebTaskManager:
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        on_progress=progress,
+                        on_usage=usage_changed,
                     )
                 elif state.stage in {"proofreading", "polishing"}:
                     summary = await run_review(
@@ -233,6 +285,8 @@ class WebTaskManager:
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        on_progress=progress,
+                        on_usage=usage_changed,
                     )
                 else:
                     summary = await run_all(
@@ -241,6 +295,9 @@ class WebTaskManager:
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                     )
             state.summary = summary
+            summary_usage = summary.get("usage")
+            if isinstance(summary_usage, dict):
+                state.usage = summary_usage
             state.status = (
                 "failed"
                 if summary.get("failed") or summary.get("pending")
@@ -273,3 +330,14 @@ class WebTaskManager:
         state.status = "cancelling"
         state.asyncio_task.cancel()
         return state.view()
+
+
+def _task_usage(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+    *,
+    resuming: bool,
+) -> dict[str, Any]:
+    if current is None:
+        return unavailable_usage()
+    return combine_usage(previous, current) if resuming else current

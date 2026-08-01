@@ -1176,6 +1176,61 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     assert calls == [(True, False), (False, True)]
 
 
+@pytest.mark.asyncio
+async def test_web_task_exposes_live_progress_and_separate_token_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def fake_translation(
+        _: Path,
+        __: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        progress = kwargs["on_progress"]
+        usage = kwargs["on_usage"]
+        assert callable(progress)
+        assert callable(usage)
+        progress(1, 2)
+        usage(
+            {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+            }
+        )
+        progress(2, 2)
+        return {
+            "failed": 0,
+            "pending": 0,
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+            },
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["status"] == "completed"
+    assert state["processed_segments"] == state["total_segments"] == 2
+    assert state["usage"]["input_tokens"] == 12
+    assert state["usage"]["output_tokens"] == 5
+
+
 def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:

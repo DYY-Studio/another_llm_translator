@@ -536,6 +536,8 @@ def create_run(
         started_at=utc_now(),
         completed_at=None,
     )
+    if stage in {"terminology", "translation", "proofreading", "polishing"}:
+        manifest["usage_invocation_count"] = 0
     atomic_write_json(run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
@@ -743,7 +745,7 @@ def finalize_run(
     failed: int,
     warnings: list[str] | None = None,
     usage: dict[str, Any] | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     manifest = read_json(run_dir / "manifest.json")
     manifest.update(
         status=status,
@@ -752,9 +754,57 @@ def finalize_run(
         warnings=warnings or [],
         completed_at=utc_now(),
     )
-    if usage is not None:
+    invocation_count = manifest.get("usage_invocation_count")
+    tracked = type(invocation_count) is int or bool(
+        manifest.get("continuations")
+    )
+    if usage is not None or tracked:
+        previous = manifest.get("usage")
+        if type(invocation_count) is int and invocation_count > 0:
+            usage = combine_usage(previous, usage)
+        elif type(invocation_count) is not int and manifest.get(
+            "continuations"
+        ):
+            usage = unavailable_usage()
+        elif usage is None:
+            usage = unavailable_usage()
         manifest["usage"] = usage
+        manifest["usage_invocation_count"] = (
+            invocation_count + 1 if type(invocation_count) is int else 1
+        )
     atomic_write_json(run_dir / "manifest.json", manifest)
+    return usage
+
+
+def unavailable_usage() -> dict[str, Any]:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "available": False,
+    }
+
+
+def combine_usage(
+    previous: Any, current: Any
+) -> dict[str, Any]:
+    values = (previous, current)
+    if any(
+        not isinstance(value, dict)
+        or value.get("available") is not True
+        or any(
+            not isinstance(value.get(key), int) or value[key] < 0
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+        )
+        for value in values
+    ):
+        return unavailable_usage()
+    return {
+        "input_tokens": sum(value["input_tokens"] for value in values),
+        "output_tokens": sum(value["output_tokens"] for value in values),
+        "total_tokens": sum(value["total_tokens"] for value in values),
+        "available": True,
+    }
 
 
 def save_debug_chunks(
@@ -845,6 +895,7 @@ class LLMClient:
         stage: str,
         client: httpx.AsyncClient | None = None,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_usage: Callable[[dict[str, Any] | None], None] | None = None,
     ) -> None:
         self.config = config
         self.limiter = limiter
@@ -855,6 +906,7 @@ class LLMClient:
         self.client = client
         self.owns_client = client is None
         self.sleeper = sleeper
+        self.on_usage = on_usage
         self.log_lock = asyncio.Lock()
         self.send_count = 0
         self.warnings: list[str] = []
@@ -1109,6 +1161,8 @@ class LLMClient:
                     self.usage_observed = True
                 elif self.adapter.usage_pointers is not None:
                     self.usage_complete = False
+                if self.on_usage is not None:
+                    self.on_usage(self.usage_summary())
                 self.logger.info(
                     "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
                     request_id,
