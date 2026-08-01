@@ -64,12 +64,9 @@ class Diagnostics:
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
-        self.request_count = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_wait_count = 0
-        self.rate_limit_wait_seconds = 0.0
-        self.total_latency_seconds = 0.0
         self.latest_latency_seconds: float | None = None
         self.usage: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
@@ -118,12 +115,9 @@ class Diagnostics:
         self.project = project
         self.stage = stage
         self.active_requests = 0
-        self.request_count = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_wait_count = 0
-        self.rate_limit_wait_seconds = 0.0
-        self.total_latency_seconds = 0.0
         self.latest_latency_seconds = None
         self.usage = None
         self.reasoning.clear()
@@ -147,8 +141,6 @@ class Diagnostics:
         self, *, latency_seconds: float, status: int | None, error: bool
     ) -> None:
         self.active_requests = max(0, self.active_requests - 1)
-        self.request_count += 1
-        self.total_latency_seconds += latency_seconds
         self.latest_latency_seconds = latency_seconds
         if error or (status is not None and status >= 400):
             self.http_errors += 1
@@ -156,9 +148,8 @@ class Diagnostics:
     def retried(self) -> None:
         self.retry_count += 1
 
-    def rate_limit_waited(self, seconds: float) -> None:
+    def rate_limit_waited(self) -> None:
         self.rate_limit_wait_count += 1
-        self.rate_limit_wait_seconds += seconds
 
     def set_usage(self, usage: dict[str, Any]) -> None:
         self.usage = dict(usage)
@@ -216,18 +207,9 @@ class Diagnostics:
                 "project": self.project,
                 "stage": self.stage,
                 "active_requests": self.active_requests,
-                "request_count": self.request_count,
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
                 "rate_limit_wait_count": self.rate_limit_wait_count,
-                "rate_limit_wait_seconds": round(
-                    self.rate_limit_wait_seconds, 3
-                ),
-                "average_latency_ms": (
-                    round(self.total_latency_seconds / self.request_count * 1000, 1)
-                    if self.request_count
-                    else None
-                ),
                 "latest_latency_ms": (
                     round(self.latest_latency_seconds * 1000, 1)
                     if self.latest_latency_seconds is not None

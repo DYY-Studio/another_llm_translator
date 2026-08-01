@@ -90,12 +90,9 @@ export interface DiagnosticsResponse {
     project: string | null;
     stage: string | null;
     active_requests: number;
-    request_count: number;
     http_errors: number;
     retry_count: number;
     rate_limit_wait_count: number;
-    rate_limit_wait_seconds: number;
-    average_latency_ms: number | null;
     latest_latency_ms: number | null;
     input_tokens: number;
     output_tokens: number;

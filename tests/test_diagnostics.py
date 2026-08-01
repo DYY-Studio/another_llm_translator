@@ -45,7 +45,7 @@ def test_reasoning_and_exact_usage_are_session_only(tmp_path: Path) -> None:
         diagnostics.request_started()
         diagnostics.request_finished(latency_seconds=0.25, status=429, error=True)
         diagnostics.retried()
-        diagnostics.rate_limit_waited(1.5)
+        diagnostics.rate_limit_waited()
         diagnostics.add_reasoning("REQ-1", "private chain")
         diagnostics.set_usage(
             {
@@ -60,11 +60,10 @@ def test_reasoning_and_exact_usage_are_session_only(tmp_path: Path) -> None:
     snapshot = diagnostics.snapshot()
     metrics = snapshot["metrics"]
     assert metrics["active_requests"] == 0
-    assert metrics["request_count"] == 1
     assert metrics["http_errors"] == 1
     assert metrics["retry_count"] == 1
     assert metrics["rate_limit_wait_count"] == 1
-    assert metrics["average_latency_ms"] == 250.0
+    assert metrics["latest_latency_ms"] == 250.0
     assert metrics["usage_available"] is True
     assert metrics["input_tokens"] == 12
     assert metrics["output_tokens"] == 3
@@ -147,7 +146,6 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
 
     assert response.reasoning_content == "session reasoning"
     snapshot = diagnostics.snapshot()
-    assert snapshot["metrics"]["request_count"] == 2
     assert snapshot["metrics"]["http_errors"] == 1
     assert snapshot["metrics"]["retry_count"] == 1
     assert snapshot["metrics"]["rate_limit_wait_count"] == 1

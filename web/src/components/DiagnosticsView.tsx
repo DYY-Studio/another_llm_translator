@@ -77,8 +77,7 @@ export function DiagnosticsView() {
 
       <div className="diagnostics-details" aria-label="请求诊断摘要">
         <span>Usage <strong>{metrics?.usage_available ? "完整" : "不可用"}</strong></span>
-        <span>平均延迟 <strong>{number(metrics?.average_latency_ms ?? null, " ms")}</strong></span>
-        <span>最近延迟 <strong>{number(metrics?.latest_latency_ms ?? null, " ms")}</strong></span>
+        <span>请求延迟 <strong>{number(metrics?.latest_latency_ms ?? null, " ms")}</strong></span>
         <span>HTTP 错误 <strong>{number(metrics?.http_errors ?? 0)}</strong></span>
         <span>重试 <strong>{number(metrics?.retry_count ?? 0)}</strong></span>
         <span>限流等待 <strong>{number(metrics?.rate_limit_wait_count ?? 0)}</strong></span>

@@ -1043,7 +1043,7 @@ class LLMClient:
                     attempt,
                 )
                 if diagnostics is not None:
-                    diagnostics.rate_limit_waited(waited)
+                    diagnostics.rate_limit_waited()
             self.send_count += 1
             self.logger.info(
                 "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
@@ -1265,7 +1265,7 @@ class LLMClient:
                         "retry-after request=%s wait=%.2fs", request_id, delay
                     )
                     if diagnostics is not None:
-                        diagnostics.rate_limit_waited(delay)
+                        diagnostics.rate_limit_waited()
                     await self.sleeper(delay)
                     continue
                 except ValueError:
