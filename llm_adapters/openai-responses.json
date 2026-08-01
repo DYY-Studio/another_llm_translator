@@ -12,7 +12,7 @@
     "stream": "${stream}",
     "store": false
   },
-  "response_content_pointer": "/output_text",
+  "response_content_pointer": "/output/-1/content/-1/text",
   "models": {
     "endpoint": "/v1/models",
     "response_models_pointer": "/data",

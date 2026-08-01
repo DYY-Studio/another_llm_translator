@@ -959,7 +959,26 @@ async def test_llm_client_sends_openai_responses_format_request(
         sent = json.loads(request.content)
         return httpx.Response(
             200,
-            json={"output_text": '{"type":"end"}'},
+            json={
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_123",
+                        "summary": [],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"type":"end"}',
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                ]
+            },
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

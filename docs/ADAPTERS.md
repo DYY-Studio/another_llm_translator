@@ -156,10 +156,10 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   `/candidates/0/content/parts/-2/text`，仅思考模型且思考块存在时可用，
   否则快速失败。
 - `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），
-  body 含 `"store": false`，pointer `/output_text`（官方定义为聚合全部
-  output_text 项、不含 reasoning 文本）。若端点实际响应缺失该字段，请求
-  快速失败；可改用 `/output/0/content/0/text`，但仅适用于输出首项为
-  message 的非思考模型。
+  body 含 `"store": false`，pointer `/output/-1/content/-1/text`。宿主直接
+  解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明
+  tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应
+  缺少该结构时快速失败。
 
 三个新定义都只存在于全局目录；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
