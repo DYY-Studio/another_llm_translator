@@ -318,7 +318,9 @@ def create_app(
             "url": (
                 str(preset.definition["base_url"]).rstrip("/")
                 + "/"
-                + str(preset.definition["endpoint"]).lstrip("/")
+                + str(preset.definition["endpoint"])
+                .replace("${model}", str(preset.definition["model"]))
+                .lstrip("/")
             ),
             "headers": headers,
             "body": body,
