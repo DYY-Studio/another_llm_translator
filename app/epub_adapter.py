@@ -23,6 +23,7 @@ class EPUBDocumentAdapter:
     adapter_id = "epub"
     version = "0.1"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
+    extensions = frozenset({".epub"})
 
     def import_sources(
         self,

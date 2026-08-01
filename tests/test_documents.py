@@ -13,6 +13,7 @@ from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+    get_document_adapter_for_extension,
     get_document_adapter,
     load_plugins,
 )
@@ -224,6 +225,7 @@ class FailingExportAdapter:
     adapter_id = "failing"
     version = "1"
     capabilities = frozenset({"translated_export"})
+    extensions = frozenset()
 
     def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
         (staging_dir / "partial.txt").write_text("partial", encoding="utf-8")
@@ -234,6 +236,7 @@ class IncompleteExportAdapter:
     adapter_id = "incomplete"
     version = "1"
     capabilities = frozenset({"translated_export"})
+    extensions = frozenset()
 
     def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
         (staging_dir / "ready.txt").write_text("ready", encoding="utf-8")
@@ -315,4 +318,33 @@ def test_plugin_host_rejects_protocol_and_duplicate_adapter(
         lambda **_: [FakeEntryPoint(duplicate)],
     )
     with pytest.raises(ConfigError, match="Adapter ID 重复"):
+        load_plugins()
+
+
+def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert get_document_adapter_for_extension(".TXT").adapter_id == "txt"
+    assert get_document_adapter_for_extension(".text").adapter_id == "txt"
+    assert get_document_adapter_for_extension(".EPUB").adapter_id == "epub"
+    with pytest.raises(UsageError, match="没有 Document Adapter"):
+        get_document_adapter_for_extension(".pdf")
+
+    class DuplicateExtensionAdapter:
+        adapter_id = "duplicate-extension"
+        version = "1"
+        capabilities = frozenset({"import"})
+        extensions = frozenset({".TXT".casefold()})
+
+    duplicate = PluginDescriptor(
+        plugin_id="duplicate-extension",
+        version="1",
+        protocol_version=PLUGIN_PROTOCOL_VERSION,
+        document_adapters=(DuplicateExtensionAdapter(),),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        "app.plugins.entry_points",
+        lambda **_: [FakeEntryPoint(duplicate)],
+    )
+    with pytest.raises(ConfigError, match="扩展名重复"):
         load_plugins()

@@ -7,8 +7,8 @@ import re
 import shutil
 import sys
 import tempfile
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 import chardet
@@ -41,6 +41,7 @@ PROMPT_NAMES = (
     "proofreading.middle.txt",
     "polishing.middle.txt",
 )
+_TXT_EXTENSIONS = frozenset({".txt", ".text"})
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ def _directory_txt_files(root: Path, recursive: bool) -> list[InputFile]:
             )
             for name in files:
                 path = current_path / name
-                if path.is_symlink() or path.suffix.casefold() != ".txt":
+                if path.is_symlink() or path.suffix.casefold() not in _TXT_EXTENSIONS:
                     continue
                 candidates.append(path)
     else:
@@ -74,7 +75,7 @@ def _directory_txt_files(root: Path, recursive: bool) -> list[InputFile]:
             for path in root.iterdir()
             if path.is_file()
             and not path.is_symlink()
-            and path.suffix.casefold() == ".txt"
+            and path.suffix.casefold() in _TXT_EXTENSIONS
         ]
     candidates.sort(key=lambda path: _natural_key(path.relative_to(root).as_posix()))
     return [
@@ -91,7 +92,7 @@ def discover_inputs(values: Iterable[str], recursive: bool) -> list[InputFile]:
             raise UsageError(f"不接受显式符号链接输入：{path}")
         if path.is_dir():
             discovered.extend(_directory_txt_files(path, recursive))
-        elif path.is_file() and path.suffix.casefold() == ".txt":
+        elif path.is_file() and path.suffix.casefold() in _TXT_EXTENSIONS:
             discovered.append(InputFile(path=path, original_name=path.name))
         else:
             raise UsageError(f"输入不是有效 TXT 文件或目录：{path}")
@@ -113,6 +114,151 @@ def discover_inputs(values: Iterable[str], recursive: bool) -> list[InputFile]:
     if duplicates:
         raise UsageError(f"重复导出相对路径：{', '.join(duplicates)}")
     return discovered
+
+
+def _validated_original_name(value: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or path.is_absolute()
+        or path.name in {"", ".", ".."}
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise UsageError(f"输入相对路径无效：{value}")
+    return path.as_posix()
+
+
+def _auto_input_files(
+    inputs: list[str],
+    *,
+    recursive: bool,
+    original_names: list[str] | None,
+) -> tuple[list[InputFile], list[str]]:
+    if original_names is not None and len(original_names) != len(inputs):
+        raise UsageError("输入文件与相对路径数量不一致")
+    from .plugins import get_document_adapter_for_extension
+
+    discovered: list[InputFile] = []
+    warnings: list[str] = []
+    for index, raw_input in enumerate(inputs):
+        path = Path(raw_input)
+        if path.is_symlink():
+            raise UsageError(f"不接受显式符号链接输入：{path}")
+        if path.is_file():
+            adapter = get_document_adapter_for_extension(path.suffix)
+            if "import" not in adapter.capabilities:
+                raise UsageError(
+                    f"Document Adapter 不支持导入：{adapter.adapter_id}"
+                )
+            name = (
+                original_names[index]
+                if original_names is not None
+                else path.name
+            )
+            discovered.append(
+                InputFile(path=path, original_name=_validated_original_name(name))
+            )
+            continue
+        if not path.is_dir() or original_names is not None:
+            raise UsageError(f"输入文件或目录不存在：{path}")
+        candidates = path.rglob("*") if recursive else path.iterdir()
+        ignored = 0
+        directory_files: list[InputFile] = []
+        for candidate in candidates:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            try:
+                adapter = get_document_adapter_for_extension(candidate.suffix)
+                if "import" not in adapter.capabilities:
+                    raise UsageError(
+                        f"Document Adapter 不支持导入：{adapter.adapter_id}"
+                    )
+            except UsageError:
+                ignored += 1
+                continue
+            directory_files.append(
+                InputFile(
+                    path=candidate,
+                    original_name=_validated_original_name(
+                        candidate.relative_to(path).as_posix()
+                    ),
+                )
+            )
+        directory_files.sort(key=lambda item: _natural_key(item.original_name))
+        discovered.extend(directory_files)
+        if ignored:
+            warnings.append(f"{path}: 已忽略 {ignored} 个不支持的文件")
+    if not discovered:
+        raise UsageError("没有发现受支持的输入文件")
+    names: set[str] = set()
+    duplicates: list[str] = []
+    for item in discovered:
+        key = item.original_name.casefold()
+        if key in names:
+            duplicates.append(item.original_name)
+        names.add(key)
+    if duplicates:
+        raise UsageError(f"重复导出相对路径：{', '.join(duplicates)}")
+    return discovered, warnings
+
+
+def _import_project_inputs(
+    inputs: list[str],
+    *,
+    recursive: bool,
+    config: dict[str, object],
+    document_adapter_id: str | None,
+    original_names: list[str] | None = None,
+) -> tuple[list[tuple[DocumentAdapter, ImportedFile]], list[str]]:
+    from .plugins import get_document_adapter, get_document_adapter_for_extension
+
+    if document_adapter_id is not None:
+        adapter = get_document_adapter(document_adapter_id)
+        if "import" not in adapter.capabilities:
+            raise UsageError(
+                f"Document Adapter 不支持导入：{adapter.adapter_id}"
+            )
+        imported = adapter.import_sources(
+            inputs, recursive=recursive, config=config
+        )
+        files = list(imported.files)
+        if original_names is not None:
+            if len(files) != len(original_names):
+                raise UsageError("Adapter 返回文件数与输入相对路径数量不一致")
+            files = [
+                replace(item, original_name=_validated_original_name(name))
+                for item, name in zip(files, original_names, strict=True)
+            ]
+        return [(adapter, item) for item in files], list(imported.warnings)
+
+    discovered, warnings = _auto_input_files(
+        inputs, recursive=recursive, original_names=original_names
+    )
+    values: list[tuple[DocumentAdapter, ImportedFile]] = []
+    for source in discovered:
+        adapter = get_document_adapter_for_extension(source.path.suffix)
+        if "import" not in adapter.capabilities:
+            raise UsageError(
+                f"Document Adapter 不支持导入：{adapter.adapter_id}"
+            )
+        imported = adapter.import_sources(
+            [str(source.path)], recursive=False, config=config
+        )
+        if len(imported.files) != 1:
+            raise UsageError(
+                f"按扩展名导入时 Adapter 必须返回一个 File：{adapter.adapter_id}"
+            )
+        values.append(
+            (
+                adapter,
+                replace(
+                    imported.files[0], original_name=source.original_name
+                ),
+            )
+        )
+        warnings.extend(imported.warnings)
+    return values, warnings
 
 
 def decode_txt(
@@ -165,6 +311,7 @@ class TXTDocumentAdapter:
     adapter_id = "txt"
     version = "1"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
+    extensions = _TXT_EXTENSIONS
 
     def import_sources(
         self,
@@ -271,7 +418,8 @@ def init_project(
     *,
     name: str,
     recursive: bool = False,
-    document_adapter_id: str = "txt",
+    document_adapter_id: str | None = "txt",
+    original_names: list[str] | None = None,
     empty: bool = False,
     dry_run: bool = False,
     app_root: Path = APP_ROOT,
@@ -290,30 +438,26 @@ def init_project(
     projects_root = projects_root or app_root / "projects"
     global_config = load_config(app_root / "config" / "config.toml")
     global_hash = bundle_hash(app_root)
-    from .plugins import get_document_adapter
-
-    document_adapter = None
-    imported = DocumentImport(files=(), warnings=())
+    imports: list[tuple[DocumentAdapter, ImportedFile]] = []
+    warnings: list[str] = []
     if not empty:
-        document_adapter = get_document_adapter(document_adapter_id)
-        if "import" not in document_adapter.capabilities:
-            raise UsageError(
-                f"Document Adapter 不支持导入：{document_adapter.adapter_id}"
-            )
-        imported = document_adapter.import_sources(
+        imports, warnings = _import_project_inputs(
             inputs,
             recursive=recursive,
             config=global_config,
+            document_adapter_id=document_adapter_id,
+            original_names=original_names,
         )
 
+    adapter_ids = {adapter.adapter_id for adapter, _ in imports}
     summary: dict[str, object] = {
         "project_name": name,
         "document_adapter": (
-            document_adapter.adapter_id if document_adapter is not None else None
+            next(iter(adapter_ids)) if len(adapter_ids) == 1 else None
         ),
-        "file_count": len(imported.files),
-        "segment_count": sum(len(item.segments) for item in imported.files),
-        "warnings": list(imported.warnings),
+        "file_count": len(imports),
+        "segment_count": sum(len(item.segments) for _, item in imports),
+        "warnings": warnings,
     }
     if dry_run:
         return None, summary
@@ -335,8 +479,7 @@ def init_project(
         (temp / "input").mkdir()
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
-        for file_order, item in enumerate(imported.files, start=1):
-            assert document_adapter is not None
+        for file_order, (document_adapter, item) in enumerate(imports, start=1):
             file_id = f"F{file_order:04d}"
             relative = Path(item.original_name)
             stored_name = relative.parent / f"{file_id}__{relative.name}"
@@ -569,6 +712,7 @@ def add_project_files(
     *,
     recursive: bool = False,
     document_adapter_id: str | None = None,
+    original_names: list[str] | None = None,
 ) -> dict[str, object]:
     running = _running_run_ids(project)
     if running:
@@ -577,35 +721,13 @@ def add_project_files(
         )
     metadata, files, segments = _source_records(project)
     config = load_config(project / "config.toml")
-    from .plugins import get_document_adapter
-
-    imports: list[tuple[DocumentAdapter, ImportedFile]] = []
-    warnings: list[str] = []
-    if document_adapter_id is not None:
-        adapter = get_document_adapter(document_adapter_id)
-        imported = adapter.import_sources(
-            inputs, recursive=recursive, config=config
-        )
-        imports.extend((adapter, item) for item in imported.files)
-        warnings.extend(imported.warnings)
-    else:
-        for raw_input in inputs:
-            path = Path(raw_input)
-            suffix = path.suffix.lower()
-            if path.is_dir() or suffix == ".txt":
-                adapter_id = "txt"
-            elif suffix == ".epub":
-                adapter_id = "epub"
-            else:
-                raise UsageError(
-                    f"无法识别输入格式，请使用 --document-adapter：{raw_input}"
-                )
-            adapter = get_document_adapter(adapter_id)
-            imported = adapter.import_sources(
-                [raw_input], recursive=recursive, config=config
-            )
-            imports.extend((adapter, item) for item in imported.files)
-            warnings.extend(imported.warnings)
+    imports, warnings = _import_project_inputs(
+        inputs,
+        recursive=recursive,
+        config=config,
+        document_adapter_id=document_adapter_id,
+        original_names=original_names,
+    )
     existing_names = {
         str(record["original_name"]).casefold() for record in files
     }

@@ -181,6 +181,7 @@ class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
     capabilities: frozenset[str]
+    extensions: frozenset[str]
 
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
@@ -188,6 +189,10 @@ class DocumentAdapter(Protocol):
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
+
+可导入 Adapter 必须声明至少一个小写、带前导点的扩展名。宿主按大小写不敏感
+匹配扩展名；不同 Adapter 声明同一扩展名时插件加载直接失败，不猜测格式。
+内置 TXT 声明 `.txt`、`.text`，EPUB 声明 `.epub`。
 
 ### 导入
 
@@ -209,7 +214,7 @@ ID、版本和状态位置；宿主只校验归属、版本和完整性，不解
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 2。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 3。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。

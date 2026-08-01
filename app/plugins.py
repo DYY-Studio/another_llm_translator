@@ -7,7 +7,7 @@ from .documents import DocumentAdapter
 from .errors import ConfigError, UsageError
 
 
-PLUGIN_PROTOCOL_VERSION = 2
+PLUGIN_PROTOCOL_VERSION = 3
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 
@@ -45,6 +45,7 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
         plugins.append(descriptor)
     seen_plugins: set[str] = set()
     seen_adapters: set[str] = set()
+    seen_extensions: dict[str, str] = {}
     for plugin in plugins:
         if plugin.protocol_version != PLUGIN_PROTOCOL_VERSION:
             raise ConfigError(
@@ -63,6 +64,30 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                 raise ConfigError(
                     f"Document Adapter 描述不完整：{adapter.adapter_id}"
                 )
+            extensions = getattr(adapter, "extensions", None)
+            if not isinstance(extensions, frozenset) or not all(
+                isinstance(value, str)
+                and value.startswith(".")
+                and value == value.casefold()
+                and len(value) > 1
+                for value in extensions
+            ):
+                raise ConfigError(
+                    f"Document Adapter 扩展名声明无效：{adapter.adapter_id}"
+                )
+            if "import" in adapter.capabilities and not extensions:
+                raise ConfigError(
+                    f"可导入的 Document Adapter 必须声明扩展名："
+                    f"{adapter.adapter_id}"
+                )
+            for extension in extensions:
+                owner = seen_extensions.get(extension)
+                if owner is not None:
+                    raise ConfigError(
+                        f"Document Adapter 扩展名重复：{extension} "
+                        f"({owner}, {adapter.adapter_id})"
+                    )
+                seen_extensions[extension] = adapter.adapter_id
             seen_adapters.add(adapter.adapter_id)
     return tuple(plugins)
 
@@ -73,6 +98,15 @@ def get_document_adapter(adapter_id: str) -> DocumentAdapter:
             if adapter.adapter_id == adapter_id:
                 return adapter
     raise UsageError(f"未安装 Document Adapter：{adapter_id}")
+
+
+def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
+    normalized = extension.casefold()
+    for plugin in load_plugins():
+        for adapter in plugin.document_adapters:
+            if normalized in adapter.extensions:
+                return adapter
+    raise UsageError(f"没有 Document Adapter 支持扩展名：{extension or '（无）'}")
 
 
 def document_adapter_summaries() -> list[dict[str, object]]:
@@ -86,6 +120,7 @@ def document_adapter_summaries() -> list[dict[str, object]]:
                     "plugin_id": plugin.plugin_id,
                     "plugin_version": plugin.version,
                     "capabilities": sorted(adapter.capabilities),
+                    "extensions": sorted(adapter.extensions),
                 }
             )
     return sorted(values, key=lambda value: str(value["adapter_id"]))
