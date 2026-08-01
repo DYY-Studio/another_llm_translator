@@ -480,6 +480,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     custom = {
         **default,
         "preset_id": "openrouter",
+        "endpoint": "/v1/models/${model}:generate",
         "model": "provider/model",
         "extra_body": {
             "provider": {
@@ -494,6 +495,9 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
     assert preview["headers"]["Authorization"] == "Bearer ***"
+    assert preview["url"] == (
+        "https://example.com/v1/v1/models/provider/model:generate"
+    )
     assert preview["body"]["provider"] == custom["extra_body"]["provider"]
     assert preview["body"]["model"] == "provider/model"
 
@@ -888,6 +892,13 @@ def test_web_task_options_require_explicit_running_run_action(
             }
         },
     )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'preset = "default"', 'preset = "google-gemini"'
+        ),
+        encoding="utf-8",
+    )
     calls: list[dict[str, object]] = []
 
     async def fake_translation(
@@ -907,7 +918,10 @@ def test_web_task_options_require_explicit_running_run_action(
         assert options["running_run"]["run_id"] == run_id
         assert options["running_run"]["scope"]["all_nonempty"] is True
         assert options["running_run"]["previous"]["model"]
-        assert options["running_run"]["current"]["endpoint"]
+        assert options["running_run"]["current"]["endpoint"] == (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent"
+        )
 
         undecided = client.post(
             "/api/v1/projects/sample/tasks",

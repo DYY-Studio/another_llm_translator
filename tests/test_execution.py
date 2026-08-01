@@ -750,6 +750,65 @@ async def test_llm_client_marks_usage_unavailable_when_omitted(
         await client.aclose()
 
 
+@pytest.mark.parametrize(
+    "second_usage",
+    [
+        None,
+        {"prompt_tokens": "invalid", "completion_tokens": 3, "total_tokens": 5},
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_client_marks_mixed_usage_unavailable(
+    tmp_path: Path,
+    second_usage: object,
+) -> None:
+    current = config()
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload: dict[str, object] = {
+            "choices": [{"message": {"content": '{"type":"end"}'}}],
+        }
+        usage = (
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            if calls == 1
+            else second_usage
+        )
+        if usage is not None:
+            payload["usage"] = usage
+        return httpx.Response(200, json=payload)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            for _ in range(2):
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+            assert llm.usage_summary() == {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "available": False,
+            }
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_llm_client_without_usage_mapping_has_no_summary(
     tmp_path: Path,
@@ -959,7 +1018,26 @@ async def test_llm_client_sends_openai_responses_format_request(
         sent = json.loads(request.content)
         return httpx.Response(
             200,
-            json={"output_text": '{"type":"end"}'},
+            json={
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_123",
+                        "summary": [],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"type":"end"}',
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                ]
+            },
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

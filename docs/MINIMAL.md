@@ -1087,14 +1087,15 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
 `/choices/0/message/content`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
-`endpoint` 的 `${model}` 占位符与 `/output_text` 响应路径。声明式 Adapter
-只支持非流式 JSON POST。
+`endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
+声明式 Adapter 只支持非流式 JSON POST。
 
 Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 在用户
 手动触发时以非流式 GET 检测连通性并读取模型列表，用于填写 Preset；不自动
 判断 Provider 或切换端点。`usage` 把端点响应中的消耗换算为 input/output/
 total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run
-`manifest.json`；端点未返回 usage 时明确显示不可用，不使用本地估算。
+`manifest.json`；任一成功响应未返回完整 usage 时，整个任务明确显示不可用且
+公开计数归零，不使用本地估算。
 
 项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段
 只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、

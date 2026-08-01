@@ -31,7 +31,9 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
         "endpoint": (
             str(config["llm"]["base_url"]).rstrip("/")
             + "/"
-            + str(config["llm"]["endpoint"]).lstrip("/")
+            + str(config["llm"]["endpoint"])
+            .replace("${model}", str(config["llm"]["model"]))
+            .lstrip("/")
         ),
     }
 

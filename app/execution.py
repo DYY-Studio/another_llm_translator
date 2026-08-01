@@ -861,6 +861,7 @@ class LLMClient:
         self._reported_output_clamp = False
         self.usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0)
         self.usage_observed = False
+        self.usage_complete = True
         self.logger = get_logger(stage)
         adapter = config.get("_llm_adapter")
         if not isinstance(adapter, JSONLLMAdapter):
@@ -1106,6 +1107,8 @@ class LLMClient:
                         ),
                     )
                     self.usage_observed = True
+                elif self.adapter.usage_pointers is not None:
+                    self.usage_complete = False
                 self.logger.info(
                     "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
                     request_id,
@@ -1203,11 +1206,12 @@ class LLMClient:
     def usage_summary(self) -> dict[str, Any] | None:
         if self.adapter.usage_pointers is None:
             return None
+        available = self.usage_observed and self.usage_complete
         return {
-            "input_tokens": self.usage.input_tokens,
-            "output_tokens": self.usage.output_tokens,
-            "total_tokens": self.usage.total_tokens,
-            "available": self.usage_observed,
+            "input_tokens": self.usage.input_tokens if available else 0,
+            "output_tokens": self.usage.output_tokens if available else 0,
+            "total_tokens": self.usage.total_tokens if available else 0,
+            "available": available,
         }
 
 
