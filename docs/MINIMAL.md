@@ -203,11 +203,13 @@ TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
+python -m app.main init BOOK.epub --document-adapter epub --epub-ruby-mode aozora --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
+python -m app.main files-add PROJECT BOOK.epub --epub-ruby-mode base_only
 python -m app.main files-remove PROJECT FILE_ID...
 ```
 
@@ -250,6 +252,13 @@ EPUB Adapter 按 OPF spine 顺序读取 XHTML 中可见的非空 `text` 和 `tai
 槽位。原 EPUB 及定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他
 未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/
 压缩比、越界资源以及 XML DTD/实体声明会被拒绝。
+
+完整 `<ruby>` 子树和紧随的非空尾文本作为一个 Segment。导入前可选择
+`aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
+（`原文（Ruby）`）；选项固化于 File 的 Adapter 状态，不是项目运行设置。
+更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
+EPUB 以普通译文替换 Ruby 子树，双语 EPUB 保留源 Ruby，译文不生成 Ruby。
+嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
 
@@ -1572,6 +1581,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
+- EPUB Ruby 作为单一语义 Segment，三种导入模式、纯译文去除旧读音和双语
+  保留源 Ruby 均生效；导入选项只固化在对应 File Adapter 状态。
 - EPUB ZIP 路径、符号链接、压缩炸弹和 XML DTD/实体输入明确拒绝。
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。

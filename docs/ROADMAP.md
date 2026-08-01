@@ -14,8 +14,7 @@
 - CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 10 已完成；下一阶段是 EPUB Ruby 与 Adapter
-  导入选项。
+- 产品路线 Stage 1 至 Stage 11 已完成；下一阶段是全局 Run 状态。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -162,7 +161,7 @@ Preset；内联 LLM 连接配置不再支持。
 模型发现和 usage 都是 Adapter 对端点响应的可选映射，与主请求的限速或重试
 语义无关。实现细节见 `docs/ADAPTERS.md`。
 
-## Stage 11：EPUB Ruby 与 Adapter 导入选项
+## Stage 11：EPUB Ruby 与 Adapter 导入选项（已完成）
 
 - 将完整 `<ruby>` 子树视为一个语义内联单元，不把基础文字、`rt` 和尾文本
   拆成互不相关的 Segment。

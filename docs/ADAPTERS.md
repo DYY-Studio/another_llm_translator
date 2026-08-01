@@ -182,6 +182,7 @@ class DocumentAdapter(Protocol):
     version: str
     capabilities: frozenset[str]
     extensions: frozenset[str]
+    import_options: tuple[DocumentChoiceOption, ...]
 
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
@@ -208,19 +209,24 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
 ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
 
+Adapter 可声明由固定字符串选项组成的 `import_options`。宿主展示声明、校验
+取值并只在导入调用中传入；选择结果如需影响后续导出，由 Adapter 自行写入
+File 的 `opaque_state`。修改选项不会改写既有 Segment，必须移除并重新导入
+文件。当前唯一用例是 EPUB `ruby_mode`，不支持自由键值或嵌套选项。
+
 ### 导出
 
 宿主选择阶段结果、执行缺失结果规则和前导空白恢复，再逐 File 向来源 Adapter
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 3。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 4。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
 不会自动改用 TXT，也不会删除仍可读取的项目 Segment 和阶段结果。
 
-### EPUB 0.1
+### EPUB 0.2
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
 保存各 File 的原始容器，并记录 OPF、spine
@@ -229,6 +235,12 @@ XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 
 双语模式在同一 XHTML 文本槽中按“源文、换行、目标文本”写入，并在 body
 声明 `white-space: pre-line`。该规则属于 EPUB Adapter，不是宿主通用排版树。
+
+完整 `<ruby>` 子树与其非空尾文本构成一个 Segment。导入可选择
+`aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
+（`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
+位置快速失败。纯译文导出以普通译文替换整个 Ruby 子树；双语导出保留源 Ruby
+结构，并把普通译文写在其后。
 
 安全边界拒绝：
 
@@ -263,8 +275,8 @@ def descriptor() -> PluginDescriptor:
 描述。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示信任。插件不得
 自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-插件专属配置的命名空间与验证接口尚未实现；当前 Document Adapter 只接收现有
-项目配置。不要依赖未文档化的内部对象。
+导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或
+运行期设置。不要依赖未文档化的内部对象。
 
 ## 4. Python LLM Adapter（provisional，未实现）
 
