@@ -841,6 +841,13 @@ def create_app(
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
 
+    @app.get("/api/v1/diagnostics/requests/{request_id}")
+    async def diagnostic_request(request_id: str) -> dict[str, Any]:
+        try:
+            return app.state.diagnostics.request_detail(request_id)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+
     @app.post("/api/v1/projects/{name}/apply")
     async def apply_results(
         name: str, payload: dict[str, Any]

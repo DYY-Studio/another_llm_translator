@@ -1032,9 +1032,16 @@ class LLMClient:
             .lstrip("/")
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.begin_request(
+                request_id=request_id,
+                model=str(self.config["llm"]["model"]),
+                messages=messages,
+                max_attempts=attempts,
+            )
         for attempt in range(1, attempts + 1):
             waited = await self.limiter.acquire(estimated_input_tokens)
-            diagnostics = current_diagnostics()
             if waited:
                 self.logger.info(
                     "rate-limit wait=%.2fs request=%s attempt=%d",
@@ -1056,7 +1063,7 @@ class LLMClient:
             started = time.monotonic()
             response_status: int | None = None
             if diagnostics is not None:
-                diagnostics.request_started()
+                diagnostics.request_started(request_id)
             try:
                 debug = self.config["debug"]
                 if (
@@ -1101,6 +1108,8 @@ class LLMClient:
                     parent_request_id=parent_request_id,
                 )
                 if attempt == attempts:
+                    if diagnostics is not None:
+                        diagnostics.fail_request(request_id, "network_error")
                     raise ExternalError(f"HTTP 请求重试耗尽：{exc}") from exc
                 if diagnostics is not None:
                     diagnostics.retried()
@@ -1109,6 +1118,8 @@ class LLMClient:
             finally:
                 if diagnostics is not None:
                     diagnostics.request_finished(
+                        request_id=request_id,
+                        attempt=attempt,
                         latency_seconds=time.monotonic() - started,
                         status=response_status,
                         error=response_status is None or response_status >= 400,
@@ -1160,11 +1171,20 @@ class LLMClient:
                     status=response.status_code,
                     parent_request_id=parent_request_id,
                 )
-                parsed = self.adapter.parse_response(response_data)
-                normalized = normalize_llm_response(parsed)
-                if diagnostics is not None and normalized.reasoning_content:
-                    diagnostics.add_reasoning(
-                        request_id, normalized.reasoning_content
+                try:
+                    parsed = self.adapter.parse_response(response_data)
+                    normalized = normalize_llm_response(parsed)
+                except Exception:
+                    if diagnostics is not None:
+                        diagnostics.fail_request(
+                            request_id, "response_parse_error"
+                        )
+                    raise
+                if diagnostics is not None:
+                    diagnostics.complete_request(
+                        request_id,
+                        content=normalized.content,
+                        reasoning_content=normalized.reasoning_content,
                     )
                 extracted = self.adapter.extract_usage(response_data)
                 if extracted is not None:
@@ -1209,6 +1229,8 @@ class LLMClient:
                     response.status_code,
                     elapsed,
                 )
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "authentication_error")
                 raise FatalExternalError(f"鉴权失败：HTTP {response.status_code}")
             response_hint = response.text.casefold()
             if response.status_code == 400 and (
@@ -1224,6 +1246,8 @@ class LLMClient:
                     attempt,
                     elapsed,
                 )
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "context_length_error")
                 raise ContextLengthError(
                     "模型报告上下文过长",
                     request_id=request_id,
@@ -1236,6 +1260,10 @@ class LLMClient:
                     response.status_code,
                     elapsed,
                 )
+                if diagnostics is not None:
+                    diagnostics.fail_request(
+                        request_id, "request_configuration_error"
+                    )
                 raise FatalExternalError(
                     f"请求或端点配置错误：HTTP {response.status_code}"
                 )
@@ -1247,6 +1275,8 @@ class LLMClient:
                     response.status_code,
                     elapsed,
                 )
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "http_error")
                 raise ExternalError(f"LLM 请求失败：HTTP {response.status_code}")
             self.logger.warning(
                 "request retry request=%s attempt=%d status=%d elapsed=%.2fs",

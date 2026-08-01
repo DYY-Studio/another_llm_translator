@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import copy
 import logging
 import time
 from collections import deque
@@ -21,6 +22,10 @@ _PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _HANDLER_MARKER = "_minimal_llm_translator_handler"
 _LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_REQUEST_LIMIT = 50
+_MESSAGE_LIMIT = 100_000
+_CONTENT_LIMIT = 100_000
+_REASONING_LIMIT = 20_000
 
 
 def _now() -> str:
@@ -29,6 +34,10 @@ def _now() -> str:
 
 def current_diagnostics() -> Diagnostics | None:
     return _ACTIVE.get()
+
+
+def _bounded(value: str, limit: int) -> tuple[str, bool]:
+    return value[:limit], len(value) > limit
 
 
 class _ContextFilter(logging.Filter):
@@ -60,7 +69,7 @@ class Diagnostics:
     def __init__(self, log_path: Path) -> None:
         self.log_path = log_path
         self.logs: deque[dict[str, Any]] = deque(maxlen=1000)
-        self.reasoning: deque[dict[str, Any]] = deque(maxlen=200)
+        self.requests: deque[dict[str, Any]] = deque(maxlen=_REQUEST_LIMIT)
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
@@ -120,13 +129,16 @@ class Diagnostics:
         self.rate_limit_wait_count = 0
         self.latest_latency_seconds = None
         self.usage = None
-        self.reasoning.clear()
+        self.requests.clear()
         self._started_monotonic = time.monotonic()
         self._elapsed_seconds = 0.0
         self._running = True
         try:
             yield
         finally:
+            for request in self.requests:
+                if request["status"] in {"running", "retrying"}:
+                    request["status"] = "interrupted"
             self.active_requests = 0
             if self._started_monotonic is not None:
                 self._elapsed_seconds = time.monotonic() - self._started_monotonic
@@ -134,16 +146,96 @@ class Diagnostics:
             _PROJECT.reset(project_token)
             _ACTIVE.reset(active_token)
 
-    def request_started(self) -> None:
+    def begin_request(
+        self,
+        *,
+        request_id: str,
+        model: str,
+        messages: list[dict[str, str]],
+        max_attempts: int,
+    ) -> None:
+        normalized_messages = []
+        for message in messages:
+            content, truncated = _bounded(
+                str(message.get("content", "")), _MESSAGE_LIMIT
+            )
+            normalized_messages.append(
+                {
+                    "role": str(message.get("role", "")),
+                    "content": content,
+                    "truncated": truncated,
+                }
+            )
+        self.requests.append(
+            {
+                "timestamp": _now(),
+                "project": self.project,
+                "stage": self.stage,
+                "request_id": request_id,
+                "model": model,
+                "status": "running",
+                "max_attempts": max_attempts,
+                "messages": normalized_messages,
+                "response_content": None,
+                "response_content_truncated": False,
+                "reasoning_content": None,
+                "reasoning_content_truncated": False,
+                "attempts": [],
+                "error": None,
+            }
+        )
+
+    def _request(self, request_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                request
+                for request in reversed(self.requests)
+                if request["request_id"] == request_id
+            ),
+            None,
+        )
+
+    def request_started(self, request_id: str) -> None:
         self.active_requests += 1
+        request = self._request(request_id)
+        if request is not None:
+            request["status"] = "running"
 
     def request_finished(
-        self, *, latency_seconds: float, status: int | None, error: bool
+        self,
+        *,
+        request_id: str,
+        attempt: int,
+        latency_seconds: float,
+        status: int | None,
+        error: bool,
     ) -> None:
         self.active_requests = max(0, self.active_requests - 1)
         self.latest_latency_seconds = latency_seconds
         if error or (status is not None and status >= 400):
             self.http_errors += 1
+        request = self._request(request_id)
+        if request is None:
+            return
+        outcome = (
+            "network_error"
+            if status is None
+            else "http_error"
+            if status >= 400
+            else "succeeded"
+        )
+        request["attempts"].append(
+            {
+                "attempt": attempt,
+                "http_status": status,
+                "latency_ms": round(latency_seconds * 1000, 1),
+                "outcome": outcome,
+            }
+        )
+        if error:
+            request["status"] = (
+                "retrying" if attempt < request["max_attempts"] else "failed"
+            )
 
     def retried(self) -> None:
         self.retry_count += 1
@@ -154,16 +246,34 @@ class Diagnostics:
     def set_usage(self, usage: dict[str, Any]) -> None:
         self.usage = dict(usage)
 
-    def add_reasoning(self, request_id: str, content: str) -> None:
-        self.reasoning.append(
-            {
-                "timestamp": _now(),
-                "project": self.project,
-                "stage": self.stage,
-                "request_id": request_id,
-                "content": content[:20000],
-            }
-        )
+    def complete_request(
+        self, request_id: str, *, content: str, reasoning_content: str | None
+    ) -> None:
+        request = self._request(request_id)
+        if request is None:
+            return
+        response_content, content_truncated = _bounded(content, _CONTENT_LIMIT)
+        request["response_content"] = response_content
+        request["response_content_truncated"] = content_truncated
+        if reasoning_content is not None:
+            reasoning, reasoning_truncated = _bounded(
+                reasoning_content, _REASONING_LIMIT
+            )
+            request["reasoning_content"] = reasoning
+            request["reasoning_content_truncated"] = reasoning_truncated
+        request["status"] = "completed"
+
+    def fail_request(self, request_id: str, error: str) -> None:
+        request = self._request(request_id)
+        if request is not None:
+            request["status"] = "failed"
+            request["error"] = error
+
+    def request_detail(self, request_id: str) -> dict[str, Any]:
+        request = self._request(request_id)
+        if request is None:
+            raise ValueError(f"本次运行中不存在请求：{request_id}")
+        return copy.deepcopy(request)
 
     def snapshot(
         self,
@@ -225,7 +335,31 @@ class Diagnostics:
                 "throughput_tokens_per_second": throughput,
             },
             "logs": logs,
-            "reasoning": list(self.reasoning),
+            "requests": [
+                {
+                    "timestamp": request["timestamp"],
+                    "project": request["project"],
+                    "stage": request["stage"],
+                    "request_id": request["request_id"],
+                    "model": request["model"],
+                    "status": request["status"],
+                    "attempt_count": len(request["attempts"]),
+                    "last_http_status": (
+                        request["attempts"][-1]["http_status"]
+                        if request["attempts"]
+                        else None
+                    ),
+                    "latest_latency_ms": (
+                        request["attempts"][-1]["latency_ms"]
+                        if request["attempts"]
+                        else None
+                    ),
+                    "has_content": request["response_content"] is not None,
+                    "has_reasoning": request["reasoning_content"] is not None,
+                    "error": request["error"],
+                }
+                for request in self.requests
+            ],
             "filters": {
                 "levels": sorted({item["level"] for item in self.logs}),
                 "projects": sorted({item["project"] for item in self.logs}),
