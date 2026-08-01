@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { DiagnosticsResponse } from "../types";
+import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
+
+type DetailTab = "request" | "content" | "reasoning" | "attempts";
 
 function number(value: number | null, suffix = "") {
   return value === null ? "不可用" : `${value.toLocaleString()}${suffix}`;
@@ -14,6 +16,14 @@ function clock(value: string) {
   });
 }
 
+const statusLabels = {
+  running: "请求中",
+  retrying: "重试中",
+  completed: "已完成",
+  failed: "失败",
+  interrupted: "已中断",
+};
+
 export function DiagnosticsView() {
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
   const [level, setLevel] = useState("");
@@ -22,6 +32,10 @@ export function DiagnosticsView() {
   const [query, setQuery] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const [error, setError] = useState("");
+  const [selectedRequest, setSelectedRequest] = useState<string | null>(null);
+  const [detail, setDetail] = useState<DiagnosticsRequestDetail | null>(null);
+  const [detailError, setDetailError] = useState("");
+  const [detailTab, setDetailTab] = useState<DetailTab>("request");
   const logRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -31,14 +45,28 @@ export function DiagnosticsView() {
     if (stage) params.set("stage", stage);
     if (query) params.set("q", query);
     try {
-      setValue(await api<DiagnosticsResponse>(
+      const summary = api<DiagnosticsResponse>(
         `/api/v1/diagnostics${params.size ? `?${params}` : ""}`,
-      ));
+      );
+      const requestDetail = selectedRequest
+        ? api<DiagnosticsRequestDetail>(
+            `/api/v1/diagnostics/requests/${encodeURIComponent(selectedRequest)}`,
+          ).then(
+            (next) => ({ value: next, error: "" }),
+            (reason) => ({ value: null, error: String(reason) }),
+          )
+        : Promise.resolve({ value: null, error: "" });
+      const [nextValue, nextDetail] = await Promise.all([summary, requestDetail]);
+      setValue(nextValue);
+      if (selectedRequest) {
+        setDetail(nextDetail.value);
+        setDetailError(nextDetail.error);
+      }
       setError("");
     } catch (reason) {
       setError(String(reason));
     }
-  }, [level, project, stage, query]);
+  }, [level, project, stage, query, selectedRequest]);
 
   useEffect(() => {
     void load();
@@ -51,6 +79,28 @@ export function DiagnosticsView() {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [autoScroll, value?.logs]);
+
+  useEffect(() => {
+    if (!selectedRequest) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedRequest(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedRequest]);
+
+  const openDetail = (requestId: string) => {
+    setSelectedRequest(requestId);
+    setDetail(null);
+    setDetailError("");
+    setDetailTab("request");
+  };
+
+  const closeDetail = () => {
+    setSelectedRequest(null);
+    setDetail(null);
+    setDetailError("");
+  };
 
   const metrics = value?.metrics;
   return (
@@ -122,20 +172,117 @@ export function DiagnosticsView() {
           </div>
         </section>
 
-        <section className="diagnostics-panel reasoning-panel">
+        <section className="diagnostics-panel request-panel">
           <div className="diagnostics-panel-heading">
-            <div><h2>本次运行 Reasoning</h2><span>仅保存在内存</span></div>
+            <div><h2>本次运行请求/响应</h2><span>最近 50 条 · 仅保存在内存</span></div>
           </div>
-          <div className="reasoning-list">
-            {value?.reasoning.length ? value.reasoning.map((item, index) => (
-              <article key={`${item.request_id}-${index}`}>
-                <header><code>{item.request_id}</code><time>{clock(item.timestamp)}</time></header>
-                <pre>{item.content}</pre>
+          <div className="request-list">
+            {value?.requests.length ? [...value.requests].reverse().map((item) => (
+              <article
+                key={item.request_id}
+                onDoubleClick={() => openDetail(item.request_id)}
+              >
+                <div className="request-row-main">
+                  <header><code>{item.request_id}</code><time>{clock(item.timestamp)}</time></header>
+                  <strong>{item.model}</strong>
+                  <span>
+                    <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
+                    {item.attempt_count} 次尝试
+                    {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
+                    {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
+                  </span>
+                </div>
+                <button className="quiet-button" onClick={() => openDetail(item.request_id)}>查看</button>
               </article>
-            )) : <div className="diagnostics-empty">本次运行尚无 Reasoning 内容。</div>}
+            )) : <div className="diagnostics-empty">本次运行尚无请求。</div>}
           </div>
         </section>
       </div>
+
+      {selectedRequest && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDetail();
+          }}
+        >
+          <section className="modal exchange-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
+            <header className="exchange-dialog-heading">
+              <div>
+                <h2 id="exchange-dialog-title">请求 / 响应详情</h2>
+                <code>{selectedRequest}</code>
+              </div>
+              <button className="quiet-button" onClick={closeDetail} aria-label="关闭详情">关闭</button>
+            </header>
+            <nav className="exchange-tabs" aria-label="详情分类">
+              {([
+                ["request", "请求"],
+                ["content", "Content"],
+                ["reasoning", "Reasoning"],
+                ["attempts", "尝试"],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  className={detailTab === tab ? "active" : ""}
+                  aria-pressed={detailTab === tab}
+                  onClick={() => setDetailTab(tab)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+            {detailError ? (
+              <div className="warning-banner">{detailError}</div>
+            ) : !detail ? (
+              <div className="diagnostics-empty">正在读取请求详情…</div>
+            ) : (
+              <div className="exchange-detail">
+                <div className="exchange-meta">
+                  <span>模型 <strong>{detail.model}</strong></span>
+                  <span>状态 <strong>{statusLabels[detail.status]}</strong></span>
+                </div>
+                {detailTab === "request" && (
+                  <div className="exchange-messages">
+                    {detail.messages.map((message, index) => (
+                      <article key={`${message.role}-${index}`}>
+                        <header>
+                          <strong>{message.role || "message"}</strong>
+                          {message.truncated && <span>已截断至 100,000 字符</span>}
+                        </header>
+                        <pre>{message.content}</pre>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {detailTab === "content" && (
+                  <article className="exchange-body">
+                    {detail.response_content_truncated && <p>已截断至 100,000 字符。</p>}
+                    <pre>{detail.response_content ?? "尚无 Content。"}</pre>
+                  </article>
+                )}
+                {detailTab === "reasoning" && (
+                  <article className="exchange-body">
+                    {detail.reasoning_content_truncated && <p>已截断至 20,000 字符。</p>}
+                    <pre>{detail.reasoning_content ?? "本请求没有 Reasoning。"}</pre>
+                  </article>
+                )}
+                {detailTab === "attempts" && (
+                  <div className="exchange-attempts">
+                    {detail.attempts.length ? detail.attempts.map((attempt) => (
+                      <article key={attempt.attempt}>
+                        <strong>第 {attempt.attempt} 次</strong>
+                        <span>{attempt.http_status === null ? "网络错误" : `HTTP ${attempt.http_status}`}</span>
+                        <span>{attempt.latency_ms} ms</span>
+                      </article>
+                    )) : <div className="diagnostics-empty">尚未开始 HTTP 尝试。</div>}
+                    {detail.error && <p className="error-text">错误类别：{detail.error}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </section>
   );
 }

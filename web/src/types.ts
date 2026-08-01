@@ -106,18 +106,51 @@ export interface DiagnosticsResponse {
     stage: string;
     message: string;
   }>;
-  reasoning: Array<{
+  requests: Array<{
     timestamp: string;
     project: string | null;
     stage: string | null;
     request_id: string;
-    content: string;
+    model: string;
+    status: "running" | "retrying" | "completed" | "failed" | "interrupted";
+    attempt_count: number;
+    last_http_status: number | null;
+    latest_latency_ms: number | null;
+    has_content: boolean;
+    has_reasoning: boolean;
+    error: string | null;
   }>;
   filters: {
     levels: string[];
     projects: string[];
     stages: string[];
   };
+}
+
+export interface DiagnosticsRequestDetail {
+  timestamp: string;
+  project: string | null;
+  stage: string | null;
+  request_id: string;
+  model: string;
+  status: "running" | "retrying" | "completed" | "failed" | "interrupted";
+  max_attempts: number;
+  messages: Array<{
+    role: string;
+    content: string;
+    truncated: boolean;
+  }>;
+  response_content: string | null;
+  response_content_truncated: boolean;
+  reasoning_content: string | null;
+  reasoning_content_truncated: boolean;
+  attempts: Array<{
+    attempt: number;
+    http_status: number | null;
+    latency_ms: number;
+    outcome: "succeeded" | "http_error" | "network_error";
+  }>;
+  error: string | null;
 }
 
 export interface ModelRow {
