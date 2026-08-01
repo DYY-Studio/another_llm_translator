@@ -56,8 +56,9 @@ MVP 需要回答：
 ### Segment 是进度单位
 
 Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻辑行，EPUB
-中对应 XHTML 文本槽。术语扫描、翻译、校对和润色的完成结果、失败记录和恢复
-判断全部绑定 `segment_id`。
+中对应 XHTML 文本流。普通透明内联元素中的相邻文本槽合并为一个语义单元；
+Ruby 及其尾文本保持独立语义单元。术语扫描、翻译、校对和润色的完成结果、
+失败记录和恢复判断全部绑定 `segment_id`。
 
 非空 Segment 的连续前导 Unicode 空白以源文为准。模型仍接收完整文本，但翻译、
 校对建议、润色建议、apply 和导出在本地移除模型生成的前导空白，并恢复源
@@ -248,10 +249,17 @@ python -m app.main files-remove PROJECT FILE_ID...
 Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
 export 必须在创建 Run 或请求前快速失败，提示先添加含非空 Segment 的文件。
 
-EPUB Adapter 按 OPF spine 顺序读取 XHTML 中可见的非空 `text` 和 `tail`
-槽位。原 EPUB 及定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他
-未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/
-压缩比、越界资源以及 XML DTD/实体声明会被拒绝。
+EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，按 spine 顺序读取
+XHTML 文本流。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻
+`text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的
+非空白文本以及内部空白按源文保留。原 EPUB 及不透明定位状态用于重建输出；
+导航、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号
+链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
+
+EPUB 3 XHTML 允许省略 DOCTYPE，或使用不含外部标识的 `<!DOCTYPE html>`；
+EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
+`-//W3C//DTD XHTML 1.1//EN` 的 XHTML 1.1 声明。外部 DTD 永不加载；实体声明、
+不匹配版本的 DOCTYPE、SYSTEM-only 声明和不支持的 PUBLIC 标识均拒绝。
 
 完整 `<ruby>` 子树和紧随的非空尾文本作为一个 Segment。导入前可选择
 `aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
@@ -1404,7 +1412,9 @@ output/bilingual/polished/
 TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，并使用
 `project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
 EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
-XHTML 槽位。
+XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写入首个槽并清空
+其余槽，保留原内联标签骨架；双语输出保留源槽并在末槽后追加译文。Ruby 继续
+按其专用定位规则导出。
 
 ```bash
 python -m app.main export PROJECT --stage translated --format original
@@ -1613,7 +1623,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
   纯译文和双语文件均可重新打开。
 - EPUB Ruby 作为单一语义 Segment，三种导入模式、纯译文去除旧读音和双语
   保留源 Ruby 均生效；导入选项只固化在对应 File Adapter 状态。
-- EPUB ZIP 路径、符号链接、压缩炸弹和 XML DTD/实体输入明确拒绝。
+- EPUB ZIP 路径、符号链接、压缩炸弹、非法版本化 DOCTYPE 和 XML 实体输入明确
+  拒绝；普通内联文本合并、复合定位和 Ruby 独立 Segment 均保持可导出。
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。

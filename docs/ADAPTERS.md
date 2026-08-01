@@ -230,13 +230,24 @@ Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
 保存各 File 的原始容器，并记录 OPF、spine
-顺序以及 Segment 到 XHTML `text`/`tail` 槽位的定位。导出只重写被翻译的
-XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
+顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。普通透明内联
+元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写
+被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 
-双语模式在同一 XHTML 文本槽中按“源文、换行、目标文本”写入，并在 body
-声明 `white-space: pre-line`。该规则属于 EPUB Adapter，不是宿主通用排版树。
+双语模式在单槽 Segment 中按“源文、换行、目标文本”写入；复合 Segment 保留
+所有源槽，并在最后一个槽后追加“换行、目标文本”。body 声明
+`white-space: pre-line`。该规则属于 EPUB Adapter，不是宿主通用排版树。
 
-完整 `<ruby>` 子树与其非空尾文本构成一个 Segment。导入可选择
+EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`。EPUB 3 XHTML 可无
+DOCTYPE，或使用无外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 可无 DOCTYPE，
+或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN`，SYSTEM 地址只作为声明数据而不
+会被加载。所有外部 DTD、实体声明、版本不匹配的声明、SYSTEM-only 和错误
+PUBLIC 标识都会快速失败。
+
+普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入
+首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出
+保留源槽并在末槽后写入译文。完整 `<ruby>` 子树与其非空尾文本仍构成独立
+Segment。导入可选择
 `aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
 （`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
 位置快速失败。纯译文导出以普通译文替换整个 Ruby 子树；双语导出保留源 Ruby
@@ -247,7 +258,7 @@ XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 - ZIP 绝对路径、`..`、反斜杠路径、重复路径和符号链接；
 - 过多条目、过大解压总量和异常压缩比；
 - 越界或缺失的 OPF/spine 资源；
-- XML DTD、实体声明和非法 XML。
+- 非法版本化 DOCTYPE、外部 DTD、实体声明和非法 XML。
 
 ## 3. 可信 Python 插件宿主（Beta）
 

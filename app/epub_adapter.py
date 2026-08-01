@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
+from xml.parsers import expat
 from xml.etree import ElementTree
 
 from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
@@ -17,6 +18,32 @@ MAX_EPUB_ENTRIES = 10_000
 MAX_EPUB_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_EPUB_COMPRESSION_RATIO = 200
 _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
+_INLINE_TEXT_ELEMENTS = {
+    "a",
+    "abbr",
+    "b",
+    "bdi",
+    "bdo",
+    "cite",
+    "code",
+    "data",
+    "dfn",
+    "em",
+    "i",
+    "kbd",
+    "mark",
+    "q",
+    "s",
+    "samp",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "time",
+    "u",
+    "var",
+}
 
 
 class EPUBDocumentAdapter:
@@ -59,11 +86,17 @@ class EPUBDocumentAdapter:
         with zipfile.ZipFile(path) as archive:
             entries = _validated_entries(archive)
             opf_path = _opf_path(archive, entries)
-            xhtml_paths = _spine_paths(archive, entries, opf_path)
+            xhtml_paths, epub_version = _spine_paths(
+                archive, entries, opf_path
+            )
             segments: list[str] = []
             locators: list[dict[str, Any]] = []
             for xhtml_path in xhtml_paths:
-                root = _parse_xml(archive.read(xhtml_path), xhtml_path)
+                root = _parse_xml(
+                    archive.read(xhtml_path),
+                    xhtml_path,
+                    doctype_policy=f"epub{epub_version}_xhtml",
+                )
                 body = next(
                     (
                         element
@@ -138,12 +171,20 @@ class EPUBDocumentAdapter:
         changed: dict[str, bytes] = {}
         with zipfile.ZipFile(source_path) as archive:
             entries = _validated_entries(archive)
+            opf_path = state.get("opf_path")
+            if not isinstance(opf_path, str):
+                raise IncompleteError("EPUB 状态缺少 OPF 路径")
+            _, epub_version = _spine_paths(archive, entries, opf_path)
             for xhtml_path, items in by_xhtml.items():
                 if xhtml_path not in entries:
                     raise IncompleteError(
                         f"EPUB 状态引用了缺失资源：{xhtml_path}"
                     )
-                root = _parse_xml(archive.read(xhtml_path), xhtml_path)
+                root = _parse_xml(
+                    archive.read(xhtml_path),
+                    xhtml_path,
+                    doctype_policy=f"epub{epub_version}_xhtml",
+                )
                 body = next(
                     (
                         element
@@ -183,9 +224,13 @@ class EPUBDocumentAdapter:
                     if item[1]["slot"].get("kind") == "ruby"
                 ]
                 for segment, locator, target in regular:
-                    source = str(segment["source"])
-                    value = f"{source}\n{target}" if bilingual else target
-                    _set_text_slot(body, locator.get("slot"), value)
+                    _set_regular_slot(
+                        body,
+                        locator.get("slot"),
+                        str(segment["source"]),
+                        target,
+                        bilingual=bilingual,
+                    )
                 ruby_items = rubies if bilingual else sorted(
                     rubies,
                     key=lambda item: tuple(item[1]["slot"].get("path", [])),
@@ -252,13 +297,72 @@ def _validated_entries(
     return entries
 
 
-def _parse_xml(payload: bytes, location: str) -> ElementTree.Element:
-    lowered = payload.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
-        raise ProjectError(f"EPUB XML 不允许 DTD 或实体声明：{location}")
+def _parse_xml(
+    payload: bytes,
+    location: str,
+    *,
+    doctype_policy: str = "no_external",
+) -> ElementTree.Element:
+    _validate_xml_declarations(
+        payload, location=location, doctype_policy=doctype_policy
+    )
     try:
         return ElementTree.fromstring(payload)
     except ElementTree.ParseError as exc:
+        raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
+
+
+def _validate_xml_declarations(
+    payload: bytes,
+    *,
+    location: str,
+    doctype_policy: str,
+) -> None:
+    if doctype_policy not in {
+        "no_external",
+        "epub2_xhtml",
+        "epub3_xhtml",
+    }:
+        raise ProjectError(f"EPUB XML 校验策略无效：{doctype_policy}")
+    parser = expat.ParserCreate()
+
+    def reject_entity(*_: object) -> None:
+        raise ProjectError(f"EPUB XML 不允许实体声明：{location}")
+
+    def check_doctype(
+        name: str,
+        system_id: str | None,
+        public_id: str | None,
+        _has_internal_subset: int,
+    ) -> None:
+        if doctype_policy == "no_external":
+            if system_id is not None or public_id is not None:
+                raise ProjectError(
+                    f"EPUB XML 不允许外部 DTD 标识：{location}"
+                )
+            return
+        if name.casefold() != "html":
+            raise ProjectError(f"EPUB XHTML DOCTYPE 名称无效：{location}")
+        if doctype_policy == "epub3_xhtml":
+            if system_id is not None or public_id is not None:
+                raise ProjectError(
+                    f"EPUB 3 XHTML 不允许外部 DTD 标识：{location}"
+                )
+            return
+        if public_id != "-//W3C//DTD XHTML 1.1//EN":
+            raise ProjectError(
+                f"EPUB 2 XHTML PUBLIC 标识无效：{location}"
+            )
+
+    parser.StartDoctypeDeclHandler = check_doctype
+    parser.EntityDeclHandler = reject_entity
+    parser.UnparsedEntityDeclHandler = reject_entity
+    parser.ExternalEntityRefHandler = reject_entity
+    try:
+        parser.Parse(payload, True)
+    except ProjectError:
+        raise
+    except expat.ExpatError as exc:
         raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
 
 
@@ -284,8 +388,13 @@ def _spine_paths(
     archive: zipfile.ZipFile,
     entries: dict[str, zipfile.ZipInfo],
     opf_path: str,
-) -> list[str]:
+) -> tuple[list[str], str]:
     root = _parse_xml(archive.read(opf_path), opf_path)
+    if _local_name(root.tag) != "package":
+        raise ProjectError(f"EPUB OPF 根元素无效：{opf_path}")
+    version = root.get("version")
+    if version not in {"2.0", "3.0"}:
+        raise ProjectError(f"EPUB OPF 版本不支持：{opf_path}")
     manifest: dict[str, tuple[str, str]] = {}
     spine: list[str] = []
     for element in root.iter():
@@ -312,7 +421,7 @@ def _spine_paths(
         paths.append(resolved)
     if not paths:
         raise ProjectError("EPUB spine 没有 XHTML 内容")
-    return paths
+    return paths, version[0]
 
 
 def _safe_archive_path(base: str, value: str) -> str:
@@ -335,45 +444,90 @@ def _text_slots(
     location: str,
 ) -> list[tuple[dict[str, Any], str]]:
     values: list[tuple[dict[str, Any], str]] = []
+    regular_run: list[tuple[dict[str, Any], str]] = []
+
+    def add_regular(locator: dict[str, Any], text: str | None) -> None:
+        if not text:
+            return
+        if text.isspace() and not regular_run:
+            return
+        regular_run.append((locator, text))
+
+    def flush_regular() -> None:
+        while regular_run and regular_run[-1][1].isspace():
+            regular_run.pop()
+        if not regular_run:
+            return
+        if len(regular_run) == 1:
+            locator: dict[str, Any] = regular_run[0][0]
+        else:
+            locator = {
+                "kind": "composite",
+                "slots": [item[0] for item in regular_run],
+            }
+        values.append((locator, "".join(item[1] for item in regular_run)))
+        regular_run.clear()
+
+    def append_ruby(child: ElementTree.Element, child_path: list[int]) -> None:
+        ruby = _render_ruby(
+            child,
+            ruby_mode=ruby_mode,
+            location=location,
+            path=child_path,
+        )
+        tail = child.tail or ""
+        tail_in_source = bool(tail and not tail.isspace())
+        values.append(
+            (
+                {
+                    "path": child_path,
+                    "kind": "ruby",
+                    "tail": tail,
+                    "tail_in_source": tail_in_source,
+                },
+                ruby + (tail if tail_in_source else ""),
+            )
+        )
+
+    def visit_inline(element: ElementTree.Element, path: list[int]) -> None:
+        if _local_name(element.tag) in _SKIPPED_TEXT_ELEMENTS:
+            return
+        add_regular({"path": path, "kind": "text"}, element.text)
+        for index, child in enumerate(list(element)):
+            child_path = [*path, index]
+            name = _local_name(child.tag)
+            if name == "ruby":
+                flush_regular()
+                append_ruby(child, child_path)
+            elif name in _INLINE_TEXT_ELEMENTS:
+                visit_inline(child, child_path)
+            else:
+                flush_regular()
+                visit(child, child_path)
+            if name != "ruby":
+                add_regular({"path": child_path, "kind": "tail"}, child.tail)
 
     def visit(element: ElementTree.Element, path: list[int]) -> None:
         if _local_name(element.tag) in _SKIPPED_TEXT_ELEMENTS:
             return
-        if element.text and not element.text.isspace():
-            values.append(({"path": path, "kind": "text"}, element.text))
+        add_regular({"path": path, "kind": "text"}, element.text)
         for index, child in enumerate(list(element)):
             child_path = [*path, index]
-            if _local_name(child.tag) == "ruby":
-                ruby = _render_ruby(
-                    child,
-                    ruby_mode=ruby_mode,
-                    location=location,
-                    path=child_path,
-                )
-                tail = child.tail or ""
-                tail_in_source = bool(tail and not tail.isspace())
-                values.append(
-                    (
-                        {
-                            "path": child_path,
-                            "kind": "ruby",
-                            "tail": tail,
-                            "tail_in_source": tail_in_source,
-                        },
-                        ruby + (tail if tail_in_source else ""),
-                    )
-                )
-                continue
-            visit(child, child_path)
-            if child.tail and not child.tail.isspace():
-                values.append(
-                    (
-                        {"path": child_path, "kind": "tail"},
-                        child.tail,
-                    )
-                )
+            name = _local_name(child.tag)
+            if name == "ruby":
+                flush_regular()
+                append_ruby(child, child_path)
+            elif name in _INLINE_TEXT_ELEMENTS:
+                visit_inline(child, child_path)
+            else:
+                flush_regular()
+                visit(child, child_path)
+            if name != "ruby":
+                add_regular({"path": child_path, "kind": "tail"}, child.tail)
+        flush_regular()
 
     visit(root, [])
+    flush_regular()
     return values
 
 
@@ -444,9 +598,9 @@ def _render_ruby(
     return f"｜{base}《{reading}》"
 
 
-def _set_text_slot(
-    root: ElementTree.Element, raw: Any, value: str
-) -> None:
+def _resolve_text_slot(
+    root: ElementTree.Element, raw: Any
+) -> tuple[ElementTree.Element, str]:
     if not isinstance(raw, dict) or raw.get("kind") not in {"text", "tail"}:
         raise IncompleteError("EPUB Segment 定位 slot 损坏")
     path = raw.get("path")
@@ -460,10 +614,55 @@ def _set_text_slot(
             element = list(element)[index]
     except IndexError as exc:
         raise IncompleteError("EPUB XHTML 结构与导入状态不一致") from exc
-    if raw["kind"] == "text":
+    return element, str(raw["kind"])
+
+
+def _read_text_slot(root: ElementTree.Element, raw: Any) -> str:
+    element, kind = _resolve_text_slot(root, raw)
+    return element.text or "" if kind == "text" else element.tail or ""
+
+
+def _set_text_slot(
+    root: ElementTree.Element, raw: Any, value: str
+) -> None:
+    element, kind = _resolve_text_slot(root, raw)
+    if kind == "text":
         element.text = value
     else:
         element.tail = value
+
+
+def _set_regular_slot(
+    root: ElementTree.Element,
+    raw: Any,
+    source: str,
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    if not isinstance(raw, dict) or raw.get("kind") != "composite":
+        value = f"{source}\n{target}" if bilingual else target
+        _set_text_slot(root, raw, value)
+        return
+    slots = raw.get("slots")
+    if not isinstance(slots, list) or len(slots) < 2:
+        raise IncompleteError("EPUB 复合 Segment 定位损坏")
+    if not all(
+        isinstance(slot, dict)
+        and slot.get("kind") in {"text", "tail"}
+        for slot in slots
+    ):
+        raise IncompleteError("EPUB 复合 Segment 文本槽损坏")
+    current = "".join(_read_text_slot(root, slot) for slot in slots)
+    if current != source:
+        raise IncompleteError("EPUB 复合 Segment 与原文不一致")
+    if bilingual:
+        last = slots[-1]
+        _set_text_slot(root, last, f"{_read_text_slot(root, last)}\n{target}")
+        return
+    _set_text_slot(root, slots[0], target)
+    for slot in slots[1:]:
+        _set_text_slot(root, slot, "")
 
 
 def _set_ruby_slot(

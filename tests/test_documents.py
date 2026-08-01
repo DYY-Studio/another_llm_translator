@@ -26,7 +26,9 @@ from app.storage import append_jsonl, read_json, read_jsonl, record_header
 from tests.test_foundation import make_app_root
 
 
-def make_epub(path: Path, *, xhtml: bytes | None = None) -> None:
+def make_epub(
+    path: Path, *, xhtml: bytes | None = None, opf_version: str = "3.0"
+) -> None:
     chapter = xhtml or (
         b'<?xml version="1.0" encoding="utf-8"?>'
         b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title>'
@@ -42,12 +44,12 @@ def make_epub(path: Path, *, xhtml: bytes | None = None) -> None:
     )
     opf = (
         b'<?xml version="1.0" encoding="utf-8"?>'
-        b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
-        b'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Demo</dc:title></metadata>'
-        b'<manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>'
-        b'<item id="css" href="style.css" media-type="text/css"/>'
-        b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
-        b'<spine><itemref idref="c1"/></spine></package>'
+        + f'<package xmlns="http://www.idpf.org/2007/opf" version="{opf_version}">'.encode()
+        + b'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Demo</dc:title></metadata>'
+        + b'<manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>'
+        + b'<item id="css" href="style.css" media-type="text/css"/>'
+        + b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
+        + b'<spine><itemref idref="c1"/></spine></package>'
     )
     with zipfile.ZipFile(
         path, "w", compression=zipfile.ZIP_DEFLATED
@@ -111,8 +113,7 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
     assert file_record["document_adapter_state"]
     segments = add_translations(project)
     assert [item["source"] for item in segments] == [
-        "Chapter ",
-        "One",
+        "Chapter One",
         "Hello world.",
     ]
 
@@ -135,6 +136,122 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+def test_epub_inline_text_forms_one_segment_and_preserves_tag_skeleton(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "inline.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>「こぉら！　何を嗅ぎまわっておるか'
+            '<span class="tcy">!!</span>」</p>'
+            '<p>A<span class="outer"><em> B</em></span>'
+            '<strong> C</strong> D</p>'
+            '</body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="inline",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    segments = add_translations(project)
+    assert [item["source"] for item in segments] == [
+        "「こぉら！　何を嗅ぎまわっておるか!!」",
+        "A B C D",
+    ]
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        paragraphs = [
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "p"
+        ]
+        assert paragraphs[0].text == "译：「こぉら！　何を嗅ぎまわっておるか!!」"
+        assert paragraphs[0][0].get("class") == "tcy"
+        assert paragraphs[0][0].text is None
+        assert paragraphs[0][0].tail is None
+        assert paragraphs[1].text == "译：A B C D"
+        assert paragraphs[1][0].get("class") == "outer"
+        assert paragraphs[1][0][0].text is None
+        assert paragraphs[1][0][0].tail is None
+
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        paragraphs = [
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "p"
+        ]
+        assert paragraphs[0].text == "「こぉら！　何を嗅ぎまわっておるか"
+        assert paragraphs[0][0].text == "!!"
+        assert paragraphs[0][0].tail == (
+            "」\n译：「こぉら！　何を嗅ぎまわっておるか!!」"
+        )
+
+
+def test_epub_inline_runs_respect_blocks_and_line_breaks(tmp_path: Path) -> None:
+    source = tmp_path / "boundaries.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>A<span>B</span></p><p>C<br/>D</p>'
+            '</body></html>'
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+    )
+
+    assert list(imported.files[0].segments) == ["AB", "C", "D"]
+
+
+def test_epub_composite_locator_corruption_fails_explicitly(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "corrupt-composite.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>A<span>B</span>C</p></body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="corrupt-composite",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_translations(project)
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(state_path)
+    state["state"]["locators"][0]["slot"]["slots"][0]["path"] = [99]
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(IncompleteError, match="结构"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
 
 
 RUBY_XHTML = (
@@ -316,10 +433,100 @@ def test_epub_rejects_xml_entities(tmp_path: Path) -> None:
             b'<html><body>&x;</body></html>'
         ),
     )
-    with pytest.raises(ProjectError, match="DTD 或实体"):
+    with pytest.raises(ProjectError, match="实体声明"):
         get_document_adapter("epub").import_sources(
             [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
         )
+
+
+def test_epub3_accepts_bare_doctype_and_ignores_comment_text(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "epub3-doctype.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE html><!-- <!ENTITY fake SYSTEM "file:///secret"> -->'
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            + "<p>合法正文</p></body></html>".encode()
+        ),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+    )
+
+    assert list(imported.files[0].segments) == ["合法正文"]
+
+
+def test_epub2_accepts_xhtml11_public_with_custom_system_identifier(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "epub2-doctype.epub"
+    make_epub(
+        source,
+        opf_version="2.0",
+        xhtml=(
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" '
+            b'"https://example.invalid/local.xhtml11.dtd">'
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            + "<p>EPUB 2 正文</p></body></html>".encode()
+        ),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+    )
+
+    assert list(imported.files[0].segments) == ["EPUB 2 正文"]
+
+
+@pytest.mark.parametrize(
+    ("opf_version", "doctype"),
+    [
+        (
+            "3.0",
+            '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://x">',
+        ),
+        (
+            "2.0",
+            '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://x">',
+        ),
+        ("2.0", '<!DOCTYPE html SYSTEM "http://x">'),
+    ],
+)
+def test_epub_rejects_incompatible_doctype(
+    tmp_path: Path, opf_version: str, doctype: str
+) -> None:
+    source = tmp_path / "bad-doctype.epub"
+    make_epub(
+        source,
+        opf_version=opf_version,
+        xhtml=(
+            f'{doctype}<html xmlns="http://www.w3.org/1999/xhtml">'
+            "<body><p>正文</p></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ProjectError, match="DOCTYPE|PUBLIC|外部 DTD"):
+        get_document_adapter("epub").import_sources(
+            [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+        )
+
+
+def test_epub_rejects_missing_or_unknown_opf_version(tmp_path: Path) -> None:
+    for version in ("", "4.0"):
+        source = tmp_path / f"opf-{version or 'missing'}.epub"
+        make_epub(source, opf_version=version)
+        with pytest.raises(ProjectError, match="OPF 版本"):
+            get_document_adapter("epub").import_sources(
+                [str(source)],
+                recursive=False,
+                config={},
+                options={"ruby_mode": "aozora"},
+            )
 
 
 def test_epub_rejects_zip_symlink(tmp_path: Path) -> None:
