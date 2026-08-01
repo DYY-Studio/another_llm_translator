@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
+from xml.parsers import expat
 from xml.etree import ElementTree
 
 from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
@@ -59,11 +60,17 @@ class EPUBDocumentAdapter:
         with zipfile.ZipFile(path) as archive:
             entries = _validated_entries(archive)
             opf_path = _opf_path(archive, entries)
-            xhtml_paths = _spine_paths(archive, entries, opf_path)
+            xhtml_paths, epub_version = _spine_paths(
+                archive, entries, opf_path
+            )
             segments: list[str] = []
             locators: list[dict[str, Any]] = []
             for xhtml_path in xhtml_paths:
-                root = _parse_xml(archive.read(xhtml_path), xhtml_path)
+                root = _parse_xml(
+                    archive.read(xhtml_path),
+                    xhtml_path,
+                    doctype_policy=f"epub{epub_version}_xhtml",
+                )
                 body = next(
                     (
                         element
@@ -138,12 +145,20 @@ class EPUBDocumentAdapter:
         changed: dict[str, bytes] = {}
         with zipfile.ZipFile(source_path) as archive:
             entries = _validated_entries(archive)
+            opf_path = state.get("opf_path")
+            if not isinstance(opf_path, str):
+                raise IncompleteError("EPUB 状态缺少 OPF 路径")
+            _, epub_version = _spine_paths(archive, entries, opf_path)
             for xhtml_path, items in by_xhtml.items():
                 if xhtml_path not in entries:
                     raise IncompleteError(
                         f"EPUB 状态引用了缺失资源：{xhtml_path}"
                     )
-                root = _parse_xml(archive.read(xhtml_path), xhtml_path)
+                root = _parse_xml(
+                    archive.read(xhtml_path),
+                    xhtml_path,
+                    doctype_policy=f"epub{epub_version}_xhtml",
+                )
                 body = next(
                     (
                         element
@@ -252,13 +267,72 @@ def _validated_entries(
     return entries
 
 
-def _parse_xml(payload: bytes, location: str) -> ElementTree.Element:
-    lowered = payload.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
-        raise ProjectError(f"EPUB XML 不允许 DTD 或实体声明：{location}")
+def _parse_xml(
+    payload: bytes,
+    location: str,
+    *,
+    doctype_policy: str = "no_external",
+) -> ElementTree.Element:
+    _validate_xml_declarations(
+        payload, location=location, doctype_policy=doctype_policy
+    )
     try:
         return ElementTree.fromstring(payload)
     except ElementTree.ParseError as exc:
+        raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
+
+
+def _validate_xml_declarations(
+    payload: bytes,
+    *,
+    location: str,
+    doctype_policy: str,
+) -> None:
+    if doctype_policy not in {
+        "no_external",
+        "epub2_xhtml",
+        "epub3_xhtml",
+    }:
+        raise ProjectError(f"EPUB XML 校验策略无效：{doctype_policy}")
+    parser = expat.ParserCreate()
+
+    def reject_entity(*_: object) -> None:
+        raise ProjectError(f"EPUB XML 不允许实体声明：{location}")
+
+    def check_doctype(
+        name: str,
+        system_id: str | None,
+        public_id: str | None,
+        _has_internal_subset: int,
+    ) -> None:
+        if doctype_policy == "no_external":
+            if system_id is not None or public_id is not None:
+                raise ProjectError(
+                    f"EPUB XML 不允许外部 DTD 标识：{location}"
+                )
+            return
+        if name.casefold() != "html":
+            raise ProjectError(f"EPUB XHTML DOCTYPE 名称无效：{location}")
+        if doctype_policy == "epub3_xhtml":
+            if system_id is not None or public_id is not None:
+                raise ProjectError(
+                    f"EPUB 3 XHTML 不允许外部 DTD 标识：{location}"
+                )
+            return
+        if public_id != "-//W3C//DTD XHTML 1.1//EN":
+            raise ProjectError(
+                f"EPUB 2 XHTML PUBLIC 标识无效：{location}"
+            )
+
+    parser.StartDoctypeDeclHandler = check_doctype
+    parser.EntityDeclHandler = reject_entity
+    parser.UnparsedEntityDeclHandler = reject_entity
+    parser.ExternalEntityRefHandler = reject_entity
+    try:
+        parser.Parse(payload, True)
+    except ProjectError:
+        raise
+    except expat.ExpatError as exc:
         raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
 
 
@@ -284,8 +358,13 @@ def _spine_paths(
     archive: zipfile.ZipFile,
     entries: dict[str, zipfile.ZipInfo],
     opf_path: str,
-) -> list[str]:
+) -> tuple[list[str], str]:
     root = _parse_xml(archive.read(opf_path), opf_path)
+    if _local_name(root.tag) != "package":
+        raise ProjectError(f"EPUB OPF 根元素无效：{opf_path}")
+    version = root.get("version")
+    if version not in {"2.0", "3.0"}:
+        raise ProjectError(f"EPUB OPF 版本不支持：{opf_path}")
     manifest: dict[str, tuple[str, str]] = {}
     spine: list[str] = []
     for element in root.iter():
@@ -312,7 +391,7 @@ def _spine_paths(
         paths.append(resolved)
     if not paths:
         raise ProjectError("EPUB spine 没有 XHTML 内容")
-    return paths
+    return paths, version[0]
 
 
 def _safe_archive_path(base: str, value: str) -> str:
