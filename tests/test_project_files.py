@@ -64,6 +64,27 @@ def test_export_cli_collects_repeated_file_ids() -> None:
     assert args.file_ids == ["F0001", "F0003"]
 
 
+def test_epub_ruby_mode_is_available_for_cli_imports() -> None:
+    init_args = build_parser().parse_args(
+        [
+            "init",
+            "book.epub",
+            "--name",
+            "book",
+            "--document-adapter",
+            "epub",
+            "--epub-ruby-mode",
+            "parenthetical",
+        ]
+    )
+    add_args = build_parser().parse_args(
+        ["files-add", "book", "next.epub", "--epub-ruby-mode", "base_only"]
+    )
+
+    assert init_args.epub_ruby_mode == "parenthetical"
+    assert add_args.epub_ruby_mode == "base_only"
+
+
 def test_empty_project_can_open_inspect_and_add_txt_files(
     tmp_path: Path,
 ) -> None:
