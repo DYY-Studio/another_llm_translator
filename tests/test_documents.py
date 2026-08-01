@@ -4,6 +4,7 @@ import json
 import stat
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -134,6 +135,134 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+RUBY_XHTML = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ruby</title>'
+    b'</head><body><p>'
+    b'\xe5\xbd\xbc\xe3\x81\xaf<ruby>\xe6\xbc\xa2<rt>\xe3\x81\x8b\xe3\x82\x93</rt>'
+    b'\xe5\xad\x97<rt>\xe3\x81\x98</rt></ruby>\xe3\x82\x92\xe8\xaa\xad\xe3\x82\x80\xe3\x80\x82'
+    b'</p><p><ruby><rb><em>\xe7\x89\xb9\xe5\x88\xa5</em></rb><rp>\xef\xbc\x88</rp>'
+    b'<rt>\xe3\x82\xb9\xe3\x83\x9a\xe3\x82\xb7\xe3\x83\xa3\xe3\x83\xab</rt><rp>\xef\xbc\x89</rp>'
+    b'<rtc><rt>\xe3\x81\xa8\xe3\x81\x8f\xe3\x81\xb9\xe3\x81\xa4</rt></rtc></ruby>'
+    b'\xe3\x81\xa0\xe3\x80\x82</p></body></html>'
+)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (
+            "aozora",
+            ["彼は", "｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+        ),
+        ("base_only", ["彼は", "漢字を読む。", "特別だ。"]),
+        ("parenthetical", ["彼は", "漢字（かんじ）を読む。", "特別（スペシャル／とくべつ）だ。"]),
+    ],
+)
+def test_epub_ruby_modes_form_semantic_segments(
+    tmp_path: Path, mode: str, expected: list[str]
+) -> None:
+    source = tmp_path / f"ruby-{mode}.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+    )
+
+    assert list(imported.files[0].segments) == expected
+    assert imported.files[0].opaque_state is not None
+    assert imported.files[0].opaque_state["ruby_mode"] == mode
+
+
+def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="ruby",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    metadata = read_json(project / "project.json")
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+    targets = ["他は", "汉字を読む。", "特别だ。"]
+    for segment, target in zip(segments, targets, strict=True):
+        append_jsonl(
+            stage_result_path(project, "translation"),
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=segment["segment_id"],
+                status="completed",
+                text=target,
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=0,
+                run_id="RUN-RUBY",
+                request_id="REQ-RUBY",
+            ),
+        )
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        names = [element.tag.rsplit("}", 1)[-1] for element in root.iter()]
+        assert "ruby" not in names
+        assert "rt" not in names
+        assert "".join(root.itertext()) == "Ruby他は汉字を読む。特别だ。"
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        names = [element.tag.rsplit("}", 1)[-1] for element in root.iter()]
+        assert names.count("ruby") == 2
+        assert names.count("rt") == 4
+        text = "".join(root.itertext())
+        assert "彼は\n他は" in text
+        assert "を読む。\n汉字を読む。" in text
+        assert "だ。\n特别だ。" in text
+
+
+@pytest.mark.parametrize(
+    "ruby",
+    [
+        "<ruby>外<ruby>内<rt>うち</rt></ruby><rt>そと</rt></ruby>",
+        "<ruby>漢<rt></rt></ruby>",
+        "<ruby>漢<rtc><span>かん</span></rtc></ruby>",
+    ],
+)
+def test_epub_rejects_ambiguous_ruby_with_xhtml_location(
+    tmp_path: Path, ruby: str
+) -> None:
+    source = tmp_path / "bad-ruby.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            f"{ruby}</p></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ProjectError, match=r"ch1\.xhtml.*ruby path"):
+        get_document_adapter("epub").import_sources(
+            [str(source)],
+            recursive=False,
+            config={},
+            options={"ruby_mode": "aozora"},
+        )
 
 
 def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
