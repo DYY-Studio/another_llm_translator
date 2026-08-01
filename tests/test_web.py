@@ -19,6 +19,7 @@ from app.project import init_project
 from app.storage import append_jsonl, atomic_write_json, read_json, record_header
 from app.web import create_app
 from app.web_tasks import WebTaskManager
+from tests.test_documents import make_epub
 from tests.test_editor import seed_conflicted_terms
 from tests.test_foundation import make_app_root
 
@@ -46,6 +47,7 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
 
     listed = client.get("/api/v1/projects")
     assert listed.status_code == 200
+    assert listed.json()["default_projects_path"] == str(projects_root.resolve())
     assert listed.json()["projects"][0]["name"] == "sample"
     overview = client.get("/api/v1/projects/sample").json()
     segment_id = overview["segments"][0]["segment_id"]
@@ -252,6 +254,74 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     ]
     adapters = client.get("/api/v1/document-adapters").json()["adapters"]
     assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
+    assert next(item for item in adapters if item["adapter_id"] == "txt")[
+        "extensions"
+    ] == [".text", ".txt"]
+
+
+def test_web_creates_mixed_project_from_queued_folder_inputs(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "book.epub"
+    make_epub(epub)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "mixed-upload",
+            "relative_paths": [
+                "chapters/one.txt",
+                "assets/cover.bin",
+                "book.epub",
+            ],
+            "input_kinds": ["folder", "folder", "folder"],
+        },
+        files=[
+            ("files", ("one.txt", b"one", "text/plain")),
+            ("files", ("cover.bin", b"image", "application/octet-stream")),
+            ("files", ("book.epub", epub.read_bytes(), "application/epub+zip")),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        "已忽略 1 个不支持的文件：assets/cover.bin"
+    ]
+    overview = client.get("/api/v1/projects/mixed-upload").json()
+    assert [item["name"] for item in overview["files"]] == [
+        "chapters/one.txt",
+        "book.epub",
+    ]
+    assert [item["document_adapter_id"] for item in overview["files"]] == [
+        "txt",
+        "epub",
+    ]
+
+
+def test_web_rejects_queued_path_collision_before_creating_project(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "collision",
+            "relative_paths": ["chapter/one.txt", "CHAPTER/ONE.TXT"],
+            "input_kinds": ["folder", "folder"],
+        },
+        files=[
+            ("files", ("one.txt", b"one", "text/plain")),
+            ("files", ("ONE.TXT", b"two", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "重复相对路径" in response.json()["error"]
+    assert not (projects_root / "collision").exists()
 
 
 def test_web_export_accepts_explicit_file_range(tmp_path: Path) -> None:

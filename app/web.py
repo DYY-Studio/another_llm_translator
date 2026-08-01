@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -26,7 +26,10 @@ from .execution import Scope
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .locking import project_write_lock
-from .plugins import document_adapter_summaries
+from .plugins import (
+    document_adapter_summaries,
+    get_document_adapter_for_extension,
+)
 from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
     PROJECTS_ROOT,
@@ -62,6 +65,68 @@ def create_app(
     app.state.app_root = app_root
     app.state.tasks = WebTaskManager()
     app.state.external_projects = set()
+
+    async def stage_uploads(
+        upload_root: Path,
+        uploads: list[UploadFile],
+        relative_paths: list[str] | None,
+        input_kinds: list[str] | None,
+    ) -> tuple[list[str], list[str], list[str]]:
+        paths = (
+            relative_paths
+            if relative_paths is not None
+            else [Path(upload.filename or "input").name for upload in uploads]
+        )
+        kinds = input_kinds if input_kinds is not None else ["file"] * len(uploads)
+        if len(paths) != len(uploads) or len(kinds) != len(uploads):
+            raise UsageError("上传文件、相对路径与来源类型数量不一致")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in paths:
+            path = PurePosixPath(value)
+            if (
+                not value
+                or "\\" in value
+                or path.is_absolute()
+                or path.name in {"", ".", ".."}
+                or any(part in {"", ".", ".."} for part in path.parts)
+            ):
+                raise UsageError(f"上传相对路径无效：{value}")
+            name = path.as_posix()
+            key = name.casefold()
+            if key in seen:
+                raise UsageError(f"上传文件存在重复相对路径：{name}")
+            seen.add(key)
+            normalized.append(name)
+        if any(kind not in {"file", "folder"} for kind in kinds):
+            raise UsageError("输入来源类型必须是 file 或 folder")
+
+        inputs: list[str] = []
+        original_names: list[str] = []
+        ignored: list[str] = []
+        for upload, name, kind in zip(
+            uploads, normalized, kinds, strict=True
+        ):
+            try:
+                get_document_adapter_for_extension(PurePosixPath(name).suffix)
+            except UsageError:
+                if kind == "folder":
+                    ignored.append(name)
+                    continue
+                raise UsageError(f"不支持的输入文件：{name}") from None
+            target = upload_root.joinpath(*PurePosixPath(name).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(await upload.read())
+            inputs.append(str(target))
+            original_names.append(name)
+        warnings = []
+        if ignored:
+            examples = "、".join(ignored[:5])
+            suffix = "…" if len(ignored) > 5 else ""
+            warnings.append(
+                f"已忽略 {len(ignored)} 个不支持的文件：{examples}{suffix}"
+            )
+        return inputs, original_names, warnings
 
     @app.middleware("http")
     async def local_only(request: Request, call_next: Any) -> Any:
@@ -151,7 +216,10 @@ def create_app(
                     "segment_count": metadata["segment_count"],
                 }
             )
-        return {"projects": values}
+        return {
+            "projects": values,
+            "default_projects_path": str(projects_root.resolve()),
+        }
 
     @app.get("/api/v1/document-adapters")
     async def document_adapters() -> dict[str, Any]:
@@ -369,23 +437,20 @@ def create_app(
     @app.post("/api/v1/projects")
     async def create_project(
         name: str = Form(...),
-        document_adapter: str = Form("txt"),
         empty: bool = Form(False),
         parent_dir: str = Form(""),
         files: list[UploadFile] | None = File(None),
+        relative_paths: list[str] | None = Form(None),
+        input_kinds: list[str] | None = Form(None),
     ) -> dict[str, Any]:
         uploads = files or []
-        if empty == bool(uploads):
-            raise UsageError("必须上传输入文件，或显式选择创建空项目")
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
-            inputs = []
-            for index, upload in enumerate(uploads, start=1):
-                filename = Path(upload.filename or f"input-{index}.txt").name
-                target = upload_root / f"{index:04d}" / filename
-                target.parent.mkdir()
-                target.write_bytes(await upload.read())
-                inputs.append(str(target))
+            inputs, original_names, upload_warnings = await stage_uploads(
+                upload_root, uploads, relative_paths, input_kinds
+            )
+            if empty == bool(inputs):
+                raise UsageError("必须上传输入文件，或显式选择创建空项目")
             selected_root = (
                 resolve_project_parent(parent_dir, require_absolute=True)
                 if parent_dir
@@ -394,11 +459,16 @@ def create_app(
             path, summary = init_project(
                 inputs,
                 name=name,
-                document_adapter_id=document_adapter,
+                document_adapter_id=None,
+                original_names=original_names,
                 empty=empty,
                 app_root=app_root,
                 projects_root=selected_root,
             )
+            summary["warnings"] = [
+                *upload_warnings,
+                *list(summary["warnings"]),
+            ]
         assert path is not None
         remember_project(path)
         metadata = read_json(path / "project.json")
@@ -433,21 +503,28 @@ def create_app(
     async def add_files(
         name: str,
         files: list[UploadFile] = File(...),
+        relative_paths: list[str] | None = Form(None),
+        input_kinds: list[str] | None = Form(None),
     ) -> dict[str, Any]:
         if not files:
             raise UsageError("至少上传一个输入文件")
         root = project(name)
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
-            inputs = []
-            for index, upload in enumerate(files, start=1):
-                filename = Path(upload.filename or f"input-{index}").name
-                target = upload_root / f"{index:04d}" / filename
-                target.parent.mkdir()
-                target.write_bytes(await upload.read())
-                inputs.append(str(target))
+            inputs, original_names, upload_warnings = await stage_uploads(
+                upload_root, files, relative_paths, input_kinds
+            )
+            if not inputs:
+                raise UsageError("没有受支持的输入文件")
             with project_write_lock(root):
-                return add_project_files(root, inputs)
+                summary = add_project_files(
+                    root, inputs, original_names=original_names
+                )
+            summary["warnings"] = [
+                *upload_warnings,
+                *list(summary["warnings"]),
+            ]
+            return summary
 
     @app.post("/api/v1/projects/{name}/files/remove")
     async def remove_files(

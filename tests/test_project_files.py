@@ -246,8 +246,47 @@ def test_implicit_file_format_rejects_unknown_extension(tmp_path: Path) -> None:
     project = init_empty(tmp_path)
     source = tmp_path / "notes.md"
     source.write_text("text", encoding="utf-8")
-    with pytest.raises(UsageError, match="--document-adapter"):
+    with pytest.raises(UsageError, match="没有 Document Adapter"):
         add_project_files(project, [str(source)])
+
+
+def test_auto_import_recurses_all_supported_formats_and_preserves_paths(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    source_root = tmp_path / "source-tree"
+    (source_root / "chapters").mkdir(parents=True)
+    (source_root / "chapters" / "one.text").write_text("one", encoding="utf-8")
+    (source_root / "notes.bin").write_bytes(b"ignored")
+    make_epub(source_root / "book.epub")
+
+    summary = add_project_files(project, [str(source_root)], recursive=True)
+
+    files = read_jsonl(project / "source" / "files.jsonl")
+    assert [item["original_name"] for item in files] == [
+        "book.epub",
+        "chapters/one.text",
+    ]
+    assert [item["document_adapter_id"] for item in files] == ["epub", "txt"]
+    assert summary["warnings"] == [
+        f"{source_root}: 已忽略 1 个不支持的文件"
+    ]
+
+
+def test_auto_import_rejects_case_insensitive_effective_path_collision(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    first = tmp_path / "first" / "same.txt"
+    second = tmp_path / "second" / "SAME.TXT"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="重复导出相对路径"):
+        add_project_files(project, [str(first), str(second)])
+    assert read_jsonl(project / "source" / "files.jsonl") == []
 
 
 def test_export_file_filter_limits_result_validation_and_output(
