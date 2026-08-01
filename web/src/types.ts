@@ -1,5 +1,6 @@
 export type Stage =
   | "overview"
+  | "diagnostics"
   | "terminology"
   | "translation"
   | "proofreading"
@@ -82,6 +83,44 @@ export interface TaskUsage {
   output_tokens: number;
   total_tokens: number;
   available: boolean;
+}
+
+export interface DiagnosticsResponse {
+  metrics: {
+    project: string | null;
+    stage: string | null;
+    active_requests: number;
+    request_count: number;
+    http_errors: number;
+    retry_count: number;
+    rate_limit_wait_count: number;
+    rate_limit_wait_seconds: number;
+    average_latency_ms: number | null;
+    latest_latency_ms: number | null;
+    input_tokens: number;
+    output_tokens: number;
+    usage_available: boolean;
+    throughput_tokens_per_second: number | null;
+  };
+  logs: Array<{
+    timestamp: string;
+    level: string;
+    project: string;
+    stage: string;
+    message: string;
+  }>;
+  reasoning: Array<{
+    timestamp: string;
+    project: string | null;
+    stage: string | null;
+    request_id: string;
+    content: string;
+  }>;
+  filters: {
+    levels: string[];
+    projects: string[];
+    stages: string[];
+  };
 }
 
 export interface ModelRow {

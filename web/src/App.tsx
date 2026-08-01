@@ -6,6 +6,7 @@ import { TermsView } from "./components/TermsView";
 import { CreateProjectDialog, ExportView, Overview } from "./components/UtilityViews";
 import { SettingsView } from "./components/SettingsView";
 import { RunDialog } from "./components/RunDialog";
+import { DiagnosticsView } from "./components/DiagnosticsView";
 import type {
   LLMStage,
   ProjectOverview,
@@ -182,7 +183,8 @@ export default function App() {
   }
 
   let content = <div className="empty-page">选择或创建项目后开始工作。</div>;
-  if (stage === "settings") content = <SettingsView project={project} />;
+  if (stage === "diagnostics") content = <DiagnosticsView />;
+  else if (stage === "settings") content = <SettingsView project={project} />;
   else if (project && overview) {
     if (stage === "overview") content = (
       <Overview
