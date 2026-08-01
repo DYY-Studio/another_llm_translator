@@ -227,8 +227,9 @@ python -m app.main files-remove PROJECT FILE_ID...
 - 输入文件复制到项目 `input/`，后续阶段只读取项目数据。
 - 每个 File 记录来源 `document_adapter_id`、版本和可选不透明状态位置；旧项目
   的项目级字段在读取时解释为各活动 File 的来源，下一次文件变更时规范化。
-- 空项目不锁定格式，可混合追加 TXT 和 EPUB。省略 `--document-adapter` 时只按
-  `.txt`、`.epub` 选择内置 Adapter；其他格式必须显式指定已安装 Adapter。
+- 空项目不锁定格式，可混合追加不同 Adapter 支持的文件。省略
+  `--document-adapter` 时按 Adapter 声明的扩展名选择；目录可发现所有受支持
+  格式，不支持文件被忽略并汇总提示。不同 Adapter 的扩展名声明不得重复。
 - 新 File 追加到活动顺序末尾。`next_file_sequence` 单调增加；旧项目缺少该
   字段时从活动 File ID 最大值初始化。删除后重新添加不会复用 File 或 Segment
   ID。
@@ -1294,8 +1295,9 @@ python -m app.main run-all PROJECT
 - `--empty`：仅用于 init，显式创建 0 文件项目，不能同时提供输入。
 - `--parent-dir`：仅用于 init，在指定的现有可写父目录创建项目；省略时使用
   内置 `projects/`。
-- `files-add`：追加源文件；内置 TXT/EPUB 可按扩展名识别，外部或其他扩展名
-  使用 `--document-adapter`。TXT 目录支持 `--recursive`。
+- `files-add`：追加源文件；省略 Adapter 时按已安装 Adapter 的扩展名识别，
+  目录使用 `--recursive` 递归发现所有受支持格式。显式选择 Adapter 时由该
+  Adapter 解释输入。
 - `files-remove`：按 File ID 从活动项目移除文件，不清理历史结果。
 - `export --file FILE_ID`：只导出指定活动 File；参数可重复。省略时导出全部
   活动 File，未知、重复或显式空范围在发布前失败。
@@ -1419,10 +1421,16 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 ## 6.4 本地 Web Alpha
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
-本机 Host 和跨站 Origin。Web 可创建空的或带文件的 TXT/EPUB 项目，在概览
-追加或经典多选移除 TXT/EPUB 源文件。创建时可填写绝对父目录，也可输入项目
-目录绝对路径打开已有项目。外部项目使用项目自身 ID 作为 Web 路由标识；路径
-规范化并去重，无效项目、不可写父目录和目标冲突在写入前失败。
+本机 Host 和跨站 Origin。Web 创建项目时不预选文档格式；待输入列表可分多次
+加入单独文件或文件夹，并可在同一项目中混合 Adapter。文件夹输入保留内部
+相对路径，单独文件只保留 basename；大小写不敏感的重名使本次选择整体拒绝。
+文件夹内不支持的文件被忽略并汇总提示，单独选择不支持文件直接失败。项目
+概览使用同一输入队列追加文件，并可经典多选移除。
+
+保存父目录和打开项目目录默认填入服务端绝对 `projects` 路径，用户可直接修改。
+不支持 `webkitdirectory` 的浏览器明确禁用文件夹选择，但仍可选择单独文件。
+外部项目使用项目自身 ID 作为 Web 路由标识；路径规范化并去重，无效项目、
+不可写父目录和目标冲突在写入前失败。
 
 Web 只在当前浏览器的版本化 localStorage 保存最近外部项目路径。页面加载时
 逐一向本机服务提交这些精确路径；不扫描父目录，不自动移动项目。失效路径会
@@ -1568,6 +1576,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。
+- Document Adapter 扩展名按大小写不敏感保持唯一；Web 待输入列表支持混合
+  文件、文件夹相对路径、批次冲突阻止和不支持文件汇总。
 - Web 只接受本机 Host/Origin，与 CLI 共用项目记录；同项目第二个写任务明确
   失败，取消后的 Run 有正确收尾。
 - Web 项目配置表单覆盖完整配置 schema；非法类型或组合不改变原 TOML，保存
