@@ -165,6 +165,7 @@ class TXTDocumentAdapter:
     adapter_id = "txt"
     version = "1"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
+    extensions = frozenset({".txt", ".text"})
 
     def import_sources(
         self,

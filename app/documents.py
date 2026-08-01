@@ -30,6 +30,7 @@ class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
     capabilities: frozenset[str]
+    extensions: frozenset[str]
 
     def import_sources(
         self,
