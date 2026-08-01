@@ -170,7 +170,7 @@ function InputQueue({
         ))
         : [])}
       <div className="input-queue-list">
-        {!value.length && <div className="input-queue-empty">尚未选择文件；可直接创建空项目。</div>}
+        {!value.length && <div className="input-queue-empty">尚未选择文件。</div>}
         {value.map((item, index) => (
           <div className="input-queue-row" key={`${item.path}-${index}`}>
             <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? "文件夹" : "单独文件"}</small></span>
@@ -421,6 +421,7 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
           <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label>保存父目录<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
           <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} />
+          <p className="muted">未选择文件时将创建空项目。</p>
           <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>创建项目</button></div>
         </>}
       </div>
