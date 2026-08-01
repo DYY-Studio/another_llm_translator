@@ -9,6 +9,7 @@ import pytest
 
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.documents import DocumentExportJob, publish_document_exports
+from app.documents import DocumentChoiceOption
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -16,6 +17,7 @@ from app.plugins import (
     get_document_adapter_for_extension,
     get_document_adapter,
     load_plugins,
+    validate_document_import_options,
 )
 from app.project import init_project
 from app.stages import export_project
@@ -172,7 +174,7 @@ def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
         archive.writestr("../escape", b"x")
     with pytest.raises(ProjectError, match="不安全 ZIP 路径"):
         get_document_adapter("epub").import_sources(
-            [str(source)], recursive=False, config={}
+            [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
         )
 
 
@@ -187,7 +189,7 @@ def test_epub_rejects_xml_entities(tmp_path: Path) -> None:
     )
     with pytest.raises(ProjectError, match="DTD 或实体"):
         get_document_adapter("epub").import_sources(
-            [str(source)], recursive=False, config={}
+            [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
         )
 
 
@@ -201,7 +203,7 @@ def test_epub_rejects_zip_symlink(tmp_path: Path) -> None:
         archive.writestr(info, "../secret")
     with pytest.raises(ProjectError, match="符号链接"):
         get_document_adapter("epub").import_sources(
-            [str(source)], recursive=False, config={}
+            [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
         )
 
 
@@ -217,7 +219,7 @@ def test_epub_rejects_abnormal_compression_ratio(
     monkeypatch.setattr("app.epub_adapter.MAX_EPUB_COMPRESSION_RATIO", 2)
     with pytest.raises(ProjectError, match="压缩比异常"):
         get_document_adapter("epub").import_sources(
-            [str(source)], recursive=False, config={}
+            [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
         )
 
 
@@ -226,6 +228,7 @@ class FailingExportAdapter:
     version = "1"
     capabilities = frozenset({"translated_export"})
     extensions = frozenset()
+    import_options = ()
 
     def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
         (staging_dir / "partial.txt").write_text("partial", encoding="utf-8")
@@ -237,6 +240,7 @@ class IncompleteExportAdapter:
     version = "1"
     capabilities = frozenset({"translated_export"})
     extensions = frozenset()
+    import_options = ()
 
     def export_sources(self, *, staging_dir: Path, **_: object) -> list[Path]:
         (staging_dir / "ready.txt").write_text("ready", encoding="utf-8")
@@ -335,6 +339,7 @@ def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
         version = "1"
         capabilities = frozenset({"import"})
         extensions = frozenset({".TXT".casefold()})
+        import_options = ()
 
     duplicate = PluginDescriptor(
         plugin_id="duplicate-extension",
@@ -347,4 +352,49 @@ def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
         lambda **_: [FakeEntryPoint(duplicate)],
     )
     with pytest.raises(ConfigError, match="扩展名重复"):
+        load_plugins()
+
+
+def test_document_adapter_choice_options_apply_defaults_and_validate_values() -> None:
+    epub = get_document_adapter("epub")
+    assert validate_document_import_options(epub, None) == {
+        "ruby_mode": "aozora"
+    }
+    assert validate_document_import_options(
+        epub, {"ruby_mode": "base_only"}
+    ) == {"ruby_mode": "base_only"}
+    with pytest.raises(UsageError, match="未知导入选项"):
+        validate_document_import_options(epub, {"unknown": "value"})
+    with pytest.raises(UsageError, match="取值无效"):
+        validate_document_import_options(epub, {"ruby_mode": "invalid"})
+
+
+def test_plugin_host_rejects_invalid_choice_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidOptionAdapter:
+        adapter_id = "invalid-option"
+        version = "1"
+        capabilities = frozenset({"import"})
+        extensions = frozenset({".invalid"})
+        import_options = (
+            DocumentChoiceOption(
+                option_id="mode",
+                label="Mode",
+                default="missing",
+                choices=(("one", "One"), ("two", "Two")),
+            ),
+        )
+
+    descriptor = PluginDescriptor(
+        plugin_id="invalid-option",
+        version="1",
+        protocol_version=PLUGIN_PROTOCOL_VERSION,
+        document_adapters=(InvalidOptionAdapter(),),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        "app.plugins.entry_points",
+        lambda **_: [FakeEntryPoint(descriptor)],
+    )
+    with pytest.raises(ConfigError, match="导入选项声明无效"):
         load_plugins()

@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
-from .documents import DocumentImport, ImportedFile
+from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from .errors import IncompleteError, ProjectError, UsageError
 
 
@@ -21,9 +21,21 @@ _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.1"
+    version = "0.2"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
+    import_options = (
+        DocumentChoiceOption(
+            option_id="ruby_mode",
+            label="Ruby 表示",
+            default="aozora",
+            choices=(
+                ("aozora", "青空格式｜原文《Ruby》"),
+                ("base_only", "仅基础文字"),
+                ("parenthetical", "原文（Ruby）"),
+            ),
+        ),
+    )
 
     def import_sources(
         self,
@@ -31,8 +43,9 @@ class EPUBDocumentAdapter:
         *,
         recursive: bool,
         config: dict[str, Any],
+        options: dict[str, str],
     ) -> DocumentImport:
-        del config
+        del config, options
         if recursive:
             raise UsageError("EPUB Adapter 不支持目录递归发现")
         if len(inputs) != 1:
