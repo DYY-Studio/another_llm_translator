@@ -19,6 +19,7 @@ export function Icon({ children }: { children: ReactNode }) {
 
 export const icons = {
   overview: <Icon><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /></Icon>,
+  diagnostics: <Icon><path d="M4 19V9M10 19V5M16 19v-7M22 19V3" /><path d="M2 19h20" /></Icon>,
   terminology: <Icon><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H20v17H7.5A3.5 3.5 0 0 0 4 22z" /><path d="M4 5.5v13" /></Icon>,
   translation: <Icon><path d="m4 19 5.5-1.2L20 7.3 16.7 4 6.2 14.5z" /><path d="m14.8 5.9 3.3 3.3" /></Icon>,
   proofreading: <Icon><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" /><path d="m9 12 2 2 4-5" /></Icon>,

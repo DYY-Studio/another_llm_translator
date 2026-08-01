@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
+from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -1033,6 +1034,7 @@ class LLMClient:
         attempts = int(self.config["retry"]["http_max_attempts"])
         for attempt in range(1, attempts + 1):
             waited = await self.limiter.acquire(estimated_input_tokens)
+            diagnostics = current_diagnostics()
             if waited:
                 self.logger.info(
                     "rate-limit wait=%.2fs request=%s attempt=%d",
@@ -1040,6 +1042,8 @@ class LLMClient:
                     request_id,
                     attempt,
                 )
+                if diagnostics is not None:
+                    diagnostics.rate_limit_waited()
             self.send_count += 1
             self.logger.info(
                 "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
@@ -1050,6 +1054,9 @@ class LLMClient:
                 effective_output,
             )
             started = time.monotonic()
+            response_status: int | None = None
+            if diagnostics is not None:
+                diagnostics.request_started()
             try:
                 debug = self.config["debug"]
                 if (
@@ -1076,6 +1083,7 @@ class LLMClient:
                         headers=headers,
                         json=payload,
                     )
+                response_status = response.status_code
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 elapsed = time.monotonic() - started
                 self.logger.warning(
@@ -1094,8 +1102,17 @@ class LLMClient:
                 )
                 if attempt == attempts:
                     raise ExternalError(f"HTTP 请求重试耗尽：{exc}") from exc
+                if diagnostics is not None:
+                    diagnostics.retried()
                 await self._backoff(attempt)
                 continue
+            finally:
+                if diagnostics is not None:
+                    diagnostics.request_finished(
+                        latency_seconds=time.monotonic() - started,
+                        status=response_status,
+                        error=response_status is None or response_status >= 400,
+                    )
             elapsed = time.monotonic() - started
             try:
                 response_data = response.json()
@@ -1145,6 +1162,10 @@ class LLMClient:
                 )
                 parsed = self.adapter.parse_response(response_data)
                 normalized = normalize_llm_response(parsed)
+                if diagnostics is not None and normalized.reasoning_content:
+                    diagnostics.add_reasoning(
+                        request_id, normalized.reasoning_content
+                    )
                 extracted = self.adapter.extract_usage(response_data)
                 if extracted is not None:
                     self.usage = Usage(
@@ -1234,6 +1255,8 @@ class LLMClient:
                 response.status_code,
                 elapsed,
             )
+            if diagnostics is not None:
+                diagnostics.retried()
             retry_after = response.headers.get("Retry-After")
             if retry_after:
                 try:
@@ -1241,6 +1264,8 @@ class LLMClient:
                     self.logger.info(
                         "retry-after request=%s wait=%.2fs", request_id, delay
                     )
+                    if diagnostics is not None:
+                        diagnostics.rate_limit_waited()
                     await self.sleeper(delay)
                     continue
                 except ValueError:

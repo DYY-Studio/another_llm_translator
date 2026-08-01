@@ -4,6 +4,7 @@ import { icons } from "./Icons";
 
 const items: Array<{ id: Stage; label: string }> = [
   { id: "overview", label: "项目概览" },
+  { id: "diagnostics", label: "仪表盘" },
   { id: "terminology", label: "术语" },
   { id: "translation", label: "翻译" },
   { id: "proofreading", label: "校对" },
