@@ -16,10 +16,16 @@ from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
-from app.storage import append_jsonl, atomic_write_json, read_json, record_header
+from app.storage import (
+    append_jsonl,
+    atomic_write_json,
+    read_json,
+    read_jsonl,
+    record_header,
+)
 from app.web import create_app
 from app.web_tasks import WebTaskManager
-from tests.test_documents import make_epub
+from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_editor import seed_conflicted_terms
 from tests.test_foundation import make_app_root
 
@@ -257,6 +263,9 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert next(item for item in adapters if item["adapter_id"] == "txt")[
         "extensions"
     ] == [".text", ".txt"]
+    assert next(item for item in adapters if item["adapter_id"] == "epub")[
+        "import_options"
+    ][0]["default"] == "aozora"
 
 
 def test_web_creates_mixed_project_from_queued_folder_inputs(
@@ -297,6 +306,96 @@ def test_web_creates_mixed_project_from_queued_folder_inputs(
     assert [item["document_adapter_id"] for item in overview["files"]] == [
         "txt",
         "epub",
+    ]
+
+
+def test_web_applies_epub_import_options_without_project_level_settings(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "ruby-option",
+            "adapter_options": json.dumps(
+                {"epub": {"ruby_mode": "parenthetical"}}
+            ),
+        },
+        files=[
+            ("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))
+        ],
+    )
+
+    assert response.status_code == 200
+    overview = client.get("/api/v1/projects/ruby-option").json()
+    assert [item["source"] for item in overview["segments"]] == [
+        "彼は",
+        "漢字（かんじ）を読む。",
+        "特別（スペシャル／とくべつ）だ。",
+    ]
+    project = projects_root / "ruby-option"
+    assert "adapter_options" not in read_json(project / "project.json")
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    state = read_json(project / str(file_record["document_adapter_state"]))
+    assert state["state"]["ruby_mode"] == "parenthetical"
+
+
+def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    malformed = client.post(
+        "/api/v1/projects",
+        data={"name": "bad-json", "adapter_options": "[]"},
+        files=[("files", ("ruby.epub", epub.read_bytes()))],
+    )
+    unknown = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "bad-option",
+            "adapter_options": json.dumps({"epub": {"unknown": "value"}}),
+        },
+        files=[("files", ("ruby.epub", epub.read_bytes()))],
+    )
+
+    assert malformed.status_code == 400
+    assert "必须是对象" in malformed.json()["error"]
+    assert unknown.status_code == 400
+    assert "未知导入选项" in unknown.json()["error"]
+    assert not (projects_root / "bad-json").exists()
+    assert not (projects_root / "bad-option").exists()
+
+
+def test_web_applies_import_options_when_adding_project_files(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects/sample/files",
+        data={
+            "adapter_options": json.dumps(
+                {"epub": {"ruby_mode": "base_only"}}
+            )
+        },
+        files=[("files", ("ruby.epub", epub.read_bytes()))],
+    )
+
+    assert response.status_code == 200
+    overview = client.get("/api/v1/projects/sample").json()
+    assert [item["source"] for item in overview["segments"][-3:]] == [
+        "彼は",
+        "漢字を読む。",
+        "特別だ。",
     ]
 
 

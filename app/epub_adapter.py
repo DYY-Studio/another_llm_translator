@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
-from .documents import DocumentImport, ImportedFile
+from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from .errors import IncompleteError, ProjectError, UsageError
 
 
@@ -21,9 +21,21 @@ _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.1"
+    version = "0.2"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
+    import_options = (
+        DocumentChoiceOption(
+            option_id="ruby_mode",
+            label="Ruby 表示",
+            default="aozora",
+            choices=(
+                ("aozora", "青空格式｜原文《Ruby》"),
+                ("base_only", "仅基础文字"),
+                ("parenthetical", "原文（Ruby）"),
+            ),
+        ),
+    )
 
     def import_sources(
         self,
@@ -31,8 +43,10 @@ class EPUBDocumentAdapter:
         *,
         recursive: bool,
         config: dict[str, Any],
+        options: dict[str, str],
     ) -> DocumentImport:
         del config
+        ruby_mode = options["ruby_mode"]
         if recursive:
             raise UsageError("EPUB Adapter 不支持目录递归发现")
         if len(inputs) != 1:
@@ -60,7 +74,9 @@ class EPUBDocumentAdapter:
                 )
                 if body is None:
                     continue
-                for locator, source in _text_slots(body):
+                for locator, source in _text_slots(
+                    body, ruby_mode=ruby_mode, location=xhtml_path
+                ):
                     segments.append(source)
                     locators.append(
                         {"path": xhtml_path, "slot": locator}
@@ -80,6 +96,7 @@ class EPUBDocumentAdapter:
                         "opf_path": opf_path,
                         "spine_paths": xhtml_paths,
                         "locators": locators,
+                        "ruby_mode": ruby_mode,
                     },
                 ),
             ),
@@ -115,6 +132,8 @@ class EPUBDocumentAdapter:
                 locator.get("path"), str
             ):
                 raise IncompleteError("EPUB Segment 定位状态损坏")
+            if not isinstance(locator.get("slot"), dict):
+                raise IncompleteError("EPUB Segment 定位 slot 损坏")
             by_xhtml.setdefault(locator["path"], []).append((segment, locator))
         changed: dict[str, bytes] = {}
         with zipfile.ZipFile(source_path) as archive:
@@ -144,6 +163,7 @@ class EPUBDocumentAdapter:
                         "style",
                         f"{style.rstrip(';')}; {addition}".lstrip("; "),
                     )
+                resolved: list[tuple[dict[str, Any], dict[str, Any], str]] = []
                 for segment, locator in items:
                     segment_id = str(segment["segment_id"])
                     target = output_text.get(segment_id)
@@ -151,9 +171,33 @@ class EPUBDocumentAdapter:
                         raise IncompleteError(
                             f"EPUB 导出缺少结果：{segment_id}"
                         )
+                    resolved.append((segment, locator, target))
+                regular = [
+                    item
+                    for item in resolved
+                    if item[1]["slot"].get("kind") != "ruby"
+                ]
+                rubies = [
+                    item
+                    for item in resolved
+                    if item[1]["slot"].get("kind") == "ruby"
+                ]
+                for segment, locator, target in regular:
                     source = str(segment["source"])
                     value = f"{source}\n{target}" if bilingual else target
                     _set_text_slot(body, locator.get("slot"), value)
+                ruby_items = rubies if bilingual else sorted(
+                    rubies,
+                    key=lambda item: tuple(item[1]["slot"].get("path", [])),
+                    reverse=True,
+                )
+                for _, locator, target in ruby_items:
+                    _set_ruby_slot(
+                        body,
+                        locator.get("slot"),
+                        target,
+                        bilingual=bilingual,
+                    )
                 changed[xhtml_path] = ElementTree.tostring(
                     root, encoding="utf-8", xml_declaration=True
                 )
@@ -286,6 +330,9 @@ def _local_name(tag: str) -> str:
 
 def _text_slots(
     root: ElementTree.Element,
+    *,
+    ruby_mode: str,
+    location: str,
 ) -> list[tuple[dict[str, Any], str]]:
     values: list[tuple[dict[str, Any], str]] = []
 
@@ -295,17 +342,106 @@ def _text_slots(
         if element.text and not element.text.isspace():
             values.append(({"path": path, "kind": "text"}, element.text))
         for index, child in enumerate(list(element)):
-            visit(child, [*path, index])
+            child_path = [*path, index]
+            if _local_name(child.tag) == "ruby":
+                ruby = _render_ruby(
+                    child,
+                    ruby_mode=ruby_mode,
+                    location=location,
+                    path=child_path,
+                )
+                tail = child.tail or ""
+                tail_in_source = bool(tail and not tail.isspace())
+                values.append(
+                    (
+                        {
+                            "path": child_path,
+                            "kind": "ruby",
+                            "tail": tail,
+                            "tail_in_source": tail_in_source,
+                        },
+                        ruby + (tail if tail_in_source else ""),
+                    )
+                )
+                continue
+            visit(child, child_path)
             if child.tail and not child.tail.isspace():
                 values.append(
                     (
-                        {"path": [*path, index], "kind": "tail"},
+                        {"path": child_path, "kind": "tail"},
                         child.tail,
                     )
                 )
 
     visit(root, [])
     return values
+
+
+def _plain_ruby_text(element: ElementTree.Element, location: str) -> str:
+    parts: list[str] = []
+
+    def collect(value: ElementTree.Element) -> None:
+        if _local_name(value.tag) == "ruby":
+            raise ProjectError(f"EPUB Ruby 不支持嵌套 ruby：{location}")
+        if value.text:
+            parts.append(value.text)
+        for child in list(value):
+            collect(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    collect(element)
+    return "".join(parts).strip()
+
+
+def _render_ruby(
+    element: ElementTree.Element,
+    *,
+    ruby_mode: str,
+    location: str,
+    path: list[int],
+) -> str:
+    label = f"{location} ruby path {'/'.join(str(value) for value in path)}"
+    base_parts: list[str] = []
+    if element.text:
+        base_parts.append(element.text)
+    direct_readings: list[str] = []
+    grouped_readings: list[str] = []
+    for child in list(element):
+        name = _local_name(child.tag)
+        if name == "ruby":
+            raise ProjectError(f"EPUB Ruby 不支持嵌套 ruby：{label}")
+        if name == "rt":
+            reading = _plain_ruby_text(child, label)
+            if not reading:
+                raise ProjectError(f"EPUB Ruby 包含空 rt：{label}")
+            direct_readings.append(reading)
+        elif name == "rtc":
+            rtc_readings = [
+                _plain_ruby_text(item, label)
+                for item in list(child)
+                if _local_name(item.tag) == "rt"
+            ]
+            if not rtc_readings or any(not value for value in rtc_readings):
+                raise ProjectError(f"EPUB Ruby 的 rtc 缺少有效 rt：{label}")
+            grouped_readings.append("".join(rtc_readings))
+        elif name != "rp":
+            base_parts.append(_plain_ruby_text(child, label))
+        if child.tail:
+            base_parts.append(child.tail)
+    base = "".join(base_parts).strip()
+    reading_groups = []
+    if direct_readings:
+        reading_groups.append("".join(direct_readings))
+    reading_groups.extend(grouped_readings)
+    if not base or not reading_groups:
+        raise ProjectError(f"EPUB Ruby 缺少基础文字或读音：{label}")
+    reading = "／".join(reading_groups)
+    if ruby_mode == "base_only":
+        return base
+    if ruby_mode == "parenthetical":
+        return f"{base}（{reading}）"
+    return f"｜{base}《{reading}》"
 
 
 def _set_text_slot(
@@ -328,3 +464,52 @@ def _set_text_slot(
         element.text = value
     else:
         element.tail = value
+
+
+def _set_ruby_slot(
+    root: ElementTree.Element,
+    raw: Any,
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    if not isinstance(raw, dict) or raw.get("kind") != "ruby":
+        raise IncompleteError("EPUB Ruby 定位 slot 损坏")
+    path = raw.get("path")
+    if (
+        not isinstance(path, list)
+        or not path
+        or not all(isinstance(index, int) and index >= 0 for index in path)
+    ):
+        raise IncompleteError("EPUB Ruby 定位 path 损坏")
+    parent = root
+    try:
+        for index in path[:-1]:
+            parent = list(parent)[index]
+        ruby = list(parent)[path[-1]]
+    except IndexError as exc:
+        raise IncompleteError("EPUB XHTML 结构与 Ruby 导入状态不一致") from exc
+    if _local_name(ruby.tag) != "ruby":
+        raise IncompleteError("EPUB Ruby 定位未指向 ruby 元素")
+    if bilingual:
+        ruby.tail = f"{ruby.tail or ''}\n{target}"
+        return
+    imported_tail = raw.get("tail")
+    tail_in_source = raw.get("tail_in_source")
+    if not isinstance(imported_tail, str) or not isinstance(tail_in_source, bool):
+        raise IncompleteError("EPUB Ruby tail 状态损坏")
+    current_tail = ruby.tail or ""
+    if tail_in_source:
+        if not current_tail.startswith(imported_tail):
+            raise IncompleteError("EPUB Ruby tail 与导入状态不一致")
+        suffix = current_tail[len(imported_tail):]
+    else:
+        suffix = current_tail
+    value = target + suffix
+    index = path[-1]
+    if index == 0:
+        parent.text = (parent.text or "") + value
+    else:
+        previous = list(parent)[index - 1]
+        previous.tail = (previous.tail or "") + value
+    parent.remove(ruby)

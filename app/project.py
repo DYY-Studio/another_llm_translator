@@ -210,8 +210,15 @@ def _import_project_inputs(
     config: dict[str, object],
     document_adapter_id: str | None,
     original_names: list[str] | None = None,
+    adapter_options: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[tuple[DocumentAdapter, ImportedFile]], list[str]]:
-    from .plugins import get_document_adapter, get_document_adapter_for_extension
+    from .plugins import (
+        get_document_adapter,
+        get_document_adapter_for_extension,
+        validate_document_import_options,
+    )
+
+    option_values = adapter_options or {}
 
     if document_adapter_id is not None:
         adapter = get_document_adapter(document_adapter_id)
@@ -220,7 +227,12 @@ def _import_project_inputs(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
         imported = adapter.import_sources(
-            inputs, recursive=recursive, config=config
+            inputs,
+            recursive=recursive,
+            config=config,
+            options=validate_document_import_options(
+                adapter, option_values.get(adapter.adapter_id)
+            ),
         )
         files = list(imported.files)
         if original_names is not None:
@@ -243,7 +255,12 @@ def _import_project_inputs(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
         imported = adapter.import_sources(
-            [str(source.path)], recursive=False, config=config
+            [str(source.path)],
+            recursive=False,
+            config=config,
+            options=validate_document_import_options(
+                adapter, option_values.get(adapter.adapter_id)
+            ),
         )
         if len(imported.files) != 1:
             raise UsageError(
@@ -312,6 +329,7 @@ class TXTDocumentAdapter:
     version = "1"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = _TXT_EXTENSIONS
+    import_options = ()
 
     def import_sources(
         self,
@@ -319,7 +337,9 @@ class TXTDocumentAdapter:
         *,
         recursive: bool,
         config: dict[str, object],
+        options: dict[str, str],
     ) -> DocumentImport:
+        del options
         discovered = discover_inputs(inputs, recursive)
         files: list[ImportedFile] = []
         warnings: list[str] = []
@@ -420,6 +440,7 @@ def init_project(
     recursive: bool = False,
     document_adapter_id: str | None = "txt",
     original_names: list[str] | None = None,
+    adapter_options: dict[str, dict[str, str]] | None = None,
     empty: bool = False,
     dry_run: bool = False,
     app_root: Path = APP_ROOT,
@@ -447,6 +468,7 @@ def init_project(
             config=global_config,
             document_adapter_id=document_adapter_id,
             original_names=original_names,
+            adapter_options=adapter_options,
         )
 
     adapter_ids = {adapter.adapter_id for adapter, _ in imports}
@@ -713,6 +735,7 @@ def add_project_files(
     recursive: bool = False,
     document_adapter_id: str | None = None,
     original_names: list[str] | None = None,
+    adapter_options: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, object]:
     running = _running_run_ids(project)
     if running:
@@ -727,6 +750,7 @@ def add_project_files(
         config=config,
         document_adapter_id=document_adapter_id,
         original_names=original_names,
+        adapter_options=adapter_options,
     )
     existing_names = {
         str(record["original_name"]).casefold() for record in files

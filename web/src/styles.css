@@ -184,6 +184,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .input-queue-heading > div:first-child { min-width: 0; display: grid; gap: 4px; }
 .input-queue-heading small { color: var(--muted); font-size: 11px; font-weight: 400; }
 .input-queue-message { padding: 9px 10px; border: 1px solid var(--warning-border); border-radius: 6px; background: var(--warning-bg); color: var(--warning-text); text-align: left; }
+.input-queue-option { display: grid; grid-template-columns: minmax(120px, auto) minmax(180px, 1fr); align-items: center; gap: 6px 12px; }
+.input-queue-option select { min-width: 0; }
+.input-queue-option small { grid-column: 2; color: var(--muted); font-size: 11px; font-weight: 400; }
 .input-queue-list { max-height: 220px; overflow: auto; border-top: 1px solid var(--row-border); }
 .input-queue-empty { padding: 16px 4px 6px; color: var(--muted); font-size: 12px; }
 .input-queue-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--row-border); }
@@ -449,6 +452,8 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .input-queue-heading { align-items: stretch; flex-direction: column; }
   .input-queue-heading .button-group { display: grid; grid-template-columns: 1fr 1fr; }
   .input-queue-heading .button-group button { min-width: 0; padding-inline: 8px; }
+  .input-queue-option { grid-template-columns: 1fr; }
+  .input-queue-option small { grid-column: 1; }
   .summary-strip div { min-width: 0; flex: 1; }
   .run-counts { grid-template-columns: repeat(2, 1fr); }
 }

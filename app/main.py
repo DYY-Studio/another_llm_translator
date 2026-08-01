@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="txt",
         help="输入输出格式 Adapter ID（默认：txt）",
     )
+    init.add_argument(
+        "--epub-ruby-mode",
+        choices=("aozora", "base_only", "parenthetical"),
+        help="EPUB Ruby 导入形式（默认：aozora）",
+    )
     init.add_argument("--dry-run", action="store_true")
     init.add_argument(
         "--parent-dir",
@@ -63,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     files_add.add_argument(
         "--document-adapter",
         help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
+    )
+    files_add.add_argument(
+        "--epub-ruby-mode",
+        choices=("aozora", "base_only", "parenthetical"),
+        help="EPUB Ruby 导入形式（默认：aozora）",
     )
 
     files_remove = subparsers.add_parser(
@@ -170,6 +180,11 @@ def run(argv: list[str] | None = None) -> int:
             name=args.name,
             recursive=args.recursive,
             document_adapter_id=args.document_adapter,
+            adapter_options=(
+                {"epub": {"ruby_mode": args.epub_ruby_mode}}
+                if args.epub_ruby_mode
+                else None
+            ),
             empty=args.empty,
             dry_run=args.dry_run,
             projects_root=projects_root,
@@ -197,6 +212,11 @@ def run(argv: list[str] | None = None) -> int:
                 args.inputs,
                 recursive=args.recursive,
                 document_adapter_id=args.document_adapter,
+                adapter_options=(
+                    {"epub": {"ruby_mode": args.epub_ruby_mode}}
+                    if args.epub_ruby_mode
+                    else None
+                ),
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)

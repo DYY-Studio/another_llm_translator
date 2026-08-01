@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 
-from .documents import DocumentAdapter
+from .documents import DocumentAdapter, DocumentChoiceOption
 from .errors import ConfigError, UsageError
 
 
-PLUGIN_PROTOCOL_VERSION = 3
+PLUGIN_PROTOCOL_VERSION = 4
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 
@@ -88,6 +88,39 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                         f"({owner}, {adapter.adapter_id})"
                     )
                 seen_extensions[extension] = adapter.adapter_id
+            options = getattr(adapter, "import_options", None)
+            if not isinstance(options, tuple) or not all(
+                isinstance(option, DocumentChoiceOption) for option in options
+            ):
+                raise ConfigError(
+                    f"Document Adapter 导入选项声明无效：{adapter.adapter_id}"
+                )
+            if options and "import" not in adapter.capabilities:
+                raise ConfigError(
+                    f"不可导入的 Document Adapter 不能声明导入选项："
+                    f"{adapter.adapter_id}"
+                )
+            seen_options: set[str] = set()
+            for option in options:
+                choice_ids = [choice_id for choice_id, _ in option.choices]
+                choices_valid = all(
+                    choice_id and label
+                    for choice_id, label in option.choices
+                )
+                if (
+                    not option.option_id
+                    or option.option_id in seen_options
+                    or not option.label
+                    or len(choice_ids) < 2
+                    or len(set(choice_ids)) != len(choice_ids)
+                    or not choices_valid
+                    or option.default not in choice_ids
+                ):
+                    raise ConfigError(
+                        f"Document Adapter 导入选项声明无效："
+                        f"{adapter.adapter_id}.{option.option_id}"
+                    )
+                seen_options.add(option.option_id)
             seen_adapters.add(adapter.adapter_id)
     return tuple(plugins)
 
@@ -109,6 +142,30 @@ def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
     raise UsageError(f"没有 Document Adapter 支持扩展名：{extension or '（无）'}")
 
 
+def validate_document_import_options(
+    adapter: DocumentAdapter, values: dict[str, str] | None
+) -> dict[str, str]:
+    provided = values or {}
+    declarations = {
+        option.option_id: option for option in adapter.import_options
+    }
+    unknown = sorted(set(provided) - set(declarations))
+    if unknown:
+        raise UsageError(
+            f"{adapter.adapter_id} 包含未知导入选项：{', '.join(unknown)}"
+        )
+    resolved: dict[str, str] = {}
+    for option_id, option in declarations.items():
+        value = provided.get(option_id, option.default)
+        choices = {choice_id for choice_id, _ in option.choices}
+        if value not in choices:
+            raise UsageError(
+                f"{adapter.adapter_id}.{option_id} 取值无效：{value}"
+            )
+        resolved[option_id] = value
+    return resolved
+
+
 def document_adapter_summaries() -> list[dict[str, object]]:
     values = []
     for plugin in load_plugins():
@@ -121,6 +178,18 @@ def document_adapter_summaries() -> list[dict[str, object]]:
                     "plugin_version": plugin.version,
                     "capabilities": sorted(adapter.capabilities),
                     "extensions": sorted(adapter.extensions),
+                    "import_options": [
+                        {
+                            "option_id": option.option_id,
+                            "label": option.label,
+                            "default": option.default,
+                            "choices": [
+                                {"value": value, "label": label}
+                                for value, label in option.choices
+                            ],
+                        }
+                        for option in adapter.import_options
+                    ],
                 }
             )
     return sorted(values, key=lambda value: str(value["adapter_id"]))

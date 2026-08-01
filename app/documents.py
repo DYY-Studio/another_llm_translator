@@ -26,11 +26,20 @@ class DocumentImport:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DocumentChoiceOption:
+    option_id: str
+    label: str
+    default: str
+    choices: tuple[tuple[str, str], ...]
+
+
 class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
     capabilities: frozenset[str]
     extensions: frozenset[str]
+    import_options: tuple[DocumentChoiceOption, ...]
 
     def import_sources(
         self,
@@ -38,6 +47,7 @@ class DocumentAdapter(Protocol):
         *,
         recursive: bool,
         config: dict[str, Any],
+        options: dict[str, str],
     ) -> DocumentImport: ...
 
     def export_sources(
