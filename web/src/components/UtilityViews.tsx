@@ -1,7 +1,152 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview } from "../types";
+
+type InputKind = "file" | "folder";
+
+interface AdapterSummary {
+  adapter_id: string;
+  capabilities: string[];
+  extensions: string[];
+}
+
+interface PendingInput {
+  file: File;
+  path: string;
+  kind: InputKind;
+  adapterId: string;
+}
+
+function extensionOf(path: string) {
+  const dot = path.lastIndexOf(".");
+  return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase();
+}
+
+function InputQueue({
+  value,
+  onChange,
+  existingPaths = [],
+  disabled = false,
+}: {
+  value: PendingInput[];
+  onChange: (value: PendingInput[]) => void;
+  existingPaths?: string[];
+  disabled?: boolean;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+  const [adapters, setAdapters] = useState<AdapterSummary[]>([]);
+  const [message, setMessage] = useState("");
+  const folderSelectionSupported = "webkitdirectory" in document.createElement("input");
+
+  useEffect(() => {
+    folderRef.current?.setAttribute("webkitdirectory", "");
+    void api<{ adapters: AdapterSummary[] }>("/api/v1/document-adapters")
+      .then((result) => setAdapters(result.adapters))
+      .catch((reason) => setMessage(String(reason)));
+  }, []);
+
+  const extensionOwners = new Map<string, string>();
+  for (const adapter of adapters) {
+    if (!adapter.capabilities.includes("import")) continue;
+    for (const extension of adapter.extensions) {
+      extensionOwners.set(extension.toLocaleLowerCase(), adapter.adapter_id);
+    }
+  }
+  const accepted = [...extensionOwners.keys()].join(",");
+
+  function addBatch(files: FileList | null, kind: InputKind) {
+    if (!files?.length) return;
+    setMessage("");
+    const incoming: PendingInput[] = [];
+    const ignored: string[] = [];
+    for (const file of Array.from(files)) {
+      const relative = kind === "folder"
+        ? (file.webkitRelativePath || file.name).split("/").slice(1).join("/") || file.name
+        : file.name;
+      const adapterId = extensionOwners.get(extensionOf(relative));
+      if (!adapterId) {
+        if (kind === "folder") {
+          ignored.push(relative);
+          continue;
+        }
+        setMessage(`不支持的输入文件：${relative}`);
+        return;
+      }
+      incoming.push({ file, path: relative, kind, adapterId });
+    }
+    if (!incoming.length) {
+      setMessage("所选文件夹中没有受支持的输入文件");
+      return;
+    }
+    const known = new Set(
+      [...existingPaths, ...value.map((item) => item.path)]
+        .map((path) => path.toLocaleLowerCase()),
+    );
+    for (const item of incoming) {
+      const key = item.path.toLocaleLowerCase();
+      if (known.has(key)) {
+        setMessage(`输入路径重名，本次选择未加入：${item.path}`);
+        return;
+      }
+      known.add(key);
+    }
+    onChange([...value, ...incoming]);
+    if (ignored.length) {
+      setMessage(`已忽略 ${ignored.length} 个不支持的文件`);
+    }
+  }
+
+  function clearInput(ref: RefObject<HTMLInputElement | null>) {
+    if (ref.current) ref.current.value = "";
+  }
+
+  return (
+    <div className="input-queue">
+      <div className="input-queue-heading">
+        <div><strong>待输入列表</strong><small>可分多次选择；文件夹导入保留内部相对路径。</small></div>
+        <div className="button-group">
+          <input
+            ref={fileRef}
+            hidden
+            type="file"
+            accept={accepted}
+            multiple
+            onChange={(event) => {
+              addBatch(event.target.files, "file");
+              clearInput(fileRef);
+            }}
+          />
+          <input
+            ref={folderRef}
+            hidden
+            type="file"
+            accept={accepted}
+            multiple
+            onChange={(event) => {
+              addBatch(event.target.files, "folder");
+              clearInput(folderRef);
+            }}
+          />
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>选择文件</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>选择文件夹</button>
+        </div>
+      </div>
+      {!folderSelectionSupported && <small className="muted">当前浏览器不支持文件夹选择，可继续选择单独文件。</small>}
+      {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
+      <div className="input-queue-list">
+        {!value.length && <div className="input-queue-empty">尚未选择文件；可直接创建空项目。</div>}
+        {value.map((item, index) => (
+          <div className="input-queue-row" key={`${item.path}-${index}`}>
+            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? "文件夹" : "单独文件"}</small></span>
+            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>移除</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function Overview({
   project,
@@ -14,30 +159,35 @@ export function Overview({
 }) {
   const completed = value.segments.filter((item) => item.translation).length;
   const selection = useClassicSelection();
-  const uploadRef = useRef<HTMLInputElement>(null);
+  const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileIds = value.files.map((item) => item.file_id);
 
-  async function upload(files: FileList | null) {
-    if (!files?.length) return;
+  async function upload() {
+    if (!pendingInputs.length) return;
     setBusy(true);
     setError("");
     try {
       const body = new FormData();
-      Array.from(files).forEach((file) => body.append("files", file));
-      await api(`/api/v1/projects/${project}/files`, {
+      for (const item of pendingInputs) {
+        body.append("files", item.file, item.file.name);
+        body.append("relative_paths", item.path);
+        body.append("input_kinds", item.kind);
+      }
+      const result = await api<{ warnings: string[] }>(`/api/v1/projects/${project}/files`, {
         method: "POST",
         body,
       });
+      setPendingInputs([]);
+      if (result.warnings.length) setError(result.warnings.join("；"));
       selection.reset();
       await onFilesChanged();
     } catch (value) {
       setError(String(value));
     } finally {
       setBusy(false);
-      if (uploadRef.current) uploadRef.current.value = "";
     }
   }
 
@@ -70,22 +220,15 @@ export function Overview({
       <div className="section-heading">
         <div><h2>文件</h2><p>每个文件保留其来源格式</p></div>
         <div className="section-actions">
-          <input
-            ref={uploadRef}
-            className="visually-hidden"
-            type="file"
-            accept=".txt,.epub,text/plain,application/epub+zip"
-            multiple
-            onChange={(event) => void upload(event.target.files)}
-          />
-          <button className="quiet-button" disabled={busy} onClick={() => uploadRef.current?.click()}>
-            添加文件
+          <button className="primary-button" disabled={busy || !pendingInputs.length} onClick={() => void upload()}>
+            添加到项目
           </button>
           <button className="danger-button" disabled={busy || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             移除所选
           </button>
         </div>
       </div>
+      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
       <div className="file-list">
         {value.files.length === 0 && (
@@ -185,22 +328,26 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
   const [name, setName] = useState("");
   const [parentDir, setParentDir] = useState("");
   const [projectPath, setProjectPath] = useState("");
-  const [adapter, setAdapter] = useState("txt");
-  const [adapters, setAdapters] = useState<Array<{ adapter_id: string; capabilities: string[] }>>([]);
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [empty, setEmpty] = useState(false);
+  const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [error, setError] = useState("");
   useEffect(() => {
-    void api<{ adapters: Array<{ adapter_id: string; capabilities: string[] }> }>("/api/v1/document-adapters")
-      .then((value) => setAdapters(value.adapters));
+    void api<{ default_projects_path: string }>("/api/v1/projects")
+      .then((value) => {
+        setParentDir(value.default_projects_path);
+        setProjectPath(value.default_projects_path);
+      })
+      .catch((reason) => setError(String(reason)));
   }, []);
   async function submit() {
     const body = new FormData();
     body.append("name", name);
-    body.append("document_adapter", adapter);
-    body.append("empty", String(empty));
+    body.append("empty", String(pendingInputs.length === 0));
     body.append("parent_dir", parentDir.trim());
-    Array.from(files ?? []).forEach((file) => body.append("files", file));
+    for (const item of pendingInputs) {
+      body.append("files", item.file, item.file.name);
+      body.append("relative_paths", item.path);
+      body.append("input_kinds", item.kind);
+    }
     try {
       const result = await api<{ project_selector: string; project_path: string; external: boolean }>("/api/v1/projects", { method: "POST", body });
       onCreated(result.project_selector, result.external ? result.project_path : undefined);
@@ -233,27 +380,9 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
           <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>打开项目</button></div>
         </> : <>
           <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label>保存父目录（留空使用默认 projects）<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} placeholder="/path/to/parent" /></label>
-          <label>文档格式
-          <select value={adapter} onChange={(event) => { setAdapter(event.target.value); setFiles(null); }}>
-            {adapters.map((item) => <option key={item.adapter_id} value={item.adapter_id}>{item.adapter_id.toUpperCase()}</option>)}
-          </select>
-        </label>
-        <label className="check-row">
-          <input type="checkbox" checked={empty} onChange={(event) => { setEmpty(event.target.checked); if (event.target.checked) setFiles(null); }} />
-          创建空项目，稍后添加文件
-        </label>
-        <label>输入文件
-          <input
-            key={adapter}
-            type="file"
-            disabled={empty}
-            accept={adapter === "epub" ? ".epub,application/epub+zip" : ".txt,text/plain"}
-            multiple={adapter === "txt"}
-            onChange={(event) => setFiles(event.target.files)}
-          />
-        </label>
-          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name || (!empty && !files?.length)} onClick={submit}>创建项目</button></div>
+          <label>保存父目录<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
+          <InputQueue value={pendingInputs} onChange={setPendingInputs} />
+          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>创建项目</button></div>
         </>}
       </div>
     </div>
