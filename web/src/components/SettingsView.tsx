@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import type { LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
+import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
@@ -197,6 +198,7 @@ function PresetSettings() {
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -219,6 +221,7 @@ function PresetSettings() {
     setPreset(null);
     setPreview(null);
     setModels(null);
+    setModelsError("");
     void Promise.all([
       api<LLMPreset>(`/api/v1/global/presets/${selected}`),
       api<Record<string, unknown>>(`/api/v1/global/presets/${selected}/preview`),
@@ -233,19 +236,24 @@ function PresetSettings() {
     if (!preset) return;
     setModels(null);
     setModelsLoading(true);
-    setMessage(""); setError("");
+    setModelsError(""); setMessage(""); setError("");
     try {
       const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
       const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST", body: JSON.stringify(definition) });
       setModels(result.models);
-      if (result.models.length === 0) setMessage("端点返回空模型列表");
-    } catch (reason) { setError(errorMessage(reason)); }
+    } catch (reason) { setModelsError(errorMessage(reason)); }
     finally { setModelsLoading(false); }
   }
 
   function update(change: (draft: LLMPreset) => void) {
     setMessage(""); setError("");
     setPreset((current) => { if (!current) return current; const next = structuredClone(current); change(next); return next; });
+  }
+
+  function updateConnection(change: (draft: LLMPreset) => void) {
+    setModels(null);
+    setModelsError("");
+    update(change);
   }
 
   async function save() {
@@ -296,18 +304,106 @@ function PresetSettings() {
           <>
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
-            <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => update((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => update((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>            <Field label="模型标识"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field><div className="model-tools"><button className="quiet-button" disabled={modelsLoading} onClick={() => void discoverModels()}>{modelsLoading ? "正在获取" : "获取模型列表"}</button><small>手动触发连通性检测；结果仅用于填写模型标识。</small></div><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => update((draft) => { draft.api_key_env = event.target.value; })} /></Field><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
+            <div className="config-grid preset-fields"><Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field><Field label="Base URL"><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field><Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field><Field label="API Key 环境变量"><input value={preset.api_key_env} onChange={(event) => updateConnection((draft) => { draft.api_key_env = event.target.value; })} /></Field><ModelPicker value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(`已选择 ${value}；保存后生效`); }} /><Field label="代理 URL"><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field><NumberField label="上下文窗口 Token" value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} /><NumberField label="最大输出 Token" value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} /><NumberField label="上下文安全余量" value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} /><NumberField label="Token 安全系数" value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} /><NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} /><NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} /><NumberField label="最大并发" value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} /><NumberField label="请求超时（秒）" value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} /><label className="code-field preset-extra"><span>附加 JSON Body</span><small>只允许 JSON 对象；不得包含模板占位符或覆盖 Adapter 顶层字段。</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label></div>
             <h2 className="preview-heading">最终请求预览（Header 已脱敏）</h2>
             <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : "保存后加载预览"}</pre>
-            {models !== null && (
-              <>
-                <h2 className="preview-heading">模型列表（{models.length}）</h2>
-                <div className="model-list">{models.map((item) => <button key={item.id} className="preset-row" onClick={() => { update((draft) => { draft.model = item.id; }); setMessage(`已填入 ${item.id}；保存后生效`); }}><strong>{item.display}</strong><small>{item.id !== item.display ? item.id : "点击填入模型标识"}</small></button>)}</div>
-              </>
-            )}
           </>
         )}
       </section>
+    </div>
+  );
+}
+
+function ModelPicker({ value, models, loading, error, onChange, onDiscover, onSelect }: { value: string; models: ModelRow[] | null; loading: boolean; error: string; onChange: (value: string) => void; onDiscover: () => void; onSelect: (value: string) => void }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filteredModels = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!models || !normalized) return models ?? [];
+    return models.filter((item) => item.id.toLocaleLowerCase().includes(normalized) || item.display.toLocaleLowerCase().includes(normalized));
+  }, [models, query]);
+  const selectedIndex = filteredModels.findIndex((item) => item.id === value);
+  const [activeIndex, setActiveIndex] = useState(-1);
+
+  useEffect(() => {
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, []);
+
+  useEffect(() => {
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : filteredModels.length > 0 ? 0 : -1);
+  }, [query, models, value]);
+
+  function openPicker() {
+    setOpen(true);
+    window.setTimeout(() => {
+      rootRef.current?.scrollIntoView({ block: "start" });
+      searchRef.current?.focus();
+    }, 0);
+  }
+
+  function choose(item: ModelRow) {
+    onSelect(item.id);
+    setQuery("");
+    setOpen(false);
+  }
+
+  function handleKeys(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      setOpen(false);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!open) openPicker();
+      if (filteredModels.length > 0) {
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setActiveIndex((current) => (current + direction + filteredModels.length) % filteredModels.length);
+      }
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Enter" && open && activeIndex >= 0) {
+      choose(filteredModels[activeIndex]);
+      event.preventDefault();
+    }
+  }
+
+  const activeOptionId = open && activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined;
+  return (
+    <div className="config-field model-picker" ref={rootRef}>
+      <span>模型标识</span>
+      <div className="model-picker-control">
+        <input value={value} role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-activedescendant={activeOptionId} onKeyDown={handleKeys} onChange={(event) => onChange(event.target.value)} />
+        <button type="button" className="quiet-button model-discover-button" disabled={loading} onClick={() => { setQuery(""); openPicker(); onDiscover(); }}><Icon><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 9" /><path d="M5.8 15A7 7 0 0 0 17.6 17.6L20 15" /></Icon>{loading ? "正在获取" : "获取模型"}</button>
+      </div>
+      {open && (
+        <div className="model-picker-popover">
+          <div className="model-search">
+            <Icon><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></Icon>
+            <input ref={searchRef} aria-label="搜索模型" placeholder="搜索模型名称或 ID" value={query} onKeyDown={handleKeys} onChange={(event) => setQuery(event.target.value)} />
+          </div>
+          <div className="model-options" id={listId} role="listbox" aria-label="可用模型">
+            {loading && <div className="model-picker-state" role="status">正在从当前 Preset 草稿获取模型…</div>}
+            {!loading && error && <div className="model-picker-state error-text" role="alert">{error}</div>}
+            {!loading && !error && models !== null && filteredModels.length === 0 && <div className="model-picker-state">{models.length === 0 ? "端点返回空模型列表" : "没有匹配的模型"}</div>}
+            {!loading && !error && models === null && <div className="model-picker-state">点击“获取模型”检查当前草稿连接。</div>}
+            {!loading && !error && filteredModels.map((item, index) => (
+              <button type="button" key={item.id} id={`${listId}-option-${index}`} role="option" aria-selected={item.id === value} className={`model-option${index === activeIndex ? " active" : ""}${item.id === value ? " selected" : ""}`} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(item)}>
+                <span><strong>{item.display}</strong><code>{item.id}</code></span>
+                {item.id === value && <Icon><path d="m5 12 4 4L19 6" /></Icon>}
+              </button>
+            ))}
+          </div>
+          <div className="model-picker-footer">共 {models?.length ?? 0} 个模型 · 选择后仍需保存</div>
+        </div>
+      )}
     </div>
   );
 }
