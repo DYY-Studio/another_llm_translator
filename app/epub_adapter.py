@@ -18,6 +18,32 @@ MAX_EPUB_ENTRIES = 10_000
 MAX_EPUB_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_EPUB_COMPRESSION_RATIO = 200
 _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
+_INLINE_TEXT_ELEMENTS = {
+    "a",
+    "abbr",
+    "b",
+    "bdi",
+    "bdo",
+    "cite",
+    "code",
+    "data",
+    "dfn",
+    "em",
+    "i",
+    "kbd",
+    "mark",
+    "q",
+    "s",
+    "samp",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "time",
+    "u",
+    "var",
+}
 
 
 class EPUBDocumentAdapter:
@@ -198,9 +224,13 @@ class EPUBDocumentAdapter:
                     if item[1]["slot"].get("kind") == "ruby"
                 ]
                 for segment, locator, target in regular:
-                    source = str(segment["source"])
-                    value = f"{source}\n{target}" if bilingual else target
-                    _set_text_slot(body, locator.get("slot"), value)
+                    _set_regular_slot(
+                        body,
+                        locator.get("slot"),
+                        str(segment["source"]),
+                        target,
+                        bilingual=bilingual,
+                    )
                 ruby_items = rubies if bilingual else sorted(
                     rubies,
                     key=lambda item: tuple(item[1]["slot"].get("path", [])),
@@ -414,45 +444,90 @@ def _text_slots(
     location: str,
 ) -> list[tuple[dict[str, Any], str]]:
     values: list[tuple[dict[str, Any], str]] = []
+    regular_run: list[tuple[dict[str, Any], str]] = []
+
+    def add_regular(locator: dict[str, Any], text: str | None) -> None:
+        if not text:
+            return
+        if text.isspace() and not regular_run:
+            return
+        regular_run.append((locator, text))
+
+    def flush_regular() -> None:
+        while regular_run and regular_run[-1][1].isspace():
+            regular_run.pop()
+        if not regular_run:
+            return
+        if len(regular_run) == 1:
+            locator: dict[str, Any] = regular_run[0][0]
+        else:
+            locator = {
+                "kind": "composite",
+                "slots": [item[0] for item in regular_run],
+            }
+        values.append((locator, "".join(item[1] for item in regular_run)))
+        regular_run.clear()
+
+    def append_ruby(child: ElementTree.Element, child_path: list[int]) -> None:
+        ruby = _render_ruby(
+            child,
+            ruby_mode=ruby_mode,
+            location=location,
+            path=child_path,
+        )
+        tail = child.tail or ""
+        tail_in_source = bool(tail and not tail.isspace())
+        values.append(
+            (
+                {
+                    "path": child_path,
+                    "kind": "ruby",
+                    "tail": tail,
+                    "tail_in_source": tail_in_source,
+                },
+                ruby + (tail if tail_in_source else ""),
+            )
+        )
+
+    def visit_inline(element: ElementTree.Element, path: list[int]) -> None:
+        if _local_name(element.tag) in _SKIPPED_TEXT_ELEMENTS:
+            return
+        add_regular({"path": path, "kind": "text"}, element.text)
+        for index, child in enumerate(list(element)):
+            child_path = [*path, index]
+            name = _local_name(child.tag)
+            if name == "ruby":
+                flush_regular()
+                append_ruby(child, child_path)
+            elif name in _INLINE_TEXT_ELEMENTS:
+                visit_inline(child, child_path)
+            else:
+                flush_regular()
+                visit(child, child_path)
+            if name != "ruby":
+                add_regular({"path": child_path, "kind": "tail"}, child.tail)
 
     def visit(element: ElementTree.Element, path: list[int]) -> None:
         if _local_name(element.tag) in _SKIPPED_TEXT_ELEMENTS:
             return
-        if element.text and not element.text.isspace():
-            values.append(({"path": path, "kind": "text"}, element.text))
+        add_regular({"path": path, "kind": "text"}, element.text)
         for index, child in enumerate(list(element)):
             child_path = [*path, index]
-            if _local_name(child.tag) == "ruby":
-                ruby = _render_ruby(
-                    child,
-                    ruby_mode=ruby_mode,
-                    location=location,
-                    path=child_path,
-                )
-                tail = child.tail or ""
-                tail_in_source = bool(tail and not tail.isspace())
-                values.append(
-                    (
-                        {
-                            "path": child_path,
-                            "kind": "ruby",
-                            "tail": tail,
-                            "tail_in_source": tail_in_source,
-                        },
-                        ruby + (tail if tail_in_source else ""),
-                    )
-                )
-                continue
-            visit(child, child_path)
-            if child.tail and not child.tail.isspace():
-                values.append(
-                    (
-                        {"path": child_path, "kind": "tail"},
-                        child.tail,
-                    )
-                )
+            name = _local_name(child.tag)
+            if name == "ruby":
+                flush_regular()
+                append_ruby(child, child_path)
+            elif name in _INLINE_TEXT_ELEMENTS:
+                visit_inline(child, child_path)
+            else:
+                flush_regular()
+                visit(child, child_path)
+            if name != "ruby":
+                add_regular({"path": child_path, "kind": "tail"}, child.tail)
+        flush_regular()
 
     visit(root, [])
+    flush_regular()
     return values
 
 
@@ -523,9 +598,9 @@ def _render_ruby(
     return f"｜{base}《{reading}》"
 
 
-def _set_text_slot(
-    root: ElementTree.Element, raw: Any, value: str
-) -> None:
+def _resolve_text_slot(
+    root: ElementTree.Element, raw: Any
+) -> tuple[ElementTree.Element, str]:
     if not isinstance(raw, dict) or raw.get("kind") not in {"text", "tail"}:
         raise IncompleteError("EPUB Segment 定位 slot 损坏")
     path = raw.get("path")
@@ -539,10 +614,55 @@ def _set_text_slot(
             element = list(element)[index]
     except IndexError as exc:
         raise IncompleteError("EPUB XHTML 结构与导入状态不一致") from exc
-    if raw["kind"] == "text":
+    return element, str(raw["kind"])
+
+
+def _read_text_slot(root: ElementTree.Element, raw: Any) -> str:
+    element, kind = _resolve_text_slot(root, raw)
+    return element.text or "" if kind == "text" else element.tail or ""
+
+
+def _set_text_slot(
+    root: ElementTree.Element, raw: Any, value: str
+) -> None:
+    element, kind = _resolve_text_slot(root, raw)
+    if kind == "text":
         element.text = value
     else:
         element.tail = value
+
+
+def _set_regular_slot(
+    root: ElementTree.Element,
+    raw: Any,
+    source: str,
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    if not isinstance(raw, dict) or raw.get("kind") != "composite":
+        value = f"{source}\n{target}" if bilingual else target
+        _set_text_slot(root, raw, value)
+        return
+    slots = raw.get("slots")
+    if not isinstance(slots, list) or len(slots) < 2:
+        raise IncompleteError("EPUB 复合 Segment 定位损坏")
+    if not all(
+        isinstance(slot, dict)
+        and slot.get("kind") in {"text", "tail"}
+        for slot in slots
+    ):
+        raise IncompleteError("EPUB 复合 Segment 文本槽损坏")
+    current = "".join(_read_text_slot(root, slot) for slot in slots)
+    if current != source:
+        raise IncompleteError("EPUB 复合 Segment 与原文不一致")
+    if bilingual:
+        last = slots[-1]
+        _set_text_slot(root, last, f"{_read_text_slot(root, last)}\n{target}")
+        return
+    _set_text_slot(root, slots[0], target)
+    for slot in slots[1:]:
+        _set_text_slot(root, slot, "")
 
 
 def _set_ruby_slot(
