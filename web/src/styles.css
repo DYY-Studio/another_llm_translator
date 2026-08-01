@@ -133,7 +133,7 @@ input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; margin: 0; pa
 select:focus, input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .list-header { display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 650; }
 .segment-list { min-height: 0; overflow: auto; background: var(--surface); }
-.segment-row-stack { display: grid; grid-auto-rows: max-content; gap: 1px; background: var(--border); }
+.segment-row-stack { display: grid; grid-auto-rows: max-content; gap: 2px; background: var(--border); }
 .segment-row { width: 100%; min-height: 70px; display: grid; grid-template-columns: 14px 72px 1fr; align-items: start; gap: 8px; padding: 12px 16px; border: 0; background: var(--surface); text-align: left; }
 .segment-row { content-visibility: auto; contain-intrinsic-size: 70px; }
 .segment-row:hover { background: var(--sidebar); }
