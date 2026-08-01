@@ -74,7 +74,7 @@ export function AppShell({
       : icons.themeDark;
   const themeTitle = `当前外观：${themeLabels[themeMode]}；切换为${themeLabels[nextTheme[themeMode]]}`;
   return (
-    <div className="app">
+    <div className={`app${task ? " has-run-status" : ""}`}>
       <header className="topbar">
         <div className="brand">译工坊</div>
         <select value={project} onChange={(event) => onProject(event.target.value)}>

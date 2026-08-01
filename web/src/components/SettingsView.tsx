@@ -59,24 +59,29 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const loadRevision = useRef(0);
   const configPath = scope === "global" ? "/api/v1/global/config" : `/api/v1/projects/${project}/config`;
 
   async function load() {
+    const revision = ++loadRevision.current;
     const [configResponse, presetResponse] = await Promise.all([
       api<{ config: Record<string, unknown> }>(configPath),
       api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets"),
     ]);
+    if (revision !== loadRevision.current) return;
     setConfig(configResponse.config as unknown as ProjectConfig);
     setPresets(presetResponse.presets);
   }
 
   useEffect(() => {
     let active = true;
+    setConfig(null);
+    setMessage("");
     setError("");
     void load().catch((reason: unknown) => {
       if (active) setError(errorMessage(reason));
     });
-    return () => { active = false; };
+    return () => { active = false; loadRevision.current += 1; };
   }, [configPath, project, scope]);
 
   function update(change: (draft: ProjectConfig) => void) {
@@ -194,6 +199,7 @@ function PresetSettings() {
   const [adapters, setAdapters] = useState<AdapterRow[]>([]);
   const [selected, setSelected] = useState("");
   const [preset, setPreset] = useState<LLMPreset | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
   const [extraBody, setExtraBody] = useState("{}");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
@@ -217,8 +223,10 @@ function PresetSettings() {
   useEffect(() => { void loadLists().catch((reason) => setError(errorMessage(reason))); }, []);
   useEffect(() => {
     if (!selected) return;
+    let active = true;
     setError("");
     setPreset(null);
+    setPresetLoading(true);
     setPreview(null);
     setModels(null);
     setModelsError("");
@@ -226,10 +234,16 @@ function PresetSettings() {
       api<LLMPreset>(`/api/v1/global/presets/${selected}`),
       api<Record<string, unknown>>(`/api/v1/global/presets/${selected}/preview`),
     ]).then(([definition, requestPreview]) => {
+      if (!active) return;
       setPreset(definition);
       setExtraBody(JSON.stringify(definition.extra_body, null, 2));
       setPreview(requestPreview);
-    }).catch((reason) => setError(errorMessage(reason)));
+    }).catch((reason) => {
+      if (active) setError(errorMessage(reason));
+    }).finally(() => {
+      if (active) setPresetLoading(false);
+    });
+    return () => { active = false; };
   }, [selected]);
 
   async function discoverModels() {
@@ -294,12 +308,12 @@ function PresetSettings() {
         {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
       <div className="page-heading settings-action-heading preset-editor-heading">
-        <div><h1>{preset?.preset_id ?? "Preset 编辑"}</h1><p>{preset ? "修改后会立即影响所有引用项目，并产生新的阶段指纹。" : "选择一个有效 Preset。"}</p></div>
+        <div><h1>{preset?.preset_id ?? (presetLoading ? `正在加载 ${selected}` : "Preset 编辑")}</h1><p>{preset ? "修改后会立即影响所有引用项目，并产生新的阶段指纹。" : presetLoading ? "正在读取 Preset 定义和请求预览。" : "选择一个有效 Preset。"}</p></div>
         {preset && <div className="button-group"><button className="danger-button" onClick={removePreset}>删除</button><button className="primary-button" onClick={save}>验证并保存</button></div>}
       </div>
       <section className="preset-editor-body">
         {!preset ? (
-          <>{error && <div className="error-banner">{error}</div>}<p className="muted">选择一个有效 Preset。</p></>
+          <>{error && <div className="error-banner">{error}</div>}<p className="muted">{presetLoading ? "正在加载 Preset…" : "选择一个有效 Preset。"}</p></>
         ) : (
           <>
             {error && <div className="error-banner">{error}</div>}
