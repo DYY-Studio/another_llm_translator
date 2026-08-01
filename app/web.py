@@ -20,6 +20,7 @@ from .config import (
     resolve_global_config,
     resolve_project_config,
 )
+from .diagnostics import Diagnostics
 from .editor import EditorStore
 from .errors import AppError, ExternalError, ProjectError, UsageError
 from .execution import Scope
@@ -63,7 +64,8 @@ def create_app(
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
-    app.state.tasks = WebTaskManager()
+    app.state.diagnostics = Diagnostics(app_root / "logs" / "app.log")
+    app.state.tasks = WebTaskManager(app.state.diagnostics)
     app.state.external_projects = set()
 
     async def stage_uploads(
@@ -821,6 +823,23 @@ def create_app(
     @app.post("/api/v1/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str) -> dict[str, Any]:
         return await app.state.tasks.cancel(task_id)
+
+    @app.get("/api/v1/diagnostics")
+    async def diagnostics(
+        level: str | None = None,
+        project: str | None = None,
+        stage: str | None = None,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return app.state.diagnostics.snapshot(
+                level=level or None,
+                project=project or None,
+                stage=stage or None,
+                query=q or None,
+            )
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
 
     @app.post("/api/v1/projects/{name}/apply")
     async def apply_results(

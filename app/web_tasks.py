@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .config import load_project_config, load_run_config
+from .diagnostics import Diagnostics
 from .errors import UsageError
 from .execution import (
     Scope,
@@ -132,10 +134,11 @@ class WebTask:
 
 
 class WebTaskManager:
-    def __init__(self) -> None:
+    def __init__(self, diagnostics: Diagnostics | None = None) -> None:
         self.tasks: dict[str, WebTask] = {}
         self.active_by_project: dict[Path, str] = {}
         self.guard = asyncio.Lock()
+        self.diagnostics = diagnostics
 
     async def start(
         self,
@@ -236,9 +239,16 @@ class WebTaskManager:
 
         def usage_changed(current: dict[str, Any] | None) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
+            if self.diagnostics is not None:
+                self.diagnostics.set_usage(state.usage)
 
         try:
-            with project_write_lock(state.project):
+            diagnostics_context = (
+                self.diagnostics.activate(state.project.name, state.stage)
+                if self.diagnostics is not None
+                else nullcontext()
+            )
+            with diagnostics_context, project_write_lock(state.project):
                 resume_run_id = None
                 if state.stage != "run-all":
                     resume_run_id, _ = choose_running_run(
