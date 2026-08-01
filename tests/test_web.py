@@ -220,7 +220,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "同步全局模板",
         "全局请求模板",
         "不再保存副本",
-        "获取模型列表",
+        "获取模型",
+        "搜索模型名称或 ID",
+        "选择后仍需保存",
         "文件范围",
         "未选择时导出全部文件",
         "统一输出 TXT",
@@ -1145,13 +1147,29 @@ def test_web_preset_models_discovery_fetches_and_parses(
             ]
         }
     )
-    monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+    def fake_client(**kwargs: object) -> FakeModelsClient:
+        fake.kwargs = kwargs
+        return fake
+
+    monkeypatch.setattr("app.web.httpx.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    os.environ["LLM_API_KEY"] = "test"
+    preset = client.get("/api/v1/global/presets/default").json()
+    saved_definition = dict(preset)
+    preset.update(
+        {
+            "base_url": "https://draft.example/v2",
+            "api_key_env": "DRAFT_LLM_API_KEY",
+            "proxy_url": "https://proxy.example",
+            "request_timeout_seconds": 45,
+        }
+    )
+    os.environ["DRAFT_LLM_API_KEY"] = "draft-secret"
     try:
-        result = client.post("/api/v1/global/presets/default/models")
+        result = client.post(
+            "/api/v1/global/presets/default/models", json=preset
+        )
     finally:
-        del os.environ["LLM_API_KEY"]
+        del os.environ["DRAFT_LLM_API_KEY"]
     assert result.status_code == 200
     assert result.json() == {
         "models": [
@@ -1160,8 +1178,22 @@ def test_web_preset_models_discovery_fetches_and_parses(
         ],
         "count": 2,
     }
-    assert fake.request_url == "https://example.com/v1/v1/models"
-    assert fake.request_headers["Authorization"] == "Bearer test"
+    assert fake.request_url == "https://draft.example/v2/v1/models"
+    assert fake.request_headers["Authorization"] == "Bearer draft-secret"
+    assert fake.kwargs == {
+        "timeout": 45.0,
+        "proxy": "https://proxy.example",
+    }
+    assert client.get(
+        "/api/v1/global/presets/default"
+    ).json() == saved_definition
+
+    mismatched = {**preset, "preset_id": "other"}
+    rejected = client.post(
+        "/api/v1/global/presets/default/models", json=mismatched
+    )
+    assert rejected.status_code == 400
+    assert "URL 中的 Preset ID" in rejected.json()["error"]
 
 
 def test_web_preset_models_discovery_fails_fast(
@@ -1184,19 +1216,17 @@ def test_web_preset_models_discovery_fails_fast(
     )
     preset["adapter_id"] = "minimal"
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    assert client.put(
-        "/api/v1/global/presets/default", json=preset
-    ).status_code == 200
-
-    no_spec = client.post("/api/v1/global/presets/default/models")
+    no_spec = client.post(
+        "/api/v1/global/presets/default/models", json=preset
+    )
     assert no_spec.status_code == 400
     assert "未声明模型发现规格" in no_spec.json()["error"]
 
     preset["adapter_id"] = "openai-compatible"
-    assert client.put(
-        "/api/v1/global/presets/default", json=preset
-    ).status_code == 200
-    missing_key = client.post("/api/v1/global/presets/default/models")
+    monkeypatch.delenv(preset["api_key_env"], raising=False)
+    missing_key = client.post(
+        "/api/v1/global/presets/default/models", json=preset
+    )
     assert missing_key.status_code == 400
     assert "缺少环境变量" in missing_key.json()["error"]
 
@@ -1205,28 +1235,36 @@ def test_web_preset_models_discovery_fails_fast(
         fake = FakeModelsClient()
         fake.raise_error = httpx.ConnectError("no route")
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
-        network = client.post("/api/v1/global/presets/default/models")
+        network = client.post(
+            "/api/v1/global/presets/default/models", json=preset
+        )
         assert network.status_code == 400
         assert "模型列表请求失败" in network.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(status_code=500)
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
-        http_error = client.post("/api/v1/global/presets/default/models")
+        http_error = client.post(
+            "/api/v1/global/presets/default/models", json=preset
+        )
         assert http_error.status_code == 400
         assert "HTTP 500" in http_error.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(json_error=True)
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
-        bad_json = client.post("/api/v1/global/presets/default/models")
+        bad_json = client.post(
+            "/api/v1/global/presets/default/models", json=preset
+        )
         assert bad_json.status_code == 400
         assert "不是合法 JSON" in bad_json.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
-        bad_shape = client.post("/api/v1/global/presets/default/models")
+        bad_shape = client.post(
+            "/api/v1/global/presets/default/models", json=preset
+        )
         assert bad_shape.status_code == 400
         assert "不是数组" in bad_shape.json()["error"]
     finally:

@@ -113,6 +113,11 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 - models 请求固定为非流式 GET，URL 由 Preset `base_url` 与 `endpoint`
   组成，Header 复用顶层 `headers` 模板；渲染时只提供 `${api_key}`，
   含其他占位符的 Header 在触发模型发现时明确失败。
+- Web 触发模型发现时提交当前 Preset 草稿并执行与保存相同的严格校验；探测
+  使用草稿中的 Adapter、Base URL、API Key 环境变量名、代理和超时，但不保存
+  草稿。路径 Preset ID 与草稿 ID 不一致时立即拒绝。
+- Preset 编辑器保留可手工输入的模型 ID；发现结果在字段下方按名称或 ID
+  本地搜索。选择结果只更新当前草稿并收起列表，必须显式保存才会生效。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
