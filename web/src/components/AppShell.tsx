@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ProjectSummary, Stage, TaskState, TaskUsage, ThemeMode } from "../types";
+import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 
 const items: Array<{ id: Stage; label: string }> = [
@@ -45,7 +45,17 @@ export function AppShell({
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
-  const usage = task?.summary?.usage as TaskUsage | undefined;
+  const progress = task && task.total_segments
+    ? Math.min(100, Math.round(task.processed_segments / task.total_segments * 100))
+    : 0;
+  const statusLabels: Record<string, string> = {
+    queued: "等待中",
+    running: "运行中",
+    cancelling: "正在取消",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
   const themeLabels: Record<ThemeMode, string> = {
     system: "跟随系统",
     light: "浅色",
@@ -79,6 +89,27 @@ export function AppShell({
           {icons.settings}
         </button>
       </header>
+      {task && (
+        <section className="global-run-status" aria-label="全局任务状态">
+          <div className="run-identity">
+            <strong>{statusLabels[task.status] ?? task.status}</strong>
+            <span>{task.project} · {task.stage}</span>
+          </div>
+          <div className="run-progress">
+            <span>{task.processed_segments} / {task.total_segments} Segment</span>
+            <div className="progress-track" role="progressbar" aria-label="任务进度" aria-valuemin={0} aria-valuemax={task.total_segments} aria-valuenow={task.processed_segments}>
+              <span style={{ width: `${progress}%` }} />
+            </div>
+          </div>
+          <div className="run-tokens">
+            {task.usage.available ? (
+              <><span>输入 {task.usage.input_tokens} Tokens</span><span>输出 {task.usage.output_tokens} Tokens</span></>
+            ) : <span>精确 Tokens 不可用</span>}
+          </div>
+          {task.error && <span className="error-text run-error">{task.error}</span>}
+          {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
+        </section>
+      )}
       <aside className="sidebar">
         <nav>
           {items.map((item) => (
@@ -92,36 +123,21 @@ export function AppShell({
             </button>
           ))}
         </nav>
-        {(canRun || running) && <div className="run-panel">
+        {canRun && <div className="run-panel">
           {canRun && (
             <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
               {running ? "正在执行" : runLoading ? "正在检查" : "开始当前阶段"}
             </button>
           )}
-          {task && (
-            <div className="task-summary">
-              <strong>{task.status === "running" ? "运行中" : task.status}</strong>
-              <span>{task.stage}</span>
-              {task.error && <span className="error-text">{task.error}</span>}
-              {usage && <span>{usage.available ? `用量 ${usage.input_tokens}/${usage.output_tokens}/${usage.total_tokens} tokens` : "端点未返回用量"}</span>}
-              {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
-            </div>
-          )}
         </div>}
       </aside>
       <main className="main">
-        {(canRun || running) && (
+        {canRun && (
           <div className="mobile-run-bar">
             {canRun && (
               <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
                 {running ? "正在执行" : runLoading ? "正在检查" : "运行当前阶段"}
               </button>
-            )}
-            {running && (
-              <>
-                <span>{task?.stage} · {task?.status}</span>
-                <button className="danger-link" onClick={onCancel}>取消任务</button>
-              </>
             )}
           </div>
         )}

@@ -72,6 +72,9 @@ export interface TaskState {
   status: string;
   error?: string | null;
   summary?: Record<string, unknown> | null;
+  processed_segments: number;
+  total_segments: number;
+  usage: TaskUsage;
 }
 
 export interface TaskUsage {
