@@ -128,6 +128,26 @@ def create_app(
             )
         return inputs, original_names, warnings
 
+    def parse_adapter_options(raw: str) -> dict[str, dict[str, str]]:
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise UsageError("Document Adapter 导入选项不是合法 JSON") from exc
+        if not isinstance(value, dict):
+            raise UsageError("Document Adapter 导入选项必须是对象")
+        for adapter_id, options in value.items():
+            if (
+                not isinstance(adapter_id, str)
+                or not isinstance(options, dict)
+                or any(
+                    not isinstance(option_id, str)
+                    or not isinstance(option_value, str)
+                    for option_id, option_value in options.items()
+                )
+            ):
+                raise UsageError("Document Adapter 导入选项格式无效")
+        return value
+
     @app.middleware("http")
     async def local_only(request: Request, call_next: Any) -> Any:
         host = request.headers.get("host", "").split(":", 1)[0]
@@ -442,6 +462,7 @@ def create_app(
         files: list[UploadFile] | None = File(None),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
         uploads = files or []
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
@@ -461,6 +482,7 @@ def create_app(
                 name=name,
                 document_adapter_id=None,
                 original_names=original_names,
+                adapter_options=parse_adapter_options(adapter_options),
                 empty=empty,
                 app_root=app_root,
                 projects_root=selected_root,
@@ -505,6 +527,7 @@ def create_app(
         files: list[UploadFile] = File(...),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
         if not files:
             raise UsageError("至少上传一个输入文件")
@@ -518,7 +541,10 @@ def create_app(
                 raise UsageError("没有受支持的输入文件")
             with project_write_lock(root):
                 summary = add_project_files(
-                    root, inputs, original_names=original_names
+                    root,
+                    inputs,
+                    original_names=original_names,
+                    adapter_options=parse_adapter_options(adapter_options),
                 )
             summary["warnings"] = [
                 *upload_warnings,

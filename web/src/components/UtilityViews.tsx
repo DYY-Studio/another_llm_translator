@@ -9,7 +9,15 @@ interface AdapterSummary {
   adapter_id: string;
   capabilities: string[];
   extensions: string[];
+  import_options: Array<{
+    option_id: string;
+    label: string;
+    default: string;
+    choices: Array<{ value: string; label: string }>;
+  }>;
 }
+
+type AdapterOptions = Record<string, Record<string, string>>;
 
 interface PendingInput {
   file: File;
@@ -28,11 +36,15 @@ function InputQueue({
   onChange,
   existingPaths = [],
   disabled = false,
+  options,
+  onOptionsChange,
 }: {
   value: PendingInput[];
   onChange: (value: PendingInput[]) => void;
   existingPaths?: string[];
   disabled?: boolean;
+  options: AdapterOptions;
+  onOptionsChange: (value: AdapterOptions) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
@@ -55,6 +67,7 @@ function InputQueue({
     }
   }
   const accepted = [...extensionOwners.keys()].join(",");
+  const queuedAdapters = new Set(value.map((item) => item.adapterId));
 
   function addBatch(files: FileList | null, kind: InputKind) {
     if (!files?.length) return;
@@ -135,6 +148,27 @@ function InputQueue({
       </div>
       {!folderSelectionSupported && <small className="muted">当前浏览器不支持文件夹选择，可继续选择单独文件。</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
+      {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
+        ? adapter.import_options.map((option) => (
+          <label className="input-queue-option" key={`${adapter.adapter_id}.${option.option_id}`}>
+            {option.label}
+            <select
+              disabled={disabled}
+              value={options[adapter.adapter_id]?.[option.option_id] ?? option.default}
+              onChange={(event) => onOptionsChange({
+                ...options,
+                [adapter.adapter_id]: {
+                  ...options[adapter.adapter_id],
+                  [option.option_id]: event.target.value,
+                },
+              })}
+            >
+              {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
+            </select>
+            <small>仅用于本次导入；修改既有文件需重新导入。</small>
+          </label>
+        ))
+        : [])}
       <div className="input-queue-list">
         {!value.length && <div className="input-queue-empty">尚未选择文件；可直接创建空项目。</div>}
         {value.map((item, index) => (
@@ -160,6 +194,7 @@ export function Overview({
   const completed = value.segments.filter((item) => item.translation).length;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
+  const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -176,11 +211,13 @@ export function Overview({
         body.append("relative_paths", item.path);
         body.append("input_kinds", item.kind);
       }
+      body.append("adapter_options", JSON.stringify(adapterOptions));
       const result = await api<{ warnings: string[] }>(`/api/v1/projects/${project}/files`, {
         method: "POST",
         body,
       });
       setPendingInputs([]);
+      setAdapterOptions({});
       if (result.warnings.length) setError(result.warnings.join("；"));
       selection.reset();
       await onFilesChanged();
@@ -228,7 +265,7 @@ export function Overview({
           </button>
         </div>
       </div>
-      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} />
+      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
       <div className="file-list">
         {value.files.length === 0 && (
@@ -329,6 +366,7 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
   const [parentDir, setParentDir] = useState("");
   const [projectPath, setProjectPath] = useState("");
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
+  const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [error, setError] = useState("");
   useEffect(() => {
     void api<{ default_projects_path: string }>("/api/v1/projects")
@@ -348,6 +386,7 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
       body.append("relative_paths", item.path);
       body.append("input_kinds", item.kind);
     }
+    body.append("adapter_options", JSON.stringify(adapterOptions));
     try {
       const result = await api<{ project_selector: string; project_path: string; external: boolean }>("/api/v1/projects", { method: "POST", body });
       onCreated(result.project_selector, result.external ? result.project_path : undefined);
@@ -381,7 +420,7 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
         </> : <>
           <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label>保存父目录<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
-          <InputQueue value={pendingInputs} onChange={setPendingInputs} />
+          <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} />
           <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>创建项目</button></div>
         </>}
       </div>
