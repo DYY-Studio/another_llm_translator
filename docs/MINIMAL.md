@@ -1092,7 +1092,8 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 
 Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 在用户
 手动触发时以非流式 GET 检测连通性并读取模型列表，用于填写 Preset；不自动
-判断 Provider 或切换端点。`usage` 把端点响应中的消耗换算为 input/output/
+判断 Provider 或切换端点。探测使用当前 Preset 草稿并严格校验，但不保存草稿。
+`usage` 把端点响应中的消耗换算为 input/output/
 total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run
 `manifest.json`；任一成功响应未返回完整 usage 时，整个任务明确显示不可用且
 公开计数归零，不使用本地估算。

@@ -327,8 +327,10 @@ def create_app(
         }
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
-    async def discover_preset_models(preset_id: str) -> dict[str, Any]:
-        preset = load_llm_preset(preset_path(app_root, preset_id))
+    async def discover_preset_models(
+        preset_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        preset = validate_preset_payload(preset_id, payload)
         adapter = load_json_adapter(
             app_root / "llm_adapters" / f"{preset.adapter_id}.json"
         )

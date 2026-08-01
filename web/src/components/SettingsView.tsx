@@ -235,7 +235,8 @@ function PresetSettings() {
     setModelsLoading(true);
     setMessage(""); setError("");
     try {
-      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST" });
+      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
+      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST", body: JSON.stringify(definition) });
       setModels(result.models);
       if (result.models.length === 0) setMessage("端点返回空模型列表");
     } catch (reason) { setError(errorMessage(reason)); }
