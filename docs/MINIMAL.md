@@ -1094,7 +1094,8 @@ Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 
 手动触发时以非流式 GET 检测连通性并读取模型列表，用于填写 Preset；不自动
 判断 Provider 或切换端点。`usage` 把端点响应中的消耗换算为 input/output/
 total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run
-`manifest.json`；端点未返回 usage 时明确显示不可用，不使用本地估算。
+`manifest.json`；任一成功响应未返回完整 usage 时，整个任务明确显示不可用且
+公开计数归零，不使用本地估算。
 
 项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段
 只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、
