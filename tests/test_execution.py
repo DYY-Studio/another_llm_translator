@@ -670,6 +670,7 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
         {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
     ]
     calls = 0
+    observed: list[dict[str, object] | None] = []
 
     def handler(_: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -694,6 +695,7 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
             run_id="RUN",
             stage="translation",
             client=client,
+            on_usage=observed.append,
         ) as llm:
             for _ in range(3):
                 await llm.chat(
@@ -707,6 +709,8 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
                 "total_tokens": 25,
                 "available": True,
             }
+            assert observed[-1] == llm.usage_summary()
+            assert len(observed) == 3
     finally:
         del os.environ["LLM_API_KEY"]
         await client.aclose()
@@ -875,6 +879,102 @@ def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
     finalize_run(run_dir, status="failed", completed=0, failed=1)
     manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
     assert "usage" not in manifest
+
+
+def test_finalize_run_accumulates_exact_usage_across_continuations(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "usage_invocation_count": 1,
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "total_tokens": 14,
+                    "available": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    combined = finalize_run(
+        run_dir,
+        status="completed",
+        completed=2,
+        failed=0,
+        usage={
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "available": True,
+        },
+    )
+
+    assert combined == {
+        "input_tokens": 17,
+        "output_tokens": 7,
+        "total_tokens": 24,
+        "available": True,
+    }
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["usage"] == combined
+    assert manifest["usage_invocation_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        None,
+        {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "available": False,
+        },
+    ],
+)
+def test_finalize_run_marks_incomplete_or_legacy_continuation_usage_unavailable(
+    tmp_path: Path, current: dict[str, object] | None
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "continuations": [{"started_at": "now"}],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "total_tokens": 14,
+                    "available": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    usage = finalize_run(
+        run_dir,
+        status="completed",
+        completed=2,
+        failed=0,
+        usage=current,
+    )
+
+    assert usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "available": False,
+    }
 
 
 def _use_adapter(config: dict, name: str) -> None:

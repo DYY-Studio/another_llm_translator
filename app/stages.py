@@ -10,6 +10,7 @@ import sys
 import unicodedata
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -954,6 +955,8 @@ async def run_terminology(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
     resume_arguments_ignored = False
@@ -1228,6 +1231,17 @@ async def run_terminology(
     write_lock = asyncio.Lock()
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
+    completed_original_ids: set[str] = set()
+
+    def report_progress() -> None:
+        if on_progress is not None:
+            on_progress(
+                len(selected) - len(work)
+                + len(completed_original_ids | failed_originals),
+                len(selected),
+            )
+
+    report_progress()
 
     async def process_once(
         chunk: ChunkPlan,
@@ -1273,6 +1287,7 @@ async def run_terminology(
                         if segment_id in failed_originals:
                             continue
                         failed_originals.add(segment_id)
+                        report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
                             record_header(
@@ -1337,6 +1352,7 @@ async def run_terminology(
                         if segment_id in failed_originals:
                             continue
                         failed_originals.add(segment_id)
+                        report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
                             record_header(
@@ -1391,6 +1407,8 @@ async def run_terminology(
                             stage_fingerprint=fingerprint,
                         ),
                     )
+                    completed_original_ids.add(segment_id)
+                report_progress()
             logger.info(
                 "chunk complete chunk=%s completed=%d",
                 chunk.chunk_id or "runtime",
@@ -1446,6 +1464,7 @@ async def run_terminology(
                 async with write_lock:
                     if original_id not in failed_originals:
                         failed_originals.add(original_id)
+                        report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
                             record_header(
@@ -1486,11 +1505,13 @@ async def run_terminology(
             run_id=run_id,
             stage="terminology",
             client=http_client,
+            on_usage=on_usage,
         ) as llm:
             async with write_lock:
                 for segment in preflight_failed:
                     segment_id = str(segment["segment_id"])
                     failed_originals.add(segment_id)
+                    report_progress()
                     append_jsonl(
                         project / "terminology" / "scans.jsonl",
                         record_header(
@@ -1518,6 +1539,7 @@ async def run_terminology(
         _extend_unique(warnings, llm.warnings)
         usage = llm.usage_summary()
     except asyncio.CancelledError:
+        usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="interrupted",
@@ -1528,6 +1550,8 @@ async def run_terminology(
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
+        if isinstance(exc, FatalExternalError):
+            usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="failed",
@@ -1567,7 +1591,7 @@ async def run_terminology(
             published_run_id=run_id,
         )
         published_now = True
-    finalize_run(
+    usage = finalize_run(
         run_dir,
         status="completed" if failed == 0 else "failed",
         completed=(
@@ -1771,6 +1795,8 @@ async def run_translation(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
     resume_arguments_ignored = False
@@ -2007,6 +2033,15 @@ async def run_translation(
     )
     part_results: dict[str, dict[str, tuple[str, str]]] = {}
 
+    def report_progress() -> None:
+        if on_progress is not None:
+            on_progress(
+                len(selection.reusable) + len(completed_ids | failed_ids),
+                len(selection.selected),
+            )
+
+    report_progress()
+
     async def save_completed(
         segment_id: str,
         text: str,
@@ -2038,6 +2073,7 @@ async def run_translation(
                 ),
             )
         completed_ids.add(segment_id)
+        report_progress()
         latest_text[segment_id] = text
         logger.info(
             "segment complete segment=%s completed=%d failed=%d",
@@ -2079,6 +2115,7 @@ async def run_translation(
                 ),
             )
         failed_ids.add(segment_id)
+        report_progress()
         logger.warning(
             "segment failed segment=%s class=%s completed=%d failed=%d",
             segment_id,
@@ -2378,6 +2415,7 @@ async def run_translation(
             run_id=run_id,
             stage="translation",
             client=http_client,
+            on_usage=on_usage,
         ) as llm:
             for segment in preflight_failed:
                 await save_failed(
@@ -2419,6 +2457,7 @@ async def run_translation(
         _extend_unique(warnings, llm.warnings)
         usage = llm.usage_summary()
     except asyncio.CancelledError:
+        usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="interrupted",
@@ -2433,6 +2472,8 @@ async def run_translation(
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
+        if isinstance(exc, FatalExternalError):
+            usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="failed",
@@ -2507,7 +2548,7 @@ async def run_translation(
                 findings=item["findings"],
             )
     failed_count = len(failed_ids)
-    finalize_run(
+    usage = finalize_run(
         run_dir,
         status="completed" if failed_count == 0 else "failed",
         completed=(
@@ -2626,6 +2667,8 @@ async def run_review(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
@@ -2896,6 +2939,15 @@ async def run_review(
     )
     part_results: dict[str, dict[str, tuple[dict[str, Any], str]]] = {}
 
+    def report_progress() -> None:
+        if on_progress is not None:
+            on_progress(
+                len(selection.reusable) + len(completed_ids | failed_ids),
+                len(selection.selected),
+            )
+
+    report_progress()
+
     async def save_result(
         segment_id: str,
         request_id: str,
@@ -2934,6 +2986,7 @@ async def run_review(
                     ),
                 )
                 completed_ids.add(segment_id)
+                report_progress()
                 logger.info(
                     "segment complete segment=%s completed=%d failed=%d",
                     segment_id,
@@ -2959,6 +3012,7 @@ async def run_review(
                     ),
                 )
                 failed_ids.add(segment_id)
+                report_progress()
                 logger.warning(
                     "segment failed segment=%s completed=%d failed=%d",
                     segment_id,
@@ -3168,6 +3222,7 @@ async def run_review(
             run_id=run_id,
             stage=stage,
             client=http_client,
+            on_usage=on_usage,
         ) as llm:
             for segment in preflight_failed:
                 await save_result(
@@ -3184,6 +3239,7 @@ async def run_review(
         _extend_unique(warnings, llm.warnings)
         usage = llm.usage_summary()
     except asyncio.CancelledError:
+        usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="interrupted",
@@ -3198,6 +3254,8 @@ async def run_review(
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
+        if isinstance(exc, FatalExternalError):
+            usage = llm.usage_summary()
         finalize_run(
             run_dir,
             status="failed",
@@ -3217,7 +3275,7 @@ async def run_review(
             type(exc).__name__,
         )
         raise
-    finalize_run(
+    usage = finalize_run(
         run_dir,
         status="completed" if not failed_ids else "failed",
         completed=(
