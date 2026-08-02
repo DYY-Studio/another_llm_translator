@@ -183,6 +183,7 @@ class DocumentAdapter(Protocol):
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
+    run_options: tuple[DocumentChoiceOption, ...]
 
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
@@ -198,7 +199,8 @@ class DocumentAdapter(Protocol):
 ### 导入
 
 Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名称、Segment
-文本和输入编码信息。宿主负责：
+净文本和输入编码信息；可选的 `model_sources` 与 Segment 一一对应，仅用于模型
+看到的格式契约。宿主负责：
 
 - 分配 File ID、Segment ID 和行序；
 - 复制原始输入；
@@ -215,10 +217,10 @@ Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
 ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
 
-Adapter 可声明由固定字符串选项组成的 `import_options`。宿主展示声明、校验
-取值并只在导入调用中传入；选择结果如需影响后续导出，由 Adapter 自行写入
-File 的 `opaque_state`。修改选项不会改写既有 Segment，必须移除并重新导入
-文件。当前唯一用例是 EPUB `ruby_mode`，不支持自由键值或嵌套选项。
+Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的
+`run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项
+由 Adapter 固化在 File 的 `opaque_state` 并进入阶段指纹。修改选项不会改写既有
+Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
 
 ### 导出
 
@@ -226,7 +228,7 @@ File 的 `opaque_state`。修改选项不会改写既有 Segment，必须移除�
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 4。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 5。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -265,6 +267,14 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以自由�
 译文区域恢复为 EPUB Ruby，reading 可由模型翻译或转写为目标语言适用的字母/注音。
 没有返回 Ruby 不会触发重试；不完整、嵌套、含 HTML 或跨行的形式按普通文本保留。
 `base_only` 和 `parenthetical` 不执行 Ruby 还原。
+
+当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
+`inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是
+默认值，模型只看到净文本。`tiered` 要求语义关键标签保留，表现层标签可整体省略；
+`strict` 要求全部源标签保留。宿主把受控标记校验交给 EPUB Adapter：未知、重复、
+未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
+纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；
+详情界面同时显示净文本与模型文本预览。
 
 安全边界拒绝：
 

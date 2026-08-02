@@ -279,6 +279,16 @@ Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追�
 或跨行的形式保持普通文本。`base_only` 和 `parenthetical` 不还原 Ruby。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
+EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露普通内联
+标记；`markers` 为符合 `inline_format_policy` 的标签生成无 attrs 的唯一成对
+标记，并把对齐文本保存为 Segment 的 `model_source`，而 `source` 保持净显示
+文本。`tiered`（默认）要求语义关键标签保留、允许表现层标签整体省略；`strict`
+要求全部源标签保留。翻译、校对、润色及参考上下文使用 `model_source`，术语使用
+净 `source`。Adapter 在结果写入前验证标记的已知性、唯一性、闭合、嵌套和父子
+关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留
+原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新
+导入；运行选项随 Adapter 状态和阶段指纹保存。
+
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
 
 `ImportedFile.segment_part_ids` 是与 `segments` 对齐的可选导入字段；省略时宿主

@@ -16,8 +16,7 @@
   的功能已由 Web 覆盖，计划在 Stage 16 删除。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 14 已完成；下一阶段是 EPUB 普通内联格式与 Adapter
-  输出契约。
+- 产品路线 Stage 1 至 Stage 15 已完成；下一阶段是移除独立开发者 Editor。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -247,7 +246,7 @@ Preset；内联 LLM 连接配置不再支持。
 - `base_only` 和 `parenthetical` 不执行 Ruby 重建。
 - 本阶段不强制保留 Ruby，不实现普通内联标记、逐标签策略或通用验证器框架。
 
-## Stage 15：EPUB 普通内联格式与 Adapter 输出契约
+## Stage 15：EPUB 普通内联格式与 Adapter 输出契约（已完成）
 
 进入条件：可选 Ruby 还原行为稳定，并已有真实 EPUB 需要在译文中恢复普通
 内联格式。本阶段直接扩展现有可信 Document Adapter，不建立独立校验器系统。
@@ -272,7 +271,7 @@ Preset；内联 LLM 连接配置不再支持。
   Ruby 仍按独立规则处理。
 - Document Adapter 协议直接升级：`ImportedFile` 增加可选、与 Segment 对齐的
   模型文本；Adapter 可声明类型化 `run_options`，并可选校验结果和生成净显示
-  文本。仓库内调用方同步升级，不保留旧协议分支。
+  文本。仓库内调用方同步升级，不保留旧协议分支；当前插件协议为版本 5。
 - 宿主继续负责请求、修复、失败记录和 Run 收尾，Adapter 只解释自身文本契约。
   Run 保存 Adapter ID、版本和解析后的运行选项，并纳入阶段指纹。
 - Segment 列表显示净文本和格式数量；详情编辑区显示原始标记和净文本预览，
@@ -428,7 +427,6 @@ Preset 与规范化思考响应已落地。Stage 22 前相关 schema 仍可直�
 内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
-- 用 Stage 15 的真实 EPUB 标记恢复验证类型化运行选项、模型文本和结果契约；
 - 明确 Adapter 版本和不透明状态升级策略；
 - 建立外部 Document Adapter 契约测试；
 - 维护至少一个独立发行的真实 Python Document 插件。
