@@ -272,7 +272,11 @@ EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
 （`原文（Ruby）`）；选项固化于 File 的 Adapter 状态，不是项目运行设置。
 更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
 EPUB 将整条译文写入该语义 Segment 的首个可用位置，清空其余普通槽并移除全部
-Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。
+Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。使用
+`ruby_mode=aozora` 时，模型可以自由决定是否保留 Ruby；严格的
+`｜base《reading》` 会在译文区域恢复为 EPUB Ruby，reading 可翻译或转写为目标
+语言适用的字母/注音。没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML
+或跨行的形式保持普通文本。`base_only` 和 `parenthetical` 不还原 Ruby。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
