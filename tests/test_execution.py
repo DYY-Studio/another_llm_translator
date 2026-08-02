@@ -83,6 +83,8 @@ def test_review_prompt_uses_conditional_fields(stage: str) -> None:
         in prompt
     )
     assert "即使附带 suggested_text 或 reason 也不会采用" in prompt
+    assert "｜base《reading》" in prompt
+    assert "不保留 Ruby 也合法" in prompt
 
 
 def test_request_payload_uses_local_ids_without_mutating_source() -> None:

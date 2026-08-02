@@ -252,12 +252,18 @@ def full_prompt(stage: str, middle: str) -> str:
         ),
         "translation": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
+            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
+            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
             '每个 Segment 输出一条 type="segment" 记录，只包含 type、id '
             "和完整 translation。记录格式："
             '{"type":"segment","id":"1","translation":"完整译文"}。'
         ),
         "proofreading": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
+            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
+            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
@@ -270,6 +276,9 @@ def full_prompt(stage: str, middle: str) -> str:
         ),
         "polishing": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
+            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
+            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"

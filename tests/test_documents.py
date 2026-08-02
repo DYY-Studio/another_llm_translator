@@ -582,6 +582,141 @@ def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
         assert "だ。\n特别だ。" in text
 
 
+def test_epub_aozora_output_restores_only_explicit_ruby(tmp_path: Path) -> None:
+    source = tmp_path / "ruby-aozora-output.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="ruby-aozora-output",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    metadata = read_json(project / "project.json")
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+    targets = [
+        "他｜漢字《hànzì》と｜特別《tèbié》。",
+        "特別だ。",
+    ]
+    for segment, target in zip(segments, targets, strict=True):
+        append_jsonl(
+            stage_result_path(project, "translation"),
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=segment["segment_id"],
+                status="completed",
+                text=target,
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=0,
+                run_id="RUN-RUBY-AOZORA",
+                request_id="REQ-RUBY-AOZORA",
+            ),
+        )
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        rubies = [
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "ruby"
+        ]
+        assert len(rubies) == 2
+        assert ["".join(ruby.itertext()) for ruby in rubies] == [
+            "漢字hànzì",
+            "特別tèbié",
+        ]
+        assert "｜" not in "".join(root.itertext())
+        assert "《" not in "".join(root.itertext())
+
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        rubies = [
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "ruby"
+        ]
+        assert len(rubies) == 4
+        text = "".join(root.itertext())
+        assert "彼は漢かん字じを読む。\n他漢字hànzìと特別tèbié。" in text
+        assert "｜" not in text
+        assert "《" not in text
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "｜《reading》",
+        "｜base《》",
+        "｜outer｜inner《reading》《outer》",
+        "｜base《reading",
+        "<ruby>base</ruby>",
+    ],
+)
+def test_epub_aozora_invalid_markers_remain_plain_text(
+    tmp_path: Path, target: str
+) -> None:
+    source = tmp_path / "ruby-invalid-output.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<p>原文<ruby>漢<rt>かん</rt></ruby>末</p>"
+            "</body></html>"
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="ruby-invalid-output",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    metadata = read_json(project / "project.json")
+    segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    append_jsonl(
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segment["segment_id"],
+            status="completed",
+            text=target,
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-RUBY-INVALID",
+            request_id="REQ-RUBY-INVALID",
+        ),
+    )
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        assert not any(
+            element.tag.rsplit("}", 1)[-1] == "ruby"
+            for element in root.iter()
+        )
+        assert "".join(root.itertext()) == target
+
+
 @pytest.mark.parametrize(
     "ruby",
     [
