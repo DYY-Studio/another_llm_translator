@@ -609,19 +609,6 @@ def build_chunk_plans(
     )
 
 
-def materialize_chunks(run_id: str, stage: str, plans: list[ChunkPlan]) -> list[ChunkPlan]:
-    code = STAGE_CODES[stage]
-    return [
-        replace(
-            plan,
-            chunk_id=(
-                f"CHK-{run_id}-{code}-{plan.file_id}-C{index:05d}"
-            ),
-        )
-        for index, plan in enumerate(plans, start=1)
-    ]
-
-
 def materialize_chunk_stream(
     run_id: str,
     stage: str,

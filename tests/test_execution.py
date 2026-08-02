@@ -23,7 +23,7 @@ from app.execution import (
     dispatch_chunks,
     iter_chunk_plans,
     localize_request_ids,
-    materialize_chunks,
+    materialize_chunk_stream,
     previous_context,
     render_messages,
     select_scope,
@@ -212,7 +212,7 @@ def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:
     assert [[item["line_index"] for item in plan.segments] for plan in plans] == [
         [0, 2, 3],
     ]
-    chunks = materialize_chunks("RUN-X", "translation", plans)
+    chunks = list(materialize_chunk_stream("RUN-X", "translation", plans))
     assert all(chunk.chunk_id and "RUN-X" in chunk.chunk_id for chunk in chunks)
 
 
