@@ -728,6 +728,58 @@ def test_epub_aozora_output_restores_only_explicit_ruby(tmp_path: Path) -> None:
         assert "《" not in text
 
 
+def test_epub_aozora_output_can_add_ruby_to_plain_segment(tmp_path: Path) -> None:
+    source = tmp_path / "plain-aozora.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<p>猫です。</p></body></html>"
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="plain-aozora",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    metadata = read_json(project / "project.json")
+    segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    append_jsonl(
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segment["segment_id"],
+            status="completed",
+            text="｜猫《neko》です。",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-PLAIN-AOZORA",
+            request_id="REQ-PLAIN-AOZORA",
+        ),
+    )
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        rubies = [
+            item
+            for item in root.iter()
+            if item.tag.rsplit("}", 1)[-1] == "ruby"
+        ]
+        assert len(rubies) == 1
+        assert "".join(rubies[0].itertext()) == "猫neko"
+        assert "｜" not in "".join(root.itertext())
+
+
 @pytest.mark.parametrize(
     "target",
     [
