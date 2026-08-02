@@ -249,6 +249,7 @@ class EPUBDocumentAdapter:
                             slot,
                             target,
                             bilingual=bilingual,
+                            ruby_mode=str(state.get("ruby_mode", "")),
                         )
                     else:
                         _set_composite_slot(
@@ -257,6 +258,7 @@ class EPUBDocumentAdapter:
                             str(segment["source"]),
                             target,
                             bilingual=bilingual,
+                            ruby_mode=str(state.get("ruby_mode", "")),
                         )
                 changed[xhtml_path] = ElementTree.tostring(
                     root, encoding="utf-8", xml_declaration=True
@@ -843,6 +845,227 @@ def _composite_source(
     return "".join(parts)
 
 
+_AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
+
+
+def _parse_aozora_text(
+    value: str,
+) -> tuple[list[tuple[str, str, str | None]], bool]:
+    """Parse only strict, non-nested Aozora ruby expressions."""
+    fragments: list[tuple[str, str, str | None]] = []
+    plain_start = 0
+    cursor = 0
+    found_ruby = False
+    while cursor < len(value):
+        marker = value.find("｜", cursor)
+        if marker < 0:
+            break
+        opening = value.find("《", marker + 1)
+        closing = value.find("》", opening + 1) if opening >= 0 else -1
+        if opening < 0 or closing < 0:
+            break
+        base = value[marker + 1 : opening]
+        reading = value[opening + 1 : closing]
+        candidate = f"{base}{reading}"
+        if (
+            not base
+            or not reading
+            or any(character in _AOZORA_DELIMITERS for character in candidate)
+        ):
+            cursor = closing + 1
+            continue
+        if marker > plain_start:
+            fragments.append(("text", value[plain_start:marker], None))
+        fragments.append(("ruby", base, reading))
+        found_ruby = True
+        cursor = closing + 1
+        plain_start = cursor
+    if plain_start < len(value):
+        fragments.append(("text", value[plain_start:], None))
+    if not fragments:
+        fragments.append(("text", value, None))
+    return fragments, found_ruby
+
+
+def _namespace_uri(tag: str) -> str:
+    return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+
+
+def _qualified(tag: str, namespace: str) -> str:
+    return f"{{{namespace}}}{tag}" if namespace else tag
+
+
+def _new_aozora_ruby(
+    parent: ElementTree.Element,
+    base: str,
+    reading: str,
+) -> ElementTree.Element:
+    namespace = _namespace_uri(parent.tag)
+    ruby = ElementTree.Element(_qualified("ruby", namespace))
+    ruby.text = base
+    rt = ElementTree.SubElement(ruby, _qualified("rt", namespace))
+    rt.text = reading
+    return ruby
+
+
+def _insert_fragments(
+    parent: ElementTree.Element,
+    index: int,
+    fragments: list[tuple[str, str, str | None]],
+) -> ElementTree.Element | None:
+    previous = list(parent)[index - 1] if index else None
+    insert_at = index
+    last_inserted: ElementTree.Element | None = None
+    for kind, text, reading in fragments:
+        if kind == "text":
+            if last_inserted is not None:
+                last_inserted.tail = (last_inserted.tail or "") + text
+            elif previous is not None:
+                previous.tail = (previous.tail or "") + text
+            else:
+                parent.text = (parent.text or "") + text
+            continue
+        if reading is None:
+            raise IncompleteError("EPUB Aozora Ruby 片段损坏")
+        ruby = _new_aozora_ruby(parent, text, reading)
+        parent.insert(insert_at, ruby)
+        insert_at += 1
+        last_inserted = ruby
+    return last_inserted
+
+
+def _append_fragment_suffix(
+    parent: ElementTree.Element,
+    index: int,
+    last_inserted: ElementTree.Element | None,
+    suffix: str,
+) -> None:
+    if not suffix:
+        return
+    if last_inserted is not None:
+        last_inserted.tail = (last_inserted.tail or "") + suffix
+    elif index:
+        previous = list(parent)[index - 1]
+        previous.tail = (previous.tail or "") + suffix
+    else:
+        parent.text = (parent.text or "") + suffix
+
+
+def _text_slot_location(
+    root: ElementTree.Element,
+    raw: dict[str, Any],
+) -> tuple[ElementTree.Element, int, str, ElementTree.Element]:
+    path = raw.get("path")
+    if not isinstance(path, list) or not path or not all(
+        isinstance(index, int) and index >= 0 for index in path
+    ):
+        raise IncompleteError("EPUB Segment 定位 path 损坏")
+    element, kind = _resolve_text_slot(root, raw)
+    parent = root
+    for index in path[:-1]:
+        try:
+            parent = list(parent)[index]
+        except IndexError as exc:
+            raise IncompleteError("EPUB XHTML 结构与导入状态不一致") from exc
+    index = path[-1]
+    if kind == "text":
+        return element, 0, kind, element
+    return parent, index + 1, kind, element
+
+
+def _remove_ruby_members(
+    members: list[tuple[str, Any]],
+) -> None:
+    rubies = [resolved for kind, resolved in members if kind == "ruby"]
+    for parent, ruby in sorted(
+        rubies,
+        key=lambda item: (id(item[0]), list(item[0]).index(item[1])),
+        reverse=True,
+    ):
+        parent.remove(ruby)
+
+
+def _aozora_suffix(
+    slots: list[dict[str, Any]],
+    members: list[tuple[str, Any]],
+) -> str:
+    for slot, (kind, resolved) in reversed(list(zip(slots, members, strict=True))):
+        if kind != "ruby":
+            continue
+        if slot.get("tail_in_source") is not False:
+            return ""
+        tail = slot.get("tail")
+        if not isinstance(tail, str):
+            raise IncompleteError("EPUB Ruby tail 状态损坏")
+        return (resolved[1].tail or "") if resolved[1].tail is not None else tail
+    return ""
+
+
+def _set_composite_aozora(
+    root: ElementTree.Element,
+    slots: list[dict[str, Any]],
+    members: list[tuple[str, Any]],
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    fragments, found_ruby = _parse_aozora_text(target)
+    if not found_ruby:
+        raise IncompleteError("EPUB Aozora Ruby 解析状态无标记")
+    if bilingual:
+        last_kind, last_resolved = members[-1]
+        suffix = ""
+        if last_kind == "ruby":
+            _, ruby = last_resolved
+            slot = slots[-1]
+            tail = ruby.tail or ""
+            if slot.get("tail_in_source") is False:
+                suffix = tail
+                tail = ""
+            ruby.tail = tail
+            parent = last_resolved[0]
+            index = list(parent).index(ruby) + 1
+        else:
+            slot = slots[-1]
+            parent, index, slot_kind, element = _text_slot_location(root, slot)
+            if slot_kind == "text":
+                index = len(parent)
+        inserted = _insert_fragments(
+            parent,
+            index,
+            [("text", "\n", None), *fragments],
+        )
+        _append_fragment_suffix(parent, index, inserted, suffix)
+        return
+
+    first_kind, first_resolved = members[0]
+    anchor: ElementTree.Element | None = None
+    if first_kind == "ruby":
+        parent, ruby = first_resolved
+        ruby_index = list(parent).index(ruby)
+        anchor = list(parent)[ruby_index - 1] if ruby_index else None
+        insertion_parent = parent
+        insertion_index = ruby_index
+    else:
+        slot = slots[0]
+        insertion_parent, insertion_index, slot_kind, element = _text_slot_location(
+            root, slot
+        )
+        if slot_kind == "tail":
+            anchor = element
+    for slot, (kind, _) in zip(slots, members, strict=True):
+        if kind == "text":
+            _set_text_slot(root, slot, "")
+    suffix = _aozora_suffix(slots, members)
+    _remove_ruby_members(members)
+    if anchor is not None:
+        insertion_index = list(insertion_parent).index(anchor) + 1
+    else:
+        insertion_index = 0 if first_kind == "text" and slots[0].get("kind") == "text" else insertion_index
+    inserted = _insert_fragments(insertion_parent, insertion_index, fragments)
+    _append_fragment_suffix(insertion_parent, insertion_index, inserted, suffix)
+
+
 def _set_composite_slot(
     root: ElementTree.Element,
     raw: Any,
@@ -850,6 +1073,7 @@ def _set_composite_slot(
     target: str,
     *,
     bilingual: bool,
+    ruby_mode: str = "",
 ) -> None:
     slots, members = _resolve_composite_members(root, raw)
     if not any(kind == "ruby" for kind, _ in members):
@@ -857,6 +1081,17 @@ def _set_composite_slot(
         return
     if _composite_source(slots, members) != source:
         raise IncompleteError("EPUB 复合 Segment 与原文不一致")
+    if ruby_mode == "aozora":
+        _, found_ruby = _parse_aozora_text(target)
+        if found_ruby:
+            _set_composite_aozora(
+                root,
+                slots,
+                members,
+                target,
+                bilingual=bilingual,
+            )
+            return
     if bilingual:
         last_kind, last_resolved = members[-1]
         if last_kind == "ruby":
@@ -913,10 +1148,41 @@ def _set_ruby_slot(
     target: str,
     *,
     bilingual: bool,
+    ruby_mode: str = "",
 ) -> None:
     if not isinstance(raw, dict):
         raise IncompleteError("EPUB Ruby 定位 slot 损坏")
     parent, ruby = _resolve_ruby_slot(root, raw)
+    if ruby_mode == "aozora":
+        fragments, found_ruby = _parse_aozora_text(target)
+        if found_ruby:
+            ruby_tail = ruby.tail or ""
+            tail_in_source = raw.get("tail_in_source")
+            if not isinstance(tail_in_source, bool):
+                raise IncompleteError("EPUB Ruby tail 状态损坏")
+            suffix = ruby_tail if not tail_in_source else ""
+            if bilingual:
+                ruby.tail = ruby_tail if tail_in_source else ""
+                inserted = _insert_fragments(
+                    parent,
+                    list(parent).index(ruby) + 1,
+                    [("text", "\n", None), *fragments],
+                )
+                _append_fragment_suffix(
+                    parent, list(parent).index(ruby) + 1, inserted, suffix
+                )
+                return
+            index = list(parent).index(ruby)
+            previous = list(parent)[index - 1] if index else None
+            parent.remove(ruby)
+            insertion_index = (
+                list(parent).index(previous) + 1
+                if previous is not None
+                else index
+            )
+            inserted = _insert_fragments(parent, insertion_index, fragments)
+            _append_fragment_suffix(parent, insertion_index, inserted, suffix)
+            return
     if bilingual:
         ruby.tail = f"{ruby.tail or ''}\n{target}"
         return

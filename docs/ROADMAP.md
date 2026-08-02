@@ -16,7 +16,8 @@
   的功能已由 Web 覆盖，计划在 Stage 16 删除。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 13 已完成；下一阶段是可选 Aozora Ruby 还原。
+- 产品路线 Stage 1 至 Stage 14 已完成；下一阶段是 EPUB 普通内联格式与 Adapter
+  输出契约。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -230,7 +231,7 @@ Preset；内联 LLM 连接配置不再支持。
   调试数据。
 - 不引入远程遥测、数据库日志、分布式追踪或新的通用服务层。
 
-## Stage 14：可选 Aozora Ruby 还原
+## Stage 14：可选 Aozora Ruby 还原（已完成）
 
 进入条件：Stage 11 的 Ruby 文本流合并已在真实 EPUB 中稳定验证。本阶段只恢复
 模型明确返回的 Ruby，不建设普通内联格式协议。
