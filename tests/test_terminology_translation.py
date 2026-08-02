@@ -320,15 +320,15 @@ async def test_translation_partial_response_retries_only_missing(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 2
     assert calls == [
-        ["F0001-S000001", "F0001-S000002"],
-        ["F0001-S000002"],
+        ["1", "2"],
+        ["1"],
     ]
     completed = latest_completed_by_segment(
         load_stage_history(project, "translation")
     )
     assert set(completed) == {"F0001-S000001", "F0001-S000002"}
-    assert completed["F0001-S000001"]["text"] == " ok:F0001-S000001"
-    assert completed["F0001-S000002"]["text"] == "\tok:F0001-S000002"
+    assert completed["F0001-S000001"]["text"] == " ok:1"
+    assert completed["F0001-S000002"]["text"] == "\tok:1"
 
 
 @pytest.mark.asyncio
@@ -372,14 +372,11 @@ async def test_partial_response_context_split_does_not_retry_completed_segment(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 2
     assert calls[:2] == [
-        ["F0001-S000001", "F0001-S000002"],
-        ["F0001-S000002"],
+        ["1", "2"],
+        ["1"],
     ]
     assert calls[2:]
-    assert all(
-        all(segment_id.startswith("F0001-S000002") for segment_id in request)
-        for request in calls[2:]
-    )
+    assert all(all(segment_id == "1" for segment_id in request) for request in calls[2:])
     records = read_jsonl(project / "stages" / "translation.jsonl")
     assert [
         record["segment_id"]
@@ -534,7 +531,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     assert [
         [item["id"] for item in payload["segments"]] for payload in repair_payloads
     ] == [
-        ["F0001-S000001", "F0001-S000002", "F0001-S000004"],
+        ["1", "2", "3"],
     ]
     records = read_jsonl(project / "stages" / "translation.jsonl")
     assert all(record["validation_status"] == "passed" for record in records)
@@ -588,7 +585,7 @@ async def test_oversized_segment_is_split_and_saved_once(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 1
     assert len(requested_ids) > 1
-    assert all("-P" in segment_id for segment_id in requested_ids)
+    assert all(segment_id.isdigit() for segment_id in requested_ids)
     records = read_jsonl(project / "stages" / "translation.jsonl")
     completed = [record for record in records if record["status"] == "completed"]
     assert len(completed) == 1

@@ -11,6 +11,7 @@ import pytest
 from app.config import load_global_config
 from app.errors import ExternalError, FatalExternalError
 from app.execution import (
+    ChunkPlan,
     LLMClient,
     Scope,
     SlidingWindowLimiter,
@@ -19,6 +20,9 @@ from app.execution import (
     estimate_messages,
     finalize_run,
     full_prompt,
+    dispatch_chunks,
+    iter_chunk_plans,
+    localize_request_ids,
     materialize_chunks,
     previous_context,
     render_messages,
@@ -70,15 +74,94 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
 def test_review_prompt_uses_conditional_fields(stage: str) -> None:
     prompt = full_prompt(stage, "Review carefully.")
     assert (
-        '{"type":"segment","id":"F0001-S000001","status":"accepted"}'
+        '{"type":"segment","id":"1","status":"accepted"}'
         in prompt
     )
     assert (
-        '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+        '{"type":"segment","id":"1","status":"suggested",'
         '"suggested_text":"完整建议","reason":"原因"}'
         in prompt
     )
     assert "即使附带 suggested_text 或 reason 也不会采用" in prompt
+
+
+def test_request_payload_uses_local_ids_without_mutating_source() -> None:
+    items = [
+        {"segment_id": "F0001-S000001", "source": "one"},
+        {"segment_id": "F0001-S000002", "source": "two"},
+    ]
+    payload = {
+        "reference_context": [{"source": "before"}],
+        "segments": [
+            {"id": item["segment_id"], "source": item["source"]}
+            for item in items
+        ],
+    }
+
+    localized, mapping = localize_request_ids(payload, items)
+
+    assert [item["id"] for item in localized["segments"]] == ["1", "2"]
+    assert mapping == {"1": "F0001-S000001", "2": "F0001-S000002"}
+    assert payload["segments"][0]["id"] == "F0001-S000001"
+
+
+def test_chunk_plans_are_iterated_lazily() -> None:
+    source = segments()
+    current = config()
+    calls = 0
+
+    def payload_builder(items: list[dict]) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        }
+
+    stream = iter_chunk_plans(
+        [source[0], source[2], source[3]],
+        all_segments=source,
+        config=current,
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=payload_builder,
+    )
+    assert calls == 0
+    first = next(iter(stream))
+    assert first.segments[0]["segment_id"] == "F0001-S000001"
+    assert calls > 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_dispatch_keeps_input_buffer_bounded() -> None:
+    started: list[str] = []
+    release = asyncio.Event()
+
+    async def worker(chunk) -> str:
+        started.append(chunk.file_id)
+        await release.wait()
+        return chunk.file_id
+
+    chunks = (
+        ChunkPlan(
+            file_id="F0001",
+            segments=(),
+            payload={},
+            estimated_input_tokens=1,
+        )
+        for _ in range(4)
+    )
+    task = asyncio.create_task(
+        dispatch_chunks(chunks, worker, mode="parallel", max_parallel=2)
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if len(started) == 2:
+            break
+    assert len(started) == 2
+    release.set()
+    assert len(await task) == 4
 
 
 def test_scope_and_result_selection_preserve_old_success() -> None:
@@ -241,9 +324,7 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
         ["F0001-S000003", "F0001-S000004"],
     ]
     assert previous_context(source, source[2], 3) == []
-    assert [item["id"] for item in previous_context(source, source[3], 3)] == [
-        "F0001-S000003"
-    ]
+    assert previous_context(source, source[3], 3) == [{"source": "第二章"}]
 
 
 def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
@@ -372,10 +453,7 @@ def test_context_is_same_file_and_optional_target() -> None:
         2,
         target_resolver=lambda segment_id: f"translated:{segment_id}",
     )
-    assert [item["id"] for item in context] == [
-        "F0001-S000003",
-        "F0001-S000004",
-    ]
+    assert [item["source"] for item in context] == ["three", "four"]
     assert all("translation" in item for item in context)
 
 

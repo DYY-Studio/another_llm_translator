@@ -13,6 +13,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -250,33 +251,33 @@ def full_prompt(stage: str, middle: str) -> str:
             '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
         "translation": (
-            "保持 Segment ID 不变。"
+            "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             '每个 Segment 输出一条 type="segment" 记录，只包含 type、id '
             "和完整 translation。记录格式："
-            '{"type":"segment","id":"F0001-S000001","translation":"完整译文"}。'
+            '{"type":"segment","id":"1","translation":"完整译文"}。'
         ),
         "proofreading": (
-            "保持 Segment ID 不变。"
+            "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
             "accepted 记录格式："
-            '{"type":"segment","id":"F0001-S000001","status":"accepted"}。'
+            '{"type":"segment","id":"1","status":"accepted"}。'
             "suggested 必须包含非空完整 suggested_text，reason 为字符串或 "
             "null。suggested 记录格式："
-            '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+            '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
         "polishing": (
-            "保持 Segment ID 不变。"
+            "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
             "accepted 记录格式："
-            '{"type":"segment","id":"F0001-S000001","status":"accepted"}。'
+            '{"type":"segment","id":"1","status":"accepted"}。'
             "suggested 必须包含非空完整 suggested_text，reason 为字符串或 "
             "null。suggested 记录格式："
-            '{"type":"segment","id":"F0001-S000001","status":"suggested",'
+            '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
     }
@@ -354,6 +355,30 @@ def render_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]
     ]
 
 
+def localize_request_ids(
+    payload: dict[str, Any],
+    items: Iterable[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Replace output-bearing Segment IDs with request-local short IDs."""
+    localized = deepcopy(payload)
+    entries = localized.get("segments")
+    source_items = list(items)
+    if not isinstance(entries, list):
+        return localized, {}
+    if len(entries) != len(source_items):
+        raise UsageError("请求载荷与 Segment 映射数量不一致")
+    mapping: dict[str, str] = {}
+    for index, (entry, source_item) in enumerate(
+        zip(entries, source_items, strict=True), start=1
+    ):
+        if not isinstance(entry, dict):
+            raise UsageError("请求载荷中的 Segment 必须是对象")
+        short_id = str(index)
+        entry["id"] = short_id
+        mapping[short_id] = str(source_item["segment_id"])
+    return localized, mapping
+
+
 def _segment_part_key(segment: dict[str, Any]) -> tuple[str, str]:
     return str(segment["file_id"]), str(segment["part_id"])
 
@@ -377,7 +402,7 @@ def previous_context(
     ][-count:]
     result: list[dict[str, str]] = []
     for item in candidates:
-        context = {"id": str(item["segment_id"]), "source": str(item["source"])}
+        context = {"source": str(item["source"])}
         if target_resolver is not None:
             target = target_resolver(str(item["segment_id"]))
             if target is not None:
@@ -420,14 +445,55 @@ def contiguous_groups(
     return groups
 
 
-def build_chunk_plans(
+def _iter_contiguous_groups(
+    segments: Iterable[dict[str, Any]],
+    *,
+    all_segments: Iterable[dict[str, Any]],
+) -> Iterable[list[dict[str, Any]]]:
+    empty_positions = {
+        (*_segment_part_key(item), int(item["line_index"]))
+        for item in all_segments
+        if item["is_empty"]
+    }
+    ordered = sorted(
+        segments,
+        key=lambda item: (
+            str(item["file_id"]),
+            int(item["line_index"]),
+            str(item["segment_id"]),
+        ),
+    )
+    current: list[dict[str, Any]] = []
+    for segment in ordered:
+        if not current:
+            current = [segment]
+            continue
+        previous = current[-1]
+        same_part = _segment_part_key(previous) == _segment_part_key(segment)
+        previous_index = int(previous["line_index"])
+        current_index = int(segment["line_index"])
+        part_key = _segment_part_key(segment)
+        gap_is_empty = same_part and current_index > previous_index and all(
+            (*part_key, line_index) in empty_positions
+            for line_index in range(previous_index + 1, current_index)
+        )
+        if same_part and (current_index == previous_index or gap_is_empty):
+            current.append(segment)
+            continue
+        yield current
+        current = [segment]
+    if current:
+        yield current
+
+
+def iter_chunk_plans(
     work: Iterable[dict[str, Any]],
     *,
     all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
-) -> list[ChunkPlan]:
+) -> Iterable[ChunkPlan]:
     input_limit = (
         config["llm"]["context_window_tokens"]
         - config["llm"]["context_safety_margin_tokens"]
@@ -440,57 +506,107 @@ def build_chunk_plans(
         target_limits.append(config["execution"]["input_tokens_per_minute"])
     target = min(target_limits)
     factor = config["execution"]["token_safety_factor"]
-    plans: list[ChunkPlan] = []
-    for group in contiguous_groups(work, all_segments=all_segments):
-        current: list[dict[str, Any]] = []
-        for segment in group:
-            candidate = [*current, segment]
-            payload = payload_builder(candidate)
-            estimated = estimate_messages(render_messages(prompt, payload), factor)
-            if current and estimated > target:
-                current_payload = payload_builder(current)
-                current_estimate = estimate_messages(
-                    render_messages(prompt, current_payload), factor
+
+    def plan_groups(
+        groups: Iterable[list[dict[str, Any]]],
+    ) -> Iterable[ChunkPlan]:
+        for group in groups:
+            current: list[dict[str, Any]] = []
+            for segment in group:
+                candidate = [*current, segment]
+                payload = payload_builder(candidate)
+                estimated = estimate_messages(
+                    render_messages(prompt, payload), factor
                 )
-                plans.append(
-                    ChunkPlan(
+                started_new_chunk = False
+                if current and estimated > target:
+                    current_payload = payload_builder(current)
+                    current_estimate = estimate_messages(
+                        render_messages(prompt, current_payload), factor
+                    )
+                    yield ChunkPlan(
                         file_id=str(current[0]["file_id"]),
                         segments=tuple(current),
                         payload=current_payload,
                         estimated_input_tokens=current_estimate,
                     )
-                )
-                current = [segment]
+                    current = [segment]
+                    payload = payload_builder(current)
+                    estimated = estimate_messages(
+                        render_messages(prompt, payload), factor
+                    )
+                    started_new_chunk = True
+                if estimated > input_limit:
+                    raise RequestSizeError(
+                        f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
+                        reason="context",
+                    )
+                if (
+                    config["execution"]["input_tokens_per_minute"] > 0
+                    and estimated
+                    > config["execution"]["input_tokens_per_minute"]
+                ):
+                    raise RequestSizeError(
+                        f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
+                        reason="itpm",
+                    )
+                if not started_new_chunk:
+                    current = candidate
+            if current:
                 payload = payload_builder(current)
-                estimated = estimate_messages(render_messages(prompt, payload), factor)
-            if estimated > input_limit:
-                raise RequestSizeError(
-                    f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
-                    reason="context",
+                estimated = estimate_messages(
+                    render_messages(prompt, payload), factor
                 )
-            if (
-                config["execution"]["input_tokens_per_minute"] > 0
-                and estimated > config["execution"]["input_tokens_per_minute"]
-            ):
-                raise RequestSizeError(
-                    f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
-                    reason="itpm",
-                )
-            if len(current) == 1 and current[0] is segment:
-                continue
-            current = candidate
-        if current:
-            payload = payload_builder(current)
-            estimated = estimate_messages(render_messages(prompt, payload), factor)
-            plans.append(
-                ChunkPlan(
+                yield ChunkPlan(
                     file_id=str(current[0]["file_id"]),
                     segments=tuple(current),
                     payload=payload,
                     estimated_input_tokens=estimated,
                 )
+
+    if config["execution"]["scheduling_mode"] != "ordered_by_file":
+        yield from plan_groups(_iter_contiguous_groups(work, all_segments=all_segments))
+        return
+
+    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in work:
+        by_file.setdefault(str(item["file_id"]), []).append(item)
+    streams = [
+        iter(
+            plan_groups(
+                _iter_contiguous_groups(items, all_segments=all_segments)
             )
-    return plans
+        )
+        for items in by_file.values()
+    ]
+    while streams:
+        remaining: list[Iterable[ChunkPlan]] = []
+        for stream in streams:
+            try:
+                yield next(stream)  # type: ignore[arg-type]
+            except StopIteration:
+                continue
+            remaining.append(stream)
+        streams = remaining
+
+
+def build_chunk_plans(
+    work: Iterable[dict[str, Any]],
+    *,
+    all_segments: Iterable[dict[str, Any]],
+    config: dict[str, Any],
+    prompt: str,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+) -> list[ChunkPlan]:
+    return list(
+        iter_chunk_plans(
+            work,
+            all_segments=all_segments,
+            config=config,
+            prompt=prompt,
+            payload_builder=payload_builder,
+        )
+    )
 
 
 def materialize_chunks(run_id: str, stage: str, plans: list[ChunkPlan]) -> list[ChunkPlan]:
@@ -504,6 +620,19 @@ def materialize_chunks(run_id: str, stage: str, plans: list[ChunkPlan]) -> list[
         )
         for index, plan in enumerate(plans, start=1)
     ]
+
+
+def materialize_chunk_stream(
+    run_id: str,
+    stage: str,
+    plans: Iterable[ChunkPlan],
+) -> Iterable[ChunkPlan]:
+    code = STAGE_CODES[stage]
+    for index, plan in enumerate(plans, start=1):
+        yield replace(
+            plan,
+            chunk_id=f"CHK-{run_id}-{code}-{plan.file_id}-C{index:05d}",
+        )
 
 
 def create_run(
@@ -1046,6 +1175,7 @@ class LLMClient:
         estimated_input_tokens: int,
         request_id: str | None = None,
         parent_request_id: str | None = None,
+        segment_id_map: dict[str, str] | None = None,
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
@@ -1096,6 +1226,7 @@ class LLMClient:
                 model=str(self.config["llm"]["model"]),
                 messages=messages,
                 max_attempts=attempts,
+                segment_id_map=segment_id_map,
             )
         for attempt in range(1, attempts + 1):
             waited = await self.limiter.acquire(
@@ -1417,34 +1548,112 @@ class LLMClient:
 
 
 async def dispatch_chunks(
-    chunks: list[ChunkPlan],
+    chunks: Iterable[ChunkPlan],
     worker: Callable[[ChunkPlan], Awaitable[Any]],
     *,
     mode: str,
     max_parallel: int,
 ) -> list[Any]:
-    semaphore = asyncio.Semaphore(max_parallel)
+    if max_parallel < 1:
+        raise ConfigError("max_parallel 必须是正整数")
+    if mode == "ordered_by_file":
+        iterator = iter(chunks)
+        pending: dict[asyncio.Task[Any], tuple[int, str]] = {}
+        buffered: dict[str, ChunkPlan] = {}
+        results: dict[int, Any] = {}
+        active_files: set[str] = set()
+        next_index = 0
+        deferred: ChunkPlan | None = None
 
-    async def guarded(chunk: ChunkPlan) -> Any:
-        async with semaphore:
-            return await worker(chunk)
+        def start(chunk: ChunkPlan) -> None:
+            nonlocal next_index
+            file_id = str(chunk.file_id)
+            task = asyncio.create_task(worker(chunk))
+            pending[task] = (next_index, file_id)
+            active_files.add(file_id)
+            next_index += 1
 
-    if mode == "parallel":
-        return list(await asyncio.gather(*(guarded(chunk) for chunk in chunks)))
-    if mode != "ordered_by_file":
+        def fill() -> None:
+            nonlocal deferred
+            while len(pending) < max_parallel:
+                inactive = [
+                    file_id
+                    for file_id in buffered
+                    if file_id not in active_files
+                ]
+                if inactive:
+                    file_id = inactive[0]
+                    start(buffered.pop(file_id))
+                    continue
+                chunk = deferred
+                deferred = None
+                if chunk is None:
+                    try:
+                        chunk = next(iterator)
+                    except StopIteration:
+                        return
+                file_id = str(chunk.file_id)
+                if file_id in active_files:
+                    if file_id in buffered:
+                        deferred = chunk
+                        return
+                    buffered[file_id] = chunk
+                    continue
+                start(chunk)
+
+        fill()
+        try:
+            while pending:
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    index, file_id = pending.pop(task)
+                    active_files.discard(file_id)
+                    results[index] = task.result()
+                fill()
+        except BaseException:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise
+        return [results[index] for index in range(next_index)]
+    if mode != "parallel":
         raise ConfigError(f"未知调度模式：{mode}")
-    by_file: dict[str, list[ChunkPlan]] = defaultdict(list)
-    for chunk in chunks:
-        by_file[chunk.file_id].append(chunk)
+    iterator = iter(chunks)
+    pending: dict[asyncio.Task[Any], int] = {}
+    results: dict[int, Any] = {}
+    next_index = 0
 
-    async def file_chain(file_chunks: list[ChunkPlan]) -> list[Any]:
-        values = []
-        for chunk in file_chunks:
-            values.append(await guarded(chunk))
-        return values
+    def fill() -> None:
+        nonlocal next_index
+        while len(pending) < max_parallel:
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                return
+            task = asyncio.create_task(worker(chunk))
+            pending[task] = next_index
+            next_index += 1
 
-    nested = await asyncio.gather(*(file_chain(value) for value in by_file.values()))
-    return [item for group in nested for item in group]
+    fill()
+    try:
+        while pending:
+            done, _ = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                index = pending.pop(task)
+                results[index] = task.result()
+            fill()
+    except BaseException:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
+    return [results[index] for index in range(next_index)]
 
 
 _SUPPORTED_FENCE_LABELS = {"", "jsonl", "ndjson", "json"}

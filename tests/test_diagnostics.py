@@ -49,6 +49,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             model="test-model",
             messages=[{"role": "user", "content": "private source"}],
             max_attempts=2,
+            segment_id_map={"1": "F0001-S000001"},
         )
         diagnostics.request_started("REQ-1")
         diagnostics.request_finished(
@@ -116,6 +117,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert detail["messages"][0]["content"] == "private source"
     assert detail["response_content"] == "private response"
     assert detail["reasoning_content"] == "private chain"
+    assert detail["segment_id_map"] == {"1": "F0001-S000001"}
     persisted = (tmp_path / "logs" / "app.log").read_text("utf-8")
     assert "private source" not in persisted
     assert "private response" not in persisted
