@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from .storage import (
     atomic_write_json,
     new_record_id,
     read_json,
+    read_jsonl,
     record_header,
 )
 
@@ -141,6 +143,101 @@ class WebStore:
             ),
         }
 
+    def _stage_errors(self, stage: str) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for record in load_stage_history(self.project, stage):
+            segment_id = record.get("segment_id")
+            if segment_id:
+                latest[str(segment_id)] = record
+        return {
+            segment_id: {
+                "error_class": str(record.get("error_class") or "stage_error"),
+                "error_message": str(record.get("error_message") or "阶段请求失败")[:240],
+                "run_id": record.get("run_id"),
+                "request_id": record.get("request_id"),
+                "created_at": record.get("created_at"),
+            }
+            for segment_id, record in latest.items()
+            if record.get("status") == "failed"
+        }
+
+    def terminology_scan(self) -> dict[str, Any]:
+        active_path = self.project / "terminology" / "active_task.json"
+        active = read_json(active_path) if active_path.exists() else None
+        base = {
+            "active_task_id": None,
+            "status": active.get("status", "none") if active else "none",
+            "completed": 0,
+            "failed": 0,
+            "pending": len(self.segments_by_id),
+            "candidate_count": 0,
+            "candidate_records": 0,
+            "failure_counts": {},
+            "failed_segments": [],
+            "failed_segments_truncated": False,
+        }
+        if not active or active.get("status") != "active":
+            return base
+        task_id = str(active.get("active_task_id", ""))
+        base["active_task_id"] = task_id
+        scans = [
+            record
+            for record in read_jsonl(self.project / "terminology" / "scans.jsonl")
+            if record.get("active_task_id") == task_id
+            and str(record.get("segment_id")) in self.segments_by_id
+        ]
+        latest: dict[str, dict[str, Any]] = {}
+        for record in scans:
+            latest[str(record["segment_id"])] = record
+        completed = {
+            segment_id
+            for segment_id, record in latest.items()
+            if record.get("status") == "completed"
+        }
+        failed_records = {
+            segment_id: record
+            for segment_id, record in latest.items()
+            if record.get("status") == "failed"
+        }
+        counts = Counter(
+            str(record.get("error_class") or "scan_error")
+            for record in failed_records.values()
+        )
+        failed_segments = [
+            {
+                "segment_id": segment_id,
+                "error_class": str(record.get("error_class") or "scan_error"),
+                "error_message": str(record.get("error_message") or "术语扫描失败")[:240],
+                "run_id": record.get("run_id"),
+                "request_id": record.get("request_id"),
+            }
+            for segment_id, record in sorted(failed_records.items())
+        ]
+        candidate_records = [
+            record
+            for record in read_jsonl(self.project / "terminology" / "candidates.jsonl")
+            if record.get("active_task_id") == task_id
+        ]
+        candidate_sources = {
+            normalize_term(str(term.get("source")))
+            for record in candidate_records
+            for term in record.get("terms", [])
+            if isinstance(term, dict) and term.get("source")
+        }
+        base.update(
+            {
+                "completed": len(completed),
+                "failed": len(failed_records),
+                "pending": max(0, len(self.segments_by_id) - len(completed) - len(failed_records)),
+                "candidate_count": len(candidate_sources),
+                "candidate_records": len(candidate_records),
+                "failure_counts": dict(counts),
+                "failed_segments": failed_segments[:200],
+                "failed_segments_truncated": len(failed_segments) > 200,
+            }
+        )
+        return base
+
     def overview(self) -> dict[str, Any]:
         histories = {
             stage: self._history(stage)
@@ -151,6 +248,10 @@ class WebStore:
                 "polishing",
                 "polishing_applied",
             )
+        }
+        stage_errors = {
+            stage: self._stage_errors(stage)
+            for stage in ("translation", "proofreading", "polishing")
         }
         files = [
             {
@@ -182,6 +283,11 @@ class WebStore:
                     "completed": {
                         stage: segment_id in history
                         for stage, history in histories.items()
+                    },
+                    "stage_errors": {
+                        stage: stage_errors[stage].get(segment_id)
+                        for stage in stage_errors
+                        if segment_id in stage_errors[stage]
                     },
                     "translation": self._result_view(
                         histories["translation"].get(segment_id)
@@ -468,6 +574,7 @@ class WebStore:
             ),
             "conflict_count": sum(bool(item["has_conflicts"]) for item in rows),
             "terms": rows,
+            "scan": self.terminology_scan(),
         }
 
     @staticmethod

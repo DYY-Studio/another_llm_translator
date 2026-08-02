@@ -69,8 +69,8 @@ async def test_terminology_publishes_and_translation_uses_terms(
     )
     seen_translation_payload: dict | None = None
     seen_terminology_payload: dict | None = None
-    term_progress: list[tuple[int, int]] = []
-    translation_progress: list[tuple[int, int]] = []
+    term_progress: list[tuple[int, int, int]] = []
+    translation_progress: list[tuple[int, int, int]] = []
     live_usage: list[dict[str, object] | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -118,8 +118,8 @@ async def test_terminology_publishes_and_translation_uses_terms(
             project,
             Scope(),
             http_client=client,
-            on_progress=lambda processed, total: term_progress.append(
-                (processed, total)
+            on_progress=lambda completed, failed, total: term_progress.append(
+                (completed, failed, total)
             ),
             on_usage=live_usage.append,
         )
@@ -127,8 +127,8 @@ async def test_terminology_publishes_and_translation_uses_terms(
             project,
             Scope(),
             http_client=client,
-            on_progress=lambda processed, total: translation_progress.append(
-                (processed, total)
+            on_progress=lambda completed, failed, total: translation_progress.append(
+                (completed, failed, total)
             ),
             on_usage=live_usage.append,
         )
@@ -148,10 +148,10 @@ async def test_terminology_publishes_and_translation_uses_terms(
     }
     assert load_terms(project)["terms"][0]["preferred_translation"] == "爱丽丝"
     assert translation_summary["completed"] == 2
-    assert term_progress[0] == (0, 2)
-    assert term_progress[-1] == (2, 2)
-    assert translation_progress[0] == (0, 2)
-    assert translation_progress[-1] == (2, 2)
+    assert term_progress[0] == (0, 0, 2)
+    assert term_progress[-1] == (2, 0, 2)
+    assert translation_progress[0] == (0, 0, 2)
+    assert translation_progress[-1] == (2, 0, 2)
     assert live_usage[-1]["available"] is True
     assert seen_translation_payload is not None
     assert seen_translation_payload["terms"][0]["source"] == "Alice"

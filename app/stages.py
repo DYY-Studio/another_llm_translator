@@ -732,7 +732,62 @@ def _term_exchange_rows(
     project: Path,
     *,
     include_disabled: bool,
+    source: str = "published",
 ) -> list[dict[str, Any]]:
+    if source not in {"published", "scanned"}:
+        raise UsageError("术语导出 source 必须是 published 或 scanned")
+    if source == "scanned":
+        active_path = project / "terminology" / "active_task.json"
+        active = read_json(active_path) if active_path.exists() else None
+        if not active or active.get("status") != "active":
+            return []
+        task_id = str(active.get("active_task_id", ""))
+        records = [
+            record
+            for record in read_jsonl(project / "terminology" / "candidates.jsonl")
+            if record.get("active_task_id") == task_id
+        ]
+        merged: dict[str, dict[str, Any]] = {}
+        for record in records:
+            for candidate in record.get("terms", []):
+                if isinstance(candidate, dict):
+                    _add_term_candidate(merged, candidate)
+        overrides_document = read_json(project / "terminology" / "overrides.json")
+        overrides = {
+            str(item["normalized"]): dict(item)
+            for item in overrides_document.get("overrides", [])
+        }
+        _apply_term_overrides(merged, overrides)
+        alias_policy = str(
+            load_project_config(project)["terminology"]["alias_primary_collision"]
+        )
+        candidates = _build_term_rows(merged, alias_policy=alias_policy)
+        rows: list[dict[str, Any]] = []
+        for term in candidates:
+            normalized = normalize_term(str(term["source"]))
+            override = overrides.get(normalized, {})
+            disabled = bool(override.get("disabled", False))
+            if disabled and not include_disabled:
+                continue
+            rows.append(
+                {
+                    "source": override.get("source", term["source"]),
+                    "preferred_translation": override.get(
+                        "preferred_translation", term.get("preferred_translation")
+                    ),
+                    "category": override.get("category", term.get("category")),
+                    "description": override.get("description", term.get("description", "")),
+                    "aliases": list(override.get("aliases", term.get("aliases", []))),
+                    "disabled": disabled,
+                    "conflicts": {
+                        "categories": list(term.get("conflicts", {}).get("categories", [])),
+                        "preferred_translations": list(
+                            term.get("conflicts", {}).get("preferred_translations", [])
+                        ),
+                    },
+                }
+            )
+        return rows
     library = load_terms(project)
     current = {
         str(item["normalized"]): dict(item)
@@ -779,8 +834,13 @@ def export_terms(
     output: Path,
     *,
     include_disabled: bool,
+    source: str = "published",
 ) -> dict[str, Any]:
-    rows = _term_exchange_rows(project, include_disabled=include_disabled)
+    rows = _term_exchange_rows(
+        project,
+        include_disabled=include_disabled,
+        source=source,
+    )
     if output.suffix.casefold() == ".json":
         atomic_write_text(
             output,
@@ -830,6 +890,7 @@ def export_terms(
         "format": output.suffix.casefold().removeprefix("."),
         "exported": len(rows),
         "include_disabled": include_disabled,
+        "source": source,
     }
 
 
@@ -971,6 +1032,7 @@ def _merge_and_publish_terms(
     task_id: str,
     project_id: str,
     published_run_id: str,
+    active_status: str = "completed",
 ) -> dict[str, Any]:
     previous = load_terms(project)
     candidates = [
@@ -1005,10 +1067,52 @@ def _merge_and_publish_terms(
     )
     atomic_write_json(project / "terminology" / "terms.json", library)
     active = read_json(project / "terminology" / "active_task.json")
-    active["status"] = "completed"
+    active["status"] = active_status
     active["terms_revision"] = revision
     atomic_write_json(project / "terminology" / "active_task.json", active)
     return library
+
+
+def publish_partial_terms(project: Path) -> dict[str, Any]:
+    """Publish current candidates without closing or deleting scan history."""
+    if find_running_runs(project, "terminology"):
+        raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
+    active_path = project / "terminology" / "active_task.json"
+    if not active_path.exists():
+        raise UsageError("当前没有可发布的活动术语扫描")
+    active = read_json(active_path)
+    if active.get("status") != "active":
+        raise UsageError("当前没有可发布的活动术语扫描")
+    task_id = str(active.get("active_task_id", ""))
+    candidates = [
+        record
+        for record in read_jsonl(project / "terminology" / "candidates.jsonl")
+        if record.get("active_task_id") == task_id and record.get("terms")
+    ]
+    if not candidates:
+        raise UsageError("当前活动扫描没有可发布的候选术语")
+    candidate_sources = {
+        normalize_term(str(term.get("source")))
+        for record in candidates
+        for term in record.get("terms", [])
+        if isinstance(term, dict) and term.get("source")
+    }
+    metadata = read_json(project / "project.json")
+    published_run_id = str(candidates[-1].get("run_id") or task_id)
+    library = _merge_and_publish_terms(
+        project,
+        task_id=task_id,
+        project_id=str(metadata["project_id"]),
+        published_run_id=published_run_id,
+        active_status="partial_published",
+    )
+    return {
+        "published": True,
+        "active_task_id": task_id,
+        "terms_revision": library["terms_revision"],
+        "published_terms": len(library.get("terms", [])),
+        "scanned_terms": len(candidate_sources),
+    }
 
 
 async def run_terminology(
@@ -1019,7 +1123,7 @@ async def run_terminology(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
@@ -1058,7 +1162,7 @@ async def run_terminology(
     create_task = resume_run_id is None and (
         scope.force
         or active is None
-        or (active.get("status") != "active" and published is None)
+        or active.get("status") == "partial_published"
     )
     if resume_manifest is not None:
         task_id = str(resume_manifest.get("active_task_id", ""))
@@ -1327,13 +1431,15 @@ async def run_terminology(
     write_lock = asyncio.Lock()
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
+    failure_counts: Counter[str] = Counter()
     completed_original_ids: set[str] = set()
 
     def report_progress() -> None:
         if on_progress is not None:
             on_progress(
                 len(selected) - len(work)
-                + len(completed_original_ids | failed_originals),
+                + len(completed_original_ids),
+                len(failed_originals),
                 len(selected),
             )
 
@@ -1367,7 +1473,8 @@ async def run_terminology(
             if format_attempt:
                 payload["format_correction"] = (
                     "上一次响应不符合 JSONL 协议。每行只输出一个紧凑 JSON "
-                    "对象，不要解释，最后一行输出 {\"type\":\"end\"}。"
+                    "对象，不要解释，最后一行必须严格输出 {\"type\":\"end\"}，"
+                    "不要输出 {\"type\":\"type\":\"end\"} 或其他字段。"
                 )
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -1400,6 +1507,7 @@ async def run_terminology(
                         if segment_id in failed_originals:
                             continue
                         failed_originals.add(segment_id)
+                        failure_counts["external_error"] += 1
                         report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
@@ -1465,6 +1573,7 @@ async def run_terminology(
                         if segment_id in failed_originals:
                             continue
                         failed_originals.add(segment_id)
+                        failure_counts["format_error"] += 1
                         report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
@@ -1578,6 +1687,7 @@ async def run_terminology(
                 async with write_lock:
                     if original_id not in failed_originals:
                         failed_originals.add(original_id)
+                        failure_counts["context_error"] += 1
                         report_progress()
                         append_jsonl(
                             project / "terminology" / "scans.jsonl",
@@ -1625,6 +1735,7 @@ async def run_terminology(
                 for segment in preflight_failed:
                     segment_id = str(segment["segment_id"])
                     failed_originals.add(segment_id)
+                    failure_counts["context_error"] += 1
                     report_progress()
                     append_jsonl(
                         project / "terminology" / "scans.jsonl",
@@ -1661,6 +1772,7 @@ async def run_terminology(
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -1673,6 +1785,7 @@ async def run_terminology(
             failed=len(work),
             warnings=warnings,
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         logger.error(
             "run failed run=%s error_type=%s",
@@ -1719,6 +1832,7 @@ async def run_terminology(
         failed=failed,
         warnings=warnings,
         usage=usage,
+        failure_counts=dict(failure_counts),
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d pending=%d",
@@ -1732,7 +1846,9 @@ async def run_terminology(
         "run_id": run_id,
         "active_task_id": task_id,
         "completed": completed,
+        "reused": len(selected) - len(work),
         "failed": failed,
+        "failure_counts": dict(failure_counts),
         "pending": len(all_nonempty) - len(task_completed_ids),
         "published": published_now,
         "terms_revision": published["terms_revision"] if published else None,
@@ -1924,7 +2040,7 @@ async def run_translation(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
@@ -2192,6 +2308,7 @@ async def run_translation(
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
     failed_ids: set[str] = set()
+    failure_counts: Counter[str] = Counter()
     completed_ids: set[str] = set()
     by_id = {str(item["segment_id"]): item for item in segments}
     by_id.update(
@@ -2202,7 +2319,8 @@ async def run_translation(
     def report_progress() -> None:
         if on_progress is not None:
             on_progress(
-                len(selection.reusable) + len(completed_ids | failed_ids),
+                len(selection.reusable) + len(completed_ids),
+                len(failed_ids),
                 len(selection.selected),
             )
 
@@ -2277,6 +2395,7 @@ async def run_translation(
         segment_id = part_original.get(segment_id, segment_id)
         if segment_id in failed_ids:
             return
+        failure_counts[error_class] += 1
         async with write_lock:
             append_jsonl(
                 result_path,
@@ -2664,6 +2783,7 @@ async def run_translation(
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -2680,6 +2800,7 @@ async def run_translation(
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         logger.error(
             "run failed run=%s completed=%d error_type=%s",
@@ -2754,6 +2875,7 @@ async def run_translation(
         failed=failed_count,
         warnings=warnings,
         usage=usage,
+        failure_counts=dict(failure_counts),
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
@@ -2769,6 +2891,7 @@ async def run_translation(
         "reused": len(selection.reusable),
         "completed": len(completed_ids),
         "failed": failed_count,
+        "failure_counts": dict(failure_counts),
         "last_attempt_failed": len(selection.last_attempt_failed),
         "warnings": warnings,
         "usage": usage,
@@ -2877,7 +3000,7 @@ async def run_review(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
@@ -3176,6 +3299,7 @@ async def run_review(
     write_lock = asyncio.Lock()
     completed_ids: set[str] = set()
     failed_ids: set[str] = set()
+    failure_counts: Counter[str] = Counter()
     by_id = {str(item["segment_id"]): item for item in segments}
     by_id.update(
         {str(item["segment_id"]): item for item in request_segments}
@@ -3185,7 +3309,8 @@ async def run_review(
     def report_progress() -> None:
         if on_progress is not None:
             on_progress(
-                len(selection.reusable) + len(completed_ids | failed_ids),
+                len(selection.reusable) + len(completed_ids),
+                len(failed_ids),
                 len(selection.selected),
             )
 
@@ -3260,6 +3385,7 @@ async def run_review(
                     len(failed_ids),
                 )
             else:
+                failure_counts["stage_error"] += 1
                 append_jsonl(
                     result_path,
                     record_header(
@@ -3525,6 +3651,7 @@ async def run_review(
             failed=0,
             warnings=[*warnings, "任务已由用户取消"],
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
@@ -3541,6 +3668,7 @@ async def run_review(
             failed=len(selection.work) - len(completed_ids),
             warnings=warnings,
             usage=usage,
+            failure_counts=dict(failure_counts),
         )
         logger.error(
             "run failed run=%s completed=%d error_type=%s",
@@ -3560,6 +3688,7 @@ async def run_review(
         failed=len(failed_ids),
         warnings=warnings,
         usage=usage,
+        failure_counts=dict(failure_counts),
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
@@ -3575,6 +3704,7 @@ async def run_review(
         "reused": len(selection.reusable),
         "completed": len(completed_ids),
         "failed": len(failed_ids),
+        "failure_counts": dict(failure_counts),
         "warnings": warnings,
         "usage": usage,
     }
