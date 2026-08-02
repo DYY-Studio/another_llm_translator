@@ -10,7 +10,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.editor import EditorStore
+from app.web_store import WebStore
 from app.config import load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import UsageError
@@ -27,7 +27,7 @@ from app.storage import (
 from app.web import create_app
 from app.web_tasks import WebTaskManager
 from tests.test_documents import RUBY_XHTML, make_epub
-from tests.test_editor import seed_conflicted_terms
+from tests.test_web_store import seed_conflicted_terms
 from tests.test_foundation import make_app_root
 
 
@@ -974,7 +974,7 @@ def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
 
 def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
-    store = EditorStore(project)
+    store = WebStore(project)
     for segment_id in ("F0001-S000001", "F0001-S000002"):
         store.save_translation({"segment_id": segment_id, "text": segment_id})
         store.save_review(
@@ -1048,7 +1048,7 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
-    store = EditorStore(project)
+    store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
     prompt_path = project / "prompts" / "translation.middle.txt"
@@ -1192,7 +1192,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, project = make_project(tmp_path)
-    store = EditorStore(project)
+    store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
     prompt_path = project / "prompts" / "translation.middle.txt"
