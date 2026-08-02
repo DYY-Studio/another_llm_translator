@@ -972,6 +972,57 @@ def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
     assert "Alice" in complete.content.decode("utf-8-sig")
 
 
+def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path, "Alice")
+    metadata = read_json(project / "project.json")
+    task_id = "TERM-TASK-WEB-PARTIAL"
+    atomic_write_json(
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="test",
+        ),
+    )
+    append_jsonl(
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            run_id="RUN-WEB-PARTIAL",
+            terms=[
+                {
+                    "source": "Alice",
+                    "category": "人名",
+                    "description": "人物",
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                }
+            ],
+        ),
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+    scan = client.get("/api/v1/projects/sample/terms").json()["scan"]
+    assert scan["candidate_count"] == 1
+    exported = client.get(
+        "/api/v1/projects/sample/terms/export",
+        params={"format": "json", "source": "scanned"},
+    )
+    assert exported.status_code == 200
+    assert json.loads(exported.content)["terms"][0]["source"] == "Alice"
+    published = client.post(
+        "/api/v1/projects/sample/terms/publish-partial",
+        json={"confirm": True},
+    )
+    assert published.status_code == 200
+    assert published.json()["published"] is True
+    assert client.get("/api/v1/projects/sample/terms").json()["scan"]["status"] == "partial_published"
+
+
 def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     store = WebStore(project)
@@ -1249,7 +1300,7 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
         usage = kwargs["on_usage"]
         assert callable(progress)
         assert callable(usage)
-        progress(1, 2)
+        progress(1, 0, 2)
         usage(
             {
                 "input_tokens": 12,
@@ -1258,8 +1309,10 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
                 "available": True,
             }
         )
-        progress(2, 2)
+        progress(2, 0, 2)
         return {
+            "selected": 2,
+            "completed": 2,
             "failed": 0,
             "pending": 0,
             "usage": {
@@ -1284,7 +1337,8 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
 
     state = manager.get(started["task_id"])
     assert state["status"] == "completed"
-    assert state["processed_segments"] == state["total_segments"] == 2
+    assert state["completed_segments"] == state["total_segments"] == 2
+    assert state["failed_segments"] == state["pending_segments"] == 0
     assert state["usage"]["input_tokens"] == 12
     assert state["usage"]["output_tokens"] == 5
     assert diagnostics.snapshot()["metrics"]["input_tokens"] == 12

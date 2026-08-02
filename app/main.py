@@ -24,6 +24,7 @@ from .stages import (
     export_project,
     import_terms,
     inspect_full,
+    publish_partial_terms,
     run_all,
     run_apply,
     run_review,
@@ -160,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     terms_export.add_argument("project")
     terms_export.add_argument("output")
     terms_export.add_argument("--include-disabled", action="store_true")
+    terms_export.add_argument(
+        "--source", choices=("published", "scanned"), default="published"
+    )
+    terms_partial = subparsers.add_parser(
+        "terms-publish-partial", help="发布当前活动扫描中已有的候选术语"
+    )
+    terms_partial.add_argument("project")
     return parser
 
 
@@ -436,7 +444,15 @@ def run(argv: list[str] | None = None) -> int:
             project,
             Path(args.output),
             include_disabled=args.include_disabled,
+            source=args.source,
         )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "terms-publish-partial":
+        project = resolve_project(args.project)
+        attach_project_log(project)
+        with project_write_lock(project):
+            summary = publish_partial_terms(project)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
     parser.error("unknown command")
