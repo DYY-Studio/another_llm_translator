@@ -4,17 +4,19 @@
 不为后续阶段提前建设抽象。`docs/MINIMAL.md` 只描述已经实现的行为；本文描述
 未来方向和进入条件。
 
-当前项目目录继续作为完整项目边界。SQLite 迁移前不建设 Repository 层或双写
+当前项目目录继续作为完整项目边界。SQLite 切换前不建设 Repository 层或双写
 路径；不增加自动 Provider 判断、静默 fallback、任意格式互转或未经真实需求
-验证的插件能力。
+验证的插件能力。macOS 公开 Beta 前允许直接升级项目格式和插件协议，不为开发期
+项目保留迁移或兼容路径；公开 Beta 后再建立明确的数据升级边界。
 
 ## 当前基线
 
 - TXT/EPUB、File/Segment/Chunk/Run、项目 JSONL、CLI 和完整翻译流程已经实现。
-- CLI、本地 Web 和开发编辑器共享阶段、Run、限速、恢复和项目持久化代码。
+- CLI 与本地 Web 共享阶段、Run、限速、恢复和项目持久化代码。独立开发编辑器
+  的功能已由 Web 覆盖，计划在 Stage 16 删除。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 13 已完成；下一阶段是 EPUB 内联格式标记保留。
+- 产品路线 Stage 1 至 Stage 13 已完成；下一阶段是可选 Aozora Ruby 还原。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -228,54 +230,179 @@ Preset；内联 LLM 连接配置不再支持。
   调试数据。
 - 不引入远程遥测、数据库日志、分布式追踪或新的通用服务层。
 
-## Stage 14：EPUB 内联格式标记保留
+## Stage 14：可选 Aozora Ruby 还原
 
-进入条件：普通内联合并及 Ruby 文本流合并已在真实 EPUB 中稳定验证，且不引入
-通用 DOM、通用 Adapter 校验 Hook 或自由 HTML 输出协议。
+进入条件：Stage 11 的 Ruby 文本流合并已在真实 EPUB 中稳定验证。本阶段只恢复
+模型明确返回的 Ruby，不建设普通内联格式协议。
 
-- 首个且唯一的真实用例是 Aozora Ruby 还原：只解析严格的
-  `｜base《reading》`，并把合法模型输出转换为 EPUB Ruby。
-- 未闭合、嵌套、歧义或被模型破坏的标记必须在结果完成前失败；不接受任意 HTML，
-  不按字数启发式拆分目标，也不在本阶段建设通用标记协议。
-- 后续实现仍须保持 EPUB 专用、默认关闭，原始 attrs 继续留在 Adapter 不透明状态；
-  通用无 attrs 标记协议继续后置。
+- `ruby_mode=aozora` 时由模型自由决定是否保留 Ruby；完全不返回 Ruby 是合法
+  结果，不因数量减少触发重试。
+- 严格解析完整的 `｜base《reading》`，并在纯译文和双语译文区域恢复为 EPUB
+  Ruby；同一 Segment 可以包含多个 Ruby。
+- base 和 reading 必须非空，标记不得嵌套或跨行。其他文本保持普通文本，不接受
+  任意 HTML，也不按字符数猜测目标范围。
+- 翻译、校对和润色 Prompt 要求 reading 翻译或转写为目标语言适用的字母或
+  注音表达，但不尝试自动判断语言学正确性。
+- `base_only` 和 `parenthetical` 不执行 Ruby 重建。
+- 本阶段不强制保留 Ruby，不实现普通内联标记、逐标签策略或通用验证器框架。
 
-## Stage 15：SQLite 标准项目存储
+## Stage 15：EPUB 普通内联格式与 Adapter 输出契约
 
-进入条件：多格式 File 状态、阶段结果、Preset、外部项目位置、输入选项和运行
-观测语义已经稳定。
+进入条件：可选 Ruby 还原行为稳定，并已有真实 EPUB 需要在译文中恢复普通
+内联格式。本阶段直接扩展现有可信 Document Adapter，不建立独立校验器系统。
 
-- `project.sqlite` 保存项目元数据、File、Segment、术语、阶段结果和 Run 索引。
-- 原始输入、Adapter 状态、配置、Prompt、Preset/Adapter 快照、调试 Payload
-  和输出继续作为外围文件。
-- 使用单写事务、外键、唯一约束和必要索引。
-- 首版优先使用标准库 `sqlite3`，根据真实性能测试决定是否增加其他库；不引入
-  ORM。
-- 显式迁移命令先创建数据库并校验数量和引用，再原子切换项目格式。
-- 不进行 JSONL/SQLite 双写。旧数据保存在可恢复备份目录，迁移失败时原项目
-  仍可使用。
-- 完成迁移后删除 JSONL 运行路径和无用兼容代码。
+- EPUB 增加与 `ruby_mode` 独立的导入选项 `inline_format_mode`：
+  - `plain`：默认值，不向模型暴露普通内联标记；
+  - `markers`：生成受控、无 attrs 的成对标记，例如 `<em1>…</em1>`。
+- Segment `source` 保存净文本，并继续包含 `ruby_mode` 产生的 Ruby 表达；Marker
+  模式另持久化与 Segment 对齐的 `model_source`。术语使用净文本，翻译、校对、
+  润色及其参考上下文使用模型文本。
+- 原标签、attrs、定位和父子关系只保存在 Adapter 不透明状态。源文与保留标记
+  语法冲突时带 XHTML 位置快速失败，不转义或猜测。
+- 项目内按 Adapter 配置 `inline_format_policy`：
+  - `tiered`：默认值；`a/abbr/bdi/bdo/cite/code/data/dfn/kbd/q/samp/sub/sup`
+    和 `time/var` 必须保留，`b/em/i/mark/s/small/span/strong/u` 可整体省略；
+  - `strict`：全部源标记必须保留。
+- 实际返回的标记必须已知、唯一、成对、正确嵌套并维持原父子关系；兄弟范围
+  可以随译序移动。损坏标记使用现有 `format_max_attempts` 修复预算，耗尽后该
+  Segment 失败。
+- 校对和润色的 `accepted` 沿用已验证基准；`suggested` 必须执行相同校验。
+- `plain` 纯译文保留原普通标签和 attrs 的空骨架，不猜测译文局部格式映射；
+  Ruby 仍按独立规则处理。
+- Document Adapter 协议直接升级：`ImportedFile` 增加可选、与 Segment 对齐的
+  模型文本；Adapter 可声明类型化 `run_options`，并可选校验结果和生成净显示
+  文本。仓库内调用方同步升级，不保留旧协议分支。
+- 宿主继续负责请求、修复、失败记录和 Run 收尾，Adapter 只解释自身文本契约。
+  Run 保存 Adapter ID、版本和解析后的运行选项，并纳入阶段指纹。
+- Segment 列表显示净文本和格式数量；详情编辑区显示原始标记和净文本预览，
+  手工保存前执行相同校验。不实现富文本编辑器或逐标签配置。
 
-## Stage 16：单 Preset 多 API Key
+## Stage 16：移除独立开发者 Editor
 
-- Preset 只保存多个 API Key 环境变量名，不保存密钥值。
-- 实现前必须明确每 Key 与端点的限流范围、调度策略、失效状态、恢复规则和
-  Run 审计行为。
-- Key 轮换不得扩展成 Provider fallback，也不得静默掩盖鉴权或配额错误。
+- 删除 `app/editor.html`、独立 Editor HTTP 服务、命令入口、README 使用说明和
+  专属测试，不保留第二套界面。
+- Web 仍使用的项目视图和人工编辑逻辑改名并收敛为 Web 内部职责，不复制业务
+  写入规则。
+- 手工修改记录来源统一为 Web，不保留 `project_editor` 兼容值。
+- CLI 与 Web 继续共享项目存储、阶段结果和写锁语义。
 
-该能力涉及限流状态和费用归属，必须在 Stage 10 的端点观测能力和 Stage 13
-的运行观测语义稳定后单独设计和验收。
+## Stage 17：按需 Chunk 规划与请求内短 ID
 
-## Stage 17：国际化与本地化
+- 每个实际 LLM 请求把待返回 Segment 临时编号为字符串 `"1"、"2"…`，响应后
+  映射回持久 Segment ID；不修改项目内 File/Segment ID。
+- reference context 删除无输出用途的 ID，术语扫描不发送 Segment ID。格式修复、
+  验证修复、上下文拆分和超长 Segment 子请求分别建立自己的局部映射。
+- 内存诊断显示短 ID 到持久 ID 的映射；项目数据、结果、日志和 debug manifest
+  继续使用持久 ID。
+- 普通 Run 创建后才按需要规划下一批 Chunk。调度只保留与 `max_parallel` 同阶的
+  有界缓冲，Chunk ID 在进入调度时生成，debug manifest 随生成追加；取消后不再
+  继续规划。
+- `ordered_by_file` 继续保证单 File 顺序，`parallel` 继续受最大并发限制；所有
+  请求仍不得跨 `(file_id, part_id)`。
+- dry-run 明确耗尽规划器，以返回完整 Chunk 数和 Token 估算。
+- 不根据模型输出动态调整 Chunk，不持久化 Chunk 业务状态，也不增加新的通用
+  调度层。
 
-这是最低优先级阶段，以中文和英文两个真实语言作为首次实现，不提前建设只有
-单语言消费者的翻译框架。
+## Stage 18：SQLite 标准项目存储
 
+进入条件：模型文本、Adapter 运行选项和结果校验语义已经稳定。该阶段发生在首个
+公开 Beta 前，因此直接切换项目格式。
+
+- 新项目只使用 `project.sqlite`；旧 JSONL 项目要求重建，不提供迁移、双写或旧
+  格式读取。
+- SQLite 保存项目元数据、File、Segment、`model_source`、Document Adapter
+  不透明状态、术语、阶段结果、Run 索引和活动任务状态。
+- 原始输入、配置、Prompt、Run 配置/Adapter/Preset 快照、调试 Payload 和导出
+  文件继续作为项目外围文件。
+- 使用标准库 `sqlite3`、外键、事务、唯一约束、必要索引和 WAL；不引入 ORM。
+- 按领域提供直接 SQL 操作，不提前建设通用 Repository 层。
+- File、Segment、结果和 Adapter 状态在同一事务内保持一致；一个 EPUB 仍是
+  一个 File。
+- 数据库包含明确 schema version，未知版本快速失败。切换完成后删除 JSONL
+  运行路径和相关兼容代码。
+
+## Stage 19：20,000+ Segment Web 性能
+
+进入条件：SQLite 查询和事务边界稳定。当前全量 Overview 响应和完整 DOM 列表
+不作为超大项目支持方案继续扩展。
+
+- 项目概要 API 不再返回全部 Segment；增加稳定排序的 `offset/limit` 窗口查询、
+  总数和服务端文件、状态、搜索过滤。
+- 提供当前过滤结果的紧凑有序 ID 索引，使 Ctrl/Cmd/Shift 选择无需加载全部行
+  正文。Segment 详情按需读取，保存后只刷新受影响窗口和汇总。
+- 前端采用一个成熟、支持动态行高的轻量 virtualizer，只渲染可见窗口和少量
+  overscan；不手写虚拟滚动算法，不新增状态库。
+- 20,000 Segment 验收必须确认：初始页面只请求有限窗口、DOM 行数保持有界，
+  搜索、过滤、深度滚动、跳转、经典多选和批量操作正确，三阶段和移动布局无
+  横向溢出，Run 进度不依赖已加载页面。
+- `orjson` 只有在窗口化完成后仍由剖析确认序列化为主要瓶颈时才允许引入。
+  `lxml` 只有真实 EPUB 正确性无法由标准库满足，或剖析确认 XML 处理为主要
+  瓶颈时才允许引入。
+- 二进制依赖还必须通过后续三平台 sidecar 打包验证；单独微基准更快不构成
+  引入理由。
+
+## Stage 20：中文与英文国际化
+
+- 在 macOS 公开 Beta 前完成中文、英文两种真实界面。
+- Web 和桌面语言按浏览器配置保存；CLI 提供明确语言参数并支持系统默认。
 - 前端抽取消息目录、日期数字格式和可访问性文本。
-- CLI 使用稳定消息键或标准库本地化机制。
-- Web API 在确有前端消费者时增加稳定错误代码与参数。
-- 项目内容、Prompt、目标语言和模型输出不随 UI 语言自动变化。
-- 不实现自动翻译文案、远程语言包或插件本地化市场。
+- Web API 为前端可见错误提供稳定错误代码与参数，同时保留安全 fallback 文本。
+- 项目内容、Prompt、目标语言和模型输出不随 UI 语言改变。
+- 不实现远程语言包、自动翻译文案或插件本地化市场。
+
+## Stage 21：桌面共享运行时、凭据与局域网
+
+- 使用 Tauri 和打包后的 Python/FastAPI sidecar，复用现有 React、API、执行和
+  存储代码，不建设第二套桌面后端。
+- 区分只读应用资源与平台用户数据目录；全局配置、Preset、自定义 Adapter、
+  日志和默认 `projects` 均写入用户数据目录。
+- Preset schema v2 使用显式单凭据引用：`environment` 读取指定环境变量，
+  `keychain` 读取系统钥匙串；两者二选一，不隐式 fallback。
+- 钥匙串界面支持创建、更新、删除和测试凭据；API 永不回传密钥，Run 和日志
+  只保存引用 ID。
+- Tauri 提供最小原生文件、文件夹和项目路径选择桥接；普通浏览器和 LAN 客户端
+  继续使用上传和服务端路径行为。
+- 默认只监听回环地址。用户可以显式开启指定局域网接口，并保存一组长期用户名
+  和密码；密码进入系统钥匙串。有认证时使用登录页和 HttpOnly 会话 Cookie，
+  停止共享或服务重启后已有会话失效，长期账密保留。
+- 用户也可在可信局域网中留空认证，但必须明确警告同网段设备拥有完整项目和
+  LLM 操作权限。首版使用 HTTP，不实现 TLS 证书、多账号、角色、密码找回、
+  公网部署或远程管理。
+- 保持单写任务和项目写锁语义。
+
+## Stage 22：macOS Tauri 公开 Beta
+
+- 构建并验证 macOS Tauri 应用、Python sidecar、系统钥匙串、用户数据目录和
+  原生选择器。
+- 提供签名、公证的安装包及中英文首次启动引导。
+- 覆盖全新安装、手动升级、项目移动、外部项目、真实钥匙串、LAN 移动访问、
+  取消任务和异常退出恢复。
+- 使用手动下载安装升级；不实现自动更新、远程遥测或崩溃上传。
+- 从本阶段起，已发布 SQLite 项目和 Preset schema 的后续变更必须提供明确迁移
+  或主版本边界，不再静默要求重建。
+
+## Stage 23：Windows Tauri 公开 Beta
+
+- 独立完成 Windows sidecar、Credential Manager、安装包签名、Unicode/长路径、
+  外部项目和卸载保留用户数据验收。
+- 只有开启 LAN 时才请求必要的防火墙权限。
+- 继续采用手动升级，不引入 Windows 专属业务分支。
+
+## Stage 24：单 Preset 多 API Key
+
+- 在单凭据引用与限流观测稳定后，单独设计多个 credential reference。
+- 实现前必须锁定每 Key 的 RPM/ITPM 归属、选择顺序、失效、恢复、费用审计和
+  Run 快照。
+- 不扩展成 Provider fallback，不静默掩盖鉴权或配额错误。
+
+## Stage 25：Linux Tauri Beta
+
+- 最后评估并实现 Linux sidecar、Secret Service、Wayland/X11、目标发行版和
+  安装包形式。
+- 缺少可用 Secret Service 时明确失败或要求选择 `environment` 凭据，不自行
+  保存明文密钥。
+- 验收项目路径、文件权限、LAN、防火墙说明和中英文界面。
+- 不承诺未经测试的发行版或桌面环境。
 
 ## 协议成熟度
 
@@ -291,17 +418,23 @@ JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system
 调试记录始终由宿主管理。API Key 不进入 URL、请求正文、Run
 快照或阶段指纹。
 
-Preset 与规范化思考响应已落地；相关 schema 仍可直接升级仓库内调用方，
-不保留未文档化旧字段。
+Preset 与规范化思考响应已落地。Stage 22 前相关 schema 仍可直接升级仓库内
+调用方，不保留未文档化旧字段；Stage 22 公开 Beta 后，已发布 Preset schema
+变更必须提供明确迁移或主版本边界。
 
 ### Document Adapter 与可信 Python 插件（Beta）
 
 内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
+- 用 Stage 15 的真实 EPUB 标记恢复验证类型化运行选项、模型文本和结果契约；
 - 明确 Adapter 版本和不透明状态升级策略；
 - 建立外部 Document Adapter 契约测试；
 - 维护至少一个独立发行的真实 Python Document 插件。
+
+Stage 15 只在 Document Adapter 边界增加可选结果契约，不建立独立校验器插件、
+通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；
+外部插件仍按版本不匹配快速失败。
 
 Python LLM Adapter 只有 provisional 边界。只有出现 JSON POST 无法表达的真实
 端点后才实现首个适配器，不用模拟需求扩张协议。
@@ -321,4 +454,7 @@ Adapter 必须等待 OpenAI-compatible JSON Adapter 之外的真实特殊协议�
 ## 明确不规划
 
 当前不建设远程插件、多语言进程协议、在线市场、自动安装、插件沙箱、自动
-Provider 判断、静默 fallback、通用 DOM/排版树或通用工作流引擎。
+Provider 判断、静默 fallback、通用 DOM/排版树、通用校验器注册中心或通用
+工作流引擎。桌面端不另建业务后端，不改用 Electron，不面向公网部署，也不在
+公开 Beta 前建设自动更新、TLS 证书、多账号权限或远程遥测。超大列表不自制
+虚拟滚动算法，SQLite 不引入 ORM，未经过真实剖析不加入 `orjson` 或 `lxml`。
