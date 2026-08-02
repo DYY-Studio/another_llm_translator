@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -104,7 +105,29 @@ def test_empty_project_can_open_inspect_and_add_txt_files(
     assert [item["file_id"] for item in read_jsonl(
         project / "source" / "files.jsonl"
     )] == ["F0001", "F0002"]
+    assert {
+        item["part_id"]
+        for item in read_jsonl(project / "source" / "segments.jsonl")
+    } == {"document"}
     assert read_json(project / "project.json")["next_file_sequence"] == 3
+
+
+def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    source = tmp_path / "old.txt"
+    source.write_text("one", encoding="utf-8")
+    add_project_files(project, [str(source)])
+    segments_path = project / "source" / "segments.jsonl"
+    segments = read_jsonl(segments_path)
+    segments[0].pop("part_id")
+    segments_path.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in segments)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProjectError, match="part_id.*重新创建"):
+        inspect_full(project)
 
 
 def test_remove_retains_history_and_readd_does_not_reuse_ids(

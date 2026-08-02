@@ -48,7 +48,7 @@ _INLINE_TEXT_ELEMENTS = {
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.2"
+    version = "0.3"
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
     import_options = (
@@ -90,6 +90,7 @@ class EPUBDocumentAdapter:
                 archive, entries, opf_path
             )
             segments: list[str] = []
+            segment_part_ids: list[str] = []
             locators: list[dict[str, Any]] = []
             for xhtml_path in xhtml_paths:
                 root = _parse_xml(
@@ -111,6 +112,7 @@ class EPUBDocumentAdapter:
                     body, ruby_mode=ruby_mode, location=xhtml_path
                 ):
                     segments.append(source)
+                    segment_part_ids.append(xhtml_path)
                     locators.append(
                         {"path": xhtml_path, "slot": locator}
                     )
@@ -122,6 +124,7 @@ class EPUBDocumentAdapter:
                     source_path=path,
                     original_name=path.name,
                     segments=tuple(segments),
+                    segment_part_ids=tuple(segment_part_ids),
                     encoding_detected="xhtml",
                     encoding_used="utf-8",
                     encoding_confidence=1.0,
