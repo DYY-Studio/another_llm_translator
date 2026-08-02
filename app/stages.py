@@ -130,6 +130,26 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
     )
 
 
+def _finalize_planning_failure(
+    run_dir: Path | None,
+    *,
+    requested_count: int,
+    reused_count: int,
+    warnings: list[str],
+    error: BaseException,
+) -> None:
+    if run_dir is None:
+        return
+    finalize_run(
+        run_dir,
+        status="failed",
+        completed=reused_count,
+        failed=requested_count,
+        warnings=[*warnings, f"Chunk 规划失败：{error}"],
+        usage=None,
+    )
+
+
 def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
 
@@ -1136,6 +1156,16 @@ async def run_terminology(
                     "scope": _scope_record(scope, force_all=scope.force),
                 },
             )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(work),
+            reused_count=len(selected) - len(work),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -1153,6 +1183,7 @@ async def run_terminology(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -1177,8 +1208,13 @@ async def run_terminology(
                 accepted_sources.append(source_part)
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left, right = _split_source_once(source_part)
+                try:
+                    left, right = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 sources[0:0] = [left, right]
         part_ids: list[str] = []
         for index, source_part in enumerate(accepted_sources, start=1):
@@ -1976,6 +2012,16 @@ async def run_translation(
                     "scope": _scope_record(scope),
                 },
             )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -1993,6 +2039,7 @@ async def run_translation(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -2017,8 +2064,13 @@ async def run_translation(
                 accepted_sources.append(source_part)
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left, right = _split_source_once(source_part)
+                try:
+                    left, right = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 sources[0:0] = [left, right]
         part_ids: list[str] = []
         for index, source_part in enumerate(accepted_sources, start=1):
@@ -2925,6 +2977,16 @@ async def run_review(
                     "scope": _scope_record(scope),
                 },
             )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -2942,6 +3004,7 @@ async def run_review(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -2969,8 +3032,13 @@ async def run_review(
                 accepted_parts.append((source_part, text_part))
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left_source, right_source = _split_source_once(source_part)
+                try:
+                    left_source, right_source = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 split_at = round(len(text_part) * len(left_source) / len(source_part))
                 pending_parts[0:0] = [
                     (left_source, text_part[:split_at]),
