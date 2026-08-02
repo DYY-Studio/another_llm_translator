@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -58,7 +59,9 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             error=True,
         )
         diagnostics.retried()
-        diagnostics.rate_limit_waited()
+        diagnostics.rate_limit_wait_started()
+        assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 1
+        diagnostics.rate_limit_wait_finished()
         diagnostics.request_started("REQ-1")
         diagnostics.request_finished(
             request_id="REQ-1",
@@ -85,7 +88,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert metrics["active_requests"] == 0
     assert metrics["http_errors"] == 1
     assert metrics["retry_count"] == 1
-    assert metrics["rate_limit_wait_count"] == 1
+    assert metrics["rate_limit_waiting_requests"] == 0
     assert metrics["latest_latency_ms"] == 100.0
     assert metrics["usage_available"] is True
     assert metrics["input_tokens"] == 12
@@ -130,6 +133,62 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert unavailable["input_tokens"] == 0
     assert unavailable["output_tokens"] == 0
     assert unavailable["throughput_tokens_per_second"] is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_waiting_requests_track_queue_and_cancellation(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    now = [0.0]
+    waits: list[float] = []
+    release = asyncio.Event()
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+        await release.wait()
+        now[0] += delay
+
+    limiter = SlidingWindowLimiter(
+        1,
+        0,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    with diagnostics.activate("sample", "translation"):
+        await limiter.acquire(1)
+        first = asyncio.create_task(
+            limiter.acquire(
+                1,
+                on_wait_start=diagnostics.rate_limit_wait_started,
+                on_wait_end=diagnostics.rate_limit_wait_finished,
+            )
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if waits:
+                break
+        second = asyncio.create_task(
+            limiter.acquire(
+                1,
+                on_wait_start=diagnostics.rate_limit_wait_started,
+                on_wait_end=diagnostics.rate_limit_wait_finished,
+            )
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 2:
+                break
+        assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 2
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 1
+        release.set()
+        await first
+        assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 0
+
+    assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 0
 
 
 def test_request_exchanges_are_bounded_truncated_and_cleared(tmp_path: Path) -> None:
@@ -238,7 +297,7 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     snapshot = diagnostics.snapshot()
     assert snapshot["metrics"]["http_errors"] == 1
     assert snapshot["metrics"]["retry_count"] == 1
-    assert snapshot["metrics"]["rate_limit_wait_count"] == 1
+    assert snapshot["metrics"]["rate_limit_waiting_requests"] == 0
     assert snapshot["metrics"]["usage_available"] is True
     assert len(snapshot["requests"]) == 1
     request_summary = snapshot["requests"][0]
@@ -254,6 +313,140 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     assert "session reasoning" not in persisted
     assert "source secret" not in persisted
     assert "never-log-this-secret" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_429_wait_is_reported_only_while_sleeping(tmp_path: Path) -> None:
+    current = config()
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+    wait_started = asyncio.Event()
+    release = asyncio.Event()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "5"},
+                text="rate limited",
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
+        )
+
+    async def sleeper(_: float) -> None:
+        wait_started.set()
+        await release.wait()
+
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "never-log-this-secret"
+    try:
+        with diagnostics.activate("sample", "translation"):
+            async with LLMClient(
+                current,
+                SlidingWindowLimiter(0, 0),
+                run_dir=tmp_path / "run",
+                project_id="PRJ",
+                run_id="RUN",
+                stage="translation",
+                client=client,
+                sleeper=sleeper,
+            ) as llm:
+                task = asyncio.create_task(
+                    llm.chat(
+                        messages=render_messages(
+                            "prompt", {"segments": [{"source": "source"}]}
+                        ),
+                        temperature=0.2,
+                        estimated_input_tokens=10,
+                    )
+                )
+                await wait_started.wait()
+                assert (
+                    diagnostics.snapshot()["metrics"][
+                        "rate_limit_waiting_requests"
+                    ]
+                    == 1
+                )
+                release.set()
+                await task
+                assert (
+                    diagnostics.snapshot()["metrics"][
+                        "rate_limit_waiting_requests"
+                    ]
+                    == 0
+                )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_regular_retry_backoff_is_not_rate_limit_wait(
+    tmp_path: Path,
+) -> None:
+    current = config()
+    current["retry"]["http_max_attempts"] = 2
+    current["retry"]["base_delay_seconds"] = 5
+    current["retry"]["jitter_seconds"] = 0
+    calls = 0
+    wait_started = asyncio.Event()
+    release = asyncio.Event()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(500, text="temporary")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
+        )
+
+    async def sleeper(_: float) -> None:
+        wait_started.set()
+        await release.wait()
+
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "never-log-this-secret"
+    try:
+        with diagnostics.activate("sample", "translation"):
+            async with LLMClient(
+                current,
+                SlidingWindowLimiter(0, 0),
+                run_dir=tmp_path / "run",
+                project_id="PRJ",
+                run_id="RUN",
+                stage="translation",
+                client=client,
+                sleeper=sleeper,
+            ) as llm:
+                task = asyncio.create_task(
+                    llm.chat(
+                        messages=render_messages(
+                            "prompt", {"segments": [{"source": "source"}]}
+                        ),
+                        temperature=0.2,
+                        estimated_input_tokens=10,
+                    )
+                )
+                await wait_started.wait()
+                assert (
+                    diagnostics.snapshot()["metrics"][
+                        "rate_limit_waiting_requests"
+                    ]
+                    == 0
+                )
+                release.set()
+                await task
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
 
 
 @pytest.mark.asyncio

@@ -190,6 +190,10 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert "grid-template-columns:14px 72px minmax(0,1fr)" in segment_row.group(1)
     assert ".segment-row{content-visibility:auto;contain-intrinsic-block-size:70px;contain-intrinsic-inline-size:0}" in css.text
     assert "contain-intrinsic-size" not in css.text
+    assert "rate_limit_waiting_requests" in script.text
+    assert "rate_limit_wait_count" not in script.text
+    assert "60 / RPM" in script.text
+    assert "必须至少为 1" in script.text
     assert ".settings-navigation{position:sticky;top:58px" in css.text
     assert "grid-template-rows:auto minmax(0,1fr)" in css.text
     assert ".config-settings{height:100%;min-height:0;overflow:auto;padding:0 30px 30px" in css.text

@@ -75,7 +75,7 @@ class Diagnostics:
         self.active_requests = 0
         self.http_errors = 0
         self.retry_count = 0
-        self.rate_limit_wait_count = 0
+        self.rate_limit_waiting_requests = 0
         self.latest_latency_seconds: float | None = None
         self.usage: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
@@ -126,7 +126,7 @@ class Diagnostics:
         self.active_requests = 0
         self.http_errors = 0
         self.retry_count = 0
-        self.rate_limit_wait_count = 0
+        self.rate_limit_waiting_requests = 0
         self.latest_latency_seconds = None
         self.usage = None
         self.requests.clear()
@@ -140,6 +140,7 @@ class Diagnostics:
                 if request["status"] in {"running", "retrying"}:
                     request["status"] = "interrupted"
             self.active_requests = 0
+            self.rate_limit_waiting_requests = 0
             if self._started_monotonic is not None:
                 self._elapsed_seconds = time.monotonic() - self._started_monotonic
             self._running = False
@@ -240,8 +241,14 @@ class Diagnostics:
     def retried(self) -> None:
         self.retry_count += 1
 
-    def rate_limit_waited(self) -> None:
-        self.rate_limit_wait_count += 1
+    def rate_limit_wait_started(self) -> None:
+        if self._running:
+            self.rate_limit_waiting_requests += 1
+
+    def rate_limit_wait_finished(self) -> None:
+        self.rate_limit_waiting_requests = max(
+            0, self.rate_limit_waiting_requests - 1
+        )
 
     def set_usage(self, usage: dict[str, Any]) -> None:
         self.usage = dict(usage)
@@ -319,7 +326,7 @@ class Diagnostics:
                 "active_requests": self.active_requests,
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
-                "rate_limit_wait_count": self.rate_limit_wait_count,
+                "rate_limit_waiting_requests": self.rate_limit_waiting_requests,
                 "latest_latency_ms": (
                     round(self.latest_latency_seconds * 1000, 1)
                     if self.latest_latency_seconds is not None

@@ -858,7 +858,13 @@ class SlidingWindowLimiter:
         self.pacing_lock = asyncio.Lock() if requests_per_minute > 0 else None
         self.last_admitted_at: float | None = None
 
-    async def acquire(self, estimated_tokens: int) -> float:
+    async def acquire(
+        self,
+        estimated_tokens: int,
+        *,
+        on_wait_start: Callable[[], None] | None = None,
+        on_wait_end: Callable[[], None] | None = None,
+    ) -> float:
         waited = 0.0
         if self.requests_per_minute == 0 and self.input_tokens_per_minute == 0:
             return waited
@@ -867,15 +873,30 @@ class SlidingWindowLimiter:
             and estimated_tokens > self.input_tokens_per_minute
         ):
             raise ConfigError("单请求预测 Token 超过 ITPM")
+        waiting = False
+
+        def begin_wait() -> None:
+            nonlocal waiting
+            if waiting:
+                return
+            waiting = True
+            if on_wait_start is not None:
+                on_wait_start()
+
         async def sleep_for(delay: float) -> None:
             nonlocal waited
+            begin_wait()
             await self.sleeper(delay)
             waited += delay
 
         pacing_lock = self.pacing_lock
-        if pacing_lock is not None:
-            await pacing_lock.acquire()
+        pacing_acquired = False
         try:
+            if pacing_lock is not None:
+                if pacing_lock.locked():
+                    begin_wait()
+                await pacing_lock.acquire()
+                pacing_acquired = True
             while True:
                 async with self.lock:
                     now = self.clock()
@@ -914,7 +935,9 @@ class SlidingWindowLimiter:
                         return waited
                 await sleep_for(wait)
         finally:
-            if pacing_lock is not None:
+            if waiting and on_wait_end is not None:
+                on_wait_end()
+            if pacing_lock is not None and pacing_acquired:
                 pacing_lock.release()
 
 
@@ -1075,7 +1098,19 @@ class LLMClient:
                 max_attempts=attempts,
             )
         for attempt in range(1, attempts + 1):
-            waited = await self.limiter.acquire(estimated_input_tokens)
+            waited = await self.limiter.acquire(
+                estimated_input_tokens,
+                on_wait_start=(
+                    diagnostics.rate_limit_wait_started
+                    if diagnostics is not None
+                    else None
+                ),
+                on_wait_end=(
+                    diagnostics.rate_limit_wait_finished
+                    if diagnostics is not None
+                    else None
+                ),
+            )
             if waited:
                 self.logger.info(
                     "rate-limit wait=%.2fs request=%s attempt=%d",
@@ -1083,8 +1118,6 @@ class LLMClient:
                     request_id,
                     attempt,
                 )
-                if diagnostics is not None:
-                    diagnostics.rate_limit_waited()
             self.send_count += 1
             self.logger.info(
                 "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
@@ -1328,23 +1361,48 @@ class LLMClient:
                     self.logger.info(
                         "retry-after request=%s wait=%.2fs", request_id, delay
                     )
-                    if diagnostics is not None:
-                        diagnostics.rate_limit_waited()
-                    await self.sleeper(delay)
+                    await self._retry_sleep(
+                        delay,
+                        diagnostics=diagnostics
+                        if response.status_code == 429
+                        else None,
+                    )
                     continue
                 except ValueError:
                     pass
-            await self._backoff(attempt)
+            await self._backoff(
+                attempt,
+                diagnostics=diagnostics if response.status_code == 429 else None,
+            )
         raise ExternalError("HTTP 请求重试耗尽")
 
-    async def _backoff(self, attempt: int) -> None:
+    async def _retry_sleep(
+        self,
+        delay: float,
+        *,
+        diagnostics: Any | None,
+    ) -> None:
+        if diagnostics is not None:
+            diagnostics.rate_limit_wait_started()
+        try:
+            await self.sleeper(delay)
+        finally:
+            if diagnostics is not None:
+                diagnostics.rate_limit_wait_finished()
+
+    async def _backoff(
+        self,
+        attempt: int,
+        *,
+        diagnostics: Any | None = None,
+    ) -> None:
         delay = min(
             float(self.config["retry"]["max_delay_seconds"]),
             float(self.config["retry"]["base_delay_seconds"]) * (2 ** (attempt - 1)),
         )
         delay += random.uniform(0, float(self.config["retry"]["jitter_seconds"]))
         self.logger.info("retry backoff attempt=%d wait=%.2fs", attempt, delay)
-        await self.sleeper(delay)
+        await self._retry_sleep(delay, diagnostics=diagnostics)
 
     def usage_summary(self) -> dict[str, Any] | None:
         if self.adapter.usage_pointers is None:
