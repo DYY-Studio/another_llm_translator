@@ -8,6 +8,10 @@ function number(value: number | null, suffix = "") {
   return value === null ? "不可用" : `${value.toLocaleString()}${suffix}`;
 }
 
+function waitingRequests(value: number | undefined) {
+  return value ? `${value.toLocaleString()} 个请求` : "无";
+}
+
 function clock(value: string) {
   return new Date(value).toLocaleTimeString([], {
     hour: "2-digit",
@@ -130,7 +134,7 @@ export function DiagnosticsView() {
         <span>请求延迟 <strong>{number(metrics?.latest_latency_ms ?? null, " ms")}</strong></span>
         <span>HTTP 错误 <strong>{number(metrics?.http_errors ?? 0)}</strong></span>
         <span>重试 <strong>{number(metrics?.retry_count ?? 0)}</strong></span>
-        <span>限流等待 <strong>{number(metrics?.rate_limit_wait_count ?? 0)}</strong></span>
+        <span>限流等待 <strong>{waitingRequests(metrics?.rate_limit_waiting_requests)}</strong></span>
       </div>
 
       <div className="diagnostics-grid">

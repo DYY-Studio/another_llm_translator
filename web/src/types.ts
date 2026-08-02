@@ -93,7 +93,7 @@ export interface DiagnosticsResponse {
     active_requests: number;
     http_errors: number;
     retry_count: number;
-    rate_limit_wait_count: number;
+    rate_limit_waiting_requests: number;
     latest_latency_ms: number | null;
     input_tokens: number;
     output_tokens: number;
