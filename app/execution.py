@@ -333,6 +333,7 @@ def stage_fingerprint(
             "document_adapter_options": config.get(
                 "_document_adapter_options", {}
             ),
+            "document_adapters": config.get("_document_adapters", {}),
         }
         if stage == "terminology":
             data["terminology"] = config["terminology"]
