@@ -292,6 +292,7 @@ class EPUBDocumentAdapter:
                         str(segment["source"]),
                         target,
                         bilingual=bilingual,
+                        ruby_mode=str(state.get("ruby_mode", "")),
                     )
                 if not bilingual:
                     ruby_items.sort(
@@ -912,7 +913,19 @@ def _set_regular_slot(
     target: str,
     *,
     bilingual: bool,
+    ruby_mode: str = "",
 ) -> None:
+    if ruby_mode == "aozora":
+        fragments, found_ruby = _parse_aozora_text(target)
+        if found_ruby:
+            _set_regular_aozora(
+                root,
+                raw,
+                source,
+                fragments,
+                bilingual=bilingual,
+            )
+            return
     if not isinstance(raw, dict) or raw.get("kind") != "composite":
         value = f"{source}\n{target}" if bilingual else target
         _set_text_slot(root, raw, value)
@@ -936,6 +949,49 @@ def _set_regular_slot(
     _set_text_slot(root, slots[0], target)
     for slot in slots[1:]:
         _set_text_slot(root, slot, "")
+
+
+def _set_regular_aozora(
+    root: ElementTree.Element,
+    raw: Any,
+    source: str,
+    fragments: list[tuple[str, str, str | None]],
+    *,
+    bilingual: bool,
+) -> None:
+    if not isinstance(raw, dict):
+        raise IncompleteError("EPUB Segment 定位 slot 损坏")
+    if raw.get("kind") == "composite":
+        slots = raw.get("slots")
+        if not isinstance(slots, list) or len(slots) < 2 or not all(
+            isinstance(slot, dict) and slot.get("kind") in {"text", "tail"}
+            for slot in slots
+        ):
+            raise IncompleteError("EPUB 复合 Segment 文本槽损坏")
+        members = [("text", _resolve_text_slot(root, slot)) for slot in slots]
+    else:
+        slots = [raw]
+        members = [("text", _resolve_text_slot(root, raw))]
+    current = _composite_source(slots, members)
+    if current != source:
+        raise IncompleteError("EPUB Segment 与原文不一致")
+    slot = slots[-1] if bilingual else slots[0]
+    parent, index, slot_kind, element = _text_slot_location(root, slot)
+    if slot_kind == "text":
+        index = len(list(parent))
+    if not bilingual:
+        for item in slots:
+            _set_text_slot(root, item, "")
+    inserted = _insert_fragments(
+        parent,
+        index,
+        ([
+            ("text", "\n", None),
+            *fragments,
+        ] if bilingual else fragments),
+    )
+    del element
+    _append_fragment_suffix(parent, index, inserted, "")
 
 
 def _resolve_ruby_slot(
@@ -1151,7 +1207,7 @@ def _text_slot_location(
     raw: dict[str, Any],
 ) -> tuple[ElementTree.Element, int, str, ElementTree.Element]:
     path = raw.get("path")
-    if not isinstance(path, list) or not path or not all(
+    if not isinstance(path, list) or not all(
         isinstance(index, int) and index >= 0 for index in path
     ):
         raise IncompleteError("EPUB Segment 定位 path 损坏")
