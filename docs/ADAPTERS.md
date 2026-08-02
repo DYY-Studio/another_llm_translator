@@ -205,6 +205,12 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 - 以临时项目目录完成事务化初始化；
 - 保存通用 File/Segment 记录。
 
+`ImportedFile` 可选返回与 `segments` 一一对应的 `segment_part_ids`。省略时宿主
+将所有 Segment 归入 `document`；提供时每项必须是非空字符串。宿主把该值写入
+Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和参考上下文。
+这不会改变 File 的存储、选择、调度或导出边界；旧项目缺少有效 `part_id` 时要求
+重新创建，不从 locator 推测或迁移。
+
 每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
 ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
@@ -226,11 +232,12 @@ Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状�
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
 不会自动改用 TXT，也不会删除仍可读取的项目 Segment 和阶段结果。
 
-### EPUB 0.2
+### EPUB 0.3
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
 保存各 File 的原始容器，并记录 OPF、spine
-顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。普通透明内联
+顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。每个 spine XHTML
+的归档路径作为 Segment 的 `part_id`；普通透明内联
 元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写
 被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 

@@ -170,6 +170,12 @@ Preset；内联 LLM 连接配置不再支持。
   只有没有相邻文本的独立 Ruby 才继续使用旧的独立 locator 形状。
 - EPUB Adapter 在不透明状态中保存 Ruby 原始结构和复合定位；不引入宿主
   通用 DOM、排版树或跨格式中间表示。
+- 一个 EPUB 仍对应一个 File；每个 spine XHTML 作为该 File 内部的 `part_id`。
+  新建 Segment、Chunk、参考上下文以及格式/校验修复均限制在同一
+  `(file_id, part_id)`，调度和列表仍按 EPUB File 进行。
+- `ImportedFile.segment_part_ids` 是可选且与 Segment 对齐的导入字段；TXT 和
+  普通 Adapter 使用 `document`。新项目持久化每条 Segment 的 `part_id`；旧项目
+  缺少有效 part 数据时要求重新创建，不提供迁移或从 locator 补齐。
 - 普通及混合 Ruby 复合 Segment 保存按源文顺序的有序槽定位；纯译文写入首个
   可用位置，清空其余普通槽并移除该 Segment 内全部 Ruby，同时保留非 Ruby
   内联标签骨架；双语导出保留完整源句和 Ruby，只在整个 Segment 末尾追加目标文本。
