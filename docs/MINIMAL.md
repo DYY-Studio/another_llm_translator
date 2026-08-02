@@ -57,7 +57,8 @@ MVP 需要回答：
 
 Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻辑行，EPUB
 中对应 XHTML 文本流。普通透明内联元素中的相邻文本槽合并为一个语义单元；
-Ruby 及其尾文本保持独立语义单元。术语扫描、翻译、校对和润色的完成结果、
+Ruby 是同一文本流中的内联语义成员，与前后普通文本共同组成一个语义单元；只有
+没有相邻文本的独立 Ruby 才保持旧的独立定位形状。术语扫描、翻译、校对和润色的完成结果、
 失败记录和恢复判断全部绑定 `segment_id`。
 
 非空 Segment 的连续前导 Unicode 空白以源文为准。模型仍接收完整文本，但翻译、
@@ -261,11 +262,13 @@ EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
 `-//W3C//DTD XHTML 1.1//EN` 的 XHTML 1.1 声明。外部 DTD 永不加载；实体声明、
 不匹配版本的 DOCTYPE、SYSTEM-only 声明和不支持的 PUBLIC 标识均拒绝。
 
-完整 `<ruby>` 子树和紧随的非空尾文本作为一个 Segment。导入前可选择
+完整 `<ruby>` 子树和紧随的尾文本作为文本流中的一个成员；它与同一文本流中的
+普通 `text`/`tail` 槽、其他 Ruby 按源文顺序组成一个 Segment。导入前可选择
 `aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
 （`原文（Ruby）`）；选项固化于 File 的 Adapter 状态，不是项目运行设置。
 更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
-EPUB 以普通译文替换 Ruby 子树，双语 EPUB 保留源 Ruby，译文不生成 Ruby。
+EPUB 将整条译文写入该语义 Segment 的首个可用位置，清空其余普通槽并移除全部
+Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
@@ -1413,8 +1416,9 @@ TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，
 `project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
 EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
 XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写入首个槽并清空
-其余槽，保留原内联标签骨架；双语输出保留源槽并在末槽后追加译文。Ruby 继续
-按其专用定位规则导出。
+其余槽，保留原内联标签骨架；包含 Ruby 的复合 Segment 可以混合普通槽和 Ruby
+槽，单语移除该 Segment 的全部 Ruby，双语在完整源句末尾追加译文。只有旧的
+独立 Ruby locator 继续按其专用定位规则导出。
 
 ```bash
 python -m app.main export PROJECT --stage translated --format original
@@ -1621,10 +1625,11 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
-- EPUB Ruby 作为单一语义 Segment，三种导入模式、纯译文去除旧读音和双语
-  保留源 Ruby 均生效；导入选项只固化在对应 File Adapter 状态。
+- EPUB Ruby 与同一文本流的前后文合为语义 Segment，三种导入模式、纯译文移除
+  全部 Ruby 和双语在完整源句末尾追加译文均生效；导入选项只固化在对应 File
+  Adapter 状态。
 - EPUB ZIP 路径、符号链接、压缩炸弹、非法版本化 DOCTYPE 和 XML 实体输入明确
-  拒绝；普通内联文本合并、复合定位和 Ruby 独立 Segment 均保持可导出。
+  拒绝；普通内联文本合并、混合 Ruby 复合定位和旧独立 Ruby locator 均保持可导出。
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。
