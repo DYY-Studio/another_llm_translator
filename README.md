@@ -116,27 +116,11 @@ Segment 列表支持 Ctrl/Cmd/Shift 经典多选。翻译、校对和润色可�
 会显示运行选项，明确选择未完成 Run 的续用/新建，以及已有结果的复用/强制
 重做。
 
-## 开发期结果编辑器
-
-需要人工检查或修正测试项目结果时，可启动独立的本地编辑器：
-
-```bash
-python -m app.editor novel
-```
-
-编辑器只绑定 `127.0.0.1`，可裁决术语冲突、移除或恢复误提术语，并通过原文
-与译文、基准与建议对照直接检查和编辑翻译、校对与润色结果。三个文本阶段可按
-当前状态快速过滤，右侧同时显示同文件的邻近上下文；它不调用 LLM 或主 CLI
-流程。使用期间不要同时运行会
-写入同一项目的 CLI 命令。它是开发辅助工具，不用于修改源 Segment、配置或
-Prompt。
-
 ## 验证
 
 ```bash
 python -m pytest -q
 python -m app.main --help
-python -m app.editor --help
 python -m app.web --help
 cd web && npm run typecheck && npm run build
 ```

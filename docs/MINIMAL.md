@@ -1505,7 +1505,7 @@ Web 只在当前浏览器的版本化 localStorage 保存最近外部项目路�
 明确提示并从最近列表移除，默认 `projects/` 项目继续直接列出。导出页用
 Ctrl/Cmd/Shift 经典多选限定文件范围，未选择时导出全部。项目配置使用覆盖
 全部现有字段的分组表单；
-项目 Prompt 与 JSON LLM Adapter 分别保留独立编辑器。Web 还提供全局配置、
+项目 Prompt 与 JSON LLM Adapter 在设置页分别提供高级编辑器。Web 还提供全局配置、
 全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
 审校、apply 和 export。
