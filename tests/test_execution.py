@@ -720,6 +720,49 @@ async def test_concurrent_requests_reserve_one_shared_rate_window() -> None:
     assert len(limiter.records) == 1
 
 
+@pytest.mark.asyncio
+async def test_rpm_paces_concurrent_admissions_evenly() -> None:
+    now = [0.0]
+    admissions: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        now[0] += delay
+
+    limiter = SlidingWindowLimiter(
+        15,
+        0,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+
+    async def acquire() -> None:
+        await limiter.acquire(10)
+        admissions.append(now[0])
+
+    await asyncio.gather(*(acquire() for _ in range(15)))
+    assert admissions == [float(index * 4) for index in range(15)]
+
+
+@pytest.mark.asyncio
+async def test_rpm_and_itpm_use_the_later_admission_time() -> None:
+    now = [0.0]
+    waits: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+        now[0] += delay
+
+    limiter = SlidingWindowLimiter(
+        60,
+        5,
+        clock=lambda: now[0],
+        sleeper=sleeper,
+    )
+    await limiter.acquire(3)
+    await limiter.acquire(3)
+    assert waits == [60.0]
+
+
 def test_token_safety_factor_below_one_scales_estimate() -> None:
     messages = render_messages("prompt", {"segments": [{"source": "one"}]})
     assert estimate_messages(messages, 0.5) < estimate_messages(messages, 1.0)

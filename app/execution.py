@@ -855,6 +855,8 @@ class SlidingWindowLimiter:
         self.sleeper = sleeper
         self.records: deque[tuple[float, int]] = deque()
         self.lock = asyncio.Lock()
+        self.pacing_lock = asyncio.Lock() if requests_per_minute > 0 else None
+        self.last_admitted_at: float | None = None
 
     async def acquire(self, estimated_tokens: int) -> float:
         waited = 0.0
@@ -865,29 +867,55 @@ class SlidingWindowLimiter:
             and estimated_tokens > self.input_tokens_per_minute
         ):
             raise ConfigError("单请求预测 Token 超过 ITPM")
-        while True:
-            async with self.lock:
-                now = self.clock()
-                while self.records and now - self.records[0][0] >= 60:
-                    self.records.popleft()
-                request_full = (
-                    self.requests_per_minute > 0
-                    and len(self.records) >= self.requests_per_minute
-                )
-                token_full = (
-                    self.input_tokens_per_minute > 0
-                    and (
-                        sum(tokens for _, tokens in self.records)
-                        + estimated_tokens
-                        > self.input_tokens_per_minute
+        async def sleep_for(delay: float) -> None:
+            nonlocal waited
+            await self.sleeper(delay)
+            waited += delay
+
+        pacing_lock = self.pacing_lock
+        if pacing_lock is not None:
+            await pacing_lock.acquire()
+        try:
+            while True:
+                async with self.lock:
+                    now = self.clock()
+                    while self.records and now - self.records[0][0] >= 60:
+                        self.records.popleft()
+                    pace_wait = 0.0
+                    if self.requests_per_minute > 0 and self.last_admitted_at is not None:
+                        pace_wait = max(
+                            0.0,
+                            self.last_admitted_at
+                            + 60 / self.requests_per_minute
+                            - now,
+                        )
+                    request_full = (
+                        self.requests_per_minute > 0
+                        and len(self.records) >= self.requests_per_minute
                     )
-                )
-                if not request_full and not token_full:
-                    self.records.append((now, estimated_tokens))
-                    return waited
-                wait = max(0.01, 60 - (now - self.records[0][0]))
-            await self.sleeper(wait)
-            waited += wait
+                    token_full = (
+                        self.input_tokens_per_minute > 0
+                        and (
+                            sum(tokens for _, tokens in self.records)
+                            + estimated_tokens
+                            > self.input_tokens_per_minute
+                        )
+                    )
+                    window_wait = 0.0
+                    if request_full or token_full:
+                        window_wait = max(
+                            0.01,
+                            60 - (now - self.records[0][0]),
+                        )
+                    wait = max(pace_wait, window_wait)
+                    if wait <= 0:
+                        self.records.append((now, estimated_tokens))
+                        self.last_admitted_at = now
+                        return waited
+                await sleep_for(wait)
+        finally:
+            if pacing_lock is not None:
+                pacing_lock.release()
 
 
 class LLMClient:
