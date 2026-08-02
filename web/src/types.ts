@@ -37,6 +37,8 @@ export interface Segment {
   part_id: string;
   line_index: number;
   source: string;
+  model_source?: string | null;
+  format_count?: number;
   translation: ResultView | null;
   reviews: {
     proofreading: ReviewView;

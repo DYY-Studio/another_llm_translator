@@ -254,7 +254,9 @@ def full_prompt(stage: str, middle: str) -> str:
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
-            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
+            "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
+            "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
+            "没有这类标记时不要输出其他标记。"
             '每个 Segment 输出一条 type="segment" 记录，只包含 type、id '
             "和完整 translation。记录格式："
             '{"type":"segment","id":"1","translation":"完整译文"}。'
@@ -263,7 +265,9 @@ def full_prompt(stage: str, middle: str) -> str:
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
-            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
+            "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
+            "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
+            "没有这类标记时不要输出其他标记。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
@@ -278,7 +282,9 @@ def full_prompt(stage: str, middle: str) -> str:
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
-            "不保留 Ruby 也合法，不要输出 HTML 或其他标记。"
+            "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
+            "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
+            "没有这类标记时不要输出其他标记。"
             '每个 Segment 输出一条 type="segment" 记录；status 只能是 '
             "accepted 或 suggested。accepted 表示无条件保留当前基准，只输出 "
             "type、id、status；即使附带 suggested_text 或 reason 也不会采用。"
@@ -324,6 +330,9 @@ def stage_fingerprint(
             "context": config["context"][stage],
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,
+            "document_adapter_options": config.get(
+                "_document_adapter_options", {}
+            ),
         }
         if stage == "terminology":
             data["terminology"] = config["terminology"]
@@ -392,12 +401,18 @@ def _segment_part_key(segment: dict[str, Any]) -> tuple[str, str]:
     return str(segment["file_id"]), str(segment["part_id"])
 
 
+def segment_model_source(segment: dict[str, Any]) -> str:
+    value = segment.get("model_source")
+    return str(value) if isinstance(value, str) else str(segment["source"])
+
+
 def previous_context(
     all_segments: list[dict[str, Any]],
     first: dict[str, Any],
     count: int,
     *,
     target_resolver: Callable[[str], str | None] | None = None,
+    source_key: str = "source",
 ) -> list[dict[str, str]]:
     if count <= 0:
         return []
@@ -411,7 +426,13 @@ def previous_context(
     ][-count:]
     result: list[dict[str, str]] = []
     for item in candidates:
-        context = {"source": str(item["source"])}
+        context = {
+            "source": (
+                segment_model_source(item)
+                if source_key == "model_source"
+                else str(item["source"])
+            )
+        }
         if target_resolver is not None:
             target = target_resolver(str(item["segment_id"]))
             if target is not None:
@@ -664,6 +685,7 @@ def create_run(
         selected_segment_count=selected_count,
         requested_segment_count=requested_count,
         reused_segment_count=reused_count,
+        document_adapter_options=config.get("_document_adapter_options", {}),
         **(details or {}),
         started_at=utc_now(),
         completed_at=None,

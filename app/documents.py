@@ -19,6 +19,7 @@ class ImportedFile:
     encoding_confidence: float
     opaque_state: dict[str, Any] | None = None
     segment_part_ids: tuple[str, ...] | None = None
+    model_sources: tuple[str | None, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class DocumentAdapter(Protocol):
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
+    run_options: tuple[DocumentChoiceOption, ...]
 
     def import_sources(
         self,
@@ -63,6 +65,22 @@ class DocumentAdapter(Protocol):
         output_encoding: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]: ...
+
+
+def normalize_document_output(
+    adapter: DocumentAdapter,
+    *,
+    segment: dict[str, Any],
+    text: str,
+    stage: str,
+) -> str:
+    normalizer = getattr(adapter, "normalize_model_output", None)
+    if normalizer is None:
+        return text
+    value = normalizer(segment=segment, text=text, stage=stage)
+    if not isinstance(value, str):
+        raise ProjectError("Document Adapter 返回了无效的模型文本")
+    return value
 
 
 @dataclass(frozen=True)
