@@ -685,6 +685,7 @@ def create_run(
         selected_segment_count=selected_count,
         requested_segment_count=requested_count,
         reused_segment_count=reused_count,
+        document_adapters=config.get("_document_adapters", {}),
         document_adapter_options=config.get("_document_adapter_options", {}),
         **(details or {}),
         started_at=utc_now(),

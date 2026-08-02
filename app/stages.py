@@ -115,7 +115,12 @@ def _project_context(
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
     adapter_options: dict[str, dict[str, Any]] = {}
+    adapters: dict[str, dict[str, str]] = {}
     for file_record in files:
+        adapters[str(file_record["file_id"])] = {
+            "adapter_id": str(file_record["document_adapter_id"]),
+            "version": str(file_record["document_adapter_version"]),
+        }
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
             continue
@@ -126,6 +131,7 @@ def _project_context(
             if key in state
         }
     config["_document_adapter_options"] = adapter_options
+    config["_document_adapters"] = adapters
     return config, metadata, files, segments
 
 

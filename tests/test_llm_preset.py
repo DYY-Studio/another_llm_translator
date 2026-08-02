@@ -160,6 +160,12 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     assert second["llm"]["model"] == "changed-model"
     assert second["_llm_extra_body"] == definition["extra_body"]
     assert stage_fingerprint(second, "translation", "prompt") != first_fingerprint
+    second["_document_adapters"] = {
+        "F0001": {"adapter_id": "txt", "version": "1"}
+    }
+    second["_document_adapter_options"] = {
+        "F0001": {"inline_format_mode": "plain"}
+    }
     run_id, run_dir = create_run(
         project,
         config=second,
@@ -172,6 +178,13 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     )
     assert run_id
     assert json.loads((run_dir / "llm_preset.json").read_text("utf-8")) == definition
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["document_adapters"] == {
+        "F0001": {"adapter_id": "txt", "version": "1"}
+    }
+    assert manifest["document_adapter_options"] == {
+        "F0001": {"inline_format_mode": "plain"}
+    }
     assert load_run_config(run_dir)["llm"]["model"] == "changed-model"
 
     (run_dir / "llm_preset.json").unlink()
