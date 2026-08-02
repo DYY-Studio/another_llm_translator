@@ -40,6 +40,7 @@ def segments() -> list[dict]:
         {
             "segment_id": f"F0001-S{index + 1:06d}",
             "file_id": "F0001",
+            "part_id": "document",
             "line_index": index,
             "source": source,
             "is_empty": source == "",
@@ -137,6 +138,7 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
         {
             "segment_id": f"F0001-S{index + 1:06d}",
             "file_id": "F0001",
+            "part_id": "document",
             "line_index": index,
             "source": value,
             "is_empty": value == "" or value.isspace(),
@@ -147,6 +149,7 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
         {
             "segment_id": "F0002-S000001",
             "file_id": "F0002",
+            "part_id": "document",
             "line_index": 0,
             "source": "other",
             "is_empty": False,
@@ -185,6 +188,64 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
     assert [len(plan.segments) for plan in plans] == [1, 1]
 
 
+def test_chunk_and_context_stop_at_document_part_boundary() -> None:
+    source = [
+        {
+            "segment_id": "F0001-S000001",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch1.xhtml",
+            "line_index": 0,
+            "source": "第一章",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0001-S000002",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch1.xhtml",
+            "line_index": 1,
+            "source": "",
+            "is_empty": True,
+        },
+        {
+            "segment_id": "F0001-S000003",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch2.xhtml",
+            "line_index": 2,
+            "source": "第二章",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0001-S000004",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch2.xhtml",
+            "line_index": 3,
+            "source": "第二章续",
+            "is_empty": False,
+        },
+    ]
+    plans = build_chunk_plans(
+        [source[0], source[2], source[3]],
+        all_segments=source,
+        config=config(),
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+
+    assert [[item["segment_id"] for item in plan.segments] for plan in plans] == [
+        ["F0001-S000001"],
+        ["F0001-S000003", "F0001-S000004"],
+    ]
+    assert previous_context(source, source[2], 3) == []
+    assert [item["id"] for item in previous_context(source, source[3], 3)] == [
+        "F0001-S000003"
+    ]
+
+
 def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
     source: list[dict] = []
     for index in range(80):
@@ -194,6 +255,7 @@ def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
                 {
                     "segment_id": f"F0001-S{line_index + 1:06d}",
                     "file_id": "F0001",
+                    "part_id": "document",
                     "line_index": line_index,
                     "source": value,
                     "is_empty": value == "",
@@ -298,6 +360,7 @@ def test_context_is_same_file_and_optional_target() -> None:
         {
             "segment_id": "F0002-S000001",
             "file_id": "F0002",
+            "part_id": "document",
             "line_index": 0,
             "source": "other",
             "is_empty": False,

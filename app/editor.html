@@ -522,6 +522,7 @@
       }
       const sameFile = state.project.segments.filter(
         item => item.file_id === state.detail.file_id
+          && item.part_id === state.detail.part_id
       );
       const index = sameFile.findIndex(
         item => item.segment_id === state.detail.segment_id

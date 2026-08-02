@@ -354,6 +354,10 @@ def render_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]
     ]
 
 
+def _segment_part_key(segment: dict[str, Any]) -> tuple[str, str]:
+    return str(segment["file_id"]), str(segment["part_id"])
+
+
 def previous_context(
     all_segments: list[dict[str, Any]],
     first: dict[str, Any],
@@ -363,10 +367,11 @@ def previous_context(
 ) -> list[dict[str, str]]:
     if count <= 0:
         return []
+    first_part = _segment_part_key(first)
     candidates = [
         item
         for item in all_segments
-        if item["file_id"] == first["file_id"]
+        if _segment_part_key(item) == first_part
         and int(item["line_index"]) < int(first["line_index"])
         and not item["is_empty"]
     ][-count:]
@@ -387,7 +392,7 @@ def contiguous_groups(
     all_segments: Iterable[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
     empty_positions = {
-        (str(item["file_id"]), int(item["line_index"]))
+        (*_segment_part_key(item), int(item["line_index"]))
         for item in all_segments
         if item["is_empty"]
     }
@@ -400,11 +405,12 @@ def contiguous_groups(
             groups.append([segment])
             continue
         previous = groups[-1][-1]
-        same_file = previous["file_id"] == segment["file_id"]
+        same_part = _segment_part_key(previous) == _segment_part_key(segment)
         previous_index = int(previous["line_index"])
         current_index = int(segment["line_index"])
-        gap_is_empty = same_file and current_index > previous_index and all(
-            (str(segment["file_id"]), line_index) in empty_positions
+        part_key = _segment_part_key(segment)
+        gap_is_empty = same_part and current_index > previous_index and all(
+            (*part_key, line_index) in empty_positions
             for line_index in range(previous_index + 1, current_index)
         )
         if gap_is_empty:

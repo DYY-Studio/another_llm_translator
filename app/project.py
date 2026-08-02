@@ -234,7 +234,7 @@ def _import_project_inputs(
                 adapter, option_values.get(adapter.adapter_id)
             ),
         )
-        files = list(imported.files)
+        files = [_normalize_imported_file(item) for item in imported.files]
         if original_names is not None:
             if len(files) != len(original_names):
                 raise UsageError("Adapter 返回文件数与输入相对路径数量不一致")
@@ -270,12 +270,28 @@ def _import_project_inputs(
             (
                 adapter,
                 replace(
-                    imported.files[0], original_name=source.original_name
+                    _normalize_imported_file(imported.files[0]),
+                    original_name=source.original_name,
                 ),
             )
         )
         warnings.extend(imported.warnings)
     return values, warnings
+
+
+def _normalize_imported_file(item: ImportedFile) -> ImportedFile:
+    parts = item.segment_part_ids
+    if parts is None:
+        parts = tuple("document" for _ in item.segments)
+    elif (
+        not isinstance(parts, tuple)
+        or len(parts) != len(item.segments)
+        or any(not isinstance(value, str) or not value for value in parts)
+    ):
+        raise UsageError(
+            f"Document Adapter 返回的 segment_part_ids 无效：{item.original_name}"
+        )
+    return replace(item, segment_part_ids=parts)
 
 
 def decode_txt(
@@ -355,14 +371,16 @@ class TXTDocumentAdapter:
                 fallback_encoding=str(input_config["fallback_encoding"]),
             )
             normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            segments = tuple(normalized.split("\n"))
             files.append(
                 ImportedFile(
                     source_path=item.path,
                     original_name=item.original_name,
-                    segments=tuple(normalized.split("\n")),
+                    segments=segments,
                     encoding_detected=detected,
                     encoding_used=used,
                     encoding_confidence=confidence,
+                    segment_part_ids=tuple("document" for _ in segments),
                 )
             )
             warnings.extend(
@@ -550,6 +568,9 @@ def init_project(
                     ),
                 )
             )
+            part_ids = item.segment_part_ids
+            if part_ids is None:
+                raise ProjectError("导入文件缺少 segment_part_ids")
             for line_index, source in enumerate(segments):
                 segment_id = f"{file_id}-S{line_index + 1:06d}"
                 segment_records.append(
@@ -560,6 +581,7 @@ def init_project(
                         segment_id=segment_id,
                         file_id=file_id,
                         line_index=line_index,
+                        part_id=part_ids[line_index],
                         source=source,
                         is_empty=source == "" or source.isspace(),
                     )
@@ -636,7 +658,7 @@ def _source_records(
     return (
         metadata,
         _resolve_file_adapters(metadata, files),
-        read_jsonl(project / "source" / "segments.jsonl"),
+        _load_segment_records(project),
     )
 
 
@@ -819,6 +841,9 @@ def add_project_files(
                 ),
             )
             added_files.append(file_record)
+            part_ids = item.segment_part_ids
+            if part_ids is None:
+                raise ProjectError("导入文件缺少 segment_part_ids")
             for line_index, source in enumerate(item.segments):
                 segment_id = f"{file_id}-S{line_index + 1:06d}"
                 added_segments.append(
@@ -829,6 +854,7 @@ def add_project_files(
                         segment_id=segment_id,
                         file_id=file_id,
                         line_index=line_index,
+                        part_id=part_ids[line_index],
                         source=source,
                         is_empty=source == "" or source.isspace(),
                     )
@@ -1084,4 +1110,21 @@ def load_source_files(
 def load_segments(
     project: Path, *, repair_tail: bool = True
 ) -> list[dict[str, object]]:
-    return read_jsonl(project / "source" / "segments.jsonl", repair_tail=repair_tail)
+    return _load_segment_records(project, repair_tail=repair_tail)
+
+
+def _load_segment_records(
+    project: Path, *, repair_tail: bool = True
+) -> list[dict[str, object]]:
+    segments = read_jsonl(
+        project / "source" / "segments.jsonl", repair_tail=repair_tail
+    )
+    if any(
+        not isinstance(segment.get("part_id"), str)
+        or not segment["part_id"]
+        for segment in segments
+    ):
+        raise ProjectError(
+            "项目 Segment 缺少有效 part_id；请重新创建项目"
+        )
+    return segments

@@ -9,8 +9,8 @@ from xml.etree import ElementTree
 import pytest
 
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
-from app.documents import DocumentExportJob, publish_document_exports
-from app.documents import DocumentChoiceOption
+from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
+from app.documents import publish_document_exports
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -20,36 +20,50 @@ from app.plugins import (
     load_plugins,
     validate_document_import_options,
 )
-from app.project import init_project
+from app.project import _normalize_imported_file, init_project
 from app.stages import export_project
 from app.storage import append_jsonl, read_json, read_jsonl, record_header
 from tests.test_foundation import make_app_root
 
 
 def make_epub(
-    path: Path, *, xhtml: bytes | None = None, opf_version: str = "3.0"
+    path: Path,
+    *,
+    xhtml: bytes | None = None,
+    xhtmls: tuple[bytes, ...] | None = None,
+    opf_version: str = "3.0",
 ) -> None:
-    chapter = xhtml or (
+    default_chapter = xhtml or (
         b'<?xml version="1.0" encoding="utf-8"?>'
         b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title>'
         b'<link rel="stylesheet" href="../style.css"/></head><body>'
         b'<h1>Chapter <em>One</em></h1><p>Hello world.</p>'
         b'<img src="../cover.png" alt="cover"/></body></html>'
     )
+    chapters = xhtmls or (default_chapter,)
     container = (
         b'<?xml version="1.0"?>'
         b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
         b'<rootfiles><rootfile full-path="OEBPS/content.opf" '
         b'media-type="application/oebps-package+xml"/></rootfiles></container>'
     )
+    manifest = b"".join(
+        f'<item id="c{index}" href="text/ch{index}.xhtml" '
+        'media-type="application/xhtml+xml"/>'.encode()
+        for index in range(1, len(chapters) + 1)
+    )
+    spine = b"".join(
+        f'<itemref idref="c{index}"/>'.encode()
+        for index in range(1, len(chapters) + 1)
+    )
     opf = (
         b'<?xml version="1.0" encoding="utf-8"?>'
         + f'<package xmlns="http://www.idpf.org/2007/opf" version="{opf_version}">'.encode()
         + b'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Demo</dc:title></metadata>'
-        + b'<manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>'
+        + b'<manifest>' + manifest
         + b'<item id="css" href="style.css" media-type="text/css"/>'
         + b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
-        + b'<spine><itemref idref="c1"/></spine></package>'
+        + b'<spine>' + spine + b'</spine></package>'
     )
     with zipfile.ZipFile(
         path, "w", compression=zipfile.ZIP_DEFLATED
@@ -61,7 +75,8 @@ def make_epub(
         )
         archive.writestr("META-INF/container.xml", container)
         archive.writestr("OEBPS/content.opf", opf)
-        archive.writestr("OEBPS/text/ch1.xhtml", chapter)
+        for index, chapter in enumerate(chapters, start=1):
+            archive.writestr(f"OEBPS/text/ch{index}.xhtml", chapter)
         archive.writestr("OEBPS/style.css", b"body { color: #222; }")
         archive.writestr("OEBPS/cover.png", b"\x89PNG\r\nfixture")
 
@@ -136,6 +151,63 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chapters.epub"
+    chapters = tuple(
+        (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            f"<p>{value} one</p><p>{value} two</p>"
+            "</body></html>"
+        ).encode()
+        for value in ("第一章", "第二章")
+    )
+    make_epub(source, xhtmls=chapters)
+
+    project, _ = init_project(
+        [str(source)],
+        name="chapters",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    files = read_jsonl(project / "source" / "files.jsonl")
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+
+    assert len(files) == 1
+    assert [item["source"] for item in segments] == [
+        "第一章 one",
+        "第一章 two",
+        "第二章 one",
+        "第二章 two",
+    ]
+    assert [item["part_id"] for item in segments] == [
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch2.xhtml",
+        "OEBPS/text/ch2.xhtml",
+    ]
+    assert files[0]["document_adapter_version"] == "0.3"
+
+
+@pytest.mark.parametrize("parts", [(), ("only-one",), ("", "two")])
+def test_imported_file_rejects_invalid_segment_parts(parts: tuple[str, ...]) -> None:
+    item = ImportedFile(
+        source_path=Path("book.txt"),
+        original_name="book.txt",
+        segments=("one", "two"),
+        encoding_detected="utf-8",
+        encoding_used="utf-8",
+        encoding_confidence=1.0,
+        segment_part_ids=parts,
+    )
+
+    with pytest.raises(UsageError, match="segment_part_ids"):
+        _normalize_imported_file(item)
 
 
 def test_epub_inline_text_forms_one_segment_and_preserves_tag_skeleton(

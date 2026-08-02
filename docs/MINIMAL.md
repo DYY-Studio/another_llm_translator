@@ -49,14 +49,17 @@ MVP 需要回答：
 
 ## 1.2 核心不变量
 
-### File 是内容边界
+### File 与文档 part 是内容边界
 
-任何 LLM 请求、Chunk 和参考上文都不得跨文件。术语库可以在项目级汇总，但单次术语请求仍不得跨文件。
+File 仍是存储、选择和导出的边界；任何 LLM 请求、Chunk 和参考上文都不得跨
+`(file_id, part_id)`。术语库可以在项目级汇总，但单次术语请求仍不得跨文档
+part。TXT 和普通 Adapter 使用 `part_id = "document"`；EPUB 使用每个 spine
+XHTML 的归档路径作为 part。调度仍按 File 进行，不把 EPUB 拆成多个 File。
 
 ### Segment 是进度单位
 
 Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻辑行，EPUB
-中对应 XHTML 文本流。普通透明内联元素中的相邻文本槽合并为一个语义单元；
+中对应 XHTML 文本流。每个 Segment 记录非空的 `part_id`；普通透明内联元素中的相邻文本槽合并为一个语义单元；
 Ruby 是同一文本流中的内联语义成员，与前后普通文本共同组成一个语义单元；只有
 没有相邻文本的独立 Ruby 才保持旧的独立定位形状。术语扫描、翻译、校对和润色的完成结果、
 失败记录和恢复判断全部绑定 `segment_id`。
@@ -77,11 +80,11 @@ Segment 的精确前缀；正文内部和尾随空白不做本地保护。该行
 
 Chunk 由当前 Run 动态生成，只能包含：
 
-- 同一个 `file_id`。
+- 同一个 `file_id` 和 `part_id`。
 - 按 `line_index` 保持顺序的非空 Segment。
 - 当前命令选定范围内仍需处理的 Segment。
 
-两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空 Segment 本身仍不提交 LLM。已完成、筛选范围外或其他不在待处理集合中的非空 Segment 会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
+两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空 Segment 本身仍不提交 LLM。已完成、筛选范围外、不同 part 或其他不在待处理集合中的非空 Segment 会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
 
 Chunk 没有长期业务身份，不能用于判断进度或恢复。只有启用调试模式时才持久化 Chunk Manifest。
 
@@ -253,7 +256,8 @@ export 必须在创建 Run 或请求前快速失败，提示先添加含非空 S
 EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，按 spine 顺序读取
 XHTML 文本流。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻
 `text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的
-非空白文本以及内部空白按源文保留。原 EPUB 及不透明定位状态用于重建输出；
+非空白文本以及内部空白按源文保留。每个 spine XHTML 是一个 `part_id`，但仍
+属于同一个 EPUB File；原 EPUB 及不透明定位状态用于重建输出；
 导航、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号
 链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
 
@@ -272,6 +276,11 @@ Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追�
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
+
+`ImportedFile.segment_part_ids` 是与 `segments` 对齐的可选导入字段；省略时宿主
+填入单一 `document` part。新项目必须为每条 Segment 持久化有效 `part_id`；读取
+缺少、为空或不合法的旧数据时快速失败并提示重新创建项目，不读取 locator 猜测或
+写入迁移。
 
 ## 2.4 输入编码与 Segment 化
 
@@ -306,6 +315,7 @@ segments = text.split("\n")
 
 - `segment_id`
 - `file_id`
+- `part_id`
 - `line_index`
 - `source`
 - `is_empty`
@@ -704,11 +714,12 @@ enabled = true
 previous_segments = 3
 ```
 
-数量表示当前文件中、当前 Chunk 首个 Segment 之前最近的非空 Segment 数。
+数量表示当前 `(file_id, part_id)` 中、当前 Chunk 首个 Segment 之前最近的非空
+Segment 数。
 
 规则：
 
-- 上文不得跨文件。
+- 上文不得跨 `file_id` 或 `part_id`。
 - 一个 Chunk 共享一份 `reference_context`。
 - 上文不属于本次进度范围，不要求 LLM 输出。
 - 失败或未完成 Segment 的源文仍可作为上文。
@@ -717,7 +728,7 @@ previous_segments = 3
 
 `ordered_by_file`：
 
-- 同一文件内 Chunk 顺序执行。
+- 同一 `(file_id, part_id)` 内 Chunk 顺序执行。
 - 不同文件可并发。
 - 翻译、校对和润色上文可包含此前已有的阶段文本。
 
@@ -926,7 +937,7 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 修复流程：
 
 1. 汇总当前轮校验失败 Segment。
-2. 同一文件内按源文顺序分组；中间只有空行时仍可组成一个修复 Chunk。
+2. 同一 `file_id + part_id` 内按源文顺序分组；中间只有空行时仍可组成一个修复 Chunk。
 3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
@@ -1530,7 +1541,7 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 文件和 Segment 顺序正确，不跨文件混合。
+- 文件和 Segment 顺序正确，不跨 File 或文档 part 混合。
 - 解码失败明确拒绝，不产生替换字符。
 - 单语导出每个 Segment 对应一个逻辑行。
 - 三个阶段的双语导出均遵守原文/目标文本规则。
@@ -1544,7 +1555,7 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 四阶段上文数量分别生效且不跨文件。
+- 四阶段上文数量分别生效且不跨 `file_id` 或 `part_id`。
 - 术语上文只含源文，不计入扫描进度。
 - ordered_by_file 和 parallel 的上文内容符合定义。
 - 术语按 normalized source 合并，override 和 disabled 生效。

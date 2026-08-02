@@ -18,6 +18,7 @@ class ImportedFile:
     encoding_used: str
     encoding_confidence: float
     opaque_state: dict[str, Any] | None = None
+    segment_part_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
