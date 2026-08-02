@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import load_project_config
+from .documents import normalize_document_output
 from .errors import AppError, UsageError
 from .execution import (
     latest_completed_by_segment,
@@ -97,6 +98,21 @@ class EditorStore:
             raise UsageError(f"未知或空 Segment：{segment_id}")
         return self.segments_by_id[segment_id]
 
+    def _normalize_text(
+        self, segment: dict[str, Any], text: str, stage: str
+    ) -> str:
+        file_record = next(
+            item
+            for item in self.files
+            if str(item["file_id"]) == str(segment["file_id"])
+        )
+        from .plugins import get_document_adapter
+
+        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+        return normalize_document_output(
+            adapter, segment=segment, text=text, stage=stage
+        )
+
     def _base_results(self, stage: str) -> dict[str, dict[str, Any]]:
         translations = self._history("translation")
         if stage == "proofreading":
@@ -168,6 +184,8 @@ class EditorStore:
                     "part_id": item["part_id"],
                     "line_index": item["line_index"],
                     "source": item["source"],
+                    "model_source": item.get("model_source"),
+                    "format_count": len(item.get("_format_markers", [])),
                     "completed": {
                         stage: segment_id in history
                         for stage, history in histories.items()
@@ -210,6 +228,8 @@ class EditorStore:
             "part_id": segment["part_id"],
             "line_index": segment["line_index"],
             "source": segment["source"],
+            "model_source": segment.get("model_source"),
+            "format_count": len(segment.get("_format_markers", [])),
             "translation": self._result_view(
                 histories["translation"].get(segment_id)
             ),
@@ -248,6 +268,8 @@ class EditorStore:
         text = payload.get("text")
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
+        segment = self._require_segment(segment_id)
+        text = self._normalize_text(segment, text, "translation")
         findings = validate_translation_text(
             text, self.config["validation"]["translation"]
         )
@@ -289,6 +311,9 @@ class EditorStore:
         if review_status == "suggested":
             if not isinstance(suggested_text, str) or not suggested_text:
                 raise UsageError("suggested 状态需要非空建议文本")
+            suggested_text = self._normalize_text(
+                self._require_segment(segment_id), suggested_text, str(stage)
+            )
         else:
             suggested_text = None
         reason = payload.get("reason")

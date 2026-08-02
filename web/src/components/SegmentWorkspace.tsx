@@ -245,7 +245,7 @@ export function SegmentWorkspace({
                 >
                   <span className={`status-dot ${itemStatus}`} />
                   <span className="segment-id">{item.segment_id.replace("F0001-S", "")}</span>
-                  <span className="preview"><strong>{item.source}</strong><small>{preview || "尚无结果"}</small></span>
+                  <span className="preview"><strong>{item.source}</strong><small>{item.format_count ? `${item.format_count} 个格式范围 · ` : ""}{preview || "尚无结果"}</small></span>
                 </button>
               );
             })}
@@ -258,6 +258,9 @@ export function SegmentWorkspace({
           <>
             <h2>原文</h2>
             <div className="source-box">{selected.source}</div>
+            {selected.model_source && selected.model_source !== selected.source && (
+              <details className="source-model-preview"><summary>模型文本（受控格式标记）</summary><div className="source-box">{selected.model_source}</div></details>
+            )}
             {review?.outdated && <div className="warning-banner">建议所依据的基准已经变化，请重新检查后保存。</div>}
             <div className={stage === "translation" ? "comparison single" : "comparison"}>
               {stage !== "translation" && (

@@ -15,6 +15,12 @@ interface AdapterSummary {
     default: string;
     choices: Array<{ value: string; label: string }>;
   }>;
+  run_options: Array<{
+    option_id: string;
+    label: string;
+    default: string;
+    choices: Array<{ value: string; label: string }>;
+  }>;
 }
 
 type AdapterOptions = Record<string, Record<string, string>>;
@@ -149,7 +155,7 @@ function InputQueue({
       {!folderSelectionSupported && <small className="muted">当前浏览器不支持文件夹选择，可继续选择单独文件。</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
       {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
-        ? adapter.import_options.map((option) => (
+        ? [...adapter.import_options, ...adapter.run_options].map((option) => (
           <label className="input-queue-option" key={`${adapter.adapter_id}.${option.option_id}`}>
             {option.label}
             <select

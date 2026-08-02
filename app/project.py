@@ -291,7 +291,16 @@ def _normalize_imported_file(item: ImportedFile) -> ImportedFile:
         raise UsageError(
             f"Document Adapter 返回的 segment_part_ids 无效：{item.original_name}"
         )
-    return replace(item, segment_part_ids=parts)
+    model_sources = item.model_sources
+    if model_sources is not None and (
+        not isinstance(model_sources, tuple)
+        or len(model_sources) != len(item.segments)
+        or any(value is not None and not isinstance(value, str) for value in model_sources)
+    ):
+        raise UsageError(
+            f"Document Adapter 返回的 model_sources 无效：{item.original_name}"
+        )
+    return replace(item, segment_part_ids=parts, model_sources=model_sources)
 
 
 def decode_txt(
@@ -346,6 +355,7 @@ class TXTDocumentAdapter:
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = _TXT_EXTENSIONS
     import_options = ()
+    run_options = ()
 
     def import_sources(
         self,
@@ -381,6 +391,7 @@ class TXTDocumentAdapter:
                     encoding_used=used,
                     encoding_confidence=confidence,
                     segment_part_ids=tuple("document" for _ in segments),
+                    model_sources=None,
                 )
             )
             warnings.extend(
@@ -571,19 +582,27 @@ def init_project(
             part_ids = item.segment_part_ids
             if part_ids is None:
                 raise ProjectError("导入文件缺少 segment_part_ids")
+            model_sources = item.model_sources
+            if model_sources is not None and len(model_sources) != len(segments):
+                raise ProjectError("导入文件 model_sources 与 Segment 数量不一致")
             for line_index, source in enumerate(segments):
                 segment_id = f"{file_id}-S{line_index + 1:06d}"
+                fields: dict[str, object] = {
+                    "segment_id": segment_id,
+                    "file_id": file_id,
+                    "line_index": line_index,
+                    "part_id": part_ids[line_index],
+                    "source": source,
+                    "is_empty": source == "" or source.isspace(),
+                }
+                if model_sources is not None and model_sources[line_index] is not None:
+                    fields["model_source"] = model_sources[line_index]
                 segment_records.append(
                     record_header(
                         "source_segment",
                         project_id,
                         record_id=segment_id,
-                        segment_id=segment_id,
-                        file_id=file_id,
-                        line_index=line_index,
-                        part_id=part_ids[line_index],
-                        source=source,
-                        is_empty=source == "" or source.isspace(),
+                        **fields,
                     )
                 )
 
@@ -658,7 +677,7 @@ def _source_records(
     return (
         metadata,
         _resolve_file_adapters(metadata, files),
-        _load_segment_records(project),
+        _load_segment_records(project, include_model_contract=False),
     )
 
 
@@ -844,19 +863,27 @@ def add_project_files(
             part_ids = item.segment_part_ids
             if part_ids is None:
                 raise ProjectError("导入文件缺少 segment_part_ids")
+            model_sources = item.model_sources
+            if model_sources is not None and len(model_sources) != len(item.segments):
+                raise ProjectError("导入文件 model_sources 与 Segment 数量不一致")
             for line_index, source in enumerate(item.segments):
                 segment_id = f"{file_id}-S{line_index + 1:06d}"
+                fields: dict[str, object] = {
+                    "segment_id": segment_id,
+                    "file_id": file_id,
+                    "line_index": line_index,
+                    "part_id": part_ids[line_index],
+                    "source": source,
+                    "is_empty": source == "" or source.isspace(),
+                }
+                if model_sources is not None and model_sources[line_index] is not None:
+                    fields["model_source"] = model_sources[line_index]
                 added_segments.append(
                     record_header(
                         "source_segment",
                         project_id,
                         record_id=segment_id,
-                        segment_id=segment_id,
-                        file_id=file_id,
-                        line_index=line_index,
-                        part_id=part_ids[line_index],
-                        source=source,
-                        is_empty=source == "" or source.isspace(),
+                        **fields,
                     )
                 )
         new_files = [*files, *added_files]
@@ -1114,7 +1141,10 @@ def load_segments(
 
 
 def _load_segment_records(
-    project: Path, *, repair_tail: bool = True
+    project: Path,
+    *,
+    repair_tail: bool = True,
+    include_model_contract: bool = True,
 ) -> list[dict[str, object]]:
     segments = read_jsonl(
         project / "source" / "segments.jsonl", repair_tail=repair_tail
@@ -1127,4 +1157,37 @@ def _load_segment_records(
         raise ProjectError(
             "项目 Segment 缺少有效 part_id；请重新创建项目"
         )
+    if not include_model_contract:
+        return segments
+    files = read_jsonl(
+        project / "source" / "files.jsonl", repair_tail=repair_tail
+    )
+    state_by_file: dict[str, list[dict[str, Any]]] = {}
+    for file_record in files:
+        state_path = file_record.get("document_adapter_state")
+        if not isinstance(state_path, str):
+            continue
+        state = read_json(project / state_path)
+        if isinstance(state.get("state"), dict):
+            state = state["state"]
+        locators = state.get("locators")
+        if isinstance(locators, list):
+            state_by_file[str(file_record.get("file_id"))] = locators
+    by_file: dict[str, list[dict[str, Any]]] = {}
+    for segment in segments:
+        by_file.setdefault(str(segment.get("file_id")), []).append(segment)
+    for file_id, items in by_file.items():
+        locators = state_by_file.get(file_id)
+        if locators is None or len(locators) != len(items):
+            continue
+        for segment, locator in zip(
+            sorted(items, key=lambda value: int(value["line_index"])),
+            locators,
+            strict=True,
+        ):
+            if isinstance(locator, dict):
+                slot = locator.get("slot")
+                formats = slot.get("formats") if isinstance(slot, dict) else None
+                if isinstance(formats, list):
+                    segment["_format_markers"] = formats
     return segments

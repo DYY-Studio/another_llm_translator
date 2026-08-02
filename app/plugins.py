@@ -7,7 +7,7 @@ from .documents import DocumentAdapter, DocumentChoiceOption
 from .errors import ConfigError, UsageError
 
 
-PLUGIN_PROTOCOL_VERSION = 4
+PLUGIN_PROTOCOL_VERSION = 5
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 
@@ -121,6 +121,29 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                         f"{adapter.adapter_id}.{option.option_id}"
                     )
                 seen_options.add(option.option_id)
+            run_options = getattr(adapter, "run_options", ())
+            if not isinstance(run_options, tuple) or not all(
+                isinstance(option, DocumentChoiceOption) for option in run_options
+            ):
+                raise ConfigError(
+                    f"Document Adapter 运行选项声明无效：{adapter.adapter_id}"
+                )
+            for option in run_options:
+                choice_ids = [choice_id for choice_id, _ in option.choices]
+                if (
+                    not option.option_id
+                    or option.option_id in seen_options
+                    or not option.label
+                    or len(choice_ids) < 2
+                    or len(set(choice_ids)) != len(choice_ids)
+                    or not all(choice_id and label for choice_id, label in option.choices)
+                    or option.default not in choice_ids
+                ):
+                    raise ConfigError(
+                        f"Document Adapter 运行选项声明无效："
+                        f"{adapter.adapter_id}.{option.option_id}"
+                    )
+                seen_options.add(option.option_id)
             seen_adapters.add(adapter.adapter_id)
     return tuple(plugins)
 
@@ -149,13 +172,19 @@ def validate_document_import_options(
     declarations = {
         option.option_id: option for option in adapter.import_options
     }
+    run_options = getattr(adapter, "run_options", ())
+    declarations.update(
+        {option.option_id: option for option in run_options}
+    )
     unknown = sorted(set(provided) - set(declarations))
     if unknown:
         raise UsageError(
             f"{adapter.adapter_id} 包含未知导入选项：{', '.join(unknown)}"
         )
     resolved: dict[str, str] = {}
-    for option_id, option in declarations.items():
+    for option_id, option in {
+        option.option_id: option for option in adapter.import_options
+    }.items():
         value = provided.get(option_id, option.default)
         choices = {choice_id for choice_id, _ in option.choices}
         if value not in choices:
@@ -163,6 +192,16 @@ def validate_document_import_options(
                 f"{adapter.adapter_id}.{option_id} 取值无效：{value}"
             )
         resolved[option_id] = value
+    for option in run_options:
+        if option.option_id not in provided:
+            continue
+        value = provided[option.option_id]
+        choices = {choice_id for choice_id, _ in option.choices}
+        if value not in choices:
+            raise UsageError(
+                f"{adapter.adapter_id}.{option.option_id} 取值无效：{value}"
+            )
+        resolved[option.option_id] = value
     return resolved
 
 
@@ -189,6 +228,18 @@ def document_adapter_summaries() -> list[dict[str, object]]:
                             ],
                         }
                         for option in adapter.import_options
+                    ],
+                    "run_options": [
+                        {
+                            "option_id": option.option_id,
+                            "label": option.label,
+                            "default": option.default,
+                            "choices": [
+                                {"value": value, "label": label}
+                                for value, label in option.choices
+                            ],
+                        }
+                        for option in getattr(adapter, "run_options", ())
                     ],
                 }
             )

@@ -19,7 +19,11 @@ from typing import Any
 import httpx
 
 from .config import load_project_config
-from .documents import DocumentExportJob, publish_document_exports
+from .documents import (
+    DocumentExportJob,
+    normalize_document_output,
+    publish_document_exports,
+)
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -52,6 +56,7 @@ from .execution import (
     parse_jsonl_document,
     previous_context,
     render_messages,
+    segment_model_source,
     save_debug_chunks,
     select_scope,
     scope_from_run,
@@ -79,6 +84,24 @@ JAPANESE_RE = re.compile(
 KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
 
 
+def _normalize_model_text(
+    files: list[dict[str, Any]],
+    segment: dict[str, Any],
+    text: str,
+    stage: str,
+) -> str:
+    file_id = str(segment["file_id"])
+    file_record = next(
+        (item for item in files if str(item["file_id"]) == file_id), None
+    )
+    if file_record is None:
+        raise ProjectError(f"模型文本引用了未知文件：{file_id}")
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+    return normalize_document_output(
+        adapter, segment=segment, text=text, stage=stage
+    )
+
+
 def _project_context(
     project: Path, *, dry_run: bool, stage: str | None = None
 ) -> tuple[
@@ -91,6 +114,18 @@ def _project_context(
     metadata = read_json(project / "project.json")
     files = load_source_files(project, repair_tail=not dry_run)
     segments = load_segments(project, repair_tail=not dry_run)
+    adapter_options: dict[str, dict[str, Any]] = {}
+    for file_record in files:
+        state_path = file_record.get("document_adapter_state")
+        if not isinstance(state_path, str):
+            continue
+        state = read_json(project / state_path)
+        adapter_options[str(file_record["file_id"])] = {
+            key: state[key]
+            for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
+            if key in state
+        }
+    config["_document_adapter_options"] = adapter_options
     return config, metadata, files, segments
 
 
@@ -1960,6 +1995,7 @@ async def run_translation(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
+                source_key="model_source",
             )
             if context_config["enabled"]
             else []
@@ -1977,7 +2013,11 @@ async def run_translation(
             "reference_context": context,
             "terms": list(terms_by_source.values()),
             "segments": [
-                {"id": item["segment_id"], "source": item["source"]} for item in items
+                {
+                    "id": item["segment_id"],
+                    "source": segment_model_source(item),
+                }
+                for item in items
             ],
         }
 
@@ -2264,6 +2304,9 @@ async def run_translation(
     async def accept_candidate(
         segment_id: str, text: str, request_id: str
     ) -> None:
+        text = _normalize_model_text(
+            files, by_id[segment_id], str(text), "translation"
+        )
         original_id = part_original.get(segment_id)
         if original_id is None:
             findings = validate_translation_text(
@@ -2324,7 +2367,7 @@ async def run_translation(
                 payload["segments"] = [
                     {
                         "id": item["segment_id"],
-                        "source": item["source"],
+                        "source": segment_model_source(item),
                         "failed_candidate": repair_candidates[
                             str(item["segment_id"])
                         ]["candidate"],
@@ -2374,8 +2417,14 @@ async def run_translation(
                     )
                 continue
             for segment_id, text in valid.items():
+                try:
+                    await accept_candidate(segment_id, text, request_id)
+                except IncompleteError as exc:
+                    parse_errors.append(str(exc))
+                    if segment_id not in unresolved:
+                        unresolved.append(segment_id)
+                    continue
                 valid_total[segment_id] = (text, request_id)
-                await accept_candidate(segment_id, text, request_id)
             if response_complete and not unresolved:
                 continue
             logger.warning(
@@ -2920,6 +2969,7 @@ async def run_review(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
+                source_key="model_source",
             )
             if context_config["enabled"]
             else []
@@ -2939,7 +2989,7 @@ async def run_review(
             "segments": [
                 {
                     "id": item["segment_id"],
-                    "source": item["source"],
+                    "source": segment_model_source(item),
                     "current_text": bases[str(item["segment_id"])]["text"],
                 }
                 for item in items
@@ -3167,9 +3217,15 @@ async def run_review(
             if parsed is not None:
                 suggested_text = parsed["suggested_text"]
                 if suggested_text is not None:
+                    suggested_text = _normalize_model_text(
+                        files,
+                        by_id[segment_id],
+                        str(suggested_text),
+                        stage,
+                    )
                     suggested_text = _restore_leading_whitespace(
                         str(by_id[segment_id]["source"]),
-                        str(suggested_text),
+                        suggested_text,
                     )
                 append_jsonl(
                     result_path,
@@ -3322,7 +3378,12 @@ async def run_review(
                     await save_result(segment_id, request_id, error=str(exc))
                 continue
             for segment_id, parsed in valid.items():
-                await accept_result(segment_id, request_id, parsed)
+                try:
+                    await accept_result(segment_id, request_id, parsed)
+                except IncompleteError as exc:
+                    parse_errors.append(str(exc))
+                    if segment_id not in unresolved:
+                        unresolved.append(segment_id)
             if response_complete and not unresolved:
                 continue
             logger.warning(

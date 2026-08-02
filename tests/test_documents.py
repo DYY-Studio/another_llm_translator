@@ -276,6 +276,79 @@ def test_epub_inline_text_forms_one_segment_and_preserves_tag_skeleton(
         )
 
 
+def test_epub_markers_persist_model_source_and_strip_valid_output(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "markers.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>A <em class="em"><strong>B</strong></em> C</p>'
+            '</body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="markers",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+    assert segments[0]["source"] == "A B C"
+    assert segments[0]["model_source"] == (
+        "A <em1><strong2>B</strong2></em1> C"
+    )
+    loaded = __import__("app.project", fromlist=["load_segments"]).load_segments(project)
+    assert loaded[0]["_format_markers"]
+    adapter = get_document_adapter("epub")
+    assert adapter.normalize_model_output(
+        segment=loaded[0],
+        text="A <em1><strong2>B</strong2></em1> C",
+        stage="translation",
+    ) == "A B C"
+
+
+def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
+    source = tmp_path / "marker-errors.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p><strong>Text</strong></p></body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="marker-errors",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    segment = __import__("app.project", fromlist=["load_segments"]).load_segments(project)[0]
+    adapter = get_document_adapter("epub")
+    for value in ("<strong1>Text", "<unknown1>Text</unknown1>", "<strong1>Text</em1>"):
+        with pytest.raises(IncompleteError):
+            adapter.normalize_model_output(
+                segment=segment, text=value, stage="translation"
+            )
+
+
 def test_epub_inline_runs_respect_blocks_and_line_breaks(tmp_path: Path) -> None:
     source = tmp_path / "boundaries.epub"
     make_epub(
@@ -1058,11 +1131,12 @@ def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
 def test_document_adapter_choice_options_apply_defaults_and_validate_values() -> None:
     epub = get_document_adapter("epub")
     assert validate_document_import_options(epub, None) == {
-        "ruby_mode": "aozora"
+        "ruby_mode": "aozora",
+        "inline_format_mode": "plain",
     }
     assert validate_document_import_options(
         epub, {"ruby_mode": "base_only"}
-    ) == {"ruby_mode": "base_only"}
+    ) == {"ruby_mode": "base_only", "inline_format_mode": "plain"}
     with pytest.raises(UsageError, match="未知导入选项"):
         validate_document_import_options(epub, {"unknown": "value"})
     with pytest.raises(UsageError, match="取值无效"):

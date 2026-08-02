@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import stat
 import zipfile
 from copy import deepcopy
@@ -44,6 +45,23 @@ _INLINE_TEXT_ELEMENTS = {
     "u",
     "var",
 }
+_REQUIRED_INLINE_TEXT_ELEMENTS = {
+    "a",
+    "abbr",
+    "bdi",
+    "bdo",
+    "cite",
+    "code",
+    "data",
+    "dfn",
+    "kbd",
+    "q",
+    "samp",
+    "sub",
+    "sup",
+    "time",
+    "var",
+}
 
 
 class EPUBDocumentAdapter:
@@ -62,7 +80,35 @@ class EPUBDocumentAdapter:
                 ("parenthetical", "原文（Ruby）"),
             ),
         ),
+        DocumentChoiceOption(
+            option_id="inline_format_mode",
+            label="普通内联格式",
+            default="plain",
+            choices=(
+                ("plain", "纯文本"),
+                ("markers", "受控标记"),
+            ),
+        ),
     )
+    run_options = (
+        DocumentChoiceOption(
+            option_id="inline_format_policy",
+            label="内联格式保留策略",
+            default="tiered",
+            choices=(
+                ("tiered", "分级保留"),
+                ("strict", "全部保留"),
+            ),
+        ),
+    )
+
+    def normalize_model_output(
+        self, *, segment: dict[str, Any], text: str, stage: str
+    ) -> str:
+        del stage
+        return _normalize_inline_markers(
+            text, segment.get("_format_markers", [])
+        )
 
     def import_sources(
         self,
@@ -74,6 +120,8 @@ class EPUBDocumentAdapter:
     ) -> DocumentImport:
         del config
         ruby_mode = options["ruby_mode"]
+        inline_format_mode = options.get("inline_format_mode", "plain")
+        inline_format_policy = options.get("inline_format_policy", "tiered")
         if recursive:
             raise UsageError("EPUB Adapter 不支持目录递归发现")
         if len(inputs) != 1:
@@ -90,6 +138,7 @@ class EPUBDocumentAdapter:
                 archive, entries, opf_path
             )
             segments: list[str] = []
+            model_sources: list[str | None] = []
             segment_part_ids: list[str] = []
             locators: list[dict[str, Any]] = []
             for xhtml_path in xhtml_paths:
@@ -108,10 +157,15 @@ class EPUBDocumentAdapter:
                 )
                 if body is None:
                     continue
-                for locator, source in _text_slots(
-                    body, ruby_mode=ruby_mode, location=xhtml_path
+                for locator, source, model_source in _text_slots(
+                    body,
+                    ruby_mode=ruby_mode,
+                    inline_format_mode=inline_format_mode,
+                    inline_format_policy=inline_format_policy,
+                    location=xhtml_path,
                 ):
                     segments.append(source)
+                    model_sources.append(model_source)
                     segment_part_ids.append(xhtml_path)
                     locators.append(
                         {"path": xhtml_path, "slot": locator}
@@ -124,6 +178,7 @@ class EPUBDocumentAdapter:
                     source_path=path,
                     original_name=path.name,
                     segments=tuple(segments),
+                    model_sources=tuple(model_sources),
                     segment_part_ids=tuple(segment_part_ids),
                     encoding_detected="xhtml",
                     encoding_used="utf-8",
@@ -133,6 +188,8 @@ class EPUBDocumentAdapter:
                         "spine_paths": xhtml_paths,
                         "locators": locators,
                         "ruby_mode": ruby_mode,
+                        "inline_format_mode": inline_format_mode,
+                        "inline_format_policy": inline_format_policy,
                     },
                 ),
             ),
@@ -468,6 +525,74 @@ def _slot_contains_ruby(raw: Any) -> bool:
     )
 
 
+_INLINE_MARKER_RE = re.compile(r"</?([a-z][a-z0-9]*\d+)>")
+
+
+def _normalize_inline_markers(text: str, formats: Any) -> str:
+    if not isinstance(formats, list) or not formats:
+        return text
+    expected: dict[str, dict[str, Any]] = {}
+    for item in formats:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise IncompleteError("EPUB 内联格式状态损坏")
+        marker_id = str(item["id"])
+        if marker_id in expected or not isinstance(item.get("tag"), str):
+            raise IncompleteError("EPUB 内联格式标记重复或无效")
+        expected[marker_id] = item
+    stack: list[str] = []
+    seen_open: set[str] = set()
+    seen_close: set[str] = set()
+    output: list[str] = []
+    cursor = 0
+    for match in _INLINE_MARKER_RE.finditer(text):
+        literal = text[cursor : match.start()]
+        if "<" in literal or ">" in literal:
+            raise IncompleteError("EPUB 内联格式输出包含未知标记")
+        output.append(literal)
+        marker_id = match.group(1)
+        if marker_id not in expected:
+            raise IncompleteError("EPUB 内联格式输出包含未知标记")
+        closing = text[match.start() : match.end()].startswith("</")
+        if closing:
+            if not stack or stack[-1] != marker_id or marker_id in seen_close:
+                raise IncompleteError("EPUB 内联格式输出嵌套顺序无效")
+            stack.pop()
+            seen_close.add(marker_id)
+        else:
+            if marker_id in seen_open:
+                raise IncompleteError("EPUB 内联格式输出标记重复")
+            current_path = expected[marker_id].get("path")
+            if isinstance(current_path, list):
+                ancestors = [
+                    other_id
+                    for other_id, item in expected.items()
+                    if other_id != marker_id
+                    and isinstance(item.get("path"), list)
+                    and len(item["path"]) < len(current_path)
+                    and current_path[: len(item["path"])] == item["path"]
+                    and other_id in seen_open
+                    and other_id not in seen_close
+                ]
+                if ancestors and (not stack or stack[-1] != max(
+                    ancestors, key=lambda value: len(expected[value]["path"])
+                )):
+                    raise IncompleteError("EPUB 内联格式输出父子关系无效")
+            stack.append(marker_id)
+            seen_open.add(marker_id)
+        cursor = match.end()
+    tail = text[cursor:]
+    if "<" in tail or ">" in tail:
+        raise IncompleteError("EPUB 内联格式输出包含未知标记")
+    output.append(tail)
+    if stack:
+        raise IncompleteError("EPUB 内联格式输出缺少闭合标记")
+    for marker_id, item in expected.items():
+        required = item.get("required") is True
+        if required and (marker_id not in seen_open or marker_id not in seen_close):
+            raise IncompleteError("EPUB 必需内联格式标记缺失")
+    return "".join(output)
+
+
 def _first_ruby_path(raw: Any) -> tuple[int, ...]:
     if not isinstance(raw, dict):
         raise IncompleteError("EPUB Ruby 定位状态损坏")
@@ -496,10 +621,72 @@ def _text_slots(
     root: ElementTree.Element,
     *,
     ruby_mode: str,
+    inline_format_mode: str = "plain",
+    inline_format_policy: str = "tiered",
     location: str,
-) -> list[tuple[dict[str, Any], str]]:
-    values: list[tuple[dict[str, Any], str]] = []
+) -> list[tuple[dict[str, Any], str, str | None]]:
+    values: list[tuple[dict[str, Any], str, str | None]] = []
     semantic_run: list[tuple[dict[str, Any], str]] = []
+    format_elements: list[tuple[list[int], str]] = []
+
+    def keep_format(name: str) -> bool:
+        return inline_format_mode == "markers" and (
+            inline_format_policy == "strict"
+            or name in _REQUIRED_INLINE_TEXT_ELEMENTS
+        )
+
+    def is_descendant(path: list[int], ancestor: list[int]) -> bool:
+        return len(path) >= len(ancestor) and path[: len(ancestor)] == ancestor
+
+    def model_run() -> tuple[str, list[dict[str, Any]]]:
+        if inline_format_mode != "markers":
+            return "", []
+        entries: list[dict[str, Any]] = []
+        for path, name in format_elements:
+            indexes = [
+                index
+                for index, (locator, _) in enumerate(semantic_run)
+                if isinstance(locator, dict)
+                and isinstance(locator.get("path"), list)
+                and is_descendant(
+                    (
+                        locator["path"]
+                        if locator.get("kind") == "text"
+                        else locator["path"][:-1]
+                    ),
+                    path,
+                )
+            ]
+            if not indexes:
+                continue
+            entries.append(
+                {
+                    "path": path,
+                    "tag": name,
+                    "start": min(indexes),
+                    "end": max(indexes),
+                    "required": name in _REQUIRED_INLINE_TEXT_ELEMENTS,
+                }
+            )
+        entries.sort(key=lambda item: (item["start"], len(item["path"]), item["tag"]))
+        for index, item in enumerate(entries, start=1):
+            item["id"] = f"{item['tag']}{index}"
+        starts: dict[int, list[dict[str, Any]]] = {}
+        ends: dict[int, list[dict[str, Any]]] = {}
+        for item in entries:
+            starts.setdefault(int(item["start"]), []).append(item)
+            ends.setdefault(int(item["end"]), []).append(item)
+        parts: list[str] = []
+        for index, (locator, text) in enumerate(semantic_run):
+            del locator
+            for item in sorted(starts.get(index, []), key=lambda value: len(value["path"])):
+                parts.append(f"<{item['id']}>")
+            parts.append(text)
+            for item in sorted(
+                ends.get(index, []), key=lambda value: len(value["path"]), reverse=True
+            ):
+                parts.append(f"</{item['id']}>")
+        return "".join(parts), entries
 
     def add_regular(locator: dict[str, Any], text: str | None) -> None:
         if not text:
@@ -545,8 +732,13 @@ def _text_slots(
                 "kind": "composite",
                 "slots": [item[0] for item in semantic_run],
             }
-        values.append((locator, "".join(item[1] for item in semantic_run)))
+        source = "".join(item[1] for item in semantic_run)
+        model_source, formats = model_run()
+        if formats:
+            locator["formats"] = formats
+        values.append((locator, source, model_source or None))
         semantic_run.clear()
+        format_elements.clear()
 
     def append_ruby(child: ElementTree.Element, child_path: list[int]) -> None:
         ruby = _render_ruby(
@@ -572,6 +764,9 @@ def _text_slots(
     def visit_inline(element: ElementTree.Element, path: list[int]) -> None:
         if _local_name(element.tag) in _SKIPPED_TEXT_ELEMENTS:
             return
+        name = _local_name(element.tag)
+        if keep_format(name):
+            format_elements.append((path, name))
         add_regular({"path": path, "kind": "text"}, element.text)
         for index, child in enumerate(list(element)):
             child_path = [*path, index]
