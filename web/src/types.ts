@@ -39,11 +39,20 @@ export interface Segment {
   source: string;
   model_source?: string | null;
   format_count?: number;
+  stage_errors?: Partial<Record<LLMStage, StageError>>;
   translation: ResultView | null;
   reviews: {
     proofreading: ReviewView;
     polishing: ReviewView;
   };
+}
+
+export interface StageError {
+  error_class: string;
+  error_message: string;
+  run_id?: string | null;
+  request_id?: string | null;
+  created_at?: string | null;
 }
 
 export interface ProjectOverview {
@@ -76,8 +85,11 @@ export interface TaskState {
   status: string;
   error?: string | null;
   summary?: Record<string, unknown> | null;
-  processed_segments: number;
+  completed_segments: number;
+  failed_segments: number;
+  pending_segments: number;
   total_segments: number;
+  failure_counts: Record<string, number>;
   usage: TaskUsage;
 }
 
@@ -211,6 +223,26 @@ export interface TermsResponse {
   terms_revision: number | null;
   conflict_count: number;
   terms: Term[];
+  scan: TerminologyScan;
+}
+
+export interface TerminologyScan {
+  active_task_id: string | null;
+  status: "none" | "active" | "completed" | "partial_published" | string;
+  completed: number;
+  failed: number;
+  pending: number;
+  candidate_count: number;
+  candidate_records: number;
+  failure_counts: Record<string, number>;
+  failed_segments: Array<{
+    segment_id: string;
+    error_class: string;
+    error_message: string;
+    run_id?: string | null;
+    request_id?: string | null;
+  }>;
+  failed_segments_truncated: boolean;
 }
 
 export type ThemeMode = "system" | "light" | "dark";

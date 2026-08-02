@@ -29,7 +29,13 @@ function formFor(term: Term): TermForm {
   };
 }
 
-export function TermsView({ project }: { project: string }) {
+export function TermsView({
+  project,
+  focusFailures = false,
+}: {
+  project: string;
+  focusFailures?: boolean;
+}) {
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
@@ -40,6 +46,9 @@ export function TermsView({ project }: { project: string }) {
   const [removeOpen, setRemoveOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
+  const [partialOpen, setPartialOpen] = useState(false);
+  const [showScanFailures, setShowScanFailures] = useState(false);
   const selection = useClassicSelection();
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
@@ -54,6 +63,10 @@ export function TermsView({ project }: { project: string }) {
       .then(setData)
       .catch((error) => setMessage(String(error)));
   }, [project]);
+
+  useEffect(() => {
+    if (focusFailures) setShowScanFailures(true);
+  }, [focusFailures]);
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -181,7 +194,7 @@ export function TermsView({ project }: { project: string }) {
           <div className="batch-toolbar">
             <span>已选择 {selection.selectedKeys.size} 条</span>
             <button className="quiet-button" onClick={() => setImportOpen(true)}>导入</button>
-            <button className="quiet-button" onClick={() => setExportOpen(true)}>导出</button>
+            <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>导出</button>
             <button
               className="danger-button"
               disabled={!selectedActive.length}
@@ -189,6 +202,31 @@ export function TermsView({ project }: { project: string }) {
             >移除所选</button>
           </div>
         </div>
+        {data?.scan.active_task_id && (
+          <div className="term-scan-status">
+            <div>
+              <strong>当前扫描</strong>
+              <span>已完成 {data.scan.completed} · 失败 {data.scan.failed} · 待处理 {data.scan.pending}</span>
+              <span>可用候选 {data.scan.candidate_count} 条</span>
+              {Object.entries(data.scan.failure_counts).map(([key, count]) => <span key={key} className="scan-error-count">{key} {count}</span>)}
+            </div>
+            <div className="term-scan-actions">
+              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? "收起失败" : "查看失败"}</button>}
+              {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>导出当前扫描结果</button>}
+              {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>发布现有结果</button>}
+            </div>
+            {showScanFailures && data.scan.failed_segments.length > 0 && (
+              <div className="term-scan-failures">
+                {data.scan.failed_segments.map((item) => (
+                  <div key={item.segment_id}>
+                    <code>{item.segment_id}</code><span>{item.error_class} · {item.error_message}</span>
+                  </div>
+                ))}
+                {data.scan.failed_segments_truncated && <small>仅显示前 200 条失败记录。</small>}
+              </div>
+            )}
+          </div>
+        )}
         <div className="term-list">
           {visible.map((term) => {
             const selectedRow = selection.selectedKeys.has(term.normalized);
@@ -282,7 +320,21 @@ export function TermsView({ project }: { project: string }) {
       {exportOpen && (
         <TermExportDialog
           project={project}
+          hasScanned={Boolean(data?.scan.candidate_count)}
+          defaultSource={exportSource}
           onClose={() => setExportOpen(false)}
+        />
+      )}
+      {partialOpen && (
+        <PartialPublishDialog
+          project={project}
+          count={data?.scan.candidate_count ?? 0}
+          onClose={() => setPartialOpen(false)}
+          onPublished={async () => {
+            setPartialOpen(false);
+            setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
+            setMessage("现有扫描结果已发布并可用于后续阶段");
+          }}
         />
       )}
     </div>
@@ -384,19 +436,24 @@ function TermImportDialog({
 
 function TermExportDialog({
   project,
+  hasScanned,
+  defaultSource,
   onClose,
 }: {
   project: string;
+  hasScanned: boolean;
+  defaultSource: "published" | "scanned";
   onClose: () => void;
 }) {
   const [format, setFormat] = useState<"json" | "csv">("json");
+  const [source, setSource] = useState<"published" | "scanned">(defaultSource);
   const [includeDisabled, setIncludeDisabled] = useState(false);
   const [error, setError] = useState("");
 
   async function download() {
     try {
       const response = await fetch(
-        `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}`,
+        `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}&source=${source}`,
       );
       if (!response.ok) {
         const value = await response.json();
@@ -418,12 +475,55 @@ function TermExportDialog({
     <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-modal="true" aria-label="导出术语表">
         <h2>导出术语表</h2>
+        <label>来源<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">已发布术语表</option>{hasScanned && <option value="scanned">当前扫描候选</option>}</select></label>
         <label>格式<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
         <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />包含已移除术语</label>
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
           <button className="quiet-button" onClick={onClose}>取消</button>
           <button className="primary-button" onClick={download}>下载</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PartialPublishDialog({
+  project,
+  count,
+  onClose,
+  onPublished,
+}: {
+  project: string;
+  count: number;
+  onClose: () => void;
+  onPublished: () => Promise<void>;
+}) {
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+
+  async function confirm() {
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/api/v1/projects/${project}/terms/publish-partial`, { method: "POST", body: JSON.stringify({ confirm: true }) });
+      await onPublished();
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-modal="true" aria-label="发布现有扫描结果">
+        <h2>发布现有扫描结果</h2>
+        <p>将合并当前可用的 {count} 条候选术语，立即作为正式术语表使用。未完成 Segment 不会被标记为已扫描；历史候选仍会保留。</p>
+        {error && <p className="error-text">{error}</p>}
+        <div className="modal-actions">
+          <button className="quiet-button" disabled={working} onClick={onClose}>取消</button>
+          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? "正在发布…" : "确认发布"}</button>
         </div>
       </div>
     </div>
