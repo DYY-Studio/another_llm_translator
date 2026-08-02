@@ -213,17 +213,19 @@ class EPUBDocumentAdapter:
                             f"EPUB 导出缺少结果：{segment_id}"
                         )
                     resolved.append((segment, locator, target))
-                regular = [
-                    item
-                    for item in resolved
-                    if item[1]["slot"].get("kind") != "ruby"
-                ]
-                rubies = [
-                    item
-                    for item in resolved
-                    if item[1]["slot"].get("kind") == "ruby"
-                ]
-                for segment, locator, target in regular:
+                plain_items: list[
+                    tuple[dict[str, Any], dict[str, Any], str]
+                ] = []
+                ruby_items: list[
+                    tuple[dict[str, Any], dict[str, Any], str]
+                ] = []
+                for item in resolved:
+                    slot = item[1]["slot"]
+                    if _slot_contains_ruby(slot):
+                        ruby_items.append(item)
+                    else:
+                        plain_items.append(item)
+                for segment, locator, target in plain_items:
                     _set_regular_slot(
                         body,
                         locator.get("slot"),
@@ -231,18 +233,28 @@ class EPUBDocumentAdapter:
                         target,
                         bilingual=bilingual,
                     )
-                ruby_items = rubies if bilingual else sorted(
-                    rubies,
-                    key=lambda item: tuple(item[1]["slot"].get("path", [])),
-                    reverse=True,
-                )
-                for _, locator, target in ruby_items:
-                    _set_ruby_slot(
-                        body,
-                        locator.get("slot"),
-                        target,
-                        bilingual=bilingual,
+                if not bilingual:
+                    ruby_items.sort(
+                        key=lambda item: _first_ruby_path(item[1]["slot"]),
+                        reverse=True,
                     )
+                for segment, locator, target in ruby_items:
+                    slot = locator.get("slot")
+                    if isinstance(slot, dict) and slot.get("kind") == "ruby":
+                        _set_ruby_slot(
+                            body,
+                            slot,
+                            target,
+                            bilingual=bilingual,
+                        )
+                    else:
+                        _set_composite_slot(
+                            body,
+                            slot,
+                            str(segment["source"]),
+                            target,
+                            bilingual=bilingual,
+                        )
                 changed[xhtml_path] = ElementTree.tostring(
                     root, encoding="utf-8", xml_declaration=True
                 )
@@ -437,6 +449,44 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].casefold()
 
 
+def _slot_contains_ruby(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("kind") == "ruby":
+        return True
+    if raw.get("kind") != "composite":
+        return False
+    slots = raw.get("slots")
+    return isinstance(slots, list) and any(
+        isinstance(slot, dict) and slot.get("kind") == "ruby"
+        for slot in slots
+    )
+
+
+def _first_ruby_path(raw: Any) -> tuple[int, ...]:
+    if not isinstance(raw, dict):
+        raise IncompleteError("EPUB Ruby 定位状态损坏")
+    if raw.get("kind") == "ruby":
+        path = raw.get("path")
+    elif raw.get("kind") == "composite":
+        slots = raw.get("slots")
+        path = next(
+            (
+                slot.get("path")
+                for slot in slots
+                if isinstance(slot, dict) and slot.get("kind") == "ruby"
+            ),
+            None,
+        ) if isinstance(slots, list) else None
+    else:
+        path = None
+    if not isinstance(path, list) or not all(
+        isinstance(index, int) and index >= 0 for index in path
+    ):
+        raise IncompleteError("EPUB Ruby 定位 path 损坏")
+    return tuple(path)
+
+
 def _text_slots(
     root: ElementTree.Element,
     *,
@@ -444,29 +494,54 @@ def _text_slots(
     location: str,
 ) -> list[tuple[dict[str, Any], str]]:
     values: list[tuple[dict[str, Any], str]] = []
-    regular_run: list[tuple[dict[str, Any], str]] = []
+    semantic_run: list[tuple[dict[str, Any], str]] = []
 
     def add_regular(locator: dict[str, Any], text: str | None) -> None:
         if not text:
             return
-        if text.isspace() and not regular_run:
+        if text.isspace() and not semantic_run:
             return
-        regular_run.append((locator, text))
+        semantic_run.append((locator, text))
 
-    def flush_regular() -> None:
-        while regular_run and regular_run[-1][1].isspace():
-            regular_run.pop()
-        if not regular_run:
+    def flush_run() -> None:
+        if not semantic_run:
             return
-        if len(regular_run) == 1:
-            locator: dict[str, Any] = regular_run[0][0]
+        last_visible = max(
+            (
+                index
+                for index, (_, text) in enumerate(semantic_run)
+                if text and not text.isspace()
+            ),
+            default=-1,
+        )
+        if last_visible < 0:
+            semantic_run.clear()
+            return
+        del semantic_run[last_visible + 1 :]
+        for index, (locator, text) in enumerate(semantic_run):
+            if not isinstance(locator, dict) or locator.get("kind") != "ruby":
+                continue
+            tail = locator.get("tail")
+            rendered = locator.get("source")
+            if not isinstance(tail, str) or not isinstance(rendered, str):
+                raise ProjectError("EPUB Ruby 定位状态缺少源文")
+            include_tail = bool(tail) and (
+                not tail.isspace() or index < last_visible
+            )
+            locator["tail_in_source"] = include_tail
+            semantic_run[index] = (
+                locator,
+                rendered + (tail if include_tail else ""),
+            )
+        if len(semantic_run) == 1:
+            locator = semantic_run[0][0]
         else:
             locator = {
                 "kind": "composite",
-                "slots": [item[0] for item in regular_run],
+                "slots": [item[0] for item in semantic_run],
             }
-        values.append((locator, "".join(item[1] for item in regular_run)))
-        regular_run.clear()
+        values.append((locator, "".join(item[1] for item in semantic_run)))
+        semantic_run.clear()
 
     def append_ruby(child: ElementTree.Element, child_path: list[int]) -> None:
         ruby = _render_ruby(
@@ -476,16 +551,16 @@ def _text_slots(
             path=child_path,
         )
         tail = child.tail or ""
-        tail_in_source = bool(tail and not tail.isspace())
-        values.append(
+        semantic_run.append(
             (
                 {
                     "path": child_path,
                     "kind": "ruby",
+                    "source": ruby,
                     "tail": tail,
-                    "tail_in_source": tail_in_source,
+                    "tail_in_source": False,
                 },
-                ruby + (tail if tail_in_source else ""),
+                ruby + tail,
             )
         )
 
@@ -497,12 +572,11 @@ def _text_slots(
             child_path = [*path, index]
             name = _local_name(child.tag)
             if name == "ruby":
-                flush_regular()
                 append_ruby(child, child_path)
             elif name in _INLINE_TEXT_ELEMENTS:
                 visit_inline(child, child_path)
             else:
-                flush_regular()
+                flush_run()
                 visit(child, child_path)
             if name != "ruby":
                 add_regular({"path": child_path, "kind": "tail"}, child.tail)
@@ -515,19 +589,18 @@ def _text_slots(
             child_path = [*path, index]
             name = _local_name(child.tag)
             if name == "ruby":
-                flush_regular()
                 append_ruby(child, child_path)
             elif name in _INLINE_TEXT_ELEMENTS:
                 visit_inline(child, child_path)
             else:
-                flush_regular()
+                flush_run()
                 visit(child, child_path)
             if name != "ruby":
                 add_regular({"path": child_path, "kind": "tail"}, child.tail)
-        flush_regular()
+        flush_run()
 
     visit(root, [])
-    flush_regular()
+    flush_run()
     return values
 
 
@@ -665,13 +738,9 @@ def _set_regular_slot(
         _set_text_slot(root, slot, "")
 
 
-def _set_ruby_slot(
-    root: ElementTree.Element,
-    raw: Any,
-    target: str,
-    *,
-    bilingual: bool,
-) -> None:
+def _resolve_ruby_slot(
+    root: ElementTree.Element, raw: Any
+) -> tuple[ElementTree.Element, ElementTree.Element]:
     if not isinstance(raw, dict) or raw.get("kind") != "ruby":
         raise IncompleteError("EPUB Ruby 定位 slot 损坏")
     path = raw.get("path")
@@ -687,12 +756,18 @@ def _set_ruby_slot(
             parent = list(parent)[index]
         ruby = list(parent)[path[-1]]
     except IndexError as exc:
-        raise IncompleteError("EPUB XHTML 结构与 Ruby 导入状态不一致") from exc
+        raise IncompleteError("EPUB XHTML 结构与导入状态不一致") from exc
     if _local_name(ruby.tag) != "ruby":
         raise IncompleteError("EPUB Ruby 定位未指向 ruby 元素")
-    if bilingual:
-        ruby.tail = f"{ruby.tail or ''}\n{target}"
-        return
+    return parent, ruby
+
+
+def _replace_ruby_element(
+    parent: ElementTree.Element,
+    ruby: ElementTree.Element,
+    raw: dict[str, Any],
+    target: str,
+) -> None:
     imported_tail = raw.get("tail")
     tail_in_source = raw.get("tail_in_source")
     if not isinstance(imported_tail, str) or not isinstance(tail_in_source, bool):
@@ -705,10 +780,142 @@ def _set_ruby_slot(
     else:
         suffix = current_tail
     value = target + suffix
+    path = raw["path"]
     index = path[-1]
     if index == 0:
         parent.text = (parent.text or "") + value
     else:
         previous = list(parent)[index - 1]
         previous.tail = (previous.tail or "") + value
+
+
+def _resolve_composite_members(
+    root: ElementTree.Element, raw: Any
+) -> tuple[list[dict[str, Any]], list[tuple[str, Any]]]:
+    if not isinstance(raw, dict) or raw.get("kind") != "composite":
+        raise IncompleteError("EPUB 复合 Segment 定位损坏")
+    slots = raw.get("slots")
+    if not isinstance(slots, list) or len(slots) < 2:
+        raise IncompleteError("EPUB 复合 Segment 定位损坏")
+    members: list[tuple[str, Any]] = []
+    for slot in slots:
+        if not isinstance(slot, dict):
+            raise IncompleteError("EPUB 复合 Segment 槽损坏")
+        kind = slot.get("kind")
+        if kind in {"text", "tail"}:
+            members.append(("text", _resolve_text_slot(root, slot)))
+        elif kind == "ruby":
+            members.append(("ruby", _resolve_ruby_slot(root, slot)))
+        else:
+            raise IncompleteError("EPUB 复合 Segment 槽类型无效")
+    return slots, members
+
+
+def _composite_source(
+    slots: list[dict[str, Any]],
+    members: list[tuple[str, Any]],
+) -> str:
+    parts: list[str] = []
+    for slot, (kind, resolved) in zip(slots, members, strict=True):
+        if kind == "text":
+            element, slot_kind = resolved
+            parts.append(
+                element.text or ""
+                if slot_kind == "text"
+                else element.tail or ""
+            )
+            continue
+        rendered = slot.get("source")
+        tail = slot.get("tail")
+        tail_in_source = slot.get("tail_in_source")
+        if (
+            not isinstance(rendered, str)
+            or not isinstance(tail, str)
+            or not isinstance(tail_in_source, bool)
+        ):
+            raise IncompleteError("EPUB 复合 Ruby 源文状态损坏")
+        if tail_in_source and not (resolved[1].tail or "").startswith(tail):
+            raise IncompleteError("EPUB Ruby tail 与导入状态不一致")
+        parts.append(rendered + (tail if tail_in_source else ""))
+    return "".join(parts)
+
+
+def _set_composite_slot(
+    root: ElementTree.Element,
+    raw: Any,
+    source: str,
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    slots, members = _resolve_composite_members(root, raw)
+    if not any(kind == "ruby" for kind, _ in members):
+        _set_regular_slot(root, raw, source, target, bilingual=bilingual)
+        return
+    if _composite_source(slots, members) != source:
+        raise IncompleteError("EPUB 复合 Segment 与原文不一致")
+    if bilingual:
+        last_kind, last_resolved = members[-1]
+        if last_kind == "ruby":
+            _, ruby = last_resolved
+            ruby.tail = f"{ruby.tail or ''}\n{target}"
+        else:
+            element, slot_kind = last_resolved
+            current = (
+                element.text or ""
+                if slot_kind == "text"
+                else element.tail or ""
+            )
+            if slot_kind == "text":
+                element.text = f"{current}\n{target}"
+            else:
+                element.tail = f"{current}\n{target}"
+        return
+
+    first_kind = members[0][0]
+    if first_kind == "text":
+        first_element, first_slot_kind = members[0][1]
+        if first_slot_kind == "text":
+            first_element.text = target
+        else:
+            first_element.tail = target
+    for index, (kind, resolved) in enumerate(members):
+        if kind != "text" or (index == 0 and first_kind == "text"):
+            continue
+        element, slot_kind = resolved
+        if slot_kind == "text":
+            element.text = ""
+        else:
+            element.tail = ""
+
+    ruby_members = [
+        (index, slots[index], members[index][1])
+        for index, (kind, _) in enumerate(members)
+        if kind == "ruby"
+    ]
+    ordered_rubies = sorted(
+        ruby_members,
+        key=lambda item: tuple(item[1].get("path", [])),
+        reverse=True,
+    )
+    for index, slot, (parent, ruby) in ordered_rubies:
+        _replace_ruby_element(parent, ruby, slot, target if index == 0 else "")
+    for _, _, (parent, ruby) in ordered_rubies:
+        parent.remove(ruby)
+
+
+def _set_ruby_slot(
+    root: ElementTree.Element,
+    raw: Any,
+    target: str,
+    *,
+    bilingual: bool,
+) -> None:
+    if not isinstance(raw, dict):
+        raise IncompleteError("EPUB Ruby 定位 slot 损坏")
+    parent, ruby = _resolve_ruby_slot(root, raw)
+    if bilingual:
+        ruby.tail = f"{ruby.tail or ''}\n{target}"
+        return
+    _replace_ruby_element(parent, ruby, raw, target)
     parent.remove(ruby)

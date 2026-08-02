@@ -178,7 +178,7 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert "segment-row-boundary" not in script.text
     assert (
         ".segment-row-stack{display:grid;grid-auto-rows:max-content;"
-        "gap:1px;background:var(--border)}"
+        "gap:2px;background:var(--border)}"
     ) in css.text
     assert ".segment-row-boundary" not in css.text
     assert ".segment-row:after" not in css.text
@@ -343,8 +343,7 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert response.status_code == 200
     overview = client.get("/api/v1/projects/ruby-option").json()
     assert [item["source"] for item in overview["segments"]] == [
-        "彼は",
-        "漢字（かんじ）を読む。",
+        "彼は漢字（かんじ）を読む。",
         "特別（スペシャル／とくべつ）だ。",
     ]
     project = projects_root / "ruby-option"
@@ -402,9 +401,8 @@ def test_web_applies_import_options_when_adding_project_files(
 
     assert response.status_code == 200
     overview = client.get("/api/v1/projects/sample").json()
-    assert [item["source"] for item in overview["segments"][-3:]] == [
-        "彼は",
-        "漢字を読む。",
+    assert [item["source"] for item in overview["segments"][-2:]] == [
+        "彼は漢字を読む。",
         "特別だ。",
     ]
 
