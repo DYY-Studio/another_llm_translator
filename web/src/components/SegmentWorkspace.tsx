@@ -103,7 +103,9 @@ export function SegmentWorkspace({
   }, [project, stage, file, status, search]);
 
   const neighbors = selected
-    ? overview.segments.filter((item) => item.file_id === selected.file_id)
+    ? overview.segments.filter(
+        (item) => item.file_id === selected.file_id && item.part_id === selected.part_id,
+      )
     : [];
   const selectedIndex = neighbors.findIndex((item) => item.segment_id === selected?.segment_id);
   const before = neighbors.slice(Math.max(0, selectedIndex - 2), selectedIndex);

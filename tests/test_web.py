@@ -353,6 +353,46 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert state["state"]["ruby_mode"] == "parenthetical"
 
 
+def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "chapters.epub"
+    make_epub(
+        epub,
+        xhtmls=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>&#31532;&#19968;&#31456;</p></body></html>',
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>&#31532;&#20108;&#31456;</p></body></html>',
+        ),
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects",
+        data={"name": "chapter-parts"},
+        files=[
+            ("files", ("chapters.epub", epub.read_bytes(), "application/epub+zip"))
+        ],
+    )
+
+    assert response.status_code == 200
+    overview = client.get("/api/v1/projects/chapter-parts").json()
+    assert len(overview["files"]) == 1
+    assert [item["source"] for item in overview["segments"]] == [
+        "第一章",
+        "第二章",
+    ]
+    assert [item["part_id"] for item in overview["segments"]] == [
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch2.xhtml",
+    ]
+    detail = client.get(
+        "/api/v1/projects/chapter-parts/segments/F0001-S000002"
+    )
+    assert detail.status_code == 200
+    assert detail.json()["part_id"] == "OEBPS/text/ch2.xhtml"
+
+
 def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None:
     projects_root = tmp_path / "projects"
     epub = tmp_path / "ruby.epub"

@@ -91,11 +91,17 @@ def test_editor_overview_excludes_empty_segments_and_preserves_order(
     tmp_path: Path,
 ) -> None:
     project = create_editor_project(tmp_path, "first\n\u3000\nsecond")
-    overview = EditorStore(project).overview()
+    store = EditorStore(project)
+    overview = store.overview()
     assert overview["name"] == "editor-demo"
     assert [item["source"] for item in overview["segments"]] == ["first", "second"]
     assert [item["line_index"] for item in overview["segments"]] == [0, 2]
+    assert [item["part_id"] for item in overview["segments"]] == [
+        "document",
+        "document",
+    ]
     assert overview["segments"][0]["translation"] is None
+    assert store.segment_detail("F0001-S000001")["part_id"] == "document"
     assert overview["segments"][0]["reviews"]["proofreading"] == {
         "base": None,
         "suggestion": None,

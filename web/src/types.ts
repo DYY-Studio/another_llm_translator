@@ -34,6 +34,7 @@ export interface ReviewView {
 export interface Segment {
   segment_id: string;
   file_id: string;
+  part_id: string;
   line_index: number;
   source: string;
   translation: ResultView | null;

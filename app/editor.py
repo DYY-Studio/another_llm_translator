@@ -165,6 +165,7 @@ class EditorStore:
                 {
                     "segment_id": segment_id,
                     "file_id": item["file_id"],
+                    "part_id": item["part_id"],
                     "line_index": item["line_index"],
                     "source": item["source"],
                     "completed": {
@@ -206,6 +207,7 @@ class EditorStore:
         return {
             "segment_id": segment_id,
             "file_id": segment["file_id"],
+            "part_id": segment["part_id"],
             "line_index": segment["line_index"],
             "source": segment["source"],
             "translation": self._result_view(
