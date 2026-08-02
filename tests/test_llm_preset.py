@@ -166,6 +166,10 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     second["_document_adapter_options"] = {
         "F0001": {"inline_format_mode": "plain"}
     }
+    adapter_fingerprint = stage_fingerprint(second, "translation", "prompt")
+    second["_document_adapters"]["F0001"]["version"] = "2"
+    assert stage_fingerprint(second, "translation", "prompt") != adapter_fingerprint
+    second["_document_adapters"]["F0001"]["version"] = "1"
     run_id, run_dir = create_run(
         project,
         config=second,
