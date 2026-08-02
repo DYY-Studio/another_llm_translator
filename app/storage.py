@@ -21,7 +21,15 @@ STAGES = frozenset(
     }
 )
 RECORD_STATUSES = frozenset(
-    {"active", "running", "completed", "failed", "interrupted", "reset"}
+    {
+        "active",
+        "running",
+        "completed",
+        "failed",
+        "interrupted",
+        "reset",
+        "partial_published",
+    }
 )
 REVIEW_STATUSES = frozenset({"accepted", "suggested"})
 VALIDATION_STATUSES = frozenset({"passed", "warning"})

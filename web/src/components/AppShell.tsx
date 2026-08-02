@@ -19,6 +19,7 @@ export function AppShell({
   task,
   onProject,
   onStage,
+  onShowFailures,
   onCreate,
   onRun,
   onCancel,
@@ -34,6 +35,7 @@ export function AppShell({
   task: TaskState | null;
   onProject: (value: string) => void;
   onStage: (value: Stage) => void;
+  onShowFailures: () => void;
   onCreate: () => void;
   onRun: () => void;
   onCancel: () => void;
@@ -46,9 +48,11 @@ export function AppShell({
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
-  const progress = task && task.total_segments
-    ? Math.min(100, Math.round(task.processed_segments / task.total_segments * 100))
-    : 0;
+  const completed = task?.completed_segments ?? 0;
+  const failed = task?.failed_segments ?? 0;
+  const pending = task?.pending_segments ?? 0;
+  const total = task?.total_segments ?? 0;
+  const processed = completed + failed;
   const statusLabels: Record<string, string> = {
     queued: "等待中",
     running: "运行中",
@@ -97,9 +101,10 @@ export function AppShell({
             <span>{task.project} · {task.stage}</span>
           </div>
           <div className="run-progress">
-            <span>{task.processed_segments} / {task.total_segments} Segment</span>
-            <div className="progress-track" role="progressbar" aria-label="任务进度" aria-valuemin={0} aria-valuemax={task.total_segments} aria-valuenow={task.processed_segments}>
-              <span style={{ width: `${progress}%` }} />
+            <span>已完成 {completed} · 失败 {failed} · 待处理 {pending} / {total}</span>
+            <div className="progress-track" role="progressbar" aria-label="任务进度" aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+              <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
+              <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
             </div>
           </div>
           <div className="run-tokens">
@@ -107,6 +112,7 @@ export function AppShell({
               <><span>输入 {task.usage.input_tokens} Tokens</span><span>输出 {task.usage.output_tokens} Tokens</span></>
             ) : <span>精确 Tokens 不可用</span>}
           </div>
+          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>查看 {failed} 个失败 Segment</button>}
           {task.error && <span className="error-text run-error">{task.error}</span>}
           {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
         </section>

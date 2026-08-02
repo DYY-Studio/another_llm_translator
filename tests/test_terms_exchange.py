@@ -16,9 +16,10 @@ from app.stages import (
     import_terms,
     load_terms,
     match_terms,
+    publish_partial_terms,
     run_terminology,
 )
-from app.storage import read_json
+from app.storage import append_jsonl, atomic_write_json, read_json, record_header
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
@@ -61,6 +62,60 @@ def term(source: str, *, aliases: list[str] | None = None, disabled: bool = Fals
         "disabled": disabled,
         "conflicts": {"categories": [], "preferred_translations": []},
     }
+
+
+def test_scanned_terms_can_be_exported_and_published_without_complete_task(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path, "recover")
+    metadata = read_json(project / "project.json")
+    task_id = "TERM-TASK-PARTIAL"
+    atomic_write_json(
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="test",
+        ),
+    )
+    append_jsonl(
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            run_id="RUN-PARTIAL",
+            terms=[
+                {
+                    "source": "recover",
+                    "category": "名词",
+                    "description": "测试候选",
+                    "preferred_translation": "恢复",
+                    "aliases": [],
+                }
+            ],
+        ),
+    )
+
+    output = tmp_path / "scanned.json"
+    exported = export_terms(
+        project,
+        output,
+        include_disabled=False,
+        source="scanned",
+    )
+    assert exported["source"] == "scanned"
+    assert json.loads(output.read_text(encoding="utf-8"))["terms"][0]["source"] == "recover"
+    assert not (project / "terminology" / "terms.json").exists()
+
+    published = publish_partial_terms(project)
+    assert published["published"] is True
+    assert load_terms(project)["terms"][0]["source"] == "recover"
+    assert read_json(project / "terminology" / "active_task.json")["status"] == "partial_published"
+    assert (project / "terminology" / "candidates.jsonl").exists()
 
 
 def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:

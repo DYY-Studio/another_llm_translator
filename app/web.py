@@ -41,7 +41,13 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
-from .stages import export_project, export_terms, import_terms, run_apply
+from .stages import (
+    export_project,
+    export_terms,
+    import_terms,
+    publish_partial_terms,
+    run_apply,
+)
 from .storage import atomic_write_json, atomic_write_text, read_json
 from .web_tasks import WebTaskManager, task_options
 
@@ -597,6 +603,18 @@ def create_app(
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).remove_terms(payload)
 
+    @app.post("/api/v1/projects/{name}/terms/publish-partial")
+    async def publish_partial_term_results(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认发布当前扫描候选")
+        root = project(name)
+        if app.state.tasks.is_running(root, "terminology"):
+            raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
+        with project_write_lock(root):
+            return publish_partial_terms(root)
+
     @app.post("/api/v1/projects/{name}/terms/import")
     async def import_term_file(
         name: str,
@@ -625,9 +643,12 @@ def create_app(
         name: str,
         format: str = "json",
         include_disabled: bool = False,
+        source: str = "published",
     ) -> Response:
         if format not in {"json", "csv"}:
             raise UsageError("术语导出格式必须是 json 或 csv")
+        if source not in {"published", "scanned"}:
+            raise UsageError("术语导出 source 必须是 published 或 scanned")
         root = project(name)
         with tempfile.TemporaryDirectory(
             dir=root, prefix=".terms-export."
@@ -637,6 +658,7 @@ def create_app(
                 root,
                 output,
                 include_disabled=include_disabled,
+                source=source,
             )
             content = output.read_bytes()
         media_type = (

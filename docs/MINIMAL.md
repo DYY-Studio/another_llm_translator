@@ -826,7 +826,14 @@ LLM 返回 JSONL；每个术语一行：
 {"type":"end"}
 ```
 
-LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。否则格式修正仍重试原请求范围。
+LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。否则格式修正仍重试原请求范围。`end` 必须严格等于 `{"type":"end"}`；例如 `{"type":"type":"end"}` 仍拒绝，不自动修复或接受。严格失败不会回滚已经解析的候选，失败 Segment 会记录安全错误分类，Run manifest 记录分类及数量。
+
+活动扫描的合法候选可以在全量扫描完成前读取：`terms-export --source scanned`
+或 Web 术语页的“导出当前扫描结果”只导出当前活动任务候选，不改动已发布库。用户
+确认 `terms-publish-partial` 或 Web 的“发布现有结果”后，候选按现有去重、冲突和
+override 规则写入普通 `terms.json`，不添加 partial 标记，立即可供翻译、校对和润色。
+该操作只把当前活动扫描标记为 `partial_published`，保留 scans、candidates 和历史
+Run；下一次扫描创建新的活动任务，不删除旧记录。
 
 归一化：
 
@@ -1298,6 +1305,8 @@ python -m app.main inspect PROJECT
 python -m app.main terminology PROJECT
 python -m app.main terms-import PROJECT terms.json
 python -m app.main terms-export PROJECT terms.csv
+python -m app.main terms-export PROJECT scanned-terms.json --source scanned
+python -m app.main terms-publish-partial PROJECT
 python -m app.main translate PROJECT
 python -m app.main translate PROJECT --resume-run
 python -m app.main translate PROJECT --decline-run
@@ -1350,7 +1359,10 @@ python -m app.main run-all PROJECT
 - `terms-import` 根据 `.json` 或 `.csv` 扩展名增量导入术语；`--dry-run`
   只校验并报告变化。
 - `terms-export` 根据输出扩展名导出术语；默认不含 disabled，
-  `--include-disabled` 用于完整备份人工移除决定。
+  `--include-disabled` 用于完整备份人工移除决定；`--source scanned` 导出当前活动
+  扫描中已经解析的候选。
+- `terms-publish-partial` 在当前术语扫描未运行且存在候选时显式发布部分结果；Web
+  端要求同样的确认，不提供自动发布或自动修复路径。
 - `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
 - `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
@@ -1399,6 +1411,8 @@ inspect 至少报告：
 - 文件数、总 Segment 和空 Segment。
 - 当前已发布 `terms_revision`。
 - 活动术语任务的 completed、failed、pending。
+- 活动术语任务的候选数量、失败分类和可导出的部分结果；严格 JSONL 失败不会丢弃
+  已解析候选，部分发布后下游立即使用普通术语库。
 - 翻译、校对、润色和 applied 的 completed、failed、pending。
 - 当前设置指纹与已有结果指纹的差异及混合来源数量。
 - 有旧 completed 但最近重做失败的 Segment 数。
@@ -1515,10 +1529,11 @@ Web 不建立数据库；项目目录与 CLI 使用相同应用内核和持久�
 进程，重启后仍由项目 Run 与 Segment 记录恢复业务进度。
 
 Web 顶部的全局任务状态条在项目概览、导出、设置和窄屏布局中持续显示最近
-任务，直到下一任务开始。状态条提供运行项目、阶段、状态、已处理/总 Segment、
-进度、当前 Run 累计输入与输出 Tokens，以及运行中的取消入口；复用 Segment
-计入已处理，不显示 Combined Tokens。完成、失败和取消状态只保留在当前页面
-会话，刷新后不从已结束 Run 重建。
+任务，直到下一任务开始。状态条提供运行项目、阶段、状态、已完成/失败/待处理
+与总 Segment、三段式进度、当前 Run 累计输入与输出 Tokens，以及运行中的取消
+入口；复用 Segment 计入已完成，不显示 Combined Tokens。失败数量可点击跳转到
+当前阶段的错误筛选；错误行只显示稳定的安全错误分类和摘要。完成、失败和取消
+状态只保留在当前页面会话，刷新后不从已结束 Run 重建。
 
 Web 仪表盘不依赖当前项目，可查看全局日志和当前运行的请求并发数、请求延迟、
 HTTP 错误、重试、当前限流等待请求数、累计输入/输出 Tokens 与总吞吐量。当前
@@ -1542,8 +1557,11 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 再次校验；并发修改导致条件变化时明确失败，不自动降级。桌面和窄屏使用同一
 运行决策流程。
 
-术语页支持 JSON/CSV 导入导出、经典 Ctrl/Cmd/Shift 多选和批量移除。翻译、
-校对、润色列表使用相同多选规则；批量清除采用追加 reset。校对和润色可应用
+术语页支持 JSON/CSV 导入导出、经典 Ctrl/Cmd/Shift 多选和批量移除；活动扫描
+期间显示完成/失败/待处理、失败分类和候选数量，并可导出当前候选或在确认后部分
+发布。部分发布立即生成普通 `terms.json`，只结束活动扫描状态，保留历史扫描和
+候选记录，下一次扫描使用新的任务。翻译、校对、润色列表使用相同多选规则；批量
+清除采用追加 reset。校对和润色可应用
 所选或当前过滤范围，缺建议或缺基准时整批拒绝，旧基准必须显式允许。批量
 清除不会改变阶段运行 scope；随后启动仍处理项目内全部 pending/failed。
 
@@ -1581,6 +1599,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 - ordered_by_file 和 parallel 的上文内容符合定义。
 - 术语按 normalized source 合并，override 和 disabled 生效。
 - 活动术语任务可续作，force 新任务完成前不替换已发布库。
+- 失败扫描保留候选与安全错误摘要；当前候选可导出，显式部分发布只清除活动扫描
+  状态并保留历史记录。
 - 翻译 ID 映射严格，空 Segment 不请求。
 - 日语假名和韩语谚文校验覆盖配置的 Unicode 块。
 - 校对和润色只在完整上游范围存在时启动。

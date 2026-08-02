@@ -236,7 +236,7 @@ def full_prompt(stage: str, middle: str) -> str:
         "只处理 user 消息中的待处理内容。reference_context 仅供理解，"
         "不得输出或计入进度。严格使用 JSONL："
         "每个非空物理行只能包含一个紧凑 JSON 对象，不得跨行格式化，"
-        "不要使用 Markdown 代码块或解释文字。最后一行必须是"
+        "不要使用 Markdown 代码块或解释文字。最后一行只能是"
         '{"type":"end"}。'
     )
     stage_rules = {
@@ -901,12 +901,18 @@ def finalize_run(
     failed: int,
     warnings: list[str] | None = None,
     usage: dict[str, Any] | None = None,
+    failure_counts: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     manifest = read_json(run_dir / "manifest.json")
     manifest.update(
         status=status,
         completed_segment_count=completed,
         failed_segment_count=failed,
+        failure_counts={
+            str(key): int(value)
+            for key, value in (failure_counts or {}).items()
+            if int(value) > 0
+        },
         warnings=warnings or [],
         completed_at=utc_now(),
     )

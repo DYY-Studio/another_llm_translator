@@ -12,6 +12,10 @@ function resultFor(segment: Segment, stage: Stage) {
 }
 
 function statusFor(segment: Segment, stage: Stage) {
+  if (
+    (stage === "translation" || stage === "proofreading" || stage === "polishing")
+    && segment.stage_errors?.[stage]
+  ) return "error";
   if (stage === "translation") {
     if (!segment.translation) return "pending";
     return segment.translation.validation_status === "warning" ? "warning" : "completed";
@@ -37,6 +41,7 @@ const statusLabels: Record<string, string> = {
   accepted: "接受基准",
   suggested: "建议修改",
   applied: "已应用",
+  error: "请求失败",
 };
 
 export function SegmentWorkspace({
@@ -44,11 +49,13 @@ export function SegmentWorkspace({
   stage,
   overview,
   onRefresh,
+  focusFailures,
 }: {
   project: string;
   stage: "translation" | "proofreading" | "polishing";
   overview: ProjectOverview;
   onRefresh: () => Promise<void>;
+  focusFailures?: boolean;
 }) {
   const selection = useClassicSelection(
     overview.segments[0]?.segment_id ?? "",
@@ -67,6 +74,10 @@ export function SegmentWorkspace({
   const [text, setText] = useState("");
   const [reason, setReason] = useState("");
   const [reviewStatus, setReviewStatus] = useState<"accepted" | "suggested">("suggested");
+
+  useEffect(() => {
+    if (focusFailures) setStatus("error");
+  }, [focusFailures]);
 
   useEffect(() => {
     if (!selected) return;
@@ -232,7 +243,10 @@ export function SegmentWorkspace({
             {visible.map((item) => {
               const itemStatus = statusFor(item, stage);
               const result = resultFor(item, stage);
-              const preview = stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
+              const error = item.stage_errors?.[stage];
+              const preview = error
+                ? `${statusLabels.error}：${error.error_class} · ${error.error_message}`
+                : stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
               return (
                 <button
                   key={item.segment_id}

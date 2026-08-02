@@ -104,8 +104,10 @@ class WebTask:
     completed_at: str | None = None
     summary: dict[str, Any] | None = None
     error: str | None = None
-    processed_segments: int = 0
+    completed_segments: int = 0
+    failed_segments: int = 0
     total_segments: int = 0
+    failure_counts: dict[str, int] = field(default_factory=dict)
     usage: dict[str, Any] = field(
         default_factory=lambda: {
             "input_tokens": 0,
@@ -127,8 +129,16 @@ class WebTask:
             "completed_at": self.completed_at,
             "summary": self.summary,
             "error": self.error,
-            "processed_segments": self.processed_segments,
+            "completed_segments": self.completed_segments,
+            "failed_segments": self.failed_segments,
+            "pending_segments": max(
+                0,
+                self.total_segments
+                - self.completed_segments
+                - self.failed_segments,
+            ),
             "total_segments": self.total_segments,
+            "failure_counts": dict(self.failure_counts),
             "usage": self.usage,
         }
 
@@ -233,8 +243,9 @@ class WebTaskManager:
         usage_base: dict[str, Any] | None = None
         resuming = False
 
-        def progress(processed: int, total: int) -> None:
-            state.processed_segments = processed
+        def progress(completed: int, failed: int, total: int) -> None:
+            state.completed_segments = completed
+            state.failed_segments = failed
             state.total_segments = total
 
         def usage_changed(current: dict[str, Any] | None) -> None:
@@ -305,6 +316,16 @@ class WebTaskManager:
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                     )
             state.summary = summary
+            state.completed_segments = int(summary.get("completed", 0)) + int(
+                summary.get("reused", 0)
+            )
+            state.failed_segments = int(summary.get("failed", 0))
+            state.failure_counts = {
+                str(key): int(value)
+                for key, value in (summary.get("failure_counts") or {}).items()
+            }
+            if summary.get("selected") is not None:
+                state.total_segments = int(summary["selected"])
             summary_usage = summary.get("usage")
             if isinstance(summary_usage, dict):
                 state.usage = summary_usage
@@ -329,6 +350,14 @@ class WebTaskManager:
             return self.tasks[task_id].view()
         except KeyError as exc:
             raise UsageError(f"未知后台任务：{task_id}") from exc
+
+    def is_running(self, project: Path, stage: str) -> bool:
+        return any(
+            state.project == project
+            and state.stage == stage
+            and state.status in {"queued", "running", "cancelling"}
+            for state in self.tasks.values()
+        )
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
         try:

@@ -68,7 +68,7 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
         tmp_path, "one\n\u3000\n \t\ntwo", encoding="utf-8-sig"
     )
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
-    proof_progress: list[tuple[int, int]] = []
+    proof_progress: list[tuple[int, int, int]] = []
     try:
         await run_translation(project, Scope(), http_client=client)
         proof = await run_review(
@@ -76,8 +76,8 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
             "proofreading",
             Scope(),
             http_client=client,
-            on_progress=lambda processed, total: proof_progress.append(
-                (processed, total)
+            on_progress=lambda completed, failed, total: proof_progress.append(
+                (completed, failed, total)
             ),
         )
         applied = run_apply(
@@ -101,8 +101,8 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
 
-    assert proof_progress[0] == (0, 2)
-    assert proof_progress[-1] == (2, 2)
+    assert proof_progress[0] == (0, 0, 2)
+    assert proof_progress[-1] == (2, 0, 2)
     assert proof["completed"] == 2
     assert applied["completed"] == 2
     assert polish["completed"] == 2

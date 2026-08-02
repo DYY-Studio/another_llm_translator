@@ -18,7 +18,7 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.storage import read_jsonl
+from app.storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
@@ -253,6 +253,19 @@ def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
     assert complete is False
 
 
+def test_terminology_rejects_malformed_end_without_discarding_valid_candidates() -> None:
+    content = (
+        '{"type":"term","source":"Alice","category":"人物",'
+        '"description":"人物","aliases":[]}\n'
+        '{"type":"type":"end"}'
+    )
+    terms, errors, complete = _validate_term_items(content)
+    assert [item["source"] for item in terms] == ["Alice"]
+    assert complete is False
+    assert any("第 2 行" in error for error in errors)
+    assert any("最终 end" in error for error in errors)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "template",
@@ -468,6 +481,47 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
         del os.environ["LLM_API_KEY"]
     assert summary["published"] is True
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        content = (
+            '{"type":"term","source":"Alice","category":"人物",'
+            '"description":"人物","aliases":[]}\n'
+            '{"type":"type":"end"}'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    candidates = read_jsonl(project / "terminology" / "candidates.jsonl")
+    scans = read_jsonl(project / "terminology" / "scans.jsonl")
+    assert calls == 3
+    assert summary["published"] is False
+    assert summary["failed"] == 1
+    assert summary["failure_counts"] == {"format_error": 1}
+    assert candidates and candidates[0]["terms"][0]["source"] == "Alice"
+    assert scans[-1]["status"] == "failed"
+    assert scans[-1]["error_class"] == "format_error"
+    assert not (project / "terminology" / "terms.json").exists()
+    manifest = read_json(project / "runs" / summary["run_id"] / "manifest.json")
+    assert manifest["failure_counts"] == {"format_error": 1}
 
 
 @pytest.mark.asyncio

@@ -62,6 +62,7 @@ export default function App() {
   const [stage, setStage] = useState<Stage>("overview");
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
+  const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState("");
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
@@ -182,6 +183,20 @@ export default function App() {
     setTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
   }
 
+  function navigateStage(value: Stage) {
+    setStage(value);
+    setFailureFocus(null);
+  }
+
+  function showFailures() {
+    const target = runnable[stage] ?? (
+      task && runnable[task.stage as Stage] ? runnable[task.stage as Stage] : null
+    );
+    if (!target) return;
+    setFailureFocus(target);
+    setStage(target);
+  }
+
   let content = <div className="empty-page">选择或创建项目后开始工作。</div>;
   if (stage === "diagnostics") content = <DiagnosticsView />;
   else if (stage === "settings") content = <SettingsView project={project} />;
@@ -193,9 +208,9 @@ export default function App() {
         onFilesChanged={refreshProject}
       />
     );
-    else if (stage === "terminology") content = <TermsView project={project} />;
+    else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} />;
+      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} />;
   }
 
@@ -207,7 +222,8 @@ export default function App() {
         stage={stage}
         task={task}
         onProject={setProject}
-        onStage={setStage}
+        onStage={navigateStage}
+        onShowFailures={showFailures}
         onCreate={() => setCreateOpen(true)}
         onRun={openRunDialog}
         onCancel={cancelRun}
