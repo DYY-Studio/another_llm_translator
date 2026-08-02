@@ -222,6 +222,164 @@ def test_epub_inline_runs_respect_blocks_and_line_breaks(tmp_path: Path) -> None
     assert list(imported.files[0].segments) == ["AB", "C", "D"]
 
 
+def test_epub_ruby_stays_in_one_inline_text_run(tmp_path: Path) -> None:
+    source = tmp_path / "ruby-inline.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>前<span class="keep">中<ruby>漢<rt>かん</rt></ruby>後</span>'
+            '<em>間</em><ruby>字<rt>じ</rt></ruby> 末</p>'
+            '<p>外<custom>未知</custom>后</p><p>行<br/>后</p>'
+            '</body></html>'
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+    )
+
+    assert list(imported.files[0].segments) == [
+        "前中｜漢《かん》後間｜字《じ》 末",
+        "外",
+        "未知",
+        "后",
+        "行",
+        "后",
+    ]
+    first_slot = imported.files[0].opaque_state["locators"][0]["slot"]
+    assert first_slot["kind"] == "composite"
+    assert [slot["kind"] for slot in first_slot["slots"]] == [
+        "text",
+        "text",
+        "ruby",
+        "text",
+        "ruby",
+    ]
+
+
+def test_epub_mixed_ruby_export_removes_all_ruby_and_preserves_inline_attrs(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby-mixed.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p class="line">前<span class="keep">中</span>'
+            '<ruby>漢<rt>かん</rt></ruby>後<strong data-mark="1">尾</strong>'
+            '<ruby>字<rt>じ</rt></ruby>終</p>'
+            '</body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="ruby-mixed",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    segments = read_jsonl(project / "source" / "segments.jsonl")
+    assert [item["source"] for item in segments] == [
+        "前中｜漢《かん》後尾｜字《じ》終"
+    ]
+    metadata = read_json(project / "project.json")
+    append_jsonl(
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segments[0]["segment_id"],
+            status="completed",
+            text="整句译文",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-RUBY-MIXED",
+            request_id="REQ-RUBY-MIXED",
+        ),
+    )
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        paragraph = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "p"
+        )
+        assert paragraph.text == "整句译文"
+        assert [child.tag.rsplit("}", 1)[-1] for child in paragraph] == [
+            "span",
+            "strong",
+        ]
+        assert paragraph[0].get("class") == "keep"
+        assert paragraph[1].get("data-mark") == "1"
+        assert paragraph[0].text is None
+        assert paragraph[1].text is None
+        assert "ruby" not in {
+            element.tag.rsplit("}", 1)[-1] for element in root.iter()
+        }
+        assert "整句译文" == "".join(root.itertext())
+
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        paragraph = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "p"
+        )
+        assert paragraph.text == "前"
+        assert paragraph[0].text == "中"
+        assert paragraph[1].tag.rsplit("}", 1)[-1] == "ruby"
+        assert paragraph[1].tail == "後"
+        assert paragraph[-1].tail == "終\n整句译文"
+
+
+@pytest.mark.parametrize("field", ["path", "tail"])
+def test_epub_mixed_ruby_locator_corruption_fails_explicitly(
+    tmp_path: Path, field: str
+) -> None:
+    source = tmp_path / "ruby-corrupt.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p>前<ruby>漢<rt>かん</rt></ruby>後</p>'
+            '</body></html>'
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name=f"ruby-corrupt-{field}",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_translations(project)
+    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(state_path)
+    ruby_slot = state["state"]["locators"][0]["slot"]["slots"][1]
+    ruby_slot[field] = [99] if field == "path" else "不一致"
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(IncompleteError, match="结构|tail|原文不一致"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+
+
 def test_epub_composite_locator_corruption_fails_explicitly(
     tmp_path: Path,
 ) -> None:
@@ -272,10 +430,10 @@ RUBY_XHTML = (
     [
         (
             "aozora",
-            ["彼は", "｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
         ),
-        ("base_only", ["彼は", "漢字を読む。", "特別だ。"]),
-        ("parenthetical", ["彼は", "漢字（かんじ）を読む。", "特別（スペシャル／とくべつ）だ。"]),
+        ("base_only", ["彼は漢字を読む。", "特別だ。"]),
+        ("parenthetical", ["彼は漢字（かんじ）を読む。", "特別（スペシャル／とくべつ）だ。"]),
     ],
 )
 def test_epub_ruby_modes_form_semantic_segments(
@@ -309,7 +467,7 @@ def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
     assert project is not None
     metadata = read_json(project / "project.json")
     segments = read_jsonl(project / "source" / "segments.jsonl")
-    targets = ["他は", "汉字を読む。", "特别だ。"]
+    targets = ["他は汉字を読む。", "特别だ。"]
     for segment, target in zip(segments, targets, strict=True):
         append_jsonl(
             stage_result_path(project, "translation"),
@@ -348,8 +506,7 @@ def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
         assert names.count("ruby") == 2
         assert names.count("rt") == 4
         text = "".join(root.itertext())
-        assert "彼は\n他は" in text
-        assert "を読む。\n汉字を読む。" in text
+        assert "彼は漢かん字じを読む。\n他は汉字を読む。" in text
         assert "だ。\n特别だ。" in text
 
 
