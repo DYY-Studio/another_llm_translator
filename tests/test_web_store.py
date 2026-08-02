@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import io
-import json
-from email.message import Message
 from pathlib import Path
 
 import pytest
 
-from app.editor import EDITOR_HTML, EditorStore, _handler
+from app.web_store import WebStore
 from app.errors import UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import init_project
@@ -16,13 +13,13 @@ from app.storage import atomic_write_json, read_json, record_header
 from tests.test_foundation import make_app_root
 
 
-def create_editor_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
+def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "source.txt"
     source.write_text(text, encoding="utf-8-sig")
     project, _ = init_project(
         [str(source)],
-        name="editor-demo",
+        name="web-demo",
         app_root=app_root,
         projects_root=tmp_path / "projects",
     )
@@ -87,13 +84,13 @@ def seed_conflicted_terms(project: Path) -> None:
     )
 
 
-def test_editor_overview_excludes_empty_segments_and_preserves_order(
+def test_web_store_overview_excludes_empty_segments_and_preserves_order(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path, "first\n\u3000\nsecond")
-    store = EditorStore(project)
+    project = create_web_store_project(tmp_path, "first\n\u3000\nsecond")
+    store = WebStore(project)
     overview = store.overview()
-    assert overview["name"] == "editor-demo"
+    assert overview["name"] == "web-demo"
     assert [item["source"] for item in overview["segments"]] == ["first", "second"]
     assert [item["line_index"] for item in overview["segments"]] == [0, 2]
     assert [item["part_id"] for item in overview["segments"]] == [
@@ -111,9 +108,9 @@ def test_editor_overview_excludes_empty_segments_and_preserves_order(
     }
 
 
-def test_editor_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:
-    project = create_editor_project(tmp_path, "one")
-    store = EditorStore(project)
+def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "one")
+    store = WebStore(project)
     before_runs = list((project / "runs").iterdir())
     first = store.save_translation(
         {"segment_id": "F0001-S000001", "text": "第一版"}
@@ -127,7 +124,7 @@ def test_editor_translation_appends_results_and_exports_latest(tmp_path: Path) -
     assert len(history) == 2
     assert first["record_id"] != second["record_id"]
     assert latest["text"] == "第二版"
-    assert latest["origin"] == "project_editor"
+    assert latest["origin"] == "web"
     assert latest["run_id"] is None
     assert list((project / "runs").iterdir()) == before_runs
 
@@ -136,9 +133,9 @@ def test_editor_translation_appends_results_and_exports_latest(tmp_path: Path) -
     assert output.read_text(encoding="utf-8-sig") == "第二版"
 
 
-def test_editor_reset_masks_translation_until_new_result(tmp_path: Path) -> None:
-    project = create_editor_project(tmp_path, "one")
-    store = EditorStore(project)
+def test_web_store_reset_masks_translation_until_new_result(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "one")
+    store = WebStore(project)
     store.save_translation({"segment_id": "F0001-S000001", "text": "first"})
 
     reset = store.reset_results(
@@ -151,11 +148,11 @@ def test_editor_reset_masks_translation_until_new_result(tmp_path: Path) -> None
     assert store.segment_detail("F0001-S000001")["translation"]["text"] == "second"
 
 
-def test_editor_reset_review_also_clears_applied_without_cascade(
+def test_web_store_reset_review_also_clears_applied_without_cascade(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path, "one")
-    store = EditorStore(project)
+    project = create_web_store_project(tmp_path, "one")
+    store = WebStore(project)
     segment_id = "F0001-S000001"
     store.save_translation({"segment_id": segment_id, "text": "base"})
     store.save_review(
@@ -188,8 +185,8 @@ def test_editor_reset_review_also_clears_applied_without_cascade(
     assert detail["reviews"]["polishing"]["suggestion"] is not None
 
 
-def test_editor_translation_records_enabled_validator_warning(tmp_path: Path) -> None:
-    project = create_editor_project(tmp_path, "one")
+def test_web_store_translation_records_enabled_validator_warning(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "one")
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
@@ -197,11 +194,11 @@ def test_editor_translation_records_enabled_validator_warning(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    result = EditorStore(project).save_translation(
+    result = WebStore(project).save_translation(
         {"segment_id": "F0001-S000001", "text": "残留カナ"}
     )
     assert result["validation_status"] == "warning"
-    store = EditorStore(project)
+    store = WebStore(project)
     assert store.overview()["segments"][0]["translation"]["validation_status"] == (
         "warning"
     )
@@ -209,11 +206,11 @@ def test_editor_translation_records_enabled_validator_warning(tmp_path: Path) ->
     assert record["validation_findings"][0]["validator"] == "japanese_kana"
 
 
-def test_editor_saves_and_applies_review_results_with_current_lineage(
+def test_web_store_saves_and_applies_review_results_with_current_lineage(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path, "one")
-    store = EditorStore(project)
+    project = create_web_store_project(tmp_path, "one")
+    store = WebStore(project)
     store.save_translation({"segment_id": "F0001-S000001", "text": "译文一"})
     proof = store.save_review(
         {
@@ -226,7 +223,7 @@ def test_editor_saves_and_applies_review_results_with_current_lineage(
         }
     )
     assert proof["applied"]["text"] == "校对文本"
-    assert proof["suggestion"]["origin"] == "project_editor"
+    assert proof["suggestion"]["origin"] == "web"
 
     store.save_review(
         {
@@ -288,11 +285,11 @@ def test_editor_saves_and_applies_review_results_with_current_lineage(
     assert newer["applied_current"] is False
 
 
-def test_editor_polishing_overview_falls_back_to_translation_base(
+def test_web_store_polishing_overview_falls_back_to_translation_base(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path, "one")
-    store = EditorStore(project)
+    project = create_web_store_project(tmp_path, "one")
+    store = WebStore(project)
     translation = store.save_translation(
         {"segment_id": "F0001-S000001", "text": "仅有译文"}
     )
@@ -304,9 +301,9 @@ def test_editor_polishing_overview_falls_back_to_translation_base(
     assert polishing["applied_current"] is False
 
 
-def test_editor_terms_update_library_and_overrides_immediately(tmp_path: Path) -> None:
-    project = create_editor_project(tmp_path)
-    store = EditorStore(project)
+def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path)
+    store = WebStore(project)
     added = store.save_term(
         {
             "old_normalized": None,
@@ -383,12 +380,12 @@ def test_editor_terms_update_library_and_overrides_immediately(tmp_path: Path) -
     ] == "艾丽西亚"
 
 
-def test_editor_exposes_and_resolves_term_conflicts_independently(
+def test_web_store_exposes_and_resolves_term_conflicts_independently(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path)
+    project = create_web_store_project(tmp_path)
     seed_conflicted_terms(project)
-    store = EditorStore(project)
+    store = WebStore(project)
 
     result = store.terms()
     assert result["conflict_count"] == 3
@@ -449,12 +446,12 @@ def test_editor_exposes_and_resolves_term_conflicts_independently(
         )
 
 
-def test_editor_can_remove_conflicted_term_without_resolving_it(
+def test_web_store_can_remove_conflicted_term_without_resolving_it(
     tmp_path: Path,
 ) -> None:
-    project = create_editor_project(tmp_path)
+    project = create_web_store_project(tmp_path)
     seed_conflicted_terms(project)
-    store = EditorStore(project)
+    store = WebStore(project)
     removed = store.save_term(
         {
             "old_normalized": "gamma",
@@ -483,74 +480,11 @@ def test_editor_can_remove_conflicted_term_without_resolving_it(
     assert override["disabled"] is True
 
 
-def test_editor_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) -> None:
-    store = EditorStore(create_editor_project(tmp_path))
+def test_web_store_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) -> None:
+    store = WebStore(create_web_store_project(tmp_path))
     with pytest.raises(UsageError, match="未知或空"):
         store.save_translation({"segment_id": "missing", "text": "x"})
     with pytest.raises(UsageError, match="source 不能为空"):
         store.save_term({"source": " ", "aliases": []})
     with pytest.raises(UsageError, match="aliases"):
         store.save_term({"source": "Alice", "aliases": "Alice"})
-
-
-def _request_handler(
-    store: EditorStore,
-    *,
-    method: str,
-    path: str,
-    body: dict[str, object] | None = None,
-) -> bytes:
-    payload = json.dumps(body).encode() if body is not None else b""
-    handler_type = _handler(store, EDITOR_HTML.read_bytes())
-    handler = handler_type.__new__(handler_type)
-    handler.command = method
-    handler.path = path
-    handler.request_version = "HTTP/1.1"
-    handler.requestline = f"{method} {path} HTTP/1.1"
-    handler.client_address = ("127.0.0.1", 0)
-    handler.rfile = io.BytesIO(payload)
-    handler.wfile = io.BytesIO()
-    handler.headers = Message()
-    handler.headers["Content-Length"] = str(len(payload))
-    if method == "GET":
-        handler.do_GET()
-    else:
-        handler.do_POST()
-    return handler.wfile.getvalue()
-
-
-def test_editor_http_serves_page_and_json_errors(tmp_path: Path) -> None:
-    store = EditorStore(create_editor_project(tmp_path))
-    page = _request_handler(store, method="GET", path="/")
-    assert b"200 OK" in page
-    page_text = page.decode("utf-8")
-    assert "项目结果编辑器" in page_text
-    assert '<div class="stage-toolbar">' in page_text
-    assert (
-        '<select id="file-filter"></select>\n'
-        '          <div class="stage-filter-row">'
-    ) in page_text
-    assert 'class="toolbar"' not in page_text
-    assert 'id="status-filter"' in page_text
-    assert '<details id="context-card" class="context-card">' in page_text
-    assert 'window.matchMedia("(max-width: 780px)")' in page_text
-    assert 'addContextGroup("上文", before, "无更多上文")' in page_text
-    assert 'addContextGroup("下文", after, "无更多下文")' in page_text
-    assert "context-row" not in page_text
-    assert "当前建议未应用" in page_text
-    assert "没有符合当前筛选条件的 Segment" in page_text
-
-    project = _request_handler(store, method="GET", path="/api/project")
-    assert b"200 OK" in project
-    assert '"source": "one"' in project.decode("utf-8")
-    assert '"translation": null' in project.decode("utf-8")
-    assert '"applied_current": false' in project.decode("utf-8")
-
-    error = _request_handler(
-        store,
-        method="POST",
-        path="/api/translation/save",
-        body={"segment_id": "missing", "text": "x"},
-    )
-    assert b"400 Bad Request" in error
-    assert "未知或空" in error.decode("utf-8")

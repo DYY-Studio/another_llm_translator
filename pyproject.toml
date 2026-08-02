@@ -18,7 +18,6 @@ dependencies = [
 
 [project.scripts]
 minimal-llm-translator = "app.main:main"
-minimal-llm-translator-editor = "app.editor:main"
 minimal-llm-translator-web = "app.web:main"
 
 [tool.setuptools]

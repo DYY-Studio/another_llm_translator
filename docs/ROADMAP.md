@@ -12,11 +12,11 @@
 ## 当前基线
 
 - TXT/EPUB、File/Segment/Chunk/Run、项目 JSONL、CLI 和完整翻译流程已经实现。
-- CLI 与本地 Web 共享阶段、Run、限速、恢复和项目持久化代码。独立开发编辑器
-  的功能已由 Web 覆盖，计划在 Stage 16 删除。
+- CLI 与本地 Web 共享阶段、Run、限速、恢复和项目持久化代码；项目视图与人工
+  编辑逻辑均由 Web 内部职责提供。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 15 已完成；下一阶段是移除独立开发者 Editor。
+- 产品路线 Stage 1 至 Stage 17 已完成；下一阶段是 SQLite 标准项目存储。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -277,7 +277,7 @@ Preset；内联 LLM 连接配置不再支持。
 - Segment 列表显示净文本和格式数量；详情编辑区显示原始标记和净文本预览，
   手工保存前执行相同校验。不实现富文本编辑器或逐标签配置。
 
-## Stage 16：移除独立开发者 Editor
+## Stage 16：移除独立开发者 Editor（已完成）
 
 - 删除 `app/editor.html`、独立 Editor HTTP 服务、命令入口、README 使用说明和
   专属测试，不保留第二套界面。
@@ -286,7 +286,7 @@ Preset；内联 LLM 连接配置不再支持。
 - 手工修改记录来源统一为 Web，不保留 `project_editor` 兼容值。
 - CLI 与 Web 继续共享项目存储、阶段结果和写锁语义。
 
-## Stage 17：按需 Chunk 规划与请求内短 ID
+## Stage 17：按需 Chunk 规划与请求内短 ID（已完成）
 
 - 每个实际 LLM 请求把待返回 Segment 临时编号为字符串 `"1"、"2"…`，响应后
   映射回持久 Segment ID；不修改项目内 File/Segment ID。

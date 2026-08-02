@@ -21,7 +21,7 @@ from .config import (
     resolve_project_config,
 )
 from .diagnostics import Diagnostics
-from .editor import EditorStore
+from .web_store import WebStore
 from .errors import AppError, ExternalError, ProjectError, UsageError
 from .execution import Scope
 from .llm_adapter import load_json_adapter
@@ -521,7 +521,7 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}")
     async def overview(name: str) -> dict[str, Any]:
-        return EditorStore(project(name)).overview()
+        return WebStore(project(name)).overview()
 
     @app.post("/api/v1/projects/{name}/files")
     async def add_files(
@@ -571,31 +571,31 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")
     async def segment(name: str, segment_id: str) -> dict[str, Any]:
-        return EditorStore(project(name)).segment_detail(segment_id)
+        return WebStore(project(name)).segment_detail(segment_id)
 
     @app.post("/api/v1/projects/{name}/translations")
     async def save_translation(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return EditorStore(project(name)).save_translation(payload)
+        return WebStore(project(name)).save_translation(payload)
 
     @app.post("/api/v1/projects/{name}/reviews")
     async def save_review(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return EditorStore(project(name)).save_review(payload)
+        return WebStore(project(name)).save_review(payload)
 
     @app.get("/api/v1/projects/{name}/terms")
     async def terms(name: str) -> dict[str, Any]:
-        return EditorStore(project(name)).terms()
+        return WebStore(project(name)).terms()
 
     @app.post("/api/v1/projects/{name}/terms")
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return EditorStore(project(name)).save_term(payload)
+        return WebStore(project(name)).save_term(payload)
 
     @app.post("/api/v1/projects/{name}/terms/remove")
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return EditorStore(project(name)).remove_terms(payload)
+        return WebStore(project(name)).remove_terms(payload)
 
     @app.post("/api/v1/projects/{name}/terms/import")
     async def import_term_file(
@@ -656,7 +656,7 @@ def create_app(
 
     @app.post("/api/v1/projects/{name}/results/reset")
     async def reset_results(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return EditorStore(project(name)).reset_results(payload)
+        return WebStore(project(name)).reset_results(payload)
 
     @app.get("/api/v1/projects/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:
