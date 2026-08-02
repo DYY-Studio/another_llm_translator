@@ -705,7 +705,7 @@ applied 结果保存：
 + 代码内固定 Suffix
 ```
 
-固定部分定义角色、输入输出结构、适用阶段的 Segment ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+固定部分定义角色、输入输出结构、请求内短 ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
 
 四阶段分别读取自己的：
 
@@ -721,10 +721,15 @@ Segment 数。
 
 - 上文不得跨 `file_id` 或 `part_id`。
 - 一个 Chunk 共享一份 `reference_context`。
+- `reference_context` 只携带理解所需的源文和可用目标文本，不携带 Segment ID。
 - 上文不属于本次进度范围，不要求 LLM 输出。
 - 失败或未完成 Segment 的源文仍可作为上文。
 - 失败结果不能作为可信目标文本上文。
 - 术语上文始终只含源文。
+
+翻译、校对和润色请求把当前请求内的待处理 Segment 依次编号为 `"1"`、`"2"`……；模型只返回这些短 ID。宿主在解析后映射回持久 Segment ID，未知、重复或缺失短 ID 仍按格式修正规则处理。格式修正、校验修复、上下文拆分和超长 Segment part 请求各自重新编号。术语请求不发送 Segment ID。
+
+诊断详情只在本次运行的有界内存中保留短 ID 到持久 Segment ID 的映射；摘要接口不传输该映射。项目数据、阶段结果、普通日志和 debug manifest 继续只使用持久 Segment ID。
 
 `ordered_by_file`：
 
@@ -882,7 +887,7 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 {
   "target_language": "简体中文",
   "reference_context": [
-    {"id": "F0001-S000097", "source": "...", "translation": "..."}
+    {"source": "...", "translation": "..."}
   ],
   "terms": [
     {
@@ -893,7 +898,7 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
     }
   ],
   "segments": [
-    {"id": "F0001-S000101", "source": "..."}
+    {"id": "1", "source": "..."}
   ]
 }
 ```
@@ -901,13 +906,13 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 输出 JSONL：
 
 ```jsonl
-{"type":"segment","id":"F0001-S000101","translation":"..."}
+{"type":"segment","id":"1","translation":"..."}
 {"type":"end"}
 ```
 
 映射规则：
 
-- 只接受请求范围内的 Segment ID。
+- 只接受本次请求范围内从 `"1"` 开始的短 ID；宿主负责映射回持久 Segment ID。
 - 不根据返回顺序或数量猜测对应关系。
 - 未知或多余 ID 忽略并记录。
 - 重复 ID、缺少 ID 或字段错误只使对应 Segment 保持未决。
@@ -963,8 +968,8 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 输出 JSONL：
 
 ```jsonl
-{"type":"segment","id":"F0001-S000101","status":"accepted"}
-{"type":"segment","id":"F0001-S000102","status":"suggested","suggested_text":"完整建议译文","reason":"遗漏否定含义"}
+{"type":"segment","id":"1","status":"accepted"}
+{"type":"segment","id":"2","status":"suggested","suggested_text":"完整建议译文","reason":"遗漏否定含义"}
 {"type":"end"}
 ```
 
@@ -1085,7 +1090,7 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 增加服务端上下文超限或实际 ITPM 超限风险。该估算不保证与任一模型、语言或
 Prompt 的真实分词结果一致，使用者应依据实际分词器和端点行为调节。
 
-每次尝试加入 Segment 后重新渲染并估算完整 Prompt。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
+每次尝试加入 Segment 后重新渲染并估算完整 Prompt。普通 Run 创建后才规划下一批 Chunk，调度器只保留与 `max_parallel` 同阶的有界缓冲；Chunk ID 在进入调度时生成，调试模式随生成追加 Chunk Manifest。取消后不再继续规划。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
 
 `target_chunk_input_tokens` 是软目标。贪心累计时，加入下一个 Segment 将超过目标便结束当前 Chunk；单个 Segment 自身超过目标但仍低于模型输入硬限制时，可以单独发送。文件末尾和范围末尾的短尾 Chunk 允许明显低于目标。
 
@@ -1323,7 +1328,7 @@ python -m app.main run-all PROJECT
 语义：
 
 - `--force`：重做选定范围内所有非空 Segment，覆盖普通 pending/failed 筛选。
-- `--dry-run`：不写文件、不创建 Run、不更新模板、不调用 LLM，只报告范围、设置警告、Chunk 和 Token 估算。
+- `--dry-run`：不写文件、不创建 Run、不更新模板、不调用 LLM；它会耗尽规划器，报告范围、设置警告、完整 Chunk 数和 Token 估算。普通 Run 不在启动前生成全部 Chunk。
 - `--allow-outdated-base`：仅用于 apply，允许应用基于旧上游结果的建议。
 - `--allow-missing`：仅用于 export，允许使用阶段回退。
 - `--bilingual`：仅用于 export。

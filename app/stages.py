@@ -10,8 +10,9 @@ import sys
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,10 @@ from .execution import (
     find_running_runs,
     finalize_run,
     full_prompt,
+    iter_chunk_plans,
     load_stage_history,
-    materialize_chunks,
+    localize_request_ids,
+    materialize_chunk_stream,
     parse_jsonl_document,
     previous_context,
     render_messages,
@@ -124,6 +127,26 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
     return (
         f"max_output_tokens={configured} 超过上下文可用上限 "
         f"{maximum_available}；实际请求将按剩余空间自动收窄"
+    )
+
+
+def _finalize_planning_failure(
+    run_dir: Path | None,
+    *,
+    requested_count: int,
+    reused_count: int,
+    warnings: list[str],
+    error: BaseException,
+) -> None:
+    if run_dir is None:
+        return
+    finalize_run(
+        run_dir,
+        status="failed",
+        completed=reused_count,
+        failed=requested_count,
+        warnings=[*warnings, f"Chunk 规划失败：{error}"],
+        usage=None,
     )
 
 
@@ -1102,6 +1125,47 @@ async def run_terminology(
             ],
         }
 
+    run_id: str | None = None
+    run_dir: Path | None = None
+    if not scope.dry_run:
+        if resume_run_id is not None:
+            run_id, run_dir = continue_run(
+                project,
+                resume_run_id,
+                config=config,
+                stage="terminology",
+                fingerprint=fingerprint,
+                prompt=prompt,
+                scope=scope,
+                selected_count=len(selected),
+                requested_count=len(work),
+                reused_count=len(selected) - len(work),
+            )
+        else:
+            run_id, run_dir = create_run(
+                project,
+                config=config,
+                stage="terminology",
+                fingerprint=fingerprint,
+                prompt=prompt,
+                selected_count=len(selected),
+                requested_count=len(work),
+                reused_count=len(selected) - len(work),
+                details={
+                    "active_task_id": task_id,
+                    "scope": _scope_record(scope, force_all=scope.force),
+                },
+            )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(work),
+            reused_count=len(selected) - len(work),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -1119,6 +1183,7 @@ async def run_terminology(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -1143,8 +1208,13 @@ async def run_terminology(
                 accepted_sources.append(source_part)
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left, right = _split_source_once(source_part)
+                try:
+                    left, right = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 sources[0:0] = [left, right]
         part_ids: list[str] = []
         for index, source_part in enumerate(accepted_sources, start=1):
@@ -1156,21 +1226,21 @@ async def run_terminology(
             part_ids.append(part_id)
         original_parts[str(segment["segment_id"])] = part_ids
 
-    plans = build_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    logger.info(
-        "stage plan selected=%d requested=%d reused=%d chunks=%d",
-        len(selected),
-        len(work),
-        len(selected) - len(work),
-        len(plans),
-    )
     if scope.dry_run:
+        plans = build_chunk_plans(
+            request_segments,
+            all_segments=segments,
+            config=config,
+            prompt=prompt,
+            payload_builder=payload_builder,
+        )
+        logger.info(
+            "stage plan selected=%d requested=%d reused=%d chunks=%d",
+            len(selected),
+            len(work),
+            len(selected) - len(work),
+            len(plans),
+        )
         return {
             "stage": "terminology",
             "dry_run": True,
@@ -1185,44 +1255,29 @@ async def run_terminology(
             "warnings": warnings,
         }
 
-    if resume_run_id is not None:
-        run_id, run_dir = continue_run(
-            project,
-            resume_run_id,
-            config=config,
-            stage="terminology",
-            fingerprint=fingerprint,
-            prompt=prompt,
-            scope=scope,
-            selected_count=len(selected),
-            requested_count=len(work),
-            reused_count=len(selected) - len(work),
-        )
-    else:
-        run_id, run_dir = create_run(
-            project,
-            config=config,
-            stage="terminology",
-            fingerprint=fingerprint,
-            prompt=prompt,
-            selected_count=len(selected),
-            requested_count=len(work),
-            reused_count=len(selected) - len(work),
-            details={
-                "active_task_id": task_id,
-                "scope": _scope_record(scope, force_all=scope.force),
-            },
-        )
+    assert run_id is not None and run_dir is not None
     logger.info("run start run=%s", run_id)
-    chunks = materialize_chunks(run_id, "terminology", plans)
+    planned = iter_chunk_plans(
+        request_segments,
+        all_segments=segments,
+        config=config,
+        prompt=prompt,
+        payload_builder=payload_builder,
+    )
+    chunks = materialize_chunk_stream(run_id, "terminology", planned)
     if config["debug"]["enabled"]:
-        save_debug_chunks(
-            run_dir,
-            str(metadata["project_id"]),
-            run_id,
-            "terminology",
-            chunks,
-        )
+        planned_chunks = chunks
+        def debug_chunks() -> Iterable[ChunkPlan]:
+            for chunk in planned_chunks:
+                save_debug_chunks(
+                    run_dir,
+                    str(metadata["project_id"]),
+                    run_id,
+                    "terminology",
+                    [chunk],
+                )
+                yield chunk
+        chunks = debug_chunks()
     if limiter is None:
         limiter = SlidingWindowLimiter(
             config["execution"]["requests_per_minute"],
@@ -1242,6 +1297,23 @@ async def run_terminology(
             )
 
     report_progress()
+
+    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
+        if chunk.chunk_id is not None:
+            return chunk
+        materialized = replace(
+            chunk,
+            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
+        )
+        if config["debug"]["enabled"]:
+            save_debug_chunks(
+                run_dir,
+                str(metadata["project_id"]),
+                run_id,
+                "terminology",
+                [materialized],
+            )
+        return materialized
 
     async def process_once(
         chunk: ChunkPlan,
@@ -1421,6 +1493,7 @@ async def run_terminology(
         chunk: ChunkPlan,
         split_parent_request_id: str | None = None,
     ) -> tuple[int, int]:
+        chunk = ensure_runtime_chunk(chunk)
         try:
             return await process_once(chunk, split_parent_request_id)
         except ContextLengthError as exc:
@@ -1787,6 +1860,21 @@ def _parse_translation_items(
     return valid, unresolved, errors, document.complete and not errors
 
 
+def _map_local_translation_response(
+    content: str,
+    id_map: dict[str, str],
+) -> tuple[dict[str, str], list[str], list[str], bool]:
+    valid, unresolved, errors, complete = _parse_translation_items(
+        content, list(id_map)
+    )
+    return (
+        {id_map[local_id]: text for local_id, text in valid.items()},
+        [id_map[local_id] for local_id in unresolved],
+        errors,
+        complete,
+    )
+
+
 async def run_translation(
     project: Path,
     scope: Scope,
@@ -1893,6 +1981,47 @@ async def run_translation(
             ],
         }
 
+    run_id: str | None = None
+    run_dir: Path | None = None
+    if not scope.dry_run:
+        if resume_run_id is not None:
+            run_id, run_dir = continue_run(
+                project,
+                resume_run_id,
+                config=config,
+                stage="translation",
+                fingerprint=fingerprint,
+                prompt=prompt,
+                scope=scope,
+                selected_count=len(selection.selected),
+                requested_count=len(selection.work),
+                reused_count=len(selection.reusable),
+            )
+        else:
+            run_id, run_dir = create_run(
+                project,
+                config=config,
+                stage="translation",
+                fingerprint=fingerprint,
+                prompt=prompt,
+                selected_count=len(selection.selected),
+                requested_count=len(selection.work),
+                reused_count=len(selection.reusable),
+                details={
+                    "terms_revision": terms_revision,
+                    "scope": _scope_record(scope),
+                },
+            )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -1910,6 +2039,7 @@ async def run_translation(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -1934,8 +2064,13 @@ async def run_translation(
                 accepted_sources.append(source_part)
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left, right = _split_source_once(source_part)
+                try:
+                    left, right = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 sources[0:0] = [left, right]
         part_ids: list[str] = []
         for index, source_part in enumerate(accepted_sources, start=1):
@@ -1950,21 +2085,21 @@ async def run_translation(
             part_ids.append(part_id)
         original_parts[str(segment["segment_id"])] = part_ids
 
-    plans = build_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    logger.info(
-        "stage plan selected=%d requested=%d reused=%d chunks=%d",
-        len(selection.selected),
-        len(selection.work),
-        len(selection.reusable),
-        len(plans),
-    )
     if scope.dry_run:
+        plans = build_chunk_plans(
+            request_segments,
+            all_segments=segments,
+            config=config,
+            prompt=prompt,
+            payload_builder=payload_builder,
+        )
+        logger.info(
+            "stage plan selected=%d requested=%d reused=%d chunks=%d",
+            len(selection.selected),
+            len(selection.work),
+            len(selection.reusable),
+            len(plans),
+        )
         return {
             "stage": "translation",
             "dry_run": True,
@@ -1979,44 +2114,29 @@ async def run_translation(
             "warnings": warnings,
         }
 
-    if resume_run_id is not None:
-        run_id, run_dir = continue_run(
-            project,
-            resume_run_id,
-            config=config,
-            stage="translation",
-            fingerprint=fingerprint,
-            prompt=prompt,
-            scope=scope,
-            selected_count=len(selection.selected),
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-        )
-    else:
-        run_id, run_dir = create_run(
-            project,
-            config=config,
-            stage="translation",
-            fingerprint=fingerprint,
-            prompt=prompt,
-            selected_count=len(selection.selected),
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            details={
-                "terms_revision": terms_revision,
-                "scope": _scope_record(scope),
-            },
-        )
+    assert run_id is not None and run_dir is not None
     logger.info("run start run=%s", run_id)
-    chunks = materialize_chunks(run_id, "translation", plans)
+    planned = iter_chunk_plans(
+        request_segments,
+        all_segments=segments,
+        config=config,
+        prompt=prompt,
+        payload_builder=payload_builder,
+    )
+    chunks = materialize_chunk_stream(run_id, "translation", planned)
     if config["debug"]["enabled"]:
-        save_debug_chunks(
-            run_dir,
-            str(metadata["project_id"]),
-            run_id,
-            "translation",
-            chunks,
-        )
+        planned_chunks = chunks
+        def debug_chunks() -> Iterable[ChunkPlan]:
+            for chunk in planned_chunks:
+                save_debug_chunks(
+                    run_dir,
+                    str(metadata["project_id"]),
+                    run_id,
+                    "translation",
+                    [chunk],
+                )
+                yield chunk
+        chunks = debug_chunks()
     if limiter is None:
         limiter = SlidingWindowLimiter(
             config["execution"]["requests_per_minute"],
@@ -2041,6 +2161,23 @@ async def run_translation(
             )
 
     report_progress()
+
+    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
+        if chunk.chunk_id is not None:
+            return chunk
+        materialized = replace(
+            chunk,
+            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
+        )
+        if config["debug"]["enabled"]:
+            save_debug_chunks(
+                run_dir,
+                str(metadata["project_id"]),
+                run_id,
+                "translation",
+                [materialized],
+            )
+        return materialized
 
     async def save_completed(
         segment_id: str,
@@ -2205,6 +2342,7 @@ async def run_translation(
                     "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
                     "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
                 )
+            payload, id_map = localize_request_ids(payload, items)
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
@@ -2215,9 +2353,10 @@ async def run_translation(
                     estimated_input_tokens=estimated,
                     request_id=request_id,
                     parent_request_id=parent_request_id,
+                    segment_id_map=id_map,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_translation_items(response.content, expected)
+                    _map_local_translation_response(response.content, id_map)
                 )
             except FatalExternalError:
                 raise
@@ -2288,6 +2427,7 @@ async def run_translation(
         chunk: ChunkPlan,
         split_parent_request_id: str | None = None,
     ) -> None:
+        chunk = ensure_runtime_chunk(chunk)
         try:
             await process_once(chunk, split_parent_request_id)
             return
@@ -2658,6 +2798,21 @@ def _parse_review_items(
     return valid, unresolved, errors, document.complete and not errors
 
 
+def _map_local_review_response(
+    content: str,
+    id_map: dict[str, str],
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str], bool]:
+    valid, unresolved, errors, complete = _parse_review_items(
+        content, list(id_map)
+    )
+    return (
+        {id_map[local_id]: parsed for local_id, parsed in valid.items()},
+        [id_map[local_id] for local_id in unresolved],
+        errors,
+        complete,
+    )
+
+
 async def run_review(
     project: Path,
     stage: str,
@@ -2791,6 +2946,47 @@ async def run_review(
             ],
         }
 
+    run_id: str | None = None
+    run_dir: Path | None = None
+    if not scope.dry_run:
+        if resume_run_id is not None:
+            run_id, run_dir = continue_run(
+                project,
+                resume_run_id,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                scope=scope,
+                selected_count=len(selection.selected),
+                requested_count=len(selection.work),
+                reused_count=len(selection.reusable),
+            )
+        else:
+            run_id, run_dir = create_run(
+                project,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                selected_count=len(selection.selected),
+                requested_count=len(selection.work),
+                reused_count=len(selection.reusable),
+                details={
+                    "terms_revision": terms_revision,
+                    "scope": _scope_record(scope),
+                },
+            )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            run_dir,
+            requested_count=len(selection.work),
+            reused_count=len(selection.reusable),
+            warnings=warnings,
+            error=error,
+        )
+
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -2808,6 +3004,7 @@ async def run_review(
             continue
         except RequestSizeError as exc:
             if exc.reason != "context":
+                fail_planning(exc)
                 raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
@@ -2835,8 +3032,13 @@ async def run_review(
                 accepted_parts.append((source_part, text_part))
             except RequestSizeError as exc:
                 if exc.reason != "context":
+                    fail_planning(exc)
                     raise
-                left_source, right_source = _split_source_once(source_part)
+                try:
+                    left_source, right_source = _split_source_once(source_part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
                 split_at = round(len(text_part) * len(left_source) / len(source_part))
                 pending_parts[0:0] = [
                     (left_source, text_part[:split_at]),
@@ -2858,21 +3060,21 @@ async def run_review(
             part_ids.append(part_id)
         original_parts[str(segment["segment_id"])] = part_ids
 
-    plans = build_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    logger.info(
-        "stage plan selected=%d requested=%d reused=%d chunks=%d",
-        len(selection.selected),
-        len(selection.work),
-        len(selection.reusable),
-        len(plans),
-    )
     if scope.dry_run:
+        plans = build_chunk_plans(
+            request_segments,
+            all_segments=segments,
+            config=config,
+            prompt=prompt,
+            payload_builder=payload_builder,
+        )
+        logger.info(
+            "stage plan selected=%d requested=%d reused=%d chunks=%d",
+            len(selection.selected),
+            len(selection.work),
+            len(selection.reusable),
+            len(plans),
+        )
         return {
             "stage": stage,
             "dry_run": True,
@@ -2886,44 +3088,29 @@ async def run_review(
             ),
             "warnings": warnings,
         }
-    if resume_run_id is not None:
-        run_id, run_dir = continue_run(
-            project,
-            resume_run_id,
-            config=config,
-            stage=stage,
-            fingerprint=fingerprint,
-            prompt=prompt,
-            scope=scope,
-            selected_count=len(selection.selected),
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-        )
-    else:
-        run_id, run_dir = create_run(
-            project,
-            config=config,
-            stage=stage,
-            fingerprint=fingerprint,
-            prompt=prompt,
-            selected_count=len(selection.selected),
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            details={
-                "terms_revision": terms_revision,
-                "scope": _scope_record(scope),
-            },
-        )
+    assert run_id is not None and run_dir is not None
     logger.info("run start run=%s", run_id)
-    chunks = materialize_chunks(run_id, stage, plans)
+    planned = iter_chunk_plans(
+        request_segments,
+        all_segments=segments,
+        config=config,
+        prompt=prompt,
+        payload_builder=payload_builder,
+    )
+    chunks = materialize_chunk_stream(run_id, stage, planned)
     if config["debug"]["enabled"]:
-        save_debug_chunks(
-            run_dir,
-            str(metadata["project_id"]),
-            run_id,
-            stage,
-            chunks,
-        )
+        planned_chunks = chunks
+        def debug_chunks() -> Iterable[ChunkPlan]:
+            for chunk in planned_chunks:
+                save_debug_chunks(
+                    run_dir,
+                    str(metadata["project_id"]),
+                    run_id,
+                    stage,
+                    [chunk],
+                )
+                yield chunk
+        chunks = debug_chunks()
     if limiter is None:
         limiter = SlidingWindowLimiter(
             config["execution"]["requests_per_minute"],
@@ -2947,6 +3134,23 @@ async def run_review(
             )
 
     report_progress()
+
+    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
+        if chunk.chunk_id is not None:
+            return chunk
+        materialized = replace(
+            chunk,
+            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
+        )
+        if config["debug"]["enabled"]:
+            save_debug_chunks(
+                run_dir,
+                str(metadata["project_id"]),
+                run_id,
+                stage,
+                [materialized],
+            )
+        return materialized
 
     async def save_result(
         segment_id: str,
@@ -3091,6 +3295,7 @@ async def run_review(
                     '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
                     '也可为 null。最后输出 {"type":"end"}。'
                 )
+            payload, id_map = localize_request_ids(payload, items)
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
@@ -3101,9 +3306,10 @@ async def run_review(
                     estimated_input_tokens=estimated,
                     request_id=request_id,
                     parent_request_id=parent_request_id,
+                    segment_id_map=id_map,
                 )
                 valid, unresolved, parse_errors, response_complete = (
-                    _parse_review_items(response.content, expected)
+                    _map_local_review_response(response.content, id_map)
                 )
             except FatalExternalError:
                 raise
@@ -3156,6 +3362,7 @@ async def run_review(
         chunk: ChunkPlan,
         split_parent_request_id: str | None = None,
     ) -> None:
+        chunk = ensure_runtime_chunk(chunk)
         try:
             await process_once(chunk, split_parent_request_id)
             return

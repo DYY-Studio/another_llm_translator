@@ -479,9 +479,9 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 3
     assert review_calls == [
-        ["F0001-S000001", "F0001-S000002", "F0001-S000003"],
-        ["F0001-S000001"],
-        ["F0001-S000003"],
+        ["1", "2", "3"],
+        ["1"],
+        ["1"],
     ]
 
 

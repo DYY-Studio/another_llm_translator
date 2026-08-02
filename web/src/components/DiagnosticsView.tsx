@@ -246,16 +246,26 @@ export function DiagnosticsView() {
                   <span>状态 <strong>{statusLabels[detail.status]}</strong></span>
                 </div>
                 {detailTab === "request" && (
-                  <div className="exchange-messages">
-                    {detail.messages.map((message, index) => (
-                      <article key={`${message.role}-${index}`}>
-                        <header>
-                          <strong>{message.role || "message"}</strong>
-                          {message.truncated && <span>已截断至 100,000 字符</span>}
-                        </header>
-                        <pre>{message.content}</pre>
-                      </article>
-                    ))}
+                  <div className="exchange-request-detail">
+                    {Object.keys(detail.segment_id_map).length > 0 && (
+                      <div className="exchange-id-map">
+                        <strong>请求内短 ID</strong>
+                        {Object.entries(detail.segment_id_map).map(([shortId, segmentId]) => (
+                          <code key={shortId}>{shortId} → {segmentId}</code>
+                        ))}
+                      </div>
+                    )}
+                    <div className="exchange-messages">
+                      {detail.messages.map((message, index) => (
+                        <article key={`${message.role}-${index}`}>
+                          <header>
+                            <strong>{message.role || "message"}</strong>
+                            {message.truncated && <span>已截断至 100,000 字符</span>}
+                          </header>
+                          <pre>{message.content}</pre>
+                        </article>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {detailTab === "content" && (

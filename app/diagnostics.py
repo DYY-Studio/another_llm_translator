@@ -154,6 +154,7 @@ class Diagnostics:
         model: str,
         messages: list[dict[str, str]],
         max_attempts: int,
+        segment_id_map: dict[str, str] | None = None,
     ) -> None:
         normalized_messages = []
         for message in messages:
@@ -174,6 +175,7 @@ class Diagnostics:
                 "stage": self.stage,
                 "request_id": request_id,
                 "model": model,
+                "segment_id_map": dict(segment_id_map or {}),
                 "status": "running",
                 "max_attempts": max_attempts,
                 "messages": normalized_messages,

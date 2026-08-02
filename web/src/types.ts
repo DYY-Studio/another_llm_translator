@@ -136,6 +136,7 @@ export interface DiagnosticsRequestDetail {
   model: string;
   status: "running" | "retrying" | "completed" | "failed" | "interrupted";
   max_attempts: number;
+  segment_id_map: Record<string, string>;
   messages: Array<{
     role: string;
     content: string;

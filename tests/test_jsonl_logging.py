@@ -327,13 +327,13 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
             saved = read_jsonl(project / "stages" / "translation.jsonl")
             assert any(item.get("segment_id") == "F0001-S000001" for item in saved)
             assert [item["id"] for item in payload["segments"]] == [
-                "F0001-S000002"
+                "1"
             ]
             content = llm_jsonl(
                 [
                     {
                         "type": "segment",
-                        "id": "F0001-S000002",
+                        "id": "1",
                         "translation": "second",
                     }
                 ]
@@ -386,9 +386,9 @@ async def test_translation_format_retry_regroups_around_valid_nonempty_segment(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 3
     assert calls == [
-        ["F0001-S000001", "F0001-S000002", "F0001-S000003"],
-        ["F0001-S000001"],
-        ["F0001-S000003"],
+        ["1", "2", "3"],
+        ["1"],
+        ["1"],
     ]
 
 
