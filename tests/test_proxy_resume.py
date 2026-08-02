@@ -434,7 +434,7 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
         os.environ.pop("LLM_API_KEY", None)
     assert summary["run_id"] == run_id
     assert summary["selected"] == 3
-    assert requested == ["F0001-S000002", "F0001-S000003"]
+    assert requested == ["1", "2"]
     continuation = project / "runs" / run_id / "continuations" / "0001"
     assert "current-model" in (continuation / "llm_preset.json").read_text(
         "utf-8"
@@ -759,4 +759,4 @@ async def test_review_resume_reuses_completed_segments(
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
     assert summary["run_id"] == run_id
-    assert seen == ["F0001-S000002"]
+    assert seen == ["1"]
