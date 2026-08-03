@@ -629,6 +629,24 @@ def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
     )
 
 
+def _append_stage_status_filter(
+    clauses: list[str], params: list[Any], status: str
+) -> None:
+    if status == "pending":
+        clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
+    elif status == "warning":
+        clauses.append(
+            "latest_stage.status = 'completed' AND ("
+            "instr(lower(COALESCE(latest_stage.payload_json, '')), "
+            "'\"validation_status\":\"warning\"') > 0 OR "
+            "instr(lower(COALESCE(latest_stage.payload_json, '')), "
+            "'\"validation_status\": \"warning\"') > 0)"
+        )
+    else:
+        clauses.append("latest_stage.status = ?")
+        params.append(status)
+
+
 def segment_count(
     project: Path,
     *,
@@ -651,11 +669,7 @@ def segment_count(
             )
             params.extend([search, search])
         if status:
-            if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
-            else:
-                clauses.append("latest_stage.status = ?")
-                params.append(status)
+            _append_stage_status_filter(clauses, params, status)
         query = f"SELECT COUNT(*) FROM segments {join} WHERE {' AND '.join(clauses)}"
         return int(connection.execute(query, params).fetchone()[0])
     finally:
@@ -688,11 +702,7 @@ def query_segments(
             )
             params.extend([search, search])
         if status:
-            if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
-            else:
-                clauses.append("latest_stage.status = ?")
-                params.append(status)
+            _append_stage_status_filter(clauses, params, status)
         params.extend([limit, offset])
         query = f"""
             SELECT segments.payload_json
@@ -729,11 +739,7 @@ def segment_ids(
             )
             params.extend([search, search])
         if status:
-            if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
-            else:
-                clauses.append("latest_stage.status = ?")
-                params.append(status)
+            _append_stage_status_filter(clauses, params, status)
         query = f"""
             SELECT segments.segment_id
             FROM segments {join}

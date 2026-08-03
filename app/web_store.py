@@ -258,7 +258,7 @@ class WebStore:
     ) -> dict[str, Any]:
         if stage not in {"translation", "proofreading", "polishing"}:
             raise UsageError("overview stage 无效")
-        if status not in {None, "completed", "failed", "pending"}:
+        if status not in {None, "completed", "failed", "pending", "warning"}:
             raise UsageError("overview status 无效")
         window = query_segments(
             self.project,
@@ -362,7 +362,7 @@ class WebStore:
     ) -> dict[str, Any]:
         if stage not in {"translation", "proofreading", "polishing"}:
             raise UsageError("segment index stage 无效")
-        if status not in {None, "completed", "failed", "pending"}:
+        if status not in {None, "completed", "failed", "pending", "warning"}:
             raise UsageError("segment index status 无效")
         values = segment_ids(
             self.project,

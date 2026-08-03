@@ -85,7 +85,7 @@ export function SegmentWorkspace({
 
   const query = new URLSearchParams({ stage });
   if (file !== "all") query.set("file_id", file);
-  if (status !== "all") query.set("status", status === "error" ? "failed" : status === "warning" ? "completed" : status);
+  if (status !== "all") query.set("status", status === "error" ? "failed" : status);
   if (search.trim()) query.set("q", search.trim());
 
   const reloadIndex = useCallback(async () => {
@@ -129,7 +129,7 @@ export function SegmentWorkspace({
     void Promise.all([...offsets].map(async (offset) => {
       const params = new URLSearchParams({ stage, offset: String(offset), limit: String(pageSize) });
       if (file !== "all") params.set("file_id", file);
-      if (status !== "all" && status !== "warning") params.set("status", status === "error" ? "failed" : status);
+      if (status !== "all") params.set("status", status === "error" ? "failed" : status);
       if (search.trim()) params.set("q", search.trim());
       const page = await api<ProjectOverview>(`/api/v1/projects/${project}?${params.toString()}`);
       return page.segments;
