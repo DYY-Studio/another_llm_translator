@@ -192,16 +192,19 @@ export function Overview({
   project,
   value,
   onFilesChanged,
+  onDeleted,
 }: {
   project: string;
   value: ProjectOverview;
   onFilesChanged: () => Promise<void>;
+  onDeleted: (path: string) => Promise<void>;
 }) {
   const completed = value.segments.filter((item) => item.translation).length;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [removing, setRemoving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileIds = value.files.map((item) => item.file_id);
@@ -252,9 +255,29 @@ export function Overview({
     }
   }
 
+  async function deleteProject() {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/api/v1/projects/${project}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirm: true }),
+      });
+      setDeleting(false);
+      await onDeleted(value.path);
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="page">
-      <div className="page-heading"><div><h1>{value.name}</h1><p>{value.path}</p></div></div>
+      <div className="page-heading overview-heading">
+        <div><h1>{value.name}</h1><p>{value.path}</p></div>
+        <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>删除项目</button>
+      </div>
       <div className="summary-strip">
         <div><strong>{value.files.length}</strong><span>文件</span></div>
         <div><strong>{value.nonempty_segment_count}</strong><span>非空 Segment</span></div>
@@ -299,6 +322,19 @@ export function Overview({
             <div className="modal-actions">
               <button className="quiet-button" onClick={() => setRemoving(false)}>取消</button>
               <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>确认移除</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleting && (
+        <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label="永久删除项目" onMouseDown={(event) => event.stopPropagation()}>
+            <h2>永久删除项目？</h2>
+            <p>将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。</p>
+            {error && <p className="error-text">{error}</p>}
+            <div className="modal-actions">
+              <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>取消</button>
+              <button className="danger-button" disabled={busy} onClick={() => void deleteProject()}>确认删除项目</button>
             </div>
           </div>
         </div>
