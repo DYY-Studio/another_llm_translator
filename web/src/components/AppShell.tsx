@@ -1,15 +1,17 @@
 import type { ReactNode } from "react";
 import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
+import type { Language } from "../i18n";
+import { translate } from "../i18n";
 
-const items: Array<{ id: Stage; label: string }> = [
-  { id: "overview", label: "项目概览" },
-  { id: "diagnostics", label: "仪表盘" },
-  { id: "terminology", label: "术语" },
-  { id: "translation", label: "翻译" },
-  { id: "proofreading", label: "校对" },
-  { id: "polishing", label: "润色" },
-  { id: "export", label: "导出" },
+const items: Array<{ id: Stage; key: string }> = [
+  { id: "overview", key: "nav.overview" },
+  { id: "diagnostics", key: "nav.diagnostics" },
+  { id: "terminology", key: "nav.terminology" },
+  { id: "translation", key: "nav.translation" },
+  { id: "proofreading", key: "nav.proofreading" },
+  { id: "polishing", key: "nav.polishing" },
+  { id: "export", key: "nav.export" },
 ];
 
 export function AppShell({
@@ -27,6 +29,8 @@ export function AppShell({
   runLoading,
   themeMode,
   onTheme,
+  language,
+  onLanguage,
   children,
 }: {
   projects: ProjectSummary[];
@@ -43,6 +47,8 @@ export function AppShell({
   runLoading: boolean;
   themeMode: ThemeMode;
   onTheme: () => void;
+  language: Language;
+  onLanguage: () => void;
   children: ReactNode;
 }) {
   const running = Boolean(
@@ -53,18 +59,14 @@ export function AppShell({
   const pending = task?.pending_segments ?? 0;
   const total = task?.total_segments ?? 0;
   const processed = completed + failed;
-  const statusLabels: Record<string, string> = {
-    queued: "等待中",
-    running: "运行中",
-    cancelling: "正在取消",
-    completed: "已完成",
-    failed: "失败",
-    cancelled: "已取消",
-  };
+  const statusLabels: Record<string, string> = Object.fromEntries(
+    ["queued", "running", "cancelling", "completed", "failed", "cancelled"]
+      .map((key) => [key, translate(`run.${key}`, language)]),
+  );
   const themeLabels: Record<ThemeMode, string> = {
-    system: "跟随系统",
-    light: "浅色",
-    dark: "深色",
+    system: translate("theme.system", language),
+    light: translate("theme.light", language),
+    dark: translate("theme.dark", language),
   };
   const nextTheme: Record<ThemeMode, ThemeMode> = {
     system: "light",
@@ -80,19 +82,20 @@ export function AppShell({
   return (
     <div className={`app${task ? " has-run-status" : ""}`}>
       <header className="topbar">
-        <div className="brand">译工坊</div>
+        <div className="brand">{translate("brand", language)}</div>
         <select value={project} onChange={(event) => onProject(event.target.value)}>
-          <option value="">选择项目</option>
+          <option value="">{translate("project.select", language)}</option>
           {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
         </select>
-        <button className="quiet-button create-button" onClick={onCreate}>新建 / 打开</button>
+        <button className="quiet-button create-button" onClick={onCreate}>{translate("project.create", language)}</button>
         <div className="topbar-spacer" />
         <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
           {themeIcon}
         </button>
-        <button className="icon-button" aria-label="设置" onClick={() => onStage("settings")}>
+        <button className="icon-button" aria-label={translate("nav.settings", language)} onClick={() => onStage("settings")}>
           {icons.settings}
         </button>
+        <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
         <section className="global-run-status" aria-label="全局任务状态">
@@ -101,7 +104,7 @@ export function AppShell({
             <span>{task.project} · {task.stage}</span>
           </div>
           <div className="run-progress">
-            <span>已完成 {completed} · 失败 {failed} · 待处理 {pending} / {total}</span>
+            <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
             <div className="progress-track" role="progressbar" aria-label="任务进度" aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
               <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
               <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
@@ -110,11 +113,11 @@ export function AppShell({
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>输入 {task.usage.input_tokens} Tokens</span><span>输出 {task.usage.output_tokens} Tokens</span></>
-            ) : <span>精确 Tokens 不可用</span>}
+            ) : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
-          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>查看 {failed} 个失败 Segment</button>}
+          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{language === "en" ? `View ${failed} failed segments` : `查看 ${failed} 个失败 Segment`}</button>}
           {task.error && <span className="error-text run-error">{task.error}</span>}
-          {running && <button className="danger-link" onClick={onCancel}>取消任务</button>}
+          {running && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
         </section>
       )}
       <aside className="sidebar">
@@ -123,10 +126,10 @@ export function AppShell({
             <button
               className={stage === item.id ? "nav-item active" : "nav-item"}
               key={item.id}
-              aria-label={item.label}
+              aria-label={translate(item.key, language)}
               onClick={() => onStage(item.id)}
             >
-              {icons[item.id]}<span>{item.label}</span>
+              {icons[item.id]}<span>{translate(item.key, language)}</span>
             </button>
           ))}
         </nav>

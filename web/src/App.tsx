@@ -17,6 +17,7 @@ import type {
   TaskState,
   ThemeMode,
 } from "./types";
+import { detectLanguage, type Language } from "./i18n";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
@@ -78,6 +79,16 @@ export default function App() {
       return "system";
     }
   });
+  const [language, setLanguage] = useState<Language>(detectLanguage);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    try {
+      window.localStorage.setItem("minimal-llm-translator.language.v1", language);
+    } catch {
+      // The selected language still applies for this page when storage is unavailable.
+    }
+  }, [language]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -241,6 +252,8 @@ export default function App() {
         runLoading={runOptionsLoading}
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
+        language={language}
+        onLanguage={() => setLanguage((current) => current === "zh-CN" ? "en" : "zh-CN")}
       >
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}

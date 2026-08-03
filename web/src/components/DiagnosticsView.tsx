@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
+import { detectLanguage, translate } from "../i18n";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 
@@ -29,6 +30,7 @@ const statusLabels = {
 };
 
 export function DiagnosticsView() {
+  const language = detectLanguage();
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
   const [level, setLevel] = useState("");
   const [project, setProject] = useState("");
@@ -111,22 +113,22 @@ export function DiagnosticsView() {
     <section className="diagnostics-page">
       <header className="diagnostics-heading">
         <div>
-          <h1>诊断仪表盘</h1>
+          <h1>{translate("diagnostics.title", language)}</h1>
           <p>
             {metrics?.project
               ? `当前运行：${metrics.project} · ${metrics.stage}`
-              : "当前没有运行中的 LLM 任务"}
+              : translate("diagnostics.noRun", language)}
           </p>
         </div>
-        <span className="diagnostics-live"><i />每秒刷新</span>
+        <span className="diagnostics-live"><i />{translate("diagnostics.live", language)}</span>
       </header>
 
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
-        <article><span>当前请求</span><strong>{number(metrics?.active_requests ?? 0)}</strong><small>并发数</small></article>
-        <article><span>输入 Tokens</span><strong>{metrics?.usage_available ? number(metrics.input_tokens) : "不可用"}</strong><small>当前 Run 精确累计</small></article>
-        <article><span>输出 Tokens</span><strong>{metrics?.usage_available ? number(metrics.output_tokens) : "不可用"}</strong><small>当前 Run 精确累计</small></article>
-        <article><span>总吞吐量</span><strong>{number(metrics?.throughput_tokens_per_second ?? null)}</strong><small>Tokens / 秒</small></article>
+        <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens) : "不可用"}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens) : "不可用"}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null)}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" aria-label="请求诊断摘要">
