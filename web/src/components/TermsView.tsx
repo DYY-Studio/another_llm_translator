@@ -217,7 +217,7 @@ export function TermsView({
               }} />{en ? "Show removed" : "显示已移除"}</label>
             </div>
             <div className="term-stats">
-              <span>revision {data?.terms_revision ?? "无"}</span>
+              <span>revision {data?.terms_revision ?? (en ? "none" : "无")}</span>
               <span>{en ? "Conflicts" : "待裁决"} {data?.conflict_count ?? 0}</span>
             </div>
           </div>
@@ -279,7 +279,7 @@ export function TermsView({
                 }}
               >
                 <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
-                <span><strong>{term.source}</strong><small>{term.preferred_translation || "尚无推荐译名"}</small></span>
+                <span><strong>{term.source}</strong><small>{term.preferred_translation || (en ? "No preferred translation" : "尚无推荐译名")}</small></span>
                 <em>{term.has_conflicts ? (en ? "Conflict" : "待裁决") : term.disabled ? (en ? "Removed" : "已移除") : (en ? "Active" : "有效")}</em>
               </button>
             );
@@ -364,7 +364,7 @@ export function TermsView({
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
-            setMessage("术语表已导入");
+            setMessage(en ? "Term list imported" : "术语表已导入");
           }}
         />
       )}
@@ -386,7 +386,7 @@ export function TermsView({
           onPublished={async () => {
             setPartialOpen(false);
             setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
-            setMessage("现有扫描结果已发布并可用于后续阶段");
+            setMessage(en ? "Available scan results published for later stages" : "现有扫描结果已发布并可用于后续阶段");
           }}
         />
       )}
@@ -416,7 +416,7 @@ function ConflictChoices({
 function ConfirmDialog({
   title,
   text,
-  confirmLabel = "确认移除",
+  confirmLabel,
   language,
   confirming,
   onCancel,
@@ -430,6 +430,7 @@ function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const effectiveConfirmLabel = confirmLabel ?? (language === "en" ? "Confirm removal" : "确认移除");
   return (
     <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
@@ -437,7 +438,7 @@ function ConfirmDialog({
         <p>{text}</p>
         <div className="modal-actions">
           <button className="quiet-button" disabled={confirming} onClick={onCancel}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="danger-button" disabled={confirming} onClick={onConfirm}>{confirmLabel}</button>
+          <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
         </div>
       </div>
     </div>

@@ -92,13 +92,13 @@ function InputQueue({
           ignored.push(relative);
           continue;
         }
-        setMessage(`不支持的输入文件：${relative}`);
+        setMessage(language === "en" ? `Unsupported input file: ${relative}` : `不支持的输入文件：${relative}`);
         return;
       }
       incoming.push({ file, path: relative, kind, adapterId });
     }
     if (!incoming.length) {
-      setMessage("所选文件夹中没有受支持的输入文件");
+      setMessage(language === "en" ? "The selected folder has no supported input files" : "所选文件夹中没有受支持的输入文件");
       return;
     }
     const known = new Set(
@@ -108,14 +108,14 @@ function InputQueue({
     for (const item of incoming) {
       const key = item.path.toLocaleLowerCase();
       if (known.has(key)) {
-        setMessage(`输入路径重名，本次选择未加入：${item.path}`);
+        setMessage(language === "en" ? `Duplicate input path; this selection was not added: ${item.path}` : `输入路径重名，本次选择未加入：${item.path}`);
         return;
       }
       known.add(key);
     }
     onChange([...value, ...incoming]);
     if (ignored.length) {
-      setMessage(`已忽略 ${ignored.length} 个不支持的文件`);
+      setMessage(language === "en" ? `Ignored ${ignored.length} unsupported files` : `已忽略 ${ignored.length} 个不支持的文件`);
     }
   }
 
@@ -173,7 +173,7 @@ function InputQueue({
             >
               {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
             </select>
-            <small>仅用于本次导入；修改既有文件需重新导入。</small>
+            <small>{language === "en" ? "Applies to this import only; re-import existing files after changing it." : "仅用于本次导入；修改既有文件需重新导入。"}</small>
           </label>
         ))
         : [])}
@@ -181,7 +181,7 @@ function InputQueue({
         {!value.length && <div className="input-queue-empty">{language === "en" ? "No files selected." : "尚未选择文件。"}</div>}
         {value.map((item, index) => (
           <div className="input-queue-row" key={`${item.path}-${index}`}>
-            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? "文件夹" : "单独文件"}</small></span>
+            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? (language === "en" ? "Folder" : "文件夹") : (language === "en" ? "File" : "单独文件")}</small></span>
             <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{language === "en" ? "Remove" : "移除"}</button>
           </div>
         ))}
@@ -320,20 +320,20 @@ export function Overview({
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <h2>移除 {selection.selectedKeys.size} 个文件？</h2>
-            <p>项目内源文件副本和活动 Segment 将被删除；历史阶段结果与既有输出文件会保留。以后重新添加会分配新的 File 与 Segment ID。</p>
+            <h2>{language === "en" ? `Remove ${selection.selectedKeys.size} files?` : `移除 ${selection.selectedKeys.size} 个文件？`}</h2>
+            <p>{language === "en" ? "The project copies and active Segments will be removed; historical stage results and existing outputs remain. Re-adding files assigns new File and Segment IDs." : "项目内源文件副本和活动 Segment 将被删除；历史阶段结果与既有输出文件会保留。以后重新添加会分配新的 File 与 Segment ID。"}</p>
             <div className="modal-actions">
-              <button className="quiet-button" onClick={() => setRemoving(false)}>取消</button>
-              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>确认移除</button>
+              <button className="quiet-button" onClick={() => setRemoving(false)}>{language === "en" ? "Cancel" : "取消"}</button>
+              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>{language === "en" ? "Remove" : "确认移除"}</button>
             </div>
           </div>
         </div>
       )}
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
-          <div className="modal" role="dialog" aria-modal="true" aria-label="永久删除项目" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Delete project permanently" : "永久删除项目"} onMouseDown={(event) => event.stopPropagation()}>
             <h2>{language === "en" ? "Delete project permanently?" : "永久删除项目？"}</h2>
-            <p>将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。</p>
+            <p>{language === "en" ? "This deletes the project directory, source files, Runs, term library, and stage results. It cannot be undone; confirm that nothing needs to be kept." : "将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。"}</p>
             {error && <p className="error-text">{error}</p>}
             <div className="modal-actions">
               <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>{translate("dialog.cancel", language)}</button>
@@ -378,14 +378,14 @@ export function ExportView({
   return (
     <div className="page narrow-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
-      <label>结果阶段<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">翻译</option><option value="proofread">已应用校对</option><option value="polished">已应用润色</option></select></label>
-      <label>输出格式<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">保留各文件原格式</option><option value="txt">统一输出 TXT</option></select></label>
+      <label>{language === "en" ? "Result stage" : "结果阶段"}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{language === "en" ? "Translation" : "翻译"}</option><option value="proofread">{language === "en" ? "Applied proofreading" : "已应用校对"}</option><option value="polished">{language === "en" ? "Applied polishing" : "已应用润色"}</option></select></label>
+      <label>{language === "en" ? "Output format" : "输出格式"}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{language === "en" ? "Keep each file's format" : "保留各文件原格式"}</option><option value="txt">{language === "en" ? "Unified TXT" : "统一输出 TXT"}</option></select></label>
       <div className="export-file-heading">
         <div>
-          <strong>文件范围</strong>
-          <small>{selection.selectedKeys.size ? `已选择 ${selection.selectedKeys.size} 个文件` : "未选择时导出全部文件"}</small>
+          <strong>{language === "en" ? "File scope" : "文件范围"}</strong>
+          <small>{selection.selectedKeys.size ? (language === "en" ? `${selection.selectedKeys.size} files selected` : `已选择 ${selection.selectedKeys.size} 个文件`) : (language === "en" ? "All files when none are selected" : "未选择时导出全部文件")}</small>
         </div>
-        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>清除选择</button>
+        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{language === "en" ? "Clear selection" : "清除选择"}</button>
       </div>
       <div className="file-list export-file-list">
         {overview.files.map((item) => (
@@ -399,8 +399,8 @@ export function ExportView({
           </button>
         ))}
       </div>
-      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> 生成双语对照</label>
-      <button className="primary-button" onClick={run}>生成输出</button>
+      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {language === "en" ? "Generate bilingual output" : "生成双语对照"}</label>
+      <button className="primary-button" onClick={run}>{language === "en" ? "Generate output" : "生成输出"}</button>
       {result && <pre className="result-box">{result}</pre>}
     </div>
   );
