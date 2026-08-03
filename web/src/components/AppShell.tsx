@@ -78,7 +78,10 @@ export function AppShell({
     : themeMode === "light"
       ? icons.themeLight
       : icons.themeDark;
-  const themeTitle = `当前外观：${themeLabels[themeMode]}；切换为${themeLabels[nextTheme[themeMode]]}`;
+  const themeTitle = translate("theme.current", language, {
+    current: themeLabels[themeMode],
+    next: themeLabels[nextTheme[themeMode]],
+  });
   return (
     <div className={`app${task ? " has-run-status" : ""}`}>
       <header className="topbar">
