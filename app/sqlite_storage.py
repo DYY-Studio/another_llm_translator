@@ -615,7 +615,7 @@ def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
     return (
         """
         LEFT JOIN (
-            SELECT segment_id, status,
+            SELECT segment_id, status, payload_json,
                    ROW_NUMBER() OVER (
                        PARTITION BY segment_id ORDER BY sequence DESC
                    ) AS rank
@@ -645,8 +645,11 @@ def segment_count(
             clauses.append("segments.file_id = ?")
             params.append(file_id)
         if search:
-            clauses.append("instr(lower(segments.source), lower(?)) > 0")
-            params.append(search)
+            clauses.append(
+                "(instr(lower(segments.source), lower(?)) > 0 OR "
+                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
+            )
+            params.extend([search, search])
         if status:
             if status == "pending":
                 clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
@@ -679,8 +682,11 @@ def query_segments(
             clauses.append("segments.file_id = ?")
             params.append(file_id)
         if search:
-            clauses.append("instr(lower(segments.source), lower(?)) > 0")
-            params.append(search)
+            clauses.append(
+                "(instr(lower(segments.source), lower(?)) > 0 OR "
+                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
+            )
+            params.extend([search, search])
         if status:
             if status == "pending":
                 clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
@@ -717,8 +723,11 @@ def segment_ids(
             clauses.append("segments.file_id = ?")
             params.append(file_id)
         if search:
-            clauses.append("instr(lower(segments.source), lower(?)) > 0")
-            params.append(search)
+            clauses.append(
+                "(instr(lower(segments.source), lower(?)) > 0 OR "
+                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
+            )
+            params.extend([search, search])
         if status:
             if status == "pending":
                 clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
