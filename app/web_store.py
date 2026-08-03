@@ -7,14 +7,16 @@ from typing import Any
 from .config import load_project_config
 from .documents import normalize_document_output
 from .errors import UsageError
-from .execution import (
-    latest_completed_by_segment,
-    load_stage_history,
-    stage_fingerprint,
-    stage_result_path,
-)
+from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
-from .project import load_segments, load_source_files
+from .project import load_source_files
+from .sqlite_storage import (
+    get_segment,
+    latest_stage_results,
+    query_segments,
+    segment_count,
+    segment_ids,
+)
 from .stages import (
     build_term_library_rows,
     load_terms,
@@ -24,6 +26,7 @@ from .stages import (
 from .storage import (
     append_jsonl,
     atomic_write_json,
+    logical_record_exists,
     new_record_id,
     read_json,
     read_jsonl,
@@ -41,19 +44,15 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project / "project.json")
         self.files = load_source_files(project)
-        self.segments = load_segments(project)
-        self.segments_by_id = {
-            str(item["segment_id"]): item
-            for item in self.segments
-            if not item["is_empty"]
-        }
 
     @property
     def project_id(self) -> str:
         return str(self.metadata["project_id"])
 
-    def _history(self, stage: str) -> dict[str, dict[str, Any]]:
-        return latest_completed_by_segment(load_stage_history(self.project, stage))
+    def _history(
+        self, stage: str, segment_ids_filter: list[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        return latest_stage_results(self.project, stage, segment_ids_filter)
 
     def _terms_revision(self) -> int | None:
         library = load_terms(self.project)
@@ -89,9 +88,12 @@ class WebStore:
         )
 
     def _require_segment(self, segment_id: object) -> dict[str, Any]:
-        if not isinstance(segment_id, str) or segment_id not in self.segments_by_id:
+        if not isinstance(segment_id, str):
             raise UsageError(f"未知或空 Segment：{segment_id}")
-        return self.segments_by_id[segment_id]
+        segment = get_segment(self.project, segment_id)
+        if segment is None or segment.get("is_empty"):
+            raise UsageError(f"未知或空 Segment：{segment_id}")
+        return segment
 
     def _normalize_text(
         self, segment: dict[str, Any], text: str, stage: str
@@ -108,11 +110,13 @@ class WebStore:
             adapter, segment=segment, text=text, stage=stage
         )
 
-    def _base_results(self, stage: str) -> dict[str, dict[str, Any]]:
-        translations = self._history("translation")
+    def _base_results(
+        self, stage: str, segment_ids_filter: list[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        translations = self._history("translation", segment_ids_filter)
         if stage == "proofreading":
             return translations
-        applied = self._history("proofreading_applied")
+        applied = self._history("proofreading_applied", segment_ids_filter)
         return {**translations, **applied}
 
     def _review_view(
@@ -143,12 +147,10 @@ class WebStore:
             ),
         }
 
-    def _stage_errors(self, stage: str) -> dict[str, dict[str, Any]]:
-        latest: dict[str, dict[str, Any]] = {}
-        for record in load_stage_history(self.project, stage):
-            segment_id = record.get("segment_id")
-            if segment_id:
-                latest[str(segment_id)] = record
+    def _stage_errors(
+        self, stage: str, segment_ids_filter: list[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        latest = self._history(stage, segment_ids_filter)
         return {
             segment_id: {
                 "error_class": str(record.get("error_class") or "stage_error"),
@@ -163,13 +165,13 @@ class WebStore:
 
     def terminology_scan(self) -> dict[str, Any]:
         active_path = self.project / "terminology" / "active_task.json"
-        active = read_json(active_path) if active_path.exists() else None
+        active = read_json(active_path) if logical_record_exists(active_path) else None
         base = {
             "active_task_id": None,
             "status": active.get("status", "none") if active else "none",
             "completed": 0,
             "failed": 0,
-            "pending": len(self.segments_by_id),
+            "pending": segment_count(self.project),
             "candidate_count": 0,
             "candidate_records": 0,
             "failure_counts": {},
@@ -184,7 +186,7 @@ class WebStore:
             record
             for record in read_jsonl(self.project / "terminology" / "scans.jsonl")
             if record.get("active_task_id") == task_id
-            and str(record.get("segment_id")) in self.segments_by_id
+            and record.get("segment_id")
         ]
         latest: dict[str, dict[str, Any]] = {}
         for record in scans:
@@ -228,7 +230,7 @@ class WebStore:
             {
                 "completed": len(completed),
                 "failed": len(failed_records),
-                "pending": max(0, len(self.segments_by_id) - len(completed) - len(failed_records)),
+                "pending": max(0, segment_count(self.project) - len(completed) - len(failed_records)),
                 "candidate_count": len(candidate_sources),
                 "candidate_records": len(candidate_records),
                 "failure_counts": dict(counts),
@@ -238,10 +240,33 @@ class WebStore:
         )
         return base
 
-    def overview(self) -> dict[str, Any]:
+    def overview(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        file_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        stage: str = "translation",
+    ) -> dict[str, Any]:
+        if stage not in {"translation", "proofreading", "polishing"}:
+            raise UsageError("overview stage 无效")
+        if status not in {None, "completed", "failed", "pending"}:
+            raise UsageError("overview status 无效")
+        window = query_segments(
+            self.project,
+            offset=offset,
+            limit=limit,
+            file_id=file_id,
+            status=status,
+            search=search,
+            stage=stage,
+        )
+        window_ids = [str(item["segment_id"]) for item in window]
         histories = {
-            stage: self._history(stage)
-            for stage in (
+            target: self._history(target, window_ids)
+            for target in (
                 "translation",
                 "proofreading",
                 "proofreading_applied",
@@ -250,8 +275,12 @@ class WebStore:
             )
         }
         stage_errors = {
-            stage: self._stage_errors(stage)
-            for stage in ("translation", "proofreading", "polishing")
+            target: {
+                segment_id: record
+                for segment_id, record in self._stage_errors(target, window_ids).items()
+                if segment_id in window_ids
+            }
+            for target in ("translation", "proofreading", "polishing")
         }
         files = [
             {
@@ -263,13 +292,7 @@ class WebStore:
             for item in sorted(self.files, key=lambda value: int(value["file_order"]))
         ]
         segments = []
-        for item in sorted(
-            self.segments_by_id.values(),
-            key=lambda value: (
-                str(value["file_id"]),
-                int(value["line_index"]),
-            ),
-        ):
+        for item in window:
             segment_id = str(item["segment_id"])
             segments.append(
                 {
@@ -301,18 +324,47 @@ class WebStore:
         return {
             "name": self.metadata["name"],
             "path": str(self.project),
-            "nonempty_segment_count": sum(
-                not bool(item["is_empty"])
-                for item in self.segments_by_id.values()
+            "nonempty_segment_count": segment_count(self.project),
+            "total_segments": segment_count(
+                self.project,
+                file_id=file_id,
+                status=status,
+                search=search,
+                stage=stage,
             ),
+            "offset": offset,
+            "limit": limit,
+            "stage": stage,
             "files": files,
             "segments": segments,
         }
 
+    def segment_index(
+        self,
+        *,
+        file_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        stage: str = "translation",
+    ) -> dict[str, Any]:
+        if stage not in {"translation", "proofreading", "polishing"}:
+            raise UsageError("segment index stage 无效")
+        if status not in {None, "completed", "failed", "pending"}:
+            raise UsageError("segment index status 无效")
+        values = segment_ids(
+            self.project,
+            file_id=file_id,
+            status=status,
+            search=search,
+            stage=stage,
+        )
+        return {"segment_ids": values, "total": len(values), "stage": stage}
+
     def segment_detail(self, segment_id: str) -> dict[str, Any]:
         segment = self._require_segment(segment_id)
+        segment_filter = [segment_id]
         histories = {
-            stage: self._history(stage)
+            stage: self._history(stage, segment_filter)
             for stage in (
                 "translation",
                 "proofreading",
@@ -400,7 +452,7 @@ class WebStore:
             raise UsageError(f"不支持的建议阶段：{stage}")
         segment_id = payload.get("segment_id")
         self._require_segment(segment_id)
-        base = self._base_results(stage).get(str(segment_id))
+        base = self._base_results(stage, [str(segment_id)]).get(str(segment_id))
         if base is None:
             raise UsageError("当前 Segment 缺少可用基准结果")
         review_status = payload.get("review_status")
@@ -486,7 +538,7 @@ class WebStore:
             cleared_ids: set[str] = set()
             reset_records = 0
             for target_stage in stages:
-                current = self._history(target_stage)
+                current = self._history(target_stage, list(segment_ids))
                 for segment_id in segment_ids:
                     if segment_id not in current:
                         continue

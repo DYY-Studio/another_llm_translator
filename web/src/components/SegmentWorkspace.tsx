@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import type { ProjectOverview, Segment, Stage } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
@@ -57,20 +58,23 @@ export function SegmentWorkspace({
   onRefresh: () => Promise<void>;
   focusFailures?: boolean;
 }) {
-  const selection = useClassicSelection(
-    overview.segments[0]?.segment_id ?? "",
-  );
+  const selection = useClassicSelection();
   const [file, setFile] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
+  const [orderedIds, setOrderedIds] = useState<string[]>([]);
+  const [records, setRecords] = useState<Record<string, Segment>>({});
+  const [total, setTotal] = useState(0);
+  const [listError, setListError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const pageSize = 100;
   const [batchAction, setBatchAction] = useState<{
     kind: "reset" | "apply";
     scope: "selected" | "filtered";
   } | null>(null);
   const [batchMessage, setBatchMessage] = useState("");
-  const selected = overview.segments.find(
-    (item) => item.segment_id === selection.focusedKey,
-  ) ?? overview.segments[0];
+  const selected = records[selection.focusedKey] ?? records[orderedIds[0]];
   const [text, setText] = useState("");
   const [reason, setReason] = useState("");
   const [reviewStatus, setReviewStatus] = useState<"accepted" | "suggested">("suggested");
@@ -78,6 +82,74 @@ export function SegmentWorkspace({
   useEffect(() => {
     if (focusFailures) setStatus("error");
   }, [focusFailures]);
+
+  const query = new URLSearchParams({ stage });
+  if (file !== "all") query.set("file_id", file);
+  if (status !== "all") query.set("status", status === "error" ? "failed" : status === "warning" ? "completed" : status);
+  if (search.trim()) query.set("q", search.trim());
+
+  const reloadIndex = useCallback(async () => {
+    setLoading(true);
+    setListError("");
+    try {
+      const index = await api<{ segment_ids: string[]; total: number }>(
+        `/api/v1/projects/${project}/segments/ids?${query.toString()}`,
+      );
+      setOrderedIds(index.segment_ids);
+      setTotal(index.total);
+      setRecords({});
+      selection.reset(index.segment_ids[0] ?? "");
+      listRef.current?.scrollTo({ top: 0 });
+    } catch (value) {
+      setListError(String(value));
+      setOrderedIds([]);
+      setTotal(0);
+      selection.reset();
+    } finally {
+      setLoading(false);
+    }
+  }, [project, stage, file, status, search]);
+
+  useEffect(() => { void reloadIndex(); }, [reloadIndex]);
+
+  const virtualizer = useVirtualizer({
+    count: orderedIds.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 82,
+    overscan: 8,
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  useEffect(() => {
+    const offsets = new Set(
+      virtualItems.map((item) => Math.floor(item.index / pageSize) * pageSize),
+    );
+    if (!offsets.size) return;
+    let cancelled = false;
+    void Promise.all([...offsets].map(async (offset) => {
+      const params = new URLSearchParams({ stage, offset: String(offset), limit: String(pageSize) });
+      if (file !== "all") params.set("file_id", file);
+      if (status !== "all" && status !== "warning") params.set("status", status === "error" ? "failed" : status);
+      if (search.trim()) params.set("q", search.trim());
+      const page = await api<ProjectOverview>(`/api/v1/projects/${project}?${params.toString()}`);
+      return page.segments;
+    })).then((pages) => {
+      if (cancelled) return;
+      setRecords((current) => {
+        const next = { ...current };
+        for (const page of pages) for (const item of page) next[item.segment_id] = item;
+        return next;
+      });
+    }).catch((value) => { if (!cancelled) setListError(String(value)); });
+    return () => { cancelled = true; };
+  }, [project, stage, file, status, search, orderedIds, virtualItems.map((item) => item.index).join(",")]);
+
+  useEffect(() => {
+    if (!selection.focusedKey || records[selection.focusedKey]) return;
+    void api<Segment>(`/api/v1/projects/${project}/segments/${selection.focusedKey}`)
+      .then((item) => setRecords((current) => ({ ...current, [item.segment_id]: item })))
+      .catch((value) => setListError(String(value)));
+  }, [project, selection.focusedKey, records]);
 
   useEffect(() => {
     if (!selected) return;
@@ -89,34 +161,18 @@ export function SegmentWorkspace({
     setReviewStatus(suggestion?.review_status ?? "suggested");
     setText(suggestion?.suggested_text ?? selected.reviews[stage].base?.text ?? "");
     setReason(suggestion?.reason ?? "");
-  }, [selection.focusedKey, stage, overview, selected]);
+  }, [selection.focusedKey, stage, selected]);
 
-  const visible = useMemo(() => overview.segments.filter((item) => {
-    const result = resultFor(item, stage);
-    const haystack = [
-      item.segment_id,
-      item.source,
-      item.translation?.text,
-      result?.suggested_text,
-      result?.reason,
-    ].filter(Boolean).join("\n").toLocaleLowerCase();
-    return (file === "all" || item.file_id === file)
-      && (status === "all" || statusFor(item, stage) === status)
-      && haystack.includes(search.toLocaleLowerCase());
-  }), [overview, file, status, search, stage]);
-  const visibleKeys = visible.map((item) => item.segment_id);
+  const visibleKeys = orderedIds;
   const selectedVisibleIds = visibleKeys.filter((segmentId) => (
     selection.selectedKeys.has(segmentId)
   ));
 
-  useEffect(() => {
-    selection.reset(visibleKeys[0] ?? "");
-  }, [project, stage, file, status, search]);
-
   const neighbors = selected
-    ? overview.segments.filter(
-        (item) => item.file_id === selected.file_id && item.part_id === selected.part_id,
-      )
+    ? orderedIds
+      .map((id) => records[id])
+      .filter((item): item is Segment => Boolean(item))
+      .filter((item) => item.file_id === selected.file_id && item.part_id === selected.part_id)
     : [];
   const selectedIndex = neighbors.findIndex((item) => item.segment_id === selected?.segment_id);
   const before = neighbors.slice(Math.max(0, selectedIndex - 2), selectedIndex);
@@ -149,14 +205,15 @@ export function SegmentWorkspace({
       });
     }
     await onRefresh();
+    await reloadIndex();
   }
 
   const batchIds = batchAction?.scope === "filtered"
     ? visibleKeys
     : selectedVisibleIds;
-  const batchSegments = overview.segments.filter((item) => (
-    batchIds.includes(item.segment_id)
-  ));
+  const batchSegments = batchIds
+    .map((segmentId) => records[segmentId])
+    .filter((item): item is Segment => Boolean(item));
   const missingApply = batchAction?.kind === "apply" && stage !== "translation"
     ? batchSegments.filter((item) => {
       const review = item.reviews[stage];
@@ -196,6 +253,7 @@ export function SegmentWorkspace({
     setBatchAction(null);
     selection.reset();
     await onRefresh();
+    await reloadIndex();
   }
 
   const review = stage === "translation" || !selected ? null : selected.reviews[stage];
@@ -223,24 +281,26 @@ export function SegmentWorkspace({
             }} placeholder="搜索原文或译文" />
           </div>
           <div className="batch-toolbar segment-batch-toolbar">
-            <span>已选择 {selectedVisibleIds.length} / 当前 {visible.length}</span>
+            <span>已选择 {selectedVisibleIds.length} / 当前 {total}</span>
             <div className="segment-batch-actions">
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>应用所选</button>
-                  <button className="quiet-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
+                  <button className="quiet-button" disabled={!total} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
                 </>
               )}
               <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>清除所选</button>
-              <button className="danger-button" disabled={!visible.length} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
+              <button className="danger-button" disabled={!total} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
             </div>
           </div>
           {batchMessage && <span className="success-text">{batchMessage}</span>}
         </div>
         <div className="list-header"><span>ID / 状态</span><span>原文 / 结果预览</span></div>
-        <div className="segment-list">
-          <div className="segment-row-stack">
-            {visible.map((item) => {
+        <div className="segment-list" ref={listRef}>
+          <div className="segment-row-stack" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+            {virtualItems.map((virtualItem) => {
+              const item = records[orderedIds[virtualItem.index]];
+              if (!item) return <div key={virtualItem.key} className="segment-row-placeholder" style={{ height: virtualItem.size, transform: `translateY(${virtualItem.start}px)` }} />;
               const itemStatus = statusFor(item, stage);
               const result = resultFor(item, stage);
               const error = item.stage_errors?.[stage];
@@ -250,6 +310,9 @@ export function SegmentWorkspace({
               return (
                 <button
                   key={item.segment_id}
+                  ref={virtualizer.measureElement}
+                  data-index={virtualItem.index}
+                  style={{ position: "absolute", top: 0, transform: `translateY(${virtualItem.start}px)`, height: Math.max(virtualItem.size - 1, 1) }}
                   className={`segment-row${selection.selectedKeys.has(item.segment_id) ? " selected" : ""}${selection.focusedKey === item.segment_id ? " focused" : ""}`}
                   onClick={(event) => selection.select(
                     item.segment_id,
@@ -264,7 +327,9 @@ export function SegmentWorkspace({
               );
             })}
           </div>
-          {!visible.length && <div className="empty">当前筛选下没有 Segment</div>}
+          {!total && <div className="empty">当前筛选下没有 Segment</div>}
+          {loading && <div className="list-loading">正在加载 Segment…</div>}
+          {listError && <div className="error-text">{listError}</div>}
         </div>
       </section>
       <section className="editor-pane">

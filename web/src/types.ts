@@ -59,6 +59,10 @@ export interface ProjectOverview {
   name: string;
   path: string;
   nonempty_segment_count: number;
+  total_segments: number;
+  offset: number;
+  limit: number;
+  stage?: LLMStage;
   files: Array<{
     file_id: string;
     file_order: number;

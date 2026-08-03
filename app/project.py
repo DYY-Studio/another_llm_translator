@@ -20,10 +20,8 @@ from .storage import (
     atomic_write_json,
     new_record_id,
     read_json,
-    read_jsonl,
     record_header,
     utc_now,
-    write_jsonl,
 )
 from .sqlite_storage import (
     database_path,

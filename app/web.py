@@ -42,6 +42,7 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
+from .sqlite_storage import database_path
 from .stages import (
     export_project,
     export_terms,
@@ -161,20 +162,29 @@ def create_app(
     async def local_only(request: Request, call_next: Any) -> Any:
         host = request.headers.get("host", "").split(":", 1)[0]
         if host not in {"127.0.0.1", "localhost", "testserver"}:
-            return JSONResponse({"error": "只允许本机访问"}, status_code=403)
+            return JSONResponse(
+                {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+            )
         origin = request.headers.get("origin")
         if origin:
             origin_host = origin.split("://", 1)[-1].split("/", 1)[0]
             origin_host = origin_host.split(":", 1)[0]
             if origin_host not in {"127.0.0.1", "localhost", "testserver"}:
                 return JSONResponse(
-                    {"error": "不允许的请求来源"}, status_code=403
+                    {"error": "不允许的请求来源", "code": "invalid_origin"}, status_code=403
                 )
         return await call_next(request)
 
     @app.exception_handler(AppError)
     async def app_error(_: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(
+            {
+                "error": str(exc),
+                "code": exc.code,
+                "params": exc.params,
+            },
+            status_code=400,
+        )
 
     def remember_project(path: Path) -> None:
         normalized = path.resolve()
@@ -190,12 +200,12 @@ def create_app(
                 for item in sorted(
                     projects_root.iterdir(), key=lambda value: value.name
                 )
-                if (item / "project.json").is_file()
+                if database_path(item).is_file()
             )
         paths.extend(
             path
             for path in sorted(app.state.external_projects)
-            if (path / "project.json").is_file()
+            if database_path(path).is_file()
         )
         unique: dict[Path, Path] = {}
         for path in paths:
@@ -363,6 +373,7 @@ def create_app(
                         "selected": path.stem == selected,
                         "valid": False,
                         "error": str(exc),
+                        "error_code": exc.code,
                     }
                 )
         return {"presets": values}
@@ -385,7 +396,7 @@ def create_app(
         if config["llm"].get("preset") == preset_id:
             raise UsageError("不能删除全局配置正在使用的 LLM Preset")
         for item in projects_root.iterdir() if projects_root.exists() else ():
-            if not (item / "project.json").is_file():
+            if not database_path(item).is_file():
                 continue
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
@@ -544,8 +555,31 @@ def create_app(
         return result
 
     @app.get("/api/v1/projects/{name}")
-    async def overview(name: str) -> dict[str, Any]:
-        return WebStore(project(name)).overview()
+    async def overview(name: str, request: Request) -> dict[str, Any]:
+        params = request.query_params
+        try:
+            offset = int(params.get("offset", "0"))
+            limit = int(params.get("limit", "100"))
+        except ValueError as exc:
+            raise UsageError("Segment 窗口参数必须是整数") from exc
+        return WebStore(project(name)).overview(
+            offset=offset,
+            limit=limit,
+            file_id=params.get("file_id") or None,
+            status=params.get("status") or None,
+            search=params.get("q") or None,
+            stage=params.get("stage", "translation"),
+        )
+
+    @app.get("/api/v1/projects/{name}/segments/ids")
+    async def segment_index(name: str, request: Request) -> dict[str, Any]:
+        params = request.query_params
+        return WebStore(project(name)).segment_index(
+            file_id=params.get("file_id") or None,
+            status=params.get("status") or None,
+            search=params.get("q") or None,
+            stage=params.get("stage", "translation"),
+        )
 
     @app.post("/api/v1/projects/{name}/files")
     async def add_files(
@@ -769,6 +803,7 @@ def create_app(
                         "adapter_id": path.stem,
                         "valid": False,
                         "error": str(exc),
+                        "error_code": exc.code,
                     }
                 )
         return {"adapters": adapters}
