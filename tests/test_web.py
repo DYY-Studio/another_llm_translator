@@ -73,6 +73,20 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
+    client = TestClient(create_app(projects_root=tmp_path / "projects"))
+
+    response = client.post(
+        "/api/v1/projects",
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["code"] == "request_validation_error"
+    assert payload["params"]["fields"] == ["name"]
+    assert "input" not in payload["params"]
+
+
 def test_web_deletes_project_only_after_confirmation_and_finished_runs(
     tmp_path: Path,
 ) -> None:
