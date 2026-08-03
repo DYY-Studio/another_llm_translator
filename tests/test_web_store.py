@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,8 @@ import pytest
 from app.web_store import WebStore
 from app.errors import UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
-from app.project import init_project
+from app.project import add_project_files, init_project
+from app.sqlite_storage import query_segments, segment_ids
 from app.stages import export_project, load_terms, match_terms
 from app.storage import atomic_write_json, read_json, record_header
 from tests.test_foundation import make_app_root
@@ -106,6 +109,33 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "outdated": False,
         "applied_current": False,
     }
+
+
+def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "first")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    add_project_files(project, [str(second)])
+
+    database = sqlite3.connect(project / "project.sqlite")
+    try:
+        rows = database.execute(
+            "SELECT file_id, payload_json FROM files ORDER BY file_id"
+        ).fetchall()
+        assert [row[0] for row in rows] == ["F0001", "F0002"]
+        for file_id, payload_json in rows:
+            payload = json.loads(payload_json)
+            payload["file_order"] = 20 if file_id == "F0001" else 10
+            database.execute(
+                "UPDATE files SET file_order = ?, payload_json = ? WHERE file_id = ?",
+                (payload["file_order"], json.dumps(payload, ensure_ascii=False), file_id),
+            )
+        database.commit()
+    finally:
+        database.close()
+
+    assert [item["source"] for item in query_segments(project)] == ["second", "first"]
+    assert segment_ids(project) == ["F0002-S000001", "F0001-S000001"]
 
 
 def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:

@@ -276,7 +276,14 @@ def read_segments(project: Path) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
         rows = connection.execute(
-            "SELECT payload_json FROM segments ORDER BY file_id, line_index"
+            """
+            SELECT segments.payload_json
+            FROM segments
+            ORDER BY (
+                SELECT file_order FROM files
+                WHERE files.file_id = segments.file_id
+            ), segments.line_index
+            """
         ).fetchall()
         return [_load(str(row[0])) for row in rows]
     except sqlite3.Error as exc:
@@ -709,7 +716,10 @@ def query_segments(
             FROM segments
             {join}
             WHERE {' AND '.join(clauses)}
-            ORDER BY segments.file_id, segments.line_index
+            ORDER BY (
+                SELECT file_order FROM files
+                WHERE files.file_id = segments.file_id
+            ), segments.line_index
             LIMIT ? OFFSET ?
         """
         return [_load(str(row[0])) for row in connection.execute(query, params).fetchall()]
@@ -744,7 +754,10 @@ def segment_ids(
             SELECT segments.segment_id
             FROM segments {join}
             WHERE {' AND '.join(clauses)}
-            ORDER BY segments.file_id, segments.line_index
+            ORDER BY (
+                SELECT file_order FROM files
+                WHERE files.file_id = segments.file_id
+            ), segments.line_index
         """
         return [str(row[0]) for row in connection.execute(query, params).fetchall()]
     finally:
