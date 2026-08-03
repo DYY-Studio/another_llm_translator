@@ -693,7 +693,7 @@ Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复�
 `review_status` 是阶段 payload，不等于记录的 `status`。结构有效的 accepted 和 suggested 都保存为 completed。
 accepted 的持久化记录将 `suggested_text` 和 `reason` 规范化保存为 `null`。
 
-Web 人工重置在同一阶段 JSONL 中追加 `status = "reset"`。reset 屏蔽该
+Web 人工重置在 SQLite 的对应阶段记录中追加 `status = "reset"`。reset 屏蔽该
 Segment 此前的 completed；之后的新 completed 重新成为当前结果。重置校对或
 润色时同时重置该阶段 applied 结果，但不级联删除其他阶段。
 
