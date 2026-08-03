@@ -183,6 +183,15 @@ export default function App() {
     setTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
   }
 
+  async function handleProjectDeleted(path: string) {
+    writeRecentProjectPaths(readRecentProjectPaths().filter((value) => value !== path));
+    setProject("");
+    setOverview(null);
+    setTask(null);
+    setFailureFocus(null);
+    await loadProjects();
+  }
+
   function navigateStage(value: Stage) {
     setStage(value);
     setFailureFocus(null);
@@ -206,6 +215,7 @@ export default function App() {
         project={project}
         value={overview}
         onFilesChanged={refreshProject}
+        onDeleted={handleProjectDeleted}
       />
     );
     else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} />;

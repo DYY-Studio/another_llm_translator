@@ -248,6 +248,9 @@ python -m app.main files-remove PROJECT FILE_ID...
 - 被移除 Segment 的历史阶段记录仍是审计数据，但不再参与 inspect、指纹差异、
   结果复用、校验警告、过期建议统计或导出。
 - 移除 File 时同时清除该 File 独占的 Adapter 不透明状态；重新添加生成新状态。
+- Web 项目概览提供“删除项目”操作。删除必须明确确认，且项目不存在未完成 Run；
+  确认后删除整个自包含项目目录（输入、Run、术语库、阶段结果和导出），不可恢复。
+  删除外部项目时同时清理本机 Web 会话中的最近路径记录。
 
 空项目以及只含空白 Segment 的项目仍可打开、inspect、编辑配置、Prompt 和
 Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
@@ -796,8 +799,10 @@ Segment 数。
 
 `terminology --force` 创建新的全量活动任务，忽略此前扫描进度。上一份术语库
 在新任务发布前继续可用；发布时新候选合并到上一份术语库，未再次发现的旧术语
-不会自动删除。术语移除只能通过人工 disabled override 完成。旧任务记录可以
-留在追加文件中，但不再参与产品逻辑，也不提供历史代次管理功能。
+不会自动删除。术语“移除”通过人工 disabled override 完成；Web 还提供“彻底删除”，
+会同时删除术语记录及对应 disabled override，使后续扫描可以重新发现该术语。彻底
+删除不删除历史 scan/candidate 记录。旧任务记录可以留在追加文件中，但不再参与产品
+逻辑，也不提供历史代次管理功能。
 
 每条 scan 和 candidate 都记录 `active_task_id`；读取和发布时只使用 `active_task.json` 当前指向的任务记录。
 

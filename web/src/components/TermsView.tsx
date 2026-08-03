@@ -44,6 +44,7 @@ export function TermsView({
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
@@ -84,6 +85,7 @@ export function TermsView({
     });
   }, [data, onlyConflicts, search, showDisabled]);
   const visibleKeys = visible.map((term) => term.normalized);
+  const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
   const selectedActive = visible.filter(
     (term) => selection.selectedKeys.has(term.normalized) && !term.disabled,
   );
@@ -157,6 +159,30 @@ export function TermsView({
     }
   }
 
+  async function deleteSelected() {
+    setSaving(true);
+    try {
+      const value = await api<TermsResponse & { deleted: number }>(
+        `/api/v1/projects/${project}/terms/delete`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            normalized: selectedTerms.map((term) => term.normalized),
+          }),
+        },
+      );
+      setData(value);
+      selection.reset();
+      setForm(emptyForm);
+      setMessage(`已彻底删除 ${value.deleted} 条术语；再次扫描可以重新发现`);
+      setDeleteOpen(false);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="terms-workspace">
       <section className="terms-browser">
@@ -200,6 +226,12 @@ export function TermsView({
               disabled={!selectedActive.length}
               onClick={() => setRemoveOpen(true)}
             >移除所选</button>
+            <button
+              className="danger-button"
+              disabled={!selectedTerms.length}
+              onClick={() => setDeleteOpen(true)}
+            >彻底删除所选</button>
+            <small className="term-removal-help">移除会保留扫描忽略规则；彻底删除后可再次发现。</small>
           </div>
         </div>
         {data?.scan.active_task_id && (
@@ -304,6 +336,16 @@ export function TermsView({
           onConfirm={removeSelected}
         />
       )}
+      {deleteOpen && (
+        <ConfirmDialog
+          title="彻底删除所选术语"
+          text={`将删除 ${selectedTerms.length} 条术语及其扫描忽略规则；再次扫描可以重新发现。该操作不可撤销。`}
+          confirmLabel="确认彻底删除"
+          confirming={saving}
+          onCancel={() => setDeleteOpen(false)}
+          onConfirm={deleteSelected}
+        />
+      )}
       {importOpen && (
         <TermImportDialog
           project={project}
@@ -363,12 +405,14 @@ function ConflictChoices({
 function ConfirmDialog({
   title,
   text,
+  confirmLabel = "确认移除",
   confirming,
   onCancel,
   onConfirm,
 }: {
   title: string;
   text: string;
+  confirmLabel?: string;
   confirming: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -380,7 +424,7 @@ function ConfirmDialog({
         <p>{text}</p>
         <div className="modal-actions">
           <button className="quiet-button" disabled={confirming} onClick={onCancel}>取消</button>
-          <button className="danger-button" disabled={confirming} onClick={onConfirm}>确认移除</button>
+          <button className="danger-button" disabled={confirming} onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </div>
     </div>
