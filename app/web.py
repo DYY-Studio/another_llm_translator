@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -182,6 +183,29 @@ def create_app(
                 "error": str(exc),
                 "code": exc.code,
                 "params": exc.params,
+            },
+            status_code=400,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(
+        _: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        fields: set[str] = set()
+        for error in exc.errors():
+            location = error.get("loc", ())
+            field = ".".join(
+                str(part)
+                for part in location
+                if part not in {"body", "query", "path", "header", "cookie"}
+            )
+            if field:
+                fields.add(field)
+        return JSONResponse(
+            {
+                "error": "请求参数无效",
+                "code": "request_validation_error",
+                "params": {"fields": sorted(fields)},
             },
             status_code=400,
         )
