@@ -52,7 +52,13 @@ class WebStore:
     def _history(
         self, stage: str, segment_ids_filter: list[str] | None = None
     ) -> dict[str, dict[str, Any]]:
-        return latest_stage_results(self.project, stage, segment_ids_filter)
+        return {
+            segment_id: record
+            for segment_id, record in latest_stage_results(
+                self.project, stage, segment_ids_filter
+            ).items()
+            if record.get("status") != "reset"
+        }
 
     def _terms_revision(self) -> int | None:
         library = load_terms(self.project)
