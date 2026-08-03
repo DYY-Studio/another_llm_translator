@@ -237,9 +237,11 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .term-filters label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
 .term-filters input { margin: 0; }
 .term-stats { justify-content: end; color: var(--muted); white-space: nowrap; font-size: 12px; }
+
 .batch-toolbar { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 8px; }
 .batch-toolbar > span:first-child { margin-right: auto; color: var(--muted); font-size: 12px; }
 .batch-toolbar button { min-height: 32px; padding-inline: 10px; }
+
 .term-removal-help { flex: 1 1 100%; color: var(--muted); font-size: 11px; }
 .segment-batch-actions { display: flex; min-width: 0; gap: 8px; }
 .term-list { min-height: 0; overflow: auto; }
@@ -466,7 +468,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .run-button { padding: 0; font-size: 0; }
   .run-button::after { content: "运行"; font-size: 12px; }
   .workspace { grid-template-columns: minmax(330px, 42%) minmax(0, 1fr); }
-  .terms-workspace { grid-template-columns: minmax(330px, 42%) minmax(430px, 1fr); }
+  .terms-workspace { grid-template-columns: minmax(330px, 42%) minmax(375px, 1fr); }
   .settings-layout { grid-template-columns: 1fr 300px; }
 }
 

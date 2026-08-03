@@ -217,20 +217,22 @@ export function TermsView({
               <span>待裁决 {data?.conflict_count ?? 0}</span>
             </div>
           </div>
-          <div className="batch-toolbar">
+          <div className="batch-toolbar segment-batch-toolbar">
             <span>已选择 {selection.selectedKeys.size} 条</span>
-            <button className="quiet-button" onClick={() => setImportOpen(true)}>导入</button>
-            <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>导出</button>
-            <button
-              className="danger-button"
-              disabled={!selectedActive.length}
-              onClick={() => setRemoveOpen(true)}
-            >移除所选</button>
-            <button
-              className="danger-button"
-              disabled={!selectedTerms.length}
-              onClick={() => setDeleteOpen(true)}
-            >彻底删除所选</button>
+            <div className="segment-batch-actions">
+              <button className="quiet-button" onClick={() => setImportOpen(true)}>导入</button>
+              <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>导出</button>
+              <button
+                className="danger-button"
+                disabled={!selectedActive.length}
+                onClick={() => setRemoveOpen(true)}
+              >移除所选</button>
+              <button
+                className="danger-button"
+                disabled={!selectedTerms.length}
+                onClick={() => setDeleteOpen(true)}
+              >彻底删除所选</button>
+            </div>
             <small className="term-removal-help">移除会保留扫描忽略规则；彻底删除后可再次发现。</small>
           </div>
         </div>
