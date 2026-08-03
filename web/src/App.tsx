@@ -118,7 +118,10 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     if (!project) { setOverview(null); return; }
-    setOverview(await api<ProjectOverview>(`/api/v1/projects/${project}`));
+    // The shell only needs project totals and file metadata. Segment rows are
+    // loaded by SegmentWorkspace in bounded windows, so do not fetch a second
+    // full page just to refresh the summary after an edit.
+    setOverview(await api<ProjectOverview>(`/api/v1/projects/${project}?offset=0&limit=1`));
   }, [project]);
 
   const refreshProject = useCallback(async () => {

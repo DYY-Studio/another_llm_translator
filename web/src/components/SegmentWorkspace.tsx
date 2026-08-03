@@ -101,7 +101,7 @@ export function SegmentWorkspace({
   if (status !== "all") query.set("status", status === "error" ? "failed" : status);
   if (search.trim()) query.set("q", search.trim());
 
-  const reloadIndex = useCallback(async () => {
+  const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
     setLoading(true);
     setListError("");
     try {
@@ -110,14 +110,30 @@ export function SegmentWorkspace({
       );
       setOrderedIds(index.segment_ids);
       setTotal(index.total);
-      setRecords({});
-      selection.reset(index.segment_ids[0] ?? "");
-      listRef.current?.scrollTo({ top: 0 });
+      if (!preserveSegmentId) {
+        setRecords({});
+        selection.reset(index.segment_ids[0] ?? "");
+        listRef.current?.scrollTo({ top: 0 });
+      } else if (!index.segment_ids.includes(preserveSegmentId)) {
+        // A save can move the focused row out of a status filter. In that
+        // case reset only the now-invalid focus; an unchanged row keeps its
+        // window, selection, and scroll position.
+        setRecords({});
+        selection.reset(index.segment_ids[0] ?? "");
+        listRef.current?.scrollTo({ top: 0 });
+      } else {
+        const allowed = new Set(index.segment_ids);
+        setRecords((current) => Object.fromEntries(
+          Object.entries(current).filter(([segmentId]) => allowed.has(segmentId)),
+        ));
+      }
+      return index.segment_ids;
     } catch (value) {
       setListError(String(value));
       setOrderedIds([]);
       setTotal(0);
       selection.reset();
+      return [];
     } finally {
       setLoading(false);
     }
@@ -257,7 +273,17 @@ export function SegmentWorkspace({
       });
     }
     await onRefresh();
-    await reloadIndex();
+    const visibleIds = await reloadIndex(selected.segment_id);
+    if (visibleIds.includes(selected.segment_id)) {
+      try {
+        const fresh = await api<Segment>(
+          `/api/v1/projects/${project}/segments/${selected.segment_id}`,
+        );
+        setRecords((current) => ({ ...current, [fresh.segment_id]: fresh }));
+      } catch (value) {
+        setListError(String(value));
+      }
+    }
   }
 
   const batchIds = batchAction?.scope === "filtered"
