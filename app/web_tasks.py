@@ -359,6 +359,13 @@ class WebTaskManager:
             for state in self.tasks.values()
         )
 
+    def is_project_running(self, project: Path) -> bool:
+        return any(
+            state.project == project
+            and state.status in {"queued", "running", "cancelling"}
+            for state in self.tasks.values()
+        )
+
     async def cancel(self, task_id: str) -> dict[str, Any]:
         try:
             state = self.tasks[task_id]

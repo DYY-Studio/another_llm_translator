@@ -35,6 +35,7 @@ from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
     PROJECTS_ROOT,
     add_project_files,
+    delete_project,
     init_project,
     remove_project_files,
     resolve_project,
@@ -525,6 +526,23 @@ def create_app(
             "external": root.parent != projects_root.resolve(),
         }
 
+    @app.delete("/api/v1/projects/{name}")
+    async def delete_project_route(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认删除整个项目")
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，结束或取消后才能删除")
+        with project_write_lock(root):
+            result = delete_project(
+                root,
+                protected_roots=(projects_root, app_root),
+            )
+        app.state.external_projects.discard(root.resolve())
+        return result
+
     @app.get("/api/v1/projects/{name}")
     async def overview(name: str) -> dict[str, Any]:
         return WebStore(project(name)).overview()
@@ -602,6 +620,10 @@ def create_app(
     @app.post("/api/v1/projects/{name}/terms/remove")
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).remove_terms(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/delete")
+    async def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).delete_terms(payload)
 
     @app.post("/api/v1/projects/{name}/terms/publish-partial")
     async def publish_partial_term_results(

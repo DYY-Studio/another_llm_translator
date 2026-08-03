@@ -73,6 +73,54 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_deletes_project_only_after_confirmation_and_finished_runs(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    refused = client.request(
+        "DELETE",
+        "/api/v1/projects/sample",
+        json={"confirm": False},
+    )
+    assert refused.status_code == 400
+    assert project.exists()
+
+    config = load_project_config(project)
+    _, run_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="test",
+        prompt="test",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    blocked = client.request(
+        "DELETE",
+        "/api/v1/projects/sample",
+        json={"confirm": True},
+    )
+    assert blocked.status_code == 400
+    assert project.exists()
+
+    manifest = read_json(run_dir / "manifest.json")
+    manifest["status"] = "failed"
+    atomic_write_json(run_dir / "manifest.json", manifest)
+    deleted = client.request(
+        "DELETE",
+        "/api/v1/projects/sample",
+        json={"confirm": True},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert not project.exists()
+    assert client.get("/api/v1/projects").json()["projects"] == []
+
+
+
 def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     app_root = tmp_path / "app-root"
@@ -913,6 +961,31 @@ def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
     )
     assert unresolved.status_code == 400
     assert "类别冲突尚未裁决" in unresolved.json()["error"]
+
+
+def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    added = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": [],
+            "disabled": True,
+        },
+    )
+    assert added.status_code == 200
+    deleted = client.post(
+        "/api/v1/projects/sample/terms/delete",
+        json={"normalized": ["alice"]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == 1
+    assert read_json(project / "terminology" / "terms.json")["terms"] == []
+    assert read_json(project / "terminology" / "overrides.json")["overrides"] == []
 
 
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:

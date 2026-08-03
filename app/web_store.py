@@ -692,6 +692,54 @@ class WebStore:
             result["unchanged"] = len(values) - changed
             return result
 
+    def delete_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Remove terms and their disabled overrides so scans may rediscover them."""
+        with project_write_lock(self.project):
+            raw_values = payload.get("normalized")
+            if (
+                not isinstance(raw_values, list)
+                or not raw_values
+                or not all(isinstance(value, str) and value for value in raw_values)
+            ):
+                raise UsageError("normalized 必须是非空字符串数组")
+            values = tuple(dict.fromkeys(raw_values))
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_path = self.project / "terminology" / "overrides.json"
+            overrides_document = read_json(overrides_path)
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            unknown = [
+                value
+                for value in values
+                if value not in current and value not in overrides
+            ]
+            if unknown:
+                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            deleted = 0
+            for normalized in values:
+                existed = normalized in current or normalized in overrides
+                current.pop(normalized, None)
+                overrides.pop(normalized, None)
+                deleted += int(existed)
+            if not deleted:
+                result = self.terms()
+            else:
+                result = self._publish_terms(
+                    library,
+                    current,
+                    overrides,
+                    origin="web_permanent_delete",
+                )
+            result["deleted"] = deleted
+            result["unchanged"] = len(values) - deleted
+            return result
+
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = payload.get("source")
         if not isinstance(source, str) or not source.strip():

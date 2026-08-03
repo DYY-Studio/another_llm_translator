@@ -1033,6 +1033,37 @@ def remove_project_files(
     }
 
 
+def delete_project(
+    project: Path,
+    *,
+    protected_roots: Iterable[Path] = (),
+) -> dict[str, object]:
+    """Delete one complete, self-contained project directory."""
+    root = project.resolve()
+    if not (root / "project.json").is_file():
+        raise ProjectError(f"项目不存在或无效：{project}")
+    protected = {PROJECTS_ROOT.resolve(), APP_ROOT.resolve()}
+    protected.update(Path(value).resolve() for value in protected_roots)
+    if root in protected or root.parent == root:
+        raise ProjectError("不能删除项目根目录")
+    running = _running_run_ids(root)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能删除项目：{', '.join(running)}"
+        )
+    metadata = read_json(root / "project.json")
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        raise ProjectError(f"删除项目失败：{root}: {exc}") from exc
+    return {
+        "deleted": True,
+        "project_id": metadata.get("project_id"),
+        "name": metadata.get("name"),
+        "path": str(root),
+    }
+
+
 def resolve_project(value: str, projects_root: Path = PROJECTS_ROOT) -> Path:
     direct = Path(value)
     path = direct if direct.is_dir() else projects_root / value
