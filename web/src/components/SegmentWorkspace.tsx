@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
+import type { Language } from "../i18n";
 import type { ProjectOverview, Segment, Stage } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
@@ -32,32 +33,44 @@ function statusFor(segment: Segment, stage: Stage) {
   return "pending";
 }
 
-const statusLabels: Record<string, string> = {
-  all: "全部状态",
-  pending: "待处理",
-  completed: "已完成",
-  warning: "校验警告",
-  "missing-base": "缺少基准",
-  outdated: "基准已变",
-  accepted: "接受基准",
-  suggested: "建议修改",
-  applied: "已应用",
-  error: "请求失败",
-};
-
 export function SegmentWorkspace({
   project,
   stage,
   overview,
   onRefresh,
   focusFailures,
+  language,
 }: {
   project: string;
   stage: "translation" | "proofreading" | "polishing";
   overview: ProjectOverview;
   onRefresh: () => Promise<void>;
   focusFailures?: boolean;
+  language: Language;
 }) {
+  const statusLabels: Record<string, string> = language === "en" ? {
+    all: "All statuses",
+    pending: "Pending",
+    completed: "Completed",
+    warning: "Validation warning",
+    "missing-base": "Missing base",
+    outdated: "Base changed",
+    accepted: "Base accepted",
+    suggested: "Suggested",
+    applied: "Applied",
+    error: "Request failed",
+  } : {
+    all: "全部状态",
+    pending: "待处理",
+    completed: "已完成",
+    warning: "校验警告",
+    "missing-base": "缺少基准",
+    outdated: "基准已变",
+    accepted: "接受基准",
+    suggested: "建议修改",
+    applied: "已应用",
+    error: "请求失败",
+  };
   const selection = useClassicSelection();
   const [file, setFile] = useState("all");
   const [status, setStatus] = useState("all");
@@ -234,7 +247,7 @@ export function SegmentWorkspace({
           body: JSON.stringify({ stage, segment_ids: batchIds }),
         },
       );
-      setBatchMessage(`已清除 ${result.cleared} 个 Segment 的当前结果`);
+      setBatchMessage(language === "en" ? `Cleared current results for ${result.cleared} segments` : `已清除 ${result.cleared} 个 Segment 的当前结果`);
     } else {
       const result = await api<{ completed: number }>(
         `/api/v1/projects/${project}/apply`,
@@ -248,7 +261,7 @@ export function SegmentWorkspace({
           }),
         },
       );
-      setBatchMessage(`已应用 ${result.completed} 个 Segment`);
+      setBatchMessage(language === "en" ? `Applied ${result.completed} segments` : `已应用 ${result.completed} 个 Segment`);
     }
     setBatchAction(null);
     selection.reset();
@@ -265,7 +278,7 @@ export function SegmentWorkspace({
             setFile(event.target.value);
             resetFilterSelection();
           }}>
-            <option value="all">全部文件</option>
+            <option value="all">{language === "en" ? "All files" : "全部文件"}</option>
             {overview.files.map((item) => <option value={item.file_id} key={item.file_id}>{item.name}</option>)}
           </select>
           <div className="filter-row">
@@ -278,24 +291,24 @@ export function SegmentWorkspace({
             <input value={search} onChange={(event) => {
               setSearch(event.target.value);
               resetFilterSelection();
-            }} placeholder="搜索原文或译文" />
+            }} placeholder={language === "en" ? "Search source or result" : "搜索原文或译文"} />
           </div>
           <div className="batch-toolbar segment-batch-toolbar">
-            <span>已选择 {selectedVisibleIds.length} / 当前 {total}</span>
+            <span>{language === "en" ? `Selected ${selectedVisibleIds.length} / ${total}` : `已选择 ${selectedVisibleIds.length} / 当前 ${total}`}</span>
             <div className="segment-batch-actions">
               {stage !== "translation" && (
                 <>
-                  <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>应用所选</button>
-                  <button className="quiet-button" disabled={!total} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>全部应用</button>
+                  <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{language === "en" ? "Apply selected" : "应用所选"}</button>
+                  <button className="quiet-button" disabled={!total} onClick={() => setBatchAction({ kind: "apply", scope: "filtered" })}>{language === "en" ? "Apply all" : "全部应用"}</button>
                 </>
               )}
-              <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>清除所选</button>
-              <button className="danger-button" disabled={!total} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>全部清除</button>
+              <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>{language === "en" ? "Clear selected" : "清除所选"}</button>
+              <button className="danger-button" disabled={!total} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>{language === "en" ? "Clear all" : "全部清除"}</button>
             </div>
           </div>
           {batchMessage && <span className="success-text">{batchMessage}</span>}
         </div>
-        <div className="list-header"><span>ID / 状态</span><span>原文 / 结果预览</span></div>
+        <div className="list-header"><span>{language === "en" ? "ID / Status" : "ID / 状态"}</span><span>{language === "en" ? "Source / Result preview" : "原文 / 结果预览"}</span></div>
         <div className="segment-list" ref={listRef}>
           <div className="segment-row-stack" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualItems.map((virtualItem) => {
@@ -305,7 +318,7 @@ export function SegmentWorkspace({
               const result = resultFor(item, stage);
               const error = item.stage_errors?.[stage];
               const preview = error
-                ? `${statusLabels.error}：${error.error_class} · ${error.error_message}`
+                ? `${statusLabels.error}: ${error.error_class} · ${error.error_message}`
                 : stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
               return (
                 <button
@@ -322,66 +335,67 @@ export function SegmentWorkspace({
                 >
                   <span className={`status-dot ${itemStatus}`} />
                   <span className="segment-id">{item.segment_id.replace("F0001-S", "")}</span>
-                  <span className="preview"><strong>{item.source}</strong><small>{item.format_count ? `${item.format_count} 个格式范围 · ` : ""}{preview || "尚无结果"}</small></span>
+                  <span className="preview"><strong>{item.source}</strong><small>{item.format_count ? `${item.format_count} ${language === "en" ? "format ranges · " : "个格式范围 · "}` : ""}{preview || (language === "en" ? "No result yet" : "尚无结果")}</small></span>
                 </button>
               );
             })}
           </div>
-          {!total && <div className="empty">当前筛选下没有 Segment</div>}
-          {loading && <div className="list-loading">正在加载 Segment…</div>}
+          {!total && <div className="empty">{language === "en" ? "No segments match the current filters" : "当前筛选下没有 Segment"}</div>}
+          {loading && <div className="list-loading">{language === "en" ? "Loading segments…" : "正在加载 Segment…"}</div>}
           {listError && <div className="error-text">{listError}</div>}
         </div>
       </section>
       <section className="editor-pane">
-        {!selected ? <div className="empty">项目没有可编辑 Segment</div> : (
+        {!selected ? <div className="empty">{language === "en" ? "No editable segments" : "项目没有可编辑 Segment"}</div> : (
           <>
-            <h2>原文</h2>
+            <h2>{language === "en" ? "Source" : "原文"}</h2>
             <div className="source-box">{selected.source}</div>
             {selected.model_source && selected.model_source !== selected.source && (
-              <details className="source-model-preview"><summary>模型文本（受控格式标记）</summary><div className="source-box">{selected.model_source}</div></details>
+              <details className="source-model-preview"><summary>{language === "en" ? "Model text (controlled format markers)" : "模型文本（受控格式标记）"}</summary><div className="source-box">{selected.model_source}</div></details>
             )}
             {review?.outdated && <div className="warning-banner">建议所依据的基准已经变化，请重新检查后保存。</div>}
             <div className={stage === "translation" ? "comparison single" : "comparison"}>
               {stage !== "translation" && (
-                <label><span>当前基准</span><textarea readOnly value={review?.base?.text ?? ""} /></label>
+                <label><span>{language === "en" ? "Current base" : "当前基准"}</span><textarea readOnly value={review?.base?.text ?? ""} /></label>
               )}
               <label>
-                <span>{stage === "translation" ? "当前译文" : "建议结果"}</span>
+                <span>{stage === "translation" ? (language === "en" ? "Current translation" : "当前译文") : (language === "en" ? "Suggested result" : "建议结果")}</span>
                 <textarea
                   value={text}
                   disabled={reviewStatus === "accepted"}
                   onChange={(event) => setText(event.target.value)}
-                  placeholder={review?.base ? "输入完整建议文本" : "缺少可用基准"}
+                  placeholder={review?.base ? (language === "en" ? "Enter the complete suggestion" : "输入完整建议文本") : (language === "en" ? "No usable base" : "缺少可用基准")}
                 />
               </label>
             </div>
             {stage !== "translation" && (
               <div className="review-controls">
-                <label className="radio-option"><input type="radio" checked={reviewStatus === "accepted"} onChange={() => setReviewStatus("accepted")} />接受当前基准</label>
-                <label className="radio-option"><input type="radio" checked={reviewStatus === "suggested"} onChange={() => setReviewStatus("suggested")} />使用建议修改</label>
-                <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="修改原因（可选）" />
+                <label className="radio-option"><input type="radio" checked={reviewStatus === "accepted"} onChange={() => setReviewStatus("accepted")} />{language === "en" ? "Accept current base" : "接受当前基准"}</label>
+                <label className="radio-option"><input type="radio" checked={reviewStatus === "suggested"} onChange={() => setReviewStatus("suggested")} />{language === "en" ? "Use suggested edit" : "使用建议修改"}</label>
+                <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder={language === "en" ? "Reason (optional)" : "修改原因（可选）"} />
               </div>
             )}
             {showContext && (
               <>
-                <div className="context-heading"><h2>上下文</h2></div>
+                <div className="context-heading"><h2>{language === "en" ? "Context" : "上下文"}</h2></div>
                 <div className="context-groups">
-                  <ContextGroup title="上文" items={before} empty="无更多上文" stage={stage} />
-                  <ContextGroup title="下文" items={after} empty="无更多下文" stage={stage} />
+                  <ContextGroup title={language === "en" ? "Before" : "上文"} items={before} empty={language === "en" ? "No more context" : "无更多上文"} stage={stage} />
+                  <ContextGroup title={language === "en" ? "After" : "下文"} items={after} empty={language === "en" ? "No more context" : "无更多下文"} stage={stage} />
                 </div>
               </>
             )}
             <div className="editor-actions">
-              <button className="primary-button" disabled={!!review && !review.base} onClick={() => save(false)}>保存</button>
-              {stage !== "translation" && <button className="quiet-button" disabled={!review?.base} onClick={() => save(true)}>保存并应用</button>}
+              <button className="primary-button" disabled={!!review && !review.base} onClick={() => save(false)}>{language === "en" ? "Save" : "保存"}</button>
+              {stage !== "translation" && <button className="quiet-button" disabled={!review?.base} onClick={() => save(true)}>{language === "en" ? "Save and apply" : "保存并应用"}</button>}
             </div>
           </>
         )}
       </section>
       {batchAction && (
-        <BatchActionDialog
+      <BatchActionDialog
           kind={batchAction.kind}
           stage={stage}
+          language={language}
           count={batchIds.length}
           missing={missingApply.length}
           outdated={outdatedApply.length}
@@ -396,6 +410,7 @@ export function SegmentWorkspace({
 function BatchActionDialog({
   kind,
   stage,
+  language,
   count,
   missing,
   outdated,
@@ -404,6 +419,7 @@ function BatchActionDialog({
 }: {
   kind: "reset" | "apply";
   stage: "translation" | "proofreading" | "polishing";
+  language: Language;
   count: number;
   missing: number;
   outdated: number;
@@ -413,7 +429,7 @@ function BatchActionDialog({
   const [allowOutdated, setAllowOutdated] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
-  const reviewLabel = stage === "proofreading" ? "校对" : "润色";
+  const reviewLabel = language === "en" ? (stage === "proofreading" ? "proofreading" : "polishing") : stage === "proofreading" ? "校对" : "润色";
   const blocked = kind === "apply" && (
     missing > 0 || (outdated > 0 && !allowOutdated)
   );
@@ -432,31 +448,31 @@ function BatchActionDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={kind === "apply" ? "批量应用" : "批量清除"}>
-        <h2>{kind === "apply" ? `批量应用${reviewLabel}结果` : "批量清除结果"}</h2>
-        <p>本次范围包含 {count} 个 Segment。</p>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={kind === "apply" ? (language === "en" ? "Apply batch" : "批量应用") : (language === "en" ? "Clear batch" : "批量清除")}>
+        <h2>{kind === "apply" ? (language === "en" ? `Apply ${reviewLabel} results` : `批量应用${reviewLabel}结果`) : (language === "en" ? "Clear results" : "批量清除结果")}</h2>
+        <p>{language === "en" ? `This scope contains ${count} segments.` : `本次范围包含 ${count} 个 Segment。`}</p>
         {kind === "reset" ? (
           <p>
             {stage === "translation"
-              ? "当前译文将回到待处理；校对和润色历史不会级联删除。"
-              : `${reviewLabel}建议及其已应用结果将一起撤销；其他阶段不会级联删除。`}
+              ? (language === "en" ? "Current translations return to pending; proofreading and polishing history is not cascaded." : "当前译文将回到待处理；校对和润色历史不会级联删除。")
+              : (language === "en" ? `${reviewLabel} suggestions and applied results are reverted together; other stages are not cascaded.` : `${reviewLabel}建议及其已应用结果将一起撤销；其他阶段不会级联删除。`)}
           </p>
         ) : (
           <>
-            {!!missing && <div className="warning-banner">其中 {missing} 项缺少建议或基准，整批不能应用。请调整过滤范围。</div>}
+            {!!missing && <div className="warning-banner">{language === "en" ? `${missing} items lack a suggestion or base; the batch cannot be applied. Adjust the filters.` : `其中 ${missing} 项缺少建议或基准，整批不能应用。请调整过滤范围。`}</div>}
             {!!outdated && (
               <label className="check-row">
                 <input type="checkbox" checked={allowOutdated} onChange={(event) => setAllowOutdated(event.target.checked)} />
-                允许应用 {outdated} 项基于旧上游的建议
+                {language === "en" ? `Allow ${outdated} suggestions based on an outdated upstream` : `允许应用 ${outdated} 项基于旧上游的建议`}
               </label>
             )}
           </>
         )}
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
-          <button className="quiet-button" disabled={working} onClick={onClose}>取消</button>
+          <button className="quiet-button" disabled={working} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
           <button className={kind === "reset" ? "danger-button" : "primary-button"} disabled={working || blocked || !count} onClick={confirm}>
-            {kind === "reset" ? "确认清除" : "确认应用"}
+            {kind === "reset" ? (language === "en" ? "Clear" : "确认清除") : (language === "en" ? "Apply" : "确认应用")}
           </button>
         </div>
       </div>

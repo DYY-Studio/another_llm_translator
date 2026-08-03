@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
+import type { Language } from "../i18n";
 import type { LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { Icon } from "./Icons";
@@ -13,7 +14,8 @@ interface AdapterRow {
   valid?: boolean;
 }
 
-export function SettingsView({ project }: { project: string }) {
+export function SettingsView({ project, language }: { project: string; language: Language }) {
+  const en = language === "en";
   const [scope, setScope] = useState<ConfigScope>(project ? "project" : "global");
   const [section, setSection] = useState<SettingsSection>("config");
   useEffect(() => {
@@ -31,29 +33,30 @@ export function SettingsView({ project }: { project: string }) {
   }, [activeScope, section]);
   return (
     <div className="settings-page">
-      <nav className="settings-navigation" aria-label="设置">
-        <div className="settings-scope-tabs" aria-label="设置范围">
-          <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>项目设置</button>
-          <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>全局设置</button>
+      <nav className="settings-navigation" aria-label={en ? "Settings" : "设置"}>
+        <div className="settings-scope-tabs" aria-label={en ? "Settings scope" : "设置范围"}>
+          <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>{en ? "Project" : "项目设置"}</button>
+          <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>{en ? "Global" : "全局设置"}</button>
         </div>
-        <div className="settings-section-tabs" aria-label={`${activeScope === "project" ? "项目" : "全局"}设置类别`}>
-          <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>配置</button>
+        <div className="settings-section-tabs" aria-label={`${activeScope === "project" ? (en ? "Project" : "项目") : (en ? "Global" : "全局")} ${en ? "settings sections" : "设置类别"}`}>
+          <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>{en ? "Config" : "配置"}</button>
           <button className={section === "prompts" ? "active" : ""} onClick={() => setSection("prompts")}>Prompt</button>
           {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
         </div>
       </nav>
       <div className="settings-content">
-        {section === "config" && <ConfigSettings project={project} scope={activeScope} />}
-        {section === "prompts" && <PromptSettings project={project} scope={activeScope} />}
-        {section === "presets" && <PresetSettings />}
+        {section === "config" && <ConfigSettings project={project} scope={activeScope} language={language} />}
+        {section === "prompts" && <PromptSettings project={project} scope={activeScope} language={language} />}
+        {section === "presets" && <PresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings />}
       </div>
     </div>
   );
 }
 
-function ConfigSettings({ project, scope }: { project: string; scope: ConfigScope }) {
+function ConfigSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
+  const en = language === "en";
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [message, setMessage] = useState("");
@@ -125,7 +128,7 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
     }
   }
 
-  if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || "正在加载配置…"}</p></section>;
+  if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || (en ? "Loading configuration…" : "正在加载配置…")}</p></section>;
 
   const presetOptions = presets.filter((item) => item.valid);
   const contextLabels: Array<[ContextStage, string]> = [["terminology", "术语"], ["translation", "翻译"], ["proofreading", "校对"], ["polishing", "润色"]];
@@ -133,10 +136,10 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
   return (
     <section className="config-settings">
       <div className="page-heading config-heading settings-action-heading">
-        <div><h1>{scope === "global" ? "全局配置模板" : "项目配置"}</h1><p>{scope === "global" ? "只影响新项目或明确同步的项目。" : "Prompt 保留项目副本；连接与 Adapter 实时引用全局设置。"}</p></div>
+        <div><h1>{scope === "global" ? (en ? "Global configuration template" : "全局配置模板") : (en ? "Project configuration" : "项目配置")}</h1><p>{scope === "global" ? (en ? "Affects new projects or projects explicitly synchronized." : "只影响新项目或明确同步的项目。") : (en ? "Prompts stay in the project; connections and adapters use global settings." : "Prompt 保留项目副本；连接与 Adapter 实时引用全局设置。")}</p></div>
         <div className="button-group">
-          {scope === "project" && <button className="quiet-button" onClick={syncGlobal}>同步全局模板</button>}
-          <button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中…" : "验证并保存"}</button>
+          {scope === "project" && <button className="quiet-button" onClick={syncGlobal}>{en ? "Sync global template" : "同步全局模板"}</button>}
+          <button className="primary-button" disabled={saving} onClick={save}>{saving ? (en ? "Saving…" : "保存中…") : (en ? "Validate and save" : "验证并保存")}</button>
         </div>
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
@@ -194,7 +197,8 @@ function ConfigSettings({ project, scope }: { project: string; scope: ConfigScop
   );
 }
 
-function PresetSettings() {
+function PresetSettings({ language }: { language: Language }) {
+  const en = language === "en";
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [adapters, setAdapters] = useState<AdapterRow[]>([]);
   const [selected, setSelected] = useState("");
@@ -303,17 +307,17 @@ function PresetSettings() {
 
   return (
     <div className="preset-layout">
-      <div className="page-heading preset-list-heading"><div><h1>LLM Preset</h1><p>全局实时连接设置</p></div><button className="quiet-button" disabled={!preset} onClick={createPreset}>新建</button></div>
+      <div className="page-heading preset-list-heading"><div><h1>LLM Preset</h1><p>{en ? "Global live connection settings" : "全局实时连接设置"}</p></div><button className="quiet-button" disabled={!preset} onClick={createPreset}>{en ? "New" : "新建"}</button></div>
       <aside className="preset-list-body">
         {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
       <div className="page-heading settings-action-heading preset-editor-heading">
-        <div><h1>{preset?.preset_id ?? (presetLoading ? `正在加载 ${selected}` : "Preset 编辑")}</h1><p>{preset ? "修改后会立即影响所有引用项目，并产生新的阶段指纹。" : presetLoading ? "正在读取 Preset 定义和请求预览。" : "选择一个有效 Preset。"}</p></div>
-        {preset && <div className="button-group"><button className="danger-button" onClick={removePreset}>删除</button><button className="primary-button" onClick={save}>验证并保存</button></div>}
+        <div><h1>{preset?.preset_id ?? (presetLoading ? (en ? `Loading ${selected}` : `正在加载 ${selected}`) : (en ? "Preset editor" : "Preset 编辑"))}</h1><p>{preset ? (en ? "Changes affect all referenced projects and create a new stage fingerprint." : "修改后会立即影响所有引用项目，并产生新的阶段指纹。") : presetLoading ? (en ? "Reading the Preset definition and request preview." : "正在读取 Preset 定义和请求预览。") : (en ? "Select a valid Preset." : "选择一个有效 Preset。")}</p></div>
+        {preset && <div className="button-group"><button className="danger-button" onClick={removePreset}>{en ? "Delete" : "删除"}</button><button className="primary-button" onClick={save}>{en ? "Validate and save" : "验证并保存"}</button></div>}
       </div>
       <section className="preset-editor-body">
         {!preset ? (
-          <>{error && <div className="error-banner">{error}</div>}<p className="muted">{presetLoading ? "正在加载 Preset…" : "选择一个有效 Preset。"}</p></>
+          <>{error && <div className="error-banner">{error}</div>}<p className="muted">{presetLoading ? (en ? "Loading Preset…" : "正在加载 Preset…") : (en ? "Select a valid Preset." : "选择一个有效 Preset。")}</p></>
         ) : (
           <>
             {error && <div className="error-banner">{error}</div>}
@@ -427,12 +431,13 @@ function Field({ label, help, children }: { label: string; help?: string; childr
 function NumberField({ label, value, onChange, help, min, max, step }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number }) { return <Field label={label} help={help}><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
 function ToggleField({ label, checked, onChange, help, disabled = false }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean }) { return <label className="config-toggle"><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
-function PromptSettings({ project, scope }: { project: string; scope: ConfigScope }) {
+function PromptSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
+  const en = language === "en";
   const [stage, setStage] = useState("translation"); const [content, setContent] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
   useEffect(() => { setMessage(""); setError(""); void api<{ content: string }>(path).then((value) => setContent(value.content)).catch((reason) => setError(errorMessage(reason))); }, [path]);
   async function save() { try { await api(path, { method: "PUT", body: JSON.stringify({ content }) }); setMessage(scope === "global" ? "全局 Prompt 已保存；现有项目不会自动改变" : "项目 Prompt 已保存"); } catch (reason) { setError(errorMessage(reason)); } }
-  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? "全局 Prompt 模板" : "项目 Prompt"}</h1><p>{scope === "global" ? "只影响新项目或明确同步的项目。" : "编辑项目内的阶段 Prompt 副本。"}</p></div><button className="primary-button" onClick={save}>验证并保存</button></div><label className="stage-select">阶段<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">术语</option><option value="translation">翻译</option><option value="proofreading">校对</option><option value="polishing">润色</option></select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /></section>;
+  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? (en ? "Global Prompt template" : "全局 Prompt 模板") : (en ? "Project Prompt" : "项目 Prompt")}</h1><p>{scope === "global" ? (en ? "Affects new projects or projects explicitly synchronized." : "只影响新项目或明确同步的项目。") : (en ? "Edit the project's Prompt copy." : "编辑项目内的阶段 Prompt 副本。")}</p></div><button className="primary-button" onClick={save}>{en ? "Validate and save" : "验证并保存"}</button></div><label className="stage-select">{en ? "Stage" : "阶段"}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{en ? "Terms" : "术语"}</option><option value="translation">{en ? "Translation" : "翻译"}</option><option value="proofreading">{en ? "Proofreading" : "校对"}</option><option value="polishing">{en ? "Polishing" : "润色"}</option></select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /></section>;
 }
 
 function errorMessage(reason: unknown): string { return reason instanceof Error ? reason.message : "请求失败"; }

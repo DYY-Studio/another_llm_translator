@@ -83,6 +83,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.lang = language;
+    document.title = language === "en" ? "Translator" : "译工坊";
     try {
       window.localStorage.setItem("minimal-llm-translator.language.v1", language);
     } catch {
@@ -217,9 +218,9 @@ export default function App() {
     setStage(target);
   }
 
-  let content = <div className="empty-page">选择或创建项目后开始工作。</div>;
+  let content = <div className="empty-page">{language === "en" ? "Select or create a project to begin." : "选择或创建项目后开始工作。"}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView />;
-  else if (stage === "settings") content = <SettingsView project={project} />;
+    else if (stage === "settings") content = <SettingsView project={project} language={language} />;
   else if (project && overview) {
     if (stage === "overview") content = (
       <Overview
@@ -229,9 +230,9 @@ export default function App() {
         onDeleted={handleProjectDeleted}
       />
     );
-    else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} />;
+    else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} />;
+      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} />;
   }
 
@@ -253,7 +254,15 @@ export default function App() {
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
         language={language}
-        onLanguage={() => setLanguage((current) => current === "zh-CN" ? "en" : "zh-CN")}
+        onLanguage={() => setLanguage((current) => {
+          const next = current === "zh-CN" ? "en" : "zh-CN";
+          try {
+            window.localStorage.setItem("minimal-llm-translator.language.v1", next);
+          } catch {
+            // The selected language still applies for this page when storage is unavailable.
+          }
+          return next;
+        })}
       >
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}
@@ -263,6 +272,7 @@ export default function App() {
         <RunDialog
           key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
           options={runOptions}
+          language={language}
           starting={runStarting}
           onClose={() => setRunOptions(null)}
           onStart={startRun}

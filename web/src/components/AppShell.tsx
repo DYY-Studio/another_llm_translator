@@ -101,21 +101,21 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" aria-label="全局任务状态">
+        <section className="global-run-status" aria-label={language === "en" ? "Global task status" : "全局任务状态"}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
           </div>
           <div className="run-progress">
             <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
-            <div className="progress-track" role="progressbar" aria-label="任务进度" aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+            <div className="progress-track" role="progressbar" aria-label={language === "en" ? "Task progress" : "任务进度"} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
               <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
               <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
             </div>
           </div>
           <div className="run-tokens">
             {task.usage.available ? (
-              <><span>输入 {task.usage.input_tokens} Tokens</span><span>输出 {task.usage.output_tokens} Tokens</span></>
+              <><span>{language === "en" ? "Input" : "输入"} {task.usage.input_tokens} Tokens</span><span>{language === "en" ? "Output" : "输出"} {task.usage.output_tokens} Tokens</span></>
             ) : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
           {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{language === "en" ? `View ${failed} failed segments` : `查看 ${failed} 个失败 Segment`}</button>}
@@ -139,7 +139,7 @@ export function AppShell({
         {canRun && <div className="run-panel">
           {canRun && (
             <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
-              {running ? "正在执行" : runLoading ? "正在检查" : "开始当前阶段"}
+              {running ? (language === "en" ? "Running" : "正在执行") : runLoading ? (language === "en" ? "Checking" : "正在检查") : (language === "en" ? "Run current stage" : "开始当前阶段")}
             </button>
           )}
         </div>}
@@ -149,7 +149,7 @@ export function AppShell({
           <div className="mobile-run-bar">
             {canRun && (
               <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
-                {running ? "正在执行" : runLoading ? "正在检查" : "运行当前阶段"}
+                {running ? (language === "en" ? "Running" : "正在执行") : runLoading ? (language === "en" ? "Checking" : "正在检查") : (language === "en" ? "Run current stage" : "运行当前阶段")}
               </button>
             )}
           </div>
