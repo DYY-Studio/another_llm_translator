@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview } from "../types";
-import { detectLanguage, translate } from "../i18n";
+import { translate, type Language } from "../i18n";
 
 type InputKind = "file" | "folder";
 
@@ -45,6 +45,7 @@ function InputQueue({
   disabled = false,
   options,
   onOptionsChange,
+  language,
 }: {
   value: PendingInput[];
   onChange: (value: PendingInput[]) => void;
@@ -52,8 +53,8 @@ function InputQueue({
   disabled?: boolean;
   options: AdapterOptions;
   onOptionsChange: (value: AdapterOptions) => void;
+  language: Language;
 }) {
-  const language = detectLanguage();
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const [adapters, setAdapters] = useState<AdapterSummary[]>([]);
@@ -195,13 +196,14 @@ export function Overview({
   value,
   onFilesChanged,
   onDeleted,
+  language,
 }: {
   project: string;
   value: ProjectOverview;
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
+  language: Language;
 }) {
-  const language = detectLanguage();
   const completed = value.completed_segments;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
@@ -297,7 +299,7 @@ export function Overview({
           </button>
         </div>
       </div>
-      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} />
+      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
       <div className="file-list">
         {value.files.length === 0 && (
@@ -349,11 +351,12 @@ export function Overview({
 export function ExportView({
   project,
   overview,
+  language,
 }: {
   project: string;
   overview: ProjectOverview;
+  language: Language;
 }) {
-  const language = detectLanguage();
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
@@ -406,8 +409,7 @@ export function ExportView({
   );
 }
 
-export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (selector: string, externalPath?: string) => void }) {
-  const language = detectLanguage();
+export function CreateProjectDialog({ onClose, onCreated, language }: { onClose: () => void; onCreated: (selector: string, externalPath?: string) => void; language: Language }) {
   const [mode, setMode] = useState<"create" | "open">("create");
   const [name, setName] = useState("");
   const [parentDir, setParentDir] = useState("");
@@ -467,7 +469,7 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
         </> : <>
           <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label>{translate("dialog.parentDir", language)}<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
-          <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} />
+          <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
           <p className="muted">{translate("dialog.emptyHint", language)}</p>
           <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>
         </>}

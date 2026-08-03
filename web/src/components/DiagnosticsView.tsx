@@ -1,28 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
-import { detectLanguage, translate } from "../i18n";
+import { translate, type Language } from "../i18n";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 
-function number(value: number | null, suffix = "", unavailable = "不可用") {
-  return value === null ? unavailable : `${value.toLocaleString()}${suffix}`;
+function number(value: number | null, language: Language, suffix = "", unavailable = "不可用") {
+  return value === null ? unavailable : `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")}${suffix}`;
 }
 
-function waitingRequests(value: number | undefined, language: "zh-CN" | "en") {
-  return value ? (language === "en" ? `${value.toLocaleString()} requests` : `${value.toLocaleString()} 个请求`) : (language === "en" ? "None" : "无");
+function waitingRequests(value: number | undefined, language: Language) {
+  return value ? (language === "en" ? `${number(value, language)} requests` : `${number(value, language)} 个请求`) : (language === "en" ? "None" : "无");
 }
 
-function clock(value: string) {
-  return new Date(value).toLocaleTimeString([], {
+function clock(value: string, language: Language) {
+  return new Date(value).toLocaleTimeString(language === "en" ? "en-US" : "zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
 }
 
-export function DiagnosticsView() {
-  const language = detectLanguage();
+export function DiagnosticsView({ language }: { language: Language }) {
   const en = language === "en";
   const statusLabels = en ? {
     running: "Requesting", retrying: "Retrying", completed: "Completed", failed: "Failed", interrupted: "Interrupted",
@@ -123,17 +122,17 @@ export function DiagnosticsView() {
 
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
-        <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
-        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
+        <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
         <span>Usage <strong>{metrics?.usage_available ? (en ? "Complete" : "完整") : (en ? "Unavailable" : "不可用")}</strong></span>
-        <span>{en ? "Latency" : "请求延迟"} <strong>{number(metrics?.latest_latency_ms ?? null, " ms", en ? "Unavailable" : "不可用")}</strong></span>
-        <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0)}</strong></span>
-        <span>{en ? "Retries" : "重试"} <strong>{number(metrics?.retry_count ?? 0)}</strong></span>
+        <span>{en ? "Latency" : "请求延迟"} <strong>{number(metrics?.latest_latency_ms ?? null, language, " ms", en ? "Unavailable" : "不可用")}</strong></span>
+        <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
+        <span>{en ? "Retries" : "重试"} <strong>{number(metrics?.retry_count ?? 0, language)}</strong></span>
         <span>{en ? "Rate-limit waits" : "限流等待"} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>
       </div>
 
@@ -167,7 +166,7 @@ export function DiagnosticsView() {
           <div className="diagnostics-log" ref={logRef} role="log" aria-live="off">
             {value?.logs.length ? value.logs.map((item, index) => (
               <div className="diagnostics-log-row" key={`${item.timestamp}-${index}`}>
-                <time>{clock(item.timestamp)}</time>
+                <time>{clock(item.timestamp, language)}</time>
                 <b className={`log-${item.level.toLowerCase()}`}>{item.level}</b>
                 <span>{item.project} · {item.stage}</span>
                 <code>{item.message}</code>
@@ -187,7 +186,7 @@ export function DiagnosticsView() {
                 onDoubleClick={() => openDetail(item.request_id)}
               >
                 <div className="request-row-main">
-                  <header><code>{item.request_id}</code><time>{clock(item.timestamp)}</time></header>
+                  <header><code>{item.request_id}</code><time>{clock(item.timestamp, language)}</time></header>
                   <strong>{item.model}</strong>
                   <span>
                     <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>

@@ -222,7 +222,7 @@ export default function App() {
   }
 
   let content = <div className="empty-page">{language === "en" ? "Select or create a project to begin." : "选择或创建项目后开始工作。"}</div>;
-  if (stage === "diagnostics") content = <DiagnosticsView />;
+  if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
     else if (stage === "settings") content = <SettingsView project={project} language={language} />;
   else if (project && overview) {
     if (stage === "overview") content = (
@@ -231,12 +231,13 @@ export default function App() {
         value={overview}
         onFilesChanged={refreshProject}
         onDeleted={handleProjectDeleted}
+        language={language}
       />
     );
     else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} />;
-    } else if (stage === "export") content = <ExportView project={project} overview={overview} />;
+    } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
   }
 
   return (
@@ -270,7 +271,7 @@ export default function App() {
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}
       </AppShell>
-      {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}
+      {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}
       {runOptions && (
         <RunDialog
           key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
