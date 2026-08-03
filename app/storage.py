@@ -85,6 +85,12 @@ def record_header(
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
+    project = _sqlite_project(path)
+    if project is not None and isinstance(value, dict):
+        from .sqlite_storage import write_json
+
+        write_json(project, path, value)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -116,6 +122,12 @@ def atomic_write_text(path: Path, value: str) -> None:
 
 
 def append_jsonl(path: Path, value: dict[str, Any]) -> None:
+    project = _sqlite_project(path)
+    if project is not None:
+        from .sqlite_storage import append_jsonl as append_sqlite_jsonl
+
+        append_sqlite_jsonl(project, path, value)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
     with path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -125,6 +137,12 @@ def append_jsonl(path: Path, value: dict[str, Any]) -> None:
 
 
 def write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
+    project = _sqlite_project(path)
+    if project is not None:
+        from .sqlite_storage import write_jsonl as write_sqlite_jsonl
+
+        write_sqlite_jsonl(project, path, values)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
@@ -144,6 +162,14 @@ def write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    project = _sqlite_project(path)
+    if project is not None:
+        from .sqlite_storage import read_json as read_sqlite_json
+
+        value = read_sqlite_json(project, path)
+        if value is None:
+            raise StorageError(f"SQLite 记录不存在：{path}")
+        return _validate_record(value, str(path))
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -152,6 +178,14 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def read_jsonl(path: Path, *, repair_tail: bool = True) -> list[dict[str, Any]]:
+    project = _sqlite_project(path)
+    if project is not None:
+        from .sqlite_storage import read_jsonl as read_sqlite_jsonl
+
+        return [
+            _validate_record(item, str(path))
+            for item in read_sqlite_jsonl(project, path, repair_tail=repair_tail)
+        ]
     if not path.exists():
         return []
     try:
@@ -187,3 +221,26 @@ def read_jsonl(path: Path, *, repair_tail: bool = True) -> list[dict[str, Any]]:
         records.append(_validate_record(record, f"{path}:{index + 1}"))
         offset += len(raw_line)
     return records
+
+
+def _sqlite_project(path: Path) -> Path | None:
+    """Return the owning SQLite project for a logical project record path."""
+    resolved = path.resolve()
+    for parent in (resolved.parent, *resolved.parents):
+        if (parent / "project.sqlite").is_file():
+            try:
+                from .sqlite_storage import recognizes
+
+                return parent if recognizes(path) else None
+            except ValueError:
+                return None
+    return None
+
+
+def logical_record_exists(path: Path) -> bool:
+    project = _sqlite_project(path)
+    if project is None:
+        return path.exists()
+    from .sqlite_storage import record_exists
+
+    return record_exists(project, path)

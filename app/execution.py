@@ -699,17 +699,9 @@ def create_run(
 
 
 def find_running_runs(project: Path, stage: str) -> list[dict[str, Any]]:
-    runs: list[dict[str, Any]] = []
-    runs_dir = project / "runs"
-    if not runs_dir.exists():
-        return runs
-    for run_dir in runs_dir.iterdir():
-        manifest_path = run_dir / "manifest.json"
-        if not manifest_path.is_file():
-            continue
-        manifest = read_json(manifest_path)
-        if manifest.get("stage") == stage and manifest.get("status") == "running":
-            runs.append(manifest)
+    from .sqlite_storage import list_runs
+
+    runs = list_runs(project, stage=stage, status="running")
     return sorted(
         runs,
         key=lambda item: (

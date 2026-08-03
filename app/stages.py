@@ -70,6 +70,7 @@ from .storage import (
     append_jsonl,
     atomic_write_json,
     atomic_write_text,
+    logical_record_exists,
     new_record_id,
     read_json,
     read_jsonl,
@@ -315,7 +316,7 @@ def _prompt(project: Path, stage: str) -> str:
 
 def load_terms(project: Path) -> dict[str, Any] | None:
     path = project / "terminology" / "terms.json"
-    return read_json(path) if path.exists() else None
+    return read_json(path) if logical_record_exists(path) else None
 
 
 def normalize_term(value: str) -> str:
@@ -738,7 +739,7 @@ def _term_exchange_rows(
         raise UsageError("术语导出 source 必须是 published 或 scanned")
     if source == "scanned":
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if active_path.exists() else None
+        active = read_json(active_path) if logical_record_exists(active_path) else None
         if not active or active.get("status") != "active":
             return []
         task_id = str(active.get("active_task_id", ""))
@@ -1078,7 +1079,7 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     if find_running_runs(project, "terminology"):
         raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
     active_path = project / "terminology" / "active_task.json"
-    if not active_path.exists():
+    if not logical_record_exists(active_path):
         raise UsageError("当前没有可发布的活动术语扫描")
     active = read_json(active_path)
     if active.get("status") != "active":
@@ -1151,7 +1152,7 @@ async def run_terminology(
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
     active_path = project / "terminology" / "active_task.json"
-    active = read_json(active_path) if active_path.exists() else None
+    active = read_json(active_path) if logical_record_exists(active_path) else None
     published = load_terms(project)
 
     resume_manifest = (
@@ -4105,7 +4106,7 @@ async def run_all(
         summaries: list[dict[str, Any]] = []
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if active_path.exists() else None
+        active = read_json(active_path) if logical_record_exists(active_path) else None
         if scope.force or terms is None or (
             active and active.get("status") == "active"
         ):
@@ -4220,7 +4221,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     if library:
         summary["terms_revision"] = library["terms_revision"]
     active_path = project / "terminology" / "active_task.json"
-    if active_path.exists():
+    if logical_record_exists(active_path):
         active = read_json(active_path)
         if active.get("status") in {"active", "completed"}:
             scans = [

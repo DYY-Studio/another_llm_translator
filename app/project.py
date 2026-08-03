@@ -25,6 +25,15 @@ from .storage import (
     utc_now,
     write_jsonl,
 )
+from .sqlite_storage import (
+    database_path,
+    initialize as initialize_project_database,
+    read_adapter_state,
+    read_files as read_sqlite_files,
+    read_project_meta,
+    read_segments as read_sqlite_segments,
+    replace_source,
+)
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = (
@@ -527,9 +536,11 @@ def init_project(
         raise UsageError(f"无法写入项目父目录：{projects_root}: {exc}") from exc
     try:
         _copy_bundle(app_root, temp)
+        initialize_project_database(temp)
         (temp / "input").mkdir()
         file_records: list[dict[str, object]] = []
         segment_records: list[dict[str, object]] = []
+        adapter_state_records: list[dict[str, object]] = []
         for file_order, (document_adapter, item) in enumerate(imports, start=1):
             file_id = f"F{file_order:04d}"
             relative = Path(item.original_name)
@@ -547,8 +558,7 @@ def init_project(
                     / document_adapter.adapter_id
                     / f"{file_id}.json"
                 )
-                atomic_write_json(
-                    temp / state_path,
+                adapter_state_records.append(
                     record_header(
                         "document_adapter_state",
                         project_id,
@@ -557,7 +567,7 @@ def init_project(
                         adapter_version=document_adapter.version,
                         file_id=file_id,
                         state=item.opaque_state,
-                    ),
+                    )
                 )
             file_records.append(
                 record_header(
@@ -606,34 +616,37 @@ def init_project(
                     )
                 )
 
-        write_jsonl(temp / "source" / "files.jsonl", file_records)
-        write_jsonl(temp / "source" / "segments.jsonl", segment_records)
-        (temp / "terminology").mkdir(parents=True, exist_ok=True)
-        (temp / "stages").mkdir(parents=True, exist_ok=True)
         (temp / "runs").mkdir(parents=True, exist_ok=True)
         (temp / "logs").mkdir(parents=True, exist_ok=True)
         (temp / "output").mkdir(parents=True, exist_ok=True)
-        atomic_write_json(
+        metadata = record_header(
+            "project",
+            project_id,
+            record_id=project_id,
+            name=name,
+            global_bundle_hash_seen=global_hash,
+            file_count=len(file_records),
+            segment_count=len(segment_records),
+            next_file_sequence=len(file_records) + 1,
+            status="active",
+        )
+        replace_source(
+            temp,
+            file_records,
+            segment_records,
+            metadata,
+            adapter_state_records,
+        )
+        from .sqlite_storage import write_json
+
+        write_json(
+            temp,
             temp / "terminology" / "overrides.json",
             record_header(
                 "terminology_overrides",
                 project_id,
                 record_id="TERMINOLOGY-OVERRIDES",
                 overrides=[],
-            ),
-        )
-        atomic_write_json(
-            temp / "project.json",
-            record_header(
-                "project",
-                project_id,
-                record_id=project_id,
-                name=name,
-                global_bundle_hash_seen=global_hash,
-                file_count=len(file_records),
-                segment_count=len(segment_records),
-                next_file_sequence=len(file_records) + 1,
-                status="active",
             ),
         )
         os.replace(temp, target)
@@ -658,22 +671,16 @@ def _next_file_sequence(
 
 
 def _running_run_ids(project: Path) -> list[str]:
-    running: list[str] = []
-    runs_dir = project / "runs"
-    if not runs_dir.is_dir():
-        return running
-    for manifest_path in runs_dir.glob("*/manifest.json"):
-        manifest = read_json(manifest_path)
-        if manifest.get("status") == "running":
-            running.append(str(manifest.get("run_id") or manifest_path.parent.name))
-    return sorted(running)
+    from .sqlite_storage import list_runs
+
+    return [str(item["run_id"]) for item in list_runs(project, status="running")]
 
 
 def _source_records(
     project: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    metadata = read_json(project / "project.json")
-    files = read_jsonl(project / "source" / "files.jsonl")
+    metadata = read_project_meta(project)
+    files = read_sqlite_files(project)
     return (
         metadata,
         _resolve_file_adapters(metadata, files),
@@ -684,89 +691,20 @@ def _source_records(
 def _resolve_file_adapters(
     metadata: dict[str, Any], files: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    legacy_id = str(metadata.get("document_adapter_id") or "txt")
-    legacy_version = metadata.get("document_adapter_version")
-    legacy_state = metadata.get("document_adapter_state")
+    del metadata
     resolved: list[dict[str, Any]] = []
     for file_record in files:
         item = dict(file_record)
-        item.setdefault("document_adapter_id", legacy_id)
-        if "document_adapter_version" not in item:
-            if legacy_version is not None:
-                item["document_adapter_version"] = str(legacy_version)
-            else:
-                from .plugins import get_document_adapter
-
-                item["document_adapter_version"] = get_document_adapter(
-                    legacy_id
-                ).version
-        item.setdefault("document_adapter_state", legacy_state)
+        if not isinstance(item.get("document_adapter_id"), str) or not item.get(
+            "document_adapter_id"
+        ):
+            raise ProjectError("项目 File 缺少 Document Adapter；请重新创建项目")
+        if not isinstance(item.get("document_adapter_version"), str) or not item.get(
+            "document_adapter_version"
+        ):
+            raise ProjectError("项目 File 缺少 Document Adapter 版本；请重新创建项目")
         resolved.append(item)
     return resolved
-
-
-def _write_source_snapshot(
-    root: Path,
-    *,
-    metadata: dict[str, Any],
-    files: list[dict[str, Any]],
-    segments: list[dict[str, Any]],
-    adapter_states: dict[Path, dict[str, Any]],
-) -> None:
-    write_jsonl(root / "source" / "files.jsonl", files)
-    write_jsonl(root / "source" / "segments.jsonl", segments)
-    atomic_write_json(root / "project.json", metadata)
-    for state_path, state_record in adapter_states.items():
-        atomic_write_json(root / state_path, state_record)
-
-
-def _publish_source_snapshot(
-    project: Path,
-    staging: Path,
-    *,
-    state_paths: list[Path],
-    removed_state_paths: list[Path],
-) -> None:
-    targets = [
-        Path("source/files.jsonl"),
-        Path("source/segments.jsonl"),
-        Path("project.json"),
-    ]
-    targets.extend(state_paths)
-    backup = staging / "backup"
-    published: list[Path] = []
-    removed_states: list[tuple[Path, Path]] = []
-    try:
-        for relative in targets:
-            current = project / relative
-            if current.exists():
-                saved = backup / relative
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(current, saved)
-            replacement = staging / relative
-            current.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(replacement, current)
-            published.append(relative)
-        for old_state_path in removed_state_paths:
-            current = project / old_state_path
-            if current.exists():
-                saved = backup / old_state_path
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(current, saved)
-                removed_states.append((saved, old_state_path))
-    except Exception:
-        for relative in reversed(published):
-            saved = backup / relative
-            current = project / relative
-            if saved.exists():
-                os.replace(saved, current)
-            elif current.exists():
-                current.unlink()
-        for saved, old_state_path in removed_states:
-            destination = project / old_state_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(saved, destination)
-        raise
 
 
 def add_project_files(
@@ -813,7 +751,7 @@ def add_project_files(
     added_segments: list[dict[str, Any]] = []
     staging = Path(tempfile.mkdtemp(prefix=".files-add.", dir=project))
     moved_inputs: list[Path] = []
-    state_records: dict[Path, dict[str, Any]] = {}
+    state_records: list[dict[str, Any]] = []
     committed = False
     try:
         for offset, (adapter, item) in enumerate(imports):
@@ -832,14 +770,16 @@ def add_project_files(
                     / adapter.adapter_id
                     / f"{file_id}.json"
                 )
-                state_records[state_path] = record_header(
-                    "document_adapter_state",
-                    project_id,
-                    record_id=f"DOCUMENT-{file_id}",
-                    adapter_id=adapter.adapter_id,
-                    adapter_version=adapter.version,
-                    file_id=file_id,
-                    state=item.opaque_state,
+                state_records.append(
+                    record_header(
+                        "document_adapter_state",
+                        project_id,
+                        record_id=f"DOCUMENT-{file_id}",
+                        adapter_id=adapter.adapter_id,
+                        adapter_version=adapter.version,
+                        file_id=file_id,
+                        state=item.opaque_state,
+                    )
                 )
             file_record = record_header(
                 "source_file",
@@ -900,24 +840,24 @@ def add_project_files(
             "document_adapter_state",
         ):
             new_metadata.pop(key, None)
-        _write_source_snapshot(
-            staging,
-            metadata=new_metadata,
-            files=new_files,
-            segments=new_segments,
-            adapter_states=state_records,
-        )
         for file_record in added_files:
             relative = Path(str(file_record["stored_name"]))
             destination = project / "input" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging / "input" / relative, destination)
             moved_inputs.append(destination)
-        _publish_source_snapshot(
+        retained_states = [
+            state
+            for existing in files
+            if (state := read_adapter_state(project, str(existing["file_id"])))
+            is not None
+        ]
+        replace_source(
             project,
-            staging,
-            state_paths=list(state_records),
-            removed_state_paths=[],
+            new_files,
+            new_segments,
+            new_metadata,
+            [*retained_states, *state_records],
         )
         committed = True
     except Exception:
@@ -963,20 +903,6 @@ def remove_project_files(
     new_segments = [
         item for item in segments if str(item["file_id"]) not in selected
     ]
-    retained_state_paths = {
-        str(item["document_adapter_state"])
-        for item in new_files
-        if item.get("document_adapter_state")
-    }
-    removed_state_paths = sorted(
-        {
-            Path(str(known[file_id]["document_adapter_state"]))
-            for file_id in file_ids
-            if known[file_id].get("document_adapter_state")
-            and str(known[file_id]["document_adapter_state"])
-            not in retained_state_paths
-        }
-    )
     new_metadata = dict(metadata)
     new_metadata.update(
         file_count=len(new_files),
@@ -993,13 +919,6 @@ def remove_project_files(
     moved_inputs: list[tuple[Path, Path]] = []
     committed = False
     try:
-        _write_source_snapshot(
-            staging,
-            metadata=new_metadata,
-            files=new_files,
-            segments=new_segments,
-            adapter_states={},
-        )
         for file_id in file_ids:
             relative = Path(str(known[file_id]["stored_name"]))
             source = project / "input" / relative
@@ -1008,11 +927,18 @@ def remove_project_files(
                 held.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, held)
                 moved_inputs.append((held, source))
-        _publish_source_snapshot(
+        retained_states = [
+            state
+            for file_record in new_files
+            if (state := read_adapter_state(project, str(file_record["file_id"])))
+            is not None
+        ]
+        replace_source(
             project,
-            staging,
-            state_paths=[],
-            removed_state_paths=removed_state_paths,
+            new_files,
+            new_segments,
+            new_metadata,
+            retained_states,
         )
         committed = True
     except Exception:
@@ -1040,7 +966,7 @@ def delete_project(
 ) -> dict[str, object]:
     """Delete one complete, self-contained project directory."""
     root = project.resolve()
-    if not (root / "project.json").is_file():
+    if not database_path(root).is_file():
         raise ProjectError(f"项目不存在或无效：{project}")
     protected = {PROJECTS_ROOT.resolve(), APP_ROOT.resolve()}
     protected.update(Path(value).resolve() for value in protected_roots)
@@ -1051,7 +977,7 @@ def delete_project(
         raise UsageError(
             f"存在未完成 Run，不能删除项目：{', '.join(running)}"
         )
-    metadata = read_json(root / "project.json")
+    metadata = read_project_meta(root)
     try:
         shutil.rmtree(root)
     except OSError as exc:
@@ -1067,7 +993,7 @@ def delete_project(
 def resolve_project(value: str, projects_root: Path = PROJECTS_ROOT) -> Path:
     direct = Path(value)
     path = direct if direct.is_dir() else projects_root / value
-    if not (path / "project.json").is_file():
+    if not database_path(path).is_file():
         raise ProjectError(f"项目不存在或无效：{value}")
     return path.resolve()
 
@@ -1097,7 +1023,7 @@ def sync_global_templates(
     interactive: bool | None = None,
     choice: str | None = None,
 ) -> list[str]:
-    metadata = read_json(project / "project.json")
+    metadata = read_project_meta(project)
     try:
         load_config(app_root / "config" / "config.toml")
         current_hash = bundle_hash(app_root)
@@ -1158,10 +1084,8 @@ def sync_global_templates(
 def load_source_files(
     project: Path, *, repair_tail: bool = True
 ) -> list[dict[str, object]]:
-    metadata = read_json(project / "project.json")
-    files = read_jsonl(
-        project / "source" / "files.jsonl", repair_tail=repair_tail
-    )
+    metadata = read_project_meta(project)
+    files = read_sqlite_files(project)
     return _resolve_file_adapters(metadata, files)
 
 
@@ -1177,9 +1101,7 @@ def _load_segment_records(
     repair_tail: bool = True,
     include_model_contract: bool = True,
 ) -> list[dict[str, object]]:
-    segments = read_jsonl(
-        project / "source" / "segments.jsonl", repair_tail=repair_tail
-    )
+    segments = read_sqlite_segments(project)
     if any(
         not isinstance(segment.get("part_id"), str)
         or not segment["part_id"]
@@ -1190,15 +1112,13 @@ def _load_segment_records(
         )
     if not include_model_contract:
         return segments
-    files = read_jsonl(
-        project / "source" / "files.jsonl", repair_tail=repair_tail
-    )
+    files = read_sqlite_files(project)
     state_by_file: dict[str, list[dict[str, Any]]] = {}
     for file_record in files:
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
             continue
-        state = read_json(project / state_path)
+        state = read_adapter_state(project, str(file_record.get("file_id")))
         if isinstance(state.get("state"), dict):
             state = state["state"]
         locators = state.get("locators")
