@@ -771,7 +771,9 @@ def latest_stage_results(
     try:
         params: list[Any] = [stage]
         filter_sql = ""
-        values = list(segment_ids) if segment_ids is not None else []
+        values = list(segment_ids) if segment_ids is not None else None
+        if values == []:
+            return {}
         if values:
             placeholders = ",".join("?" for _ in values)
             filter_sql = f" AND segment_id IN ({placeholders})"
