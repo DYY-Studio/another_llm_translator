@@ -202,6 +202,10 @@ def test_web_store_translation_records_enabled_validator_warning(tmp_path: Path)
     assert store.overview()["segments"][0]["translation"]["validation_status"] == (
         "warning"
     )
+    assert store.overview(status="warning")["total_segments"] == 1
+    assert store.segment_index(status="warning")["segment_ids"] == [
+        "F0001-S000001"
+    ]
     record = load_stage_history(project, "translation")[-1]
     assert record["validation_findings"][0]["validator"] == "japanese_kana"
 

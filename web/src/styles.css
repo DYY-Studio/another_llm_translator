@@ -137,6 +137,8 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); box-sha
 .list-header { min-width: 0; width: 100%; max-width: 100%; display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 650; }
 .segment-list { min-width: 0; min-height: 0; width: 100%; max-width: 100%; overflow-y: auto; overflow-x: hidden; background: var(--surface); }
 .segment-row-stack { min-width: 0; width: 100%; max-width: 100%; display: grid; grid-auto-rows: max-content; gap: 2px; background: var(--border); }
+.segment-row-placeholder { width: 100%; background: var(--surface); }
+.language-button { border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px; background: var(--surface); color: var(--muted); cursor: pointer; }
 .segment-row { min-width: 0; width: 100%; max-width: 100%; min-height: 70px; display: grid; grid-template-columns: 14px 72px minmax(0, 1fr); align-items: start; gap: 8px; padding: 12px 16px; border: 0; background: var(--surface); text-align: left; }
 .segment-row { content-visibility: auto; contain-intrinsic-block-size: 70px; contain-intrinsic-inline-size: 0; }
 .segment-row:hover { background: var(--sidebar); }

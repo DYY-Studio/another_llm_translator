@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .execution import Scope, choose_running_run
 from .errors import AppError
+from .i18n import cli_language
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
 from .project import (
@@ -35,6 +36,12 @@ from .stages import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minimal-llm-translator")
+    parser.add_argument(
+        "--language",
+        choices=("system", "zh-CN", "en"),
+        default="system",
+        help="界面和 CLI 语言（默认：system）",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="创建翻译项目")
@@ -176,6 +183,7 @@ def run(argv: list[str] | None = None) -> int:
     logger = get_logger()
     parser = build_parser()
     args = parser.parse_args(argv)
+    cli_language(None if args.language == "system" else args.language)
     logger.info("command start command=%s", args.command)
     if args.command == "init":
         projects_root = (

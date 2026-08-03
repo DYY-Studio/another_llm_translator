@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
+import { detectLanguage, translate } from "../i18n";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 
-function number(value: number | null, suffix = "") {
-  return value === null ? "不可用" : `${value.toLocaleString()}${suffix}`;
+function number(value: number | null, suffix = "", unavailable = "不可用") {
+  return value === null ? unavailable : `${value.toLocaleString()}${suffix}`;
 }
 
-function waitingRequests(value: number | undefined) {
-  return value ? `${value.toLocaleString()} 个请求` : "无";
+function waitingRequests(value: number | undefined, language: "zh-CN" | "en") {
+  return value ? (language === "en" ? `${value.toLocaleString()} requests` : `${value.toLocaleString()} 个请求`) : (language === "en" ? "None" : "无");
 }
 
 function clock(value: string) {
@@ -20,15 +21,14 @@ function clock(value: string) {
   });
 }
 
-const statusLabels = {
-  running: "请求中",
-  retrying: "重试中",
-  completed: "已完成",
-  failed: "失败",
-  interrupted: "已中断",
-};
-
 export function DiagnosticsView() {
+  const language = detectLanguage();
+  const en = language === "en";
+  const statusLabels = en ? {
+    running: "Requesting", retrying: "Retrying", completed: "Completed", failed: "Failed", interrupted: "Interrupted",
+  } : {
+    running: "请求中", retrying: "重试中", completed: "已完成", failed: "失败", interrupted: "已中断",
+  };
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
   const [level, setLevel] = useState("");
   const [project, setProject] = useState("");
@@ -111,58 +111,58 @@ export function DiagnosticsView() {
     <section className="diagnostics-page">
       <header className="diagnostics-heading">
         <div>
-          <h1>诊断仪表盘</h1>
+          <h1>{translate("diagnostics.title", language)}</h1>
           <p>
             {metrics?.project
-              ? `当前运行：${metrics.project} · ${metrics.stage}`
-              : "当前没有运行中的 LLM 任务"}
+            ? (en ? `Current run: ${metrics.project} · ${metrics.stage}` : `当前运行：${metrics.project} · ${metrics.stage}`)
+              : translate("diagnostics.noRun", language)}
           </p>
         </div>
-        <span className="diagnostics-live"><i />每秒刷新</span>
+        <span className="diagnostics-live"><i />{translate("diagnostics.live", language)}</span>
       </header>
 
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
-        <article><span>当前请求</span><strong>{number(metrics?.active_requests ?? 0)}</strong><small>并发数</small></article>
-        <article><span>输入 Tokens</span><strong>{metrics?.usage_available ? number(metrics.input_tokens) : "不可用"}</strong><small>当前 Run 精确累计</small></article>
-        <article><span>输出 Tokens</span><strong>{metrics?.usage_available ? number(metrics.output_tokens) : "不可用"}</strong><small>当前 Run 精确累计</small></article>
-        <article><span>总吞吐量</span><strong>{number(metrics?.throughput_tokens_per_second ?? null)}</strong><small>Tokens / 秒</small></article>
+        <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
-      <div className="diagnostics-details" aria-label="请求诊断摘要">
-        <span>Usage <strong>{metrics?.usage_available ? "完整" : "不可用"}</strong></span>
-        <span>请求延迟 <strong>{number(metrics?.latest_latency_ms ?? null, " ms")}</strong></span>
-        <span>HTTP 错误 <strong>{number(metrics?.http_errors ?? 0)}</strong></span>
-        <span>重试 <strong>{number(metrics?.retry_count ?? 0)}</strong></span>
-        <span>限流等待 <strong>{waitingRequests(metrics?.rate_limit_waiting_requests)}</strong></span>
+      <div className="diagnostics-details" aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
+        <span>Usage <strong>{metrics?.usage_available ? (en ? "Complete" : "完整") : (en ? "Unavailable" : "不可用")}</strong></span>
+        <span>{en ? "Latency" : "请求延迟"} <strong>{number(metrics?.latest_latency_ms ?? null, " ms", en ? "Unavailable" : "不可用")}</strong></span>
+        <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0)}</strong></span>
+        <span>{en ? "Retries" : "重试"} <strong>{number(metrics?.retry_count ?? 0)}</strong></span>
+        <span>{en ? "Rate-limit waits" : "限流等待"} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>
       </div>
 
       <div className="diagnostics-grid">
         <section className="diagnostics-panel log-panel">
           <div className="diagnostics-panel-heading">
-            <div><h2>全局日志</h2><span>{value?.logs.length ?? 0} 条</span></div>
+            <div><h2>{en ? "Global logs" : "全局日志"}</h2><span>{value?.logs.length ?? 0} {en ? "entries" : "条"}</span></div>
             <button
               className="quiet-button"
               aria-pressed={!autoScroll}
               onClick={() => setAutoScroll((current) => !current)}
             >
-              {autoScroll ? "暂停自动滚动" : "恢复自动滚动"}
+              {autoScroll ? (en ? "Pause auto-scroll" : "暂停自动滚动") : (en ? "Resume auto-scroll" : "恢复自动滚动")}
             </button>
           </div>
           <div className="diagnostics-filters">
-            <select aria-label="日志级别" value={level} onChange={(event) => setLevel(event.target.value)}>
-              <option value="">全部级别</option>
+            <select aria-label={en ? "Log level" : "日志级别"} value={level} onChange={(event) => setLevel(event.target.value)}>
+              <option value="">{en ? "All levels" : "全部级别"}</option>
               {value?.filters.levels.map((item) => <option key={item}>{item}</option>)}
             </select>
-            <select aria-label="日志项目" value={project} onChange={(event) => setProject(event.target.value)}>
-              <option value="">全部项目</option>
+            <select aria-label={en ? "Log project" : "日志项目"} value={project} onChange={(event) => setProject(event.target.value)}>
+              <option value="">{en ? "All projects" : "全部项目"}</option>
               {value?.filters.projects.map((item) => <option key={item}>{item}</option>)}
             </select>
-            <select aria-label="日志阶段" value={stage} onChange={(event) => setStage(event.target.value)}>
-              <option value="">全部阶段</option>
+            <select aria-label={en ? "Log stage" : "日志阶段"} value={stage} onChange={(event) => setStage(event.target.value)}>
+              <option value="">{en ? "All stages" : "全部阶段"}</option>
               {value?.filters.stages.map((item) => <option key={item}>{item}</option>)}
             </select>
-            <input aria-label="搜索日志" placeholder="搜索消息" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input aria-label={en ? "Search logs" : "搜索日志"} placeholder={en ? "Search messages" : "搜索消息"} value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
           <div className="diagnostics-log" ref={logRef} role="log" aria-live="off">
             {value?.logs.length ? value.logs.map((item, index) => (
@@ -172,13 +172,13 @@ export function DiagnosticsView() {
                 <span>{item.project} · {item.stage}</span>
                 <code>{item.message}</code>
               </div>
-            )) : <div className="diagnostics-empty">没有符合条件的日志。</div>}
+            )) : <div className="diagnostics-empty">{en ? "No matching logs." : "没有符合条件的日志。"}</div>}
           </div>
         </section>
 
         <section className="diagnostics-panel request-panel">
           <div className="diagnostics-panel-heading">
-            <div><h2>本次运行请求/响应</h2><span>最近 50 条 · 仅保存在内存</span></div>
+            <div><h2>{en ? "Current run requests/responses" : "本次运行请求/响应"}</h2><span>{en ? "Latest 50 · memory only" : "最近 50 条 · 仅保存在内存"}</span></div>
           </div>
           <div className="request-list">
             {value?.requests.length ? [...value.requests].reverse().map((item) => (
@@ -191,14 +191,14 @@ export function DiagnosticsView() {
                   <strong>{item.model}</strong>
                   <span>
                     <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
-                    {item.attempt_count} 次尝试
+                    {en ? `${item.attempt_count} attempts` : `${item.attempt_count} 次尝试`}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
                     {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
                   </span>
                 </div>
-                <button className="quiet-button" onClick={() => openDetail(item.request_id)}>查看</button>
+                <button className="quiet-button" onClick={() => openDetail(item.request_id)}>{en ? "View" : "查看"}</button>
               </article>
-            )) : <div className="diagnostics-empty">本次运行尚无请求。</div>}
+            )) : <div className="diagnostics-empty">{en ? "No requests in this run." : "本次运行尚无请求。"}</div>}
           </div>
         </section>
       </div>

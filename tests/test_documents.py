@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
 import zipfile
 from pathlib import Path
@@ -8,7 +9,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
+from app.errors import ConfigError, IncompleteError, ProjectError, StorageError, UsageError
 from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
 from app.documents import publish_document_exports
 from app.execution import stage_result_path
@@ -22,7 +23,7 @@ from app.plugins import (
 )
 from app.project import _normalize_imported_file, init_project
 from app.stages import export_project
-from app.storage import append_jsonl, read_json, read_jsonl, record_header
+from app.storage import atomic_write_json, append_jsonl, read_json, read_jsonl, record_header
 from tests.test_foundation import make_app_root
 
 
@@ -517,9 +518,7 @@ def test_epub_mixed_ruby_locator_corruption_fails_explicitly(
     state = read_json(state_path)
     ruby_slot = state["state"]["locators"][0]["slot"]["slots"][1]
     ruby_slot[field] = [99] if field == "path" else "不一致"
-    state_path.write_text(
-        json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    atomic_write_json(state_path, state)
 
     with pytest.raises(IncompleteError, match="结构|tail|原文不一致"):
         export_project(project, "translated", bilingual=False, allow_missing=False)
@@ -549,9 +548,7 @@ def test_epub_composite_locator_corruption_fails_explicitly(
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(state_path)
     state["state"]["locators"][0]["slot"]["slots"][0]["path"] = [99]
-    state_path.write_text(
-        json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    atomic_write_json(state_path, state)
 
     with pytest.raises(IncompleteError, match="结构"):
         export_project(project, "translated", bilingual=False, allow_missing=False)
@@ -877,7 +874,7 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     project = init_epub(tmp_path)
     file_record = read_jsonl(project / "source" / "files.jsonl")[0]
     state_path = project / str(file_record["document_adapter_state"])
-    state_path.write_text('{"schema_version":1,"state":[]}\n', encoding="utf-8")
+    atomic_write_json(state_path, {"schema_version": 1, "state": []})
     with pytest.raises(IncompleteError, match="状态损坏"):
         export_project(
             project, "translated", bilingual=False, allow_missing=True
@@ -893,9 +890,11 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
     files_path = project / "source" / "files.jsonl"
     file_record = read_jsonl(files_path)[0]
     file_record["document_adapter_version"] = "future"
-    files_path.write_text(
-        json.dumps(file_record, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
+        )
     with pytest.raises(IncompleteError, match="版本不兼容"):
         export_project(
             project, "translated", bilingual=False, allow_missing=True

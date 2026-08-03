@@ -19,7 +19,7 @@ from app.stages import (
     publish_partial_terms,
     run_terminology,
 )
-from app.storage import append_jsonl, atomic_write_json, read_json, record_header
+from app.storage import append_jsonl, atomic_write_json, read_json, read_jsonl, record_header
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
@@ -115,7 +115,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     assert published["published"] is True
     assert load_terms(project)["terms"][0]["source"] == "recover"
     assert read_json(project / "terminology" / "active_task.json")["status"] == "partial_published"
-    assert (project / "terminology" / "candidates.jsonl").exists()
+    assert read_jsonl(project / "terminology" / "candidates.jsonl")
 
 
 def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(source, [term("Alpha")])
     first = import_terms(project, source, dry_run=False)
     assert first["terms_revision"] == 1
-    before = (project / "terminology" / "terms.json").read_bytes()
+    before = read_json(project / "terminology" / "terms.json")
 
     second = import_terms(project, source, dry_run=False)
     assert second["changed"] is False
@@ -161,7 +161,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(invalid, [{"source": "Broken", "aliases": "wrong"}])
     with pytest.raises(UsageError, match="aliases"):
         import_terms(project, invalid, dry_run=False)
-    assert (project / "terminology" / "terms.json").read_bytes() == before
+    assert read_json(project / "terminology" / "terms.json") == before
 
 
 def test_terms_cli_import_dry_run_and_export(

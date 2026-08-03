@@ -8,7 +8,7 @@
 
 运行方式：单机、本地 CLI/Web、异步并发
 
-存储方式：项目文件夹、JSON、JSONL、TOML、TXT、EPUB
+存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB
 
 LLM 接口：声明式非流式 JSON POST Adapter
 
@@ -118,7 +118,7 @@ apply 不调用 LLM，因此只保存配置和输入结果引用，不保存虚�
 MVP 不实现：
 
 - 远程、多用户或公网 Web 服务。
-- 数据库、消息队列或分布式执行。
+- 消息队列或分布式执行。
 - 同一项目的多个写任务并发运行或并发写入合并。
 - 网络共享盘协调。
 - EPUB 以外的复杂文档格式。
@@ -148,7 +148,7 @@ python-multipart
 ```
 
 React/Vite/TypeScript 只用于构建随 Python 包分发的 Web 静态资源。标准库负责
-CLI、异步调度、JSON/JSONL/TOML、Hash、日志、路径、原子替换、插件发现、
+CLI、异步调度、SQLite/JSON/TOML、Hash、日志、路径、原子替换、插件发现、
 EPUB ZIP/XML 处理和 Unicode 归一化。
 
 代码只需覆盖以下职责，不预先规定模块数量：
@@ -156,7 +156,7 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 - CLI 和配置加载。
 - 项目初始化及模板同步。
 - TXT/EPUB Document Adapter 与 Segment 化。
-- JSON/JSONL 持久化。
+- SQLite 项目持久化与项目外 JSON 交换文件。
 - Prompt 渲染、Token 估算和 Chunk 生成。
 - 声明式 LLM Adapter、HTTP 调用、限流和重试。
 - 术语、翻译、校对、润色和 apply。
@@ -168,19 +168,12 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 项目至少包含：
 
 ```text
-project.json
+project.sqlite
 config.toml
 prompts/
 input/
-source/files.jsonl
-source/segments.jsonl
-source/adapters/{document_adapter_id}/state.json  # 格式需要时存在
-terminology/terms.json
-terminology/overrides.json
-terminology/active_task.json
-terminology/scans.jsonl
-terminology/candidates.jsonl
-stages/*.jsonl
+（项目元数据、File、Segment、Adapter 状态、术语、阶段结果、Run 索引和活动任务
+状态均在 project.sqlite 中）
 runs/{run_id}/manifest.json
 logs/app.log
 output/
@@ -244,7 +237,7 @@ python -m app.main files-remove PROJECT FILE_ID...
 - 文件增删发现任意 `running` Run 时整体拒绝，不自动中断。未知或部分非法的
   删除选择也必须在写入前整体失败。
 - 增删在项目写锁内预写新索引、元数据和输入副本；普通发布异常不得留下部分
-  更新。移除会删除项目内输入副本；Run、阶段 JSONL、术语和既有输出保留。
+  更新。移除会删除项目内输入副本；Run、SQLite 阶段记录、术语和既有输出保留。
 - 被移除 Segment 的历史阶段记录仍是审计数据，但不再参与 inspect、指纹差异、
   结果复用、校验警告、过期建议统计或导出。
 - 移除 File 时同时清除该 File 独占的 Adapter 不透明状态；重新添加生成新状态。
@@ -292,7 +285,10 @@ EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露
 原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新
 导入；运行选项随 Adapter 状态和阶段指纹保存。
 
-项目创建后，`source/segments.jsonl` 是源内容真相。手工修改项目 `input/` 或 `segments.jsonl` 均不受支持；需要修改源文时重新创建项目。
+项目创建后，`project.sqlite` 是项目元数据、File、Segment、Adapter 状态、术语、
+阶段结果和 Run 索引的唯一真相；原始输入、配置、Prompt、Run 快照、调试 Payload
+和导出文件仍是项目外围文件。手工修改 SQLite 或项目 `input/` 均不受支持；需要
+修改源文时重新创建项目。
 
 `ImportedFile.segment_part_ids` 是与 `segments` 对齐的可选导入字段；省略时宿主
 填入单一 `document` part。新项目必须为每条 Segment 持久化有效 `part_id`；读取
@@ -697,7 +693,7 @@ Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复�
 `review_status` 是阶段 payload，不等于记录的 `status`。结构有效的 accepted 和 suggested 都保存为 completed。
 accepted 的持久化记录将 `suggested_text` 和 `reason` 规范化保存为 `null`。
 
-Web 人工重置在同一阶段 JSONL 中追加 `status = "reset"`。reset 屏蔽该
+Web 人工重置在 SQLite 的对应阶段记录中追加 `status = "reset"`。reset 屏蔽该
 Segment 此前的 completed；之后的新 completed 重新成为当前结果。重置校对或
 润色时同时重置该阶段 applied 结果，但不级联删除其他阶段。
 
@@ -767,7 +763,7 @@ Segment 数。
 
 术语目录只维护：
 
-- 一份已发布 `terms.json`。
+- 一份存放在 SQLite 中的已发布术语库。
 - 一个 `active_task_id`。
 - 追加式 scans 和 candidates。
 - 一份人工 `overrides.json`。
@@ -836,7 +832,7 @@ LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存�
 活动扫描的合法候选可以在全量扫描完成前读取：`terms-export --source scanned`
 或 Web 术语页的“导出当前扫描结果”只导出当前活动任务候选，不改动已发布库。用户
 确认 `terms-publish-partial` 或 Web 的“发布现有结果”后，候选按现有去重、冲突和
-override 规则写入普通 `terms.json`，不添加 partial 标记，立即可供翻译、校对和润色。
+override 规则写入 SQLite 中的普通术语库，不添加 partial 标记，立即可供翻译、校对和润色。
 该操作只把当前活动扫描标记为 `partial_published`，保留 scans、candidates 和历史
 Run；下一次扫描创建新的活动任务，不删除旧记录。
 
@@ -1036,7 +1032,7 @@ python -m app.main apply PROJECT --stage polishing --all
 
 - suggested：输出完整 `suggested_text`。
 - accepted：输出建议记录所使用的基准文本。
-- 不覆盖翻译或建议历史，写入独立 applied JSONL。
+- 不覆盖翻译或建议历史，写入 SQLite 中独立的 applied 记录。
 
 apply 前必须确认建议的 `base_result_id` 仍是该 Segment 当前选择的基准。若上游已经变化：
 
@@ -1225,21 +1221,16 @@ HTTP 重试：
 
 ## 5.4 持久化与中断恢复
 
-普通 JSON 使用同目录临时文件写完后原子替换。
+项目内进度记录使用 `project.sqlite` 的事务、外键、唯一约束和 WAL。项目数据库
+包含明确的 `schema_version`；缺失或未知版本快速失败并提示重新创建项目，不提供
+JSONL 到 SQLite 的迁移、双写或旧格式读取。Run 的可读 `manifest.json`、配置和
+Prompt/Preset/Adapter 快照仍保存在对应 Run 目录，数据库中的 Run 索引负责活动任务
+发现和恢复判断。
 
-所有承载进度的 JSONL，包括阶段结果、术语 scans 和 candidates：
+项目外的普通 JSON（全局配置、Preset、导出交换文件等）使用同目录临时文件写完后
+原子替换。`--dry-run` 不写入项目数据库，以保持零写入。
 
-- 由单写入协程或进程内异步锁串行追加。
-- 每条记录完整写入换行后执行 flush 和 `fsync`。
-
-读取 JSONL：
-
-- 中间行损坏：报告存储完整性错误并停止。
-- 最后一行损坏：将损坏尾部保存为带时间戳的 `.corrupt-tail`，截断至最后完整记录后继续。
-
-`--dry-run` 遇到损坏尾行时只报告，不执行备份或截断，以保持零写入。
-
-恢复只读取：
+恢复只读取数据库中的：
 
 - 每个 Segment 是否存在 completed。
 - 没有 completed 时最近是否 failed。
@@ -1254,8 +1245,7 @@ Segment 进度恢复不读取 Chunk ID、Chunk Manifest 或 Request 状态。Run
 普通模式保存：
 
 - Run Manifest 和快照。
-- Segment 阶段结果。
-- 术语任务进度与候选。
+- SQLite 中的 Segment 阶段结果、术语任务进度与候选。
 - 人类可读 `app.log`。
 
 CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写入 stderr，并把相同基本日志写入 `app.log`；最终命令汇总单独以 JSON 写入 stdout。日志不得包含正文、译文、Prompt、API Key 或完整 Payload。
@@ -1427,7 +1417,7 @@ inspect 至少报告：
 - 是否存在新的全局模板。
 - 建议的下一条命令。
 
-inspect 不修改 Run 状态或用户进度。JSONL 损坏尾行恢复属于存储维护。
+inspect 不修改 Run 状态或用户进度。旧 JSONL 项目不做尾行修复，直接提示重新创建。
 
 ## 6.3 导出
 
@@ -1529,9 +1519,9 @@ Ctrl/Cmd/Shift 经典多选限定文件范围，未选择时导出全部。项�
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
 审校、apply 和 export。
 
-Web 不建立数据库；项目目录与 CLI 使用相同应用内核和持久化记录。同一项目的
-写任务通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web
-进程，重启后仍由项目 Run 与 Segment 记录恢复业务进度。
+Web 与 CLI 使用同一 SQLite 项目数据库、应用内核和持久化记录。同一项目的写任务
+通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web 进程，重启
+后仍由项目 Run 与 Segment 记录恢复业务进度。
 
 Web 顶部的全局任务状态条在项目概览、导出、设置和窄屏布局中持续显示最近
 任务，直到下一任务开始。状态条提供运行项目、阶段、状态、已完成/失败/待处理
@@ -1564,7 +1554,7 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 术语页支持 JSON/CSV 导入导出、经典 Ctrl/Cmd/Shift 多选和批量移除；活动扫描
 期间显示完成/失败/待处理、失败分类和候选数量，并可导出当前候选或在确认后部分
-发布。部分发布立即生成普通 `terms.json`，只结束活动扫描状态，保留历史扫描和
+发布。部分发布立即更新 SQLite 中的普通术语库，只结束活动扫描状态，保留历史扫描和
 候选记录，下一次扫描使用新的任务。翻译、校对、润色列表使用相同多选规则；批量
 清除采用追加 reset。校对和润色可应用
 所选或当前过滤范围，缺建议或缺基准时整批拒绝，旧基准必须显式允许。批量

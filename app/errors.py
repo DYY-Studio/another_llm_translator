@@ -2,14 +2,21 @@ class AppError(Exception):
     """Base class for expected command failures."""
 
     exit_code = 1
+    code = "app_error"
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        self.params: dict[str, object] = {}
 
 
 class UsageError(AppError):
     exit_code = 2
+    code = "usage_error"
 
 
 class ConfigError(AppError):
     exit_code = 2
+    code = "config_error"
 
 
 class RequestSizeError(ConfigError):
@@ -18,18 +25,22 @@ class RequestSizeError(ConfigError):
     def __init__(self, message: str, *, reason: str) -> None:
         super().__init__(message)
         self.reason = reason
+        self.params = {"reason": reason}
 
 
 class ProjectError(AppError):
     exit_code = 3
+    code = "project_error"
 
 
 class StorageError(AppError):
     exit_code = 3
+    code = "storage_error"
 
 
 class ExternalError(AppError):
     exit_code = 4
+    code = "external_error"
 
 
 class ContextLengthError(ExternalError):
@@ -53,3 +64,4 @@ class FatalExternalError(ExternalError):
 
 class IncompleteError(AppError):
     exit_code = 5
+    code = "incomplete_error"

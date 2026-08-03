@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview } from "../types";
+import { detectLanguage, translate } from "../i18n";
 
 type InputKind = "file" | "folder";
 
@@ -52,6 +53,7 @@ function InputQueue({
   options: AdapterOptions;
   onOptionsChange: (value: AdapterOptions) => void;
 }) {
+  const language = detectLanguage();
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const [adapters, setAdapters] = useState<AdapterSummary[]>([]);
@@ -124,7 +126,7 @@ function InputQueue({
   return (
     <div className="input-queue">
       <div className="input-queue-heading">
-        <div><strong>待输入列表</strong><small>可分多次选择；文件夹导入保留内部相对路径。</small></div>
+        <div><strong>{language === "en" ? "Input queue" : "待输入列表"}</strong><small>{language === "en" ? "Add files or folders in multiple batches; folder paths stay relative." : "可分多次选择；文件夹导入保留内部相对路径。"}</small></div>
         <div className="button-group">
           <input
             ref={fileRef}
@@ -148,11 +150,11 @@ function InputQueue({
               clearInput(folderRef);
             }}
           />
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>选择文件</button>
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>选择文件夹</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>{language === "en" ? "Choose files" : "选择文件"}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>{language === "en" ? "Choose folder" : "选择文件夹"}</button>
         </div>
       </div>
-      {!folderSelectionSupported && <small className="muted">当前浏览器不支持文件夹选择，可继续选择单独文件。</small>}
+      {!folderSelectionSupported && <small className="muted">{language === "en" ? "This browser cannot select folders; individual files are still available." : "当前浏览器不支持文件夹选择，可继续选择单独文件。"}</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
       {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
         ? [...adapter.import_options, ...adapter.run_options].map((option) => (
@@ -176,11 +178,11 @@ function InputQueue({
         ))
         : [])}
       <div className="input-queue-list">
-        {!value.length && <div className="input-queue-empty">尚未选择文件。</div>}
+        {!value.length && <div className="input-queue-empty">{language === "en" ? "No files selected." : "尚未选择文件。"}</div>}
         {value.map((item, index) => (
           <div className="input-queue-row" key={`${item.path}-${index}`}>
             <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? "文件夹" : "单独文件"}</small></span>
-            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>移除</button>
+            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{language === "en" ? "Remove" : "移除"}</button>
           </div>
         ))}
       </div>
@@ -199,7 +201,8 @@ export function Overview({
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
 }) {
-  const completed = value.segments.filter((item) => item.translation).length;
+  const language = detectLanguage();
+  const completed = value.completed_segments;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -276,21 +279,21 @@ export function Overview({
     <div className="page">
       <div className="page-heading overview-heading">
         <div><h1>{value.name}</h1><p>{value.path}</p></div>
-        <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>删除项目</button>
+        <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
       </div>
       <div className="summary-strip">
-        <div><strong>{value.files.length}</strong><span>文件</span></div>
-        <div><strong>{value.nonempty_segment_count}</strong><span>非空 Segment</span></div>
-        <div><strong>{completed}</strong><span>已有译文</span></div>
+        <div><strong>{value.files.length}</strong><span>{translate("overview.files", language)}</span></div>
+        <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
+        <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
       </div>
       <div className="section-heading">
-        <div><h2>文件</h2><p>每个文件保留其来源格式</p></div>
+        <div><h2>{translate("overview.fileHeading", language)}</h2><p>{language === "en" ? "Each file keeps its source format." : "每个文件保留其来源格式"}</p></div>
         <div className="section-actions">
           <button className="primary-button" disabled={busy || !pendingInputs.length} onClick={() => void upload()}>
-            添加到项目
+            {translate("overview.add", language)}
           </button>
           <button className="danger-button" disabled={busy || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
-            移除所选
+            {translate("overview.remove", language)}
           </button>
         </div>
       </div>
@@ -299,8 +302,8 @@ export function Overview({
       <div className="file-list">
         {value.files.length === 0 && (
           <div className="empty-file-state">
-            <strong>项目还没有源文件</strong>
-            <span>添加包含非空文本的 TXT 或 EPUB 文件后即可运行阶段。</span>
+            <strong>{translate("overview.noFiles", language)}</strong>
+            <span>{translate("overview.addHint", language)}</span>
           </div>
         )}
         {value.files.map((item) => (
@@ -329,12 +332,12 @@ export function Overview({
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
           <div className="modal" role="dialog" aria-modal="true" aria-label="永久删除项目" onMouseDown={(event) => event.stopPropagation()}>
-            <h2>永久删除项目？</h2>
+            <h2>{language === "en" ? "Delete project permanently?" : "永久删除项目？"}</h2>
             <p>将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。</p>
             {error && <p className="error-text">{error}</p>}
             <div className="modal-actions">
-              <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>取消</button>
-              <button className="danger-button" disabled={busy} onClick={() => void deleteProject()}>确认删除项目</button>
+              <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>{translate("dialog.cancel", language)}</button>
+              <button className="danger-button" disabled={busy} onClick={() => void deleteProject()}>{translate("overview.confirmDelete", language)}</button>
             </div>
           </div>
         </div>
@@ -350,6 +353,7 @@ export function ExportView({
   project: string;
   overview: ProjectOverview;
 }) {
+  const language = detectLanguage();
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
@@ -373,7 +377,7 @@ export function ExportView({
   }
   return (
     <div className="page narrow-page">
-      <div className="page-heading"><div><h1>导出</h1><p>从已持久化结果生成输出文件。</p></div></div>
+      <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
       <label>结果阶段<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">翻译</option><option value="proofread">已应用校对</option><option value="polished">已应用润色</option></select></label>
       <label>输出格式<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">保留各文件原格式</option><option value="txt">统一输出 TXT</option></select></label>
       <div className="export-file-heading">
@@ -403,6 +407,7 @@ export function ExportView({
 }
 
 export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (selector: string, externalPath?: string) => void }) {
+  const language = detectLanguage();
   const [mode, setMode] = useState<"create" | "open">("create");
   const [name, setName] = useState("");
   const [parentDir, setParentDir] = useState("");
@@ -450,21 +455,21 @@ export function CreateProjectDialog({ onClose, onCreated }: { onClose: () => voi
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="dialog-tabs" role="tablist" aria-label="项目操作">
-          <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>新建项目</button>
-          <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>打开现有项目</button>
+        <div className="dialog-tabs" role="tablist" aria-label={language === "en" ? "Project actions" : "项目操作"}>
+          <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>{translate("dialog.new", language)}</button>
+          <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>{translate("dialog.open", language)}</button>
         </div>
         {error && <div className="error-banner" role="alert">{error}</div>}
         {mode === "open" ? <>
-          <label>项目目录绝对路径<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /></label>
-          <p className="muted">只打开此目录，不扫描父目录，也不会移动项目。</p>
-          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>打开项目</button></div>
+          <label>{translate("dialog.projectPath", language)}<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /></label>
+          <p className="muted">{language === "en" ? "Only this directory is opened; parent directories are not scanned." : "只打开此目录，不扫描父目录，也不会移动项目。"}</p>
+          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
         </> : <>
-          <label>项目名<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label>保存父目录<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
+          <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label>{translate("dialog.parentDir", language)}<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
           <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} />
-          <p className="muted">未选择文件时将创建空项目。</p>
-          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>创建项目</button></div>
+          <p className="muted">{translate("dialog.emptyHint", language)}</p>
+          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>
         </>}
       </div>
     </div>

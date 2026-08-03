@@ -858,13 +858,13 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    before = (project / "source" / "files.jsonl").read_bytes()
+    before = read_jsonl(project / "source" / "files.jsonl")
     response = client.post(
         "/api/v1/projects/sample/files/remove",
         json={"file_ids": ["F0001", "F9999"]},
     )
     assert response.status_code == 400
-    assert (project / "source" / "files.jsonl").read_bytes() == before
+    assert read_jsonl(project / "source" / "files.jsonl") == before
 
 
 def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
