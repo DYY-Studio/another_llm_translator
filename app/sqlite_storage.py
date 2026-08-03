@@ -649,7 +649,7 @@ def segment_count(
             params.append(search)
         if status:
             if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status NOT IN ('completed'))")
+                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
             else:
                 clauses.append("latest_stage.status = ?")
                 params.append(status)
@@ -683,7 +683,7 @@ def query_segments(
             params.append(search)
         if status:
             if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status NOT IN ('completed'))")
+                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
             else:
                 clauses.append("latest_stage.status = ?")
                 params.append(status)
@@ -721,7 +721,7 @@ def segment_ids(
             params.append(search)
         if status:
             if status == "pending":
-                clauses.append("(latest_stage.status IS NULL OR latest_stage.status NOT IN ('completed'))")
+                clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
             else:
                 clauses.append("latest_stage.status = ?")
                 params.append(status)
