@@ -325,6 +325,13 @@ class WebStore:
             "name": self.metadata["name"],
             "path": str(self.project),
             "nonempty_segment_count": segment_count(self.project),
+            "completed_segments": segment_count(
+                self.project,
+                file_id=file_id,
+                status="completed",
+                search=search,
+                stage=stage,
+            ),
             "total_segments": segment_count(
                 self.project,
                 file_id=file_id,

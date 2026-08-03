@@ -59,6 +59,7 @@ export interface ProjectOverview {
   name: string;
   path: string;
   nonempty_segment_count: number;
+  completed_segments: number;
   total_segments: number;
   offset: number;
   limit: number;

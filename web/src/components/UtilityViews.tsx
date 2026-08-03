@@ -202,7 +202,7 @@ export function Overview({
   onDeleted: (path: string) => Promise<void>;
 }) {
   const language = detectLanguage();
-  const completed = value.segments.filter((item) => item.translation).length;
+  const completed = value.completed_segments;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
