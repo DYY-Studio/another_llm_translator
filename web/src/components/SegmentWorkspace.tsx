@@ -158,11 +158,50 @@ export function SegmentWorkspace({
   }, [project, stage, file, status, search, orderedIds, virtualItems.map((item) => item.index).join(",")]);
 
   useEffect(() => {
-    if (!selection.focusedKey || records[selection.focusedKey]) return;
-    void api<Segment>(`/api/v1/projects/${project}/segments/${selection.focusedKey}`)
-      .then((item) => setRecords((current) => ({ ...current, [item.segment_id]: item })))
-      .catch((value) => setListError(String(value)));
-  }, [project, selection.focusedKey, records]);
+    const focusedId = selection.focusedKey || orderedIds[0];
+    const focused = focusedId ? records[focusedId] : undefined;
+    if (!focusedId || !focused) {
+      if (!focusedId) return;
+      let active = true;
+      void api<Segment>(`/api/v1/projects/${project}/segments/${focusedId}`)
+        .then((item) => {
+          if (active) setRecords((current) => ({ ...current, [item.segment_id]: item }));
+        })
+        .catch((value) => { if (active) setListError(String(value)); });
+      return () => { active = false; };
+    }
+
+    const focusedIndex = orderedIds.indexOf(focused.segment_id);
+    if (focusedIndex < 0) return;
+    const neighborIds: string[] = [];
+    for (const direction of [-1, 1]) {
+      let index = focusedIndex + direction;
+      let found = 0;
+      while (index >= 0 && index < orderedIds.length && found < 2) {
+        const candidateId = orderedIds[index];
+        const candidate = records[candidateId];
+        if (candidate && (candidate.file_id !== focused.file_id || candidate.part_id !== focused.part_id)) break;
+        if (!candidate) neighborIds.push(candidateId);
+        found += 1;
+        index += direction;
+      }
+    }
+    if (!neighborIds.length) return;
+    let active = true;
+    void Promise.all(
+      neighborIds.map((segmentId) => api<Segment>(`/api/v1/projects/${project}/segments/${segmentId}`)),
+    )
+      .then((items) => {
+        if (!active) return;
+        setRecords((current) => {
+          const next = { ...current };
+          for (const item of items) next[item.segment_id] = item;
+          return next;
+        });
+      })
+      .catch((value) => { if (active) setListError(String(value)); });
+    return () => { active = false; };
+  }, [project, selection.focusedKey, orderedIds, records]);
 
   useEffect(() => {
     if (!selected) return;
@@ -353,7 +392,7 @@ export function SegmentWorkspace({
             {selected.model_source && selected.model_source !== selected.source && (
               <details className="source-model-preview"><summary>{language === "en" ? "Model text (controlled format markers)" : "模型文本（受控格式标记）"}</summary><div className="source-box">{selected.model_source}</div></details>
             )}
-            {review?.outdated && <div className="warning-banner">建议所依据的基准已经变化，请重新检查后保存。</div>}
+            {review?.outdated && <div className="warning-banner">{language === "en" ? "The base used by this suggestion has changed. Review it again before saving." : "建议所依据的基准已经变化，请重新检查后保存。"}</div>}
             <div className={stage === "translation" ? "comparison single" : "comparison"}>
               {stage !== "translation" && (
                 <label><span>{language === "en" ? "Current base" : "当前基准"}</span><textarea readOnly value={review?.base?.text ?? ""} /></label>

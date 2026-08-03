@@ -136,7 +136,7 @@ export default function App() {
       ));
       writeRecentProjectPaths(validPaths);
       const failures = results.length - validPaths.length;
-      if (failures) setError(`${failures} 个最近项目路径已失效并移除`);
+      if (failures) setError(language === "en" ? `${failures} recent project paths were invalid and removed` : `${failures} 个最近项目路径已失效并移除`);
       await loadProjects();
     }).catch((value) => setError(String(value)));
   }, []);

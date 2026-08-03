@@ -213,17 +213,17 @@ export function DiagnosticsView() {
           <section className="modal exchange-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
             <header className="exchange-dialog-heading">
               <div>
-                <h2 id="exchange-dialog-title">请求 / 响应详情</h2>
+                <h2 id="exchange-dialog-title">{en ? "Request / response details" : "请求 / 响应详情"}</h2>
                 <code>{selectedRequest}</code>
               </div>
-              <button className="quiet-button" onClick={closeDetail} aria-label="关闭详情">关闭</button>
+              <button className="quiet-button" onClick={closeDetail} aria-label={en ? "Close details" : "关闭详情"}>{en ? "Close" : "关闭"}</button>
             </header>
-            <nav className="exchange-tabs" aria-label="详情分类">
+            <nav className="exchange-tabs" aria-label={en ? "Detail tabs" : "详情分类"}>
               {([
-                ["request", "请求"],
+                ["request", en ? "Request" : "请求"],
                 ["content", "Content"],
                 ["reasoning", "Reasoning"],
-                ["attempts", "尝试"],
+                ["attempts", en ? "Attempts" : "尝试"],
               ] as const).map(([tab, label]) => (
                 <button
                   key={tab}
@@ -238,18 +238,18 @@ export function DiagnosticsView() {
             {detailError ? (
               <div className="warning-banner">{detailError}</div>
             ) : !detail ? (
-              <div className="diagnostics-empty">正在读取请求详情…</div>
+              <div className="diagnostics-empty">{en ? "Loading request details…" : "正在读取请求详情…"}</div>
             ) : (
               <div className="exchange-detail">
                 <div className="exchange-meta">
-                  <span>模型 <strong>{detail.model}</strong></span>
-                  <span>状态 <strong>{statusLabels[detail.status]}</strong></span>
+                  <span>{en ? "Model" : "模型"} <strong>{detail.model}</strong></span>
+                  <span>{en ? "Status" : "状态"} <strong>{statusLabels[detail.status]}</strong></span>
                 </div>
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">
                     {Object.keys(detail.segment_id_map).length > 0 && (
                       <div className="exchange-id-map">
-                        <strong>请求内短 ID</strong>
+                        <strong>{en ? "Request-local IDs" : "请求内短 ID"}</strong>
                         {Object.entries(detail.segment_id_map).map(([shortId, segmentId]) => (
                           <code key={shortId}>{shortId} → {segmentId}</code>
                         ))}
@@ -260,7 +260,7 @@ export function DiagnosticsView() {
                         <article key={`${message.role}-${index}`}>
                           <header>
                             <strong>{message.role || "message"}</strong>
-                            {message.truncated && <span>已截断至 100,000 字符</span>}
+                            {message.truncated && <span>{en ? "Truncated to 100,000 characters" : "已截断至 100,000 字符"}</span>}
                           </header>
                           <pre>{message.content}</pre>
                         </article>
@@ -270,26 +270,26 @@ export function DiagnosticsView() {
                 )}
                 {detailTab === "content" && (
                   <article className="exchange-body">
-                    {detail.response_content_truncated && <p>已截断至 100,000 字符。</p>}
-                    <pre>{detail.response_content ?? "尚无 Content。"}</pre>
+                    {detail.response_content_truncated && <p>{en ? "Truncated to 100,000 characters." : "已截断至 100,000 字符。"}</p>}
+                    <pre>{detail.response_content ?? (en ? "No Content." : "尚无 Content。")}</pre>
                   </article>
                 )}
                 {detailTab === "reasoning" && (
                   <article className="exchange-body">
-                    {detail.reasoning_content_truncated && <p>已截断至 20,000 字符。</p>}
-                    <pre>{detail.reasoning_content ?? "本请求没有 Reasoning。"}</pre>
+                    {detail.reasoning_content_truncated && <p>{en ? "Truncated to 20,000 characters." : "已截断至 20,000 字符。"}</p>}
+                    <pre>{detail.reasoning_content ?? (en ? "This request has no Reasoning." : "本请求没有 Reasoning。")}</pre>
                   </article>
                 )}
                 {detailTab === "attempts" && (
                   <div className="exchange-attempts">
                     {detail.attempts.length ? detail.attempts.map((attempt) => (
                       <article key={attempt.attempt}>
-                        <strong>第 {attempt.attempt} 次</strong>
-                        <span>{attempt.http_status === null ? "网络错误" : `HTTP ${attempt.http_status}`}</span>
+                        <strong>{en ? `Attempt ${attempt.attempt}` : `第 ${attempt.attempt} 次`}</strong>
+                        <span>{attempt.http_status === null ? (en ? "Network error" : "网络错误") : `HTTP ${attempt.http_status}`}</span>
                         <span>{attempt.latency_ms} ms</span>
                       </article>
-                    )) : <div className="diagnostics-empty">尚未开始 HTTP 尝试。</div>}
-                    {detail.error && <p className="error-text">错误类别：{detail.error}</p>}
+                    )) : <div className="diagnostics-empty">{en ? "No HTTP attempts yet." : "尚未开始 HTTP 尝试。"}</div>}
+                    {detail.error && <p className="error-text">{en ? "Error category: " : "错误类别："}{detail.error}</p>}
                   </div>
                 )}
               </div>
