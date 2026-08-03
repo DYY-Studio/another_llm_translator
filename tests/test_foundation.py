@@ -111,7 +111,7 @@ def test_cli_init_creates_project_in_explicit_parent(
 
     summary = json.loads(capsys.readouterr().out)
     assert Path(summary["project_path"]) == parent / "external-project"
-    assert (parent / "external-project" / "project.json").is_file()
+    assert (parent / "external-project" / "project.sqlite").is_file()
 
 
 def test_project_parent_rejects_relative_and_unwritable_paths(

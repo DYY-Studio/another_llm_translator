@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from app.errors import ProjectError, UsageError
+from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, stage_result_path
 from app.main import build_parser
 from app.project import (
@@ -47,6 +48,14 @@ def init_empty(
     assert summary["file_count"] == summary["segment_count"] == 0
     assert (project / "input").is_dir()
     return project
+
+
+def rewrite_segment_payload(project: Path, segment: dict[str, object]) -> None:
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE segments SET payload_json = ? WHERE segment_id = ?",
+            (json.dumps(segment, ensure_ascii=False), segment["segment_id"]),
+        )
 
 
 def test_export_cli_collects_repeated_file_ids() -> None:
@@ -120,11 +129,7 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
     segments_path = project / "source" / "segments.jsonl"
     segments = read_jsonl(segments_path)
     segments[0].pop("part_id")
-    segments_path.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False) for item in segments)
-        + "\n",
-        encoding="utf-8",
-    )
+    rewrite_segment_payload(project, segments[0])
 
     with pytest.raises(ProjectError, match="part_id.*重新创建"):
         inspect_full(project)
@@ -159,11 +164,11 @@ def test_remove_retains_history_and_readd_does_not_reuse_ids(
             request_id="REQ-OLD",
         ),
     )
-    history_before = history_path.read_bytes()
+    history_before = read_jsonl(history_path)
 
     removed = remove_project_files(project, ["F0001"])
     assert removed["removed_segments"] == 1
-    assert history_path.read_bytes() == history_before
+    assert read_jsonl(history_path) == history_before
     assert inspect_full(project)["stages"]["translation"]["completed"] == 0
 
     add_project_files(project, [str(first)])
@@ -199,10 +204,10 @@ def test_add_rejects_active_name_collision_and_running_run(
         started_at="2026-07-31T00:00:00Z",
     )
     atomic_write_json(project / "runs" / "RUN-ACTIVE" / "manifest.json", manifest)
-    before = (project / "source" / "files.jsonl").read_bytes()
+    before = read_jsonl(project / "source" / "files.jsonl")
     with pytest.raises(UsageError, match="未完成 Run"):
         remove_project_files(project, ["F0001"])
-    assert (project / "source" / "files.jsonl").read_bytes() == before
+    assert read_jsonl(project / "source" / "files.jsonl") == before
 
 
 def test_epub_file_state_is_removed_and_new_id_is_allocated(
@@ -214,10 +219,11 @@ def test_epub_file_state_is_removed_and_new_id_is_allocated(
     add_project_files(project, [str(source)])
     file_record = read_jsonl(project / "source" / "files.jsonl")[0]
     state_path = project / str(file_record["document_adapter_state"])
-    assert state_path.is_file()
+    assert read_json(state_path)["file_id"] == "F0001"
 
     remove_project_files(project, ["F0001"])
-    assert not state_path.exists()
+    with pytest.raises(StorageError, match="记录不存在"):
+        read_json(state_path)
     add_project_files(project, [str(source)])
     assert read_jsonl(project / "source" / "files.jsonl")[0]["file_id"] == "F0002"
 
@@ -235,7 +241,7 @@ def test_empty_project_accepts_mixed_txt_and_epub_files(tmp_path: Path) -> None:
     files = read_jsonl(project / "source" / "files.jsonl")
     assert [item["document_adapter_id"] for item in files] == ["txt", "epub"]
     assert files[0]["document_adapter_state"] is None
-    assert (project / str(files[1]["document_adapter_state"])).is_file()
+    assert read_json(project / str(files[1]["document_adapter_state"]))["file_id"] == files[1]["file_id"]
     metadata = read_json(project / "project.json")
     assert "document_adapter_id" not in metadata
 
