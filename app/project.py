@@ -1117,6 +1117,10 @@ def _load_segment_records(
         if not isinstance(state_path, str):
             continue
         state = read_adapter_state(project, str(file_record.get("file_id")))
+        if not isinstance(state, dict):
+            raise IncompleteError(
+                f"Document Adapter 状态缺失：{file_record.get('file_id')}"
+            )
         if isinstance(state.get("state"), dict):
             state = state["state"]
         locators = state.get("locators")
