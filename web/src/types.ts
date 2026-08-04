@@ -47,6 +47,13 @@ export interface Segment {
   };
 }
 
+export interface SegmentDetail extends Segment {
+  context: {
+    before: Segment[];
+    after: Segment[];
+  };
+}
+
 export interface StageError {
   error_class: string;
   error_message: string;

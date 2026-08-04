@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import type { Language } from "../i18n";
-import type { ProjectOverview, Segment, Stage } from "../types";
+import type { ProjectOverview, Segment, SegmentDetail, Stage } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
 function resultFor(segment: Segment, stage: Stage) {
@@ -77,6 +77,7 @@ export function SegmentWorkspace({
   const [search, setSearch] = useState("");
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
   const [records, setRecords] = useState<Record<string, Segment>>({});
+  const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(null);
   const [total, setTotal] = useState(0);
   const [listError, setListError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -101,6 +102,7 @@ export function SegmentWorkspace({
   if (file !== "all") query.set("file_id", file);
   if (status !== "all") query.set("status", status === "error" ? "failed" : status);
   if (search.trim()) query.set("q", search.trim());
+  const showContext = status !== "all" || search.trim() !== "";
 
   const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
     const requestId = ++indexRequestRef.current;
@@ -115,6 +117,7 @@ export function SegmentWorkspace({
       setTotal(index.total);
       if (!preserveSegmentId) {
         setRecords({});
+        setFocusedDetail(null);
         selection.reset(index.segment_ids[0] ?? "");
         listRef.current?.scrollTo({ top: 0 });
       } else if (!index.segment_ids.includes(preserveSegmentId)) {
@@ -122,6 +125,7 @@ export function SegmentWorkspace({
         // case reset only the now-invalid focus; an unchanged row keeps its
         // window, selection, and scroll position.
         setRecords({});
+        setFocusedDetail(null);
         selection.reset(index.segment_ids[0] ?? "");
         listRef.current?.scrollTo({ top: 0 });
       } else {
@@ -136,6 +140,7 @@ export function SegmentWorkspace({
       setListError(String(value));
       setOrderedIds([]);
       setTotal(0);
+      setFocusedDetail(null);
       selection.reset();
       return [];
     } finally {
@@ -178,51 +183,28 @@ export function SegmentWorkspace({
     return () => { cancelled = true; };
   }, [project, stage, file, status, search, orderedIds, virtualItems.map((item) => item.index).join(",")]);
 
-  useEffect(() => {
-    const focusedId = selection.focusedKey || orderedIds[0];
-    const focused = focusedId ? records[focusedId] : undefined;
-    if (!focusedId || !focused) {
-      if (!focusedId) return;
-      let active = true;
-      void api<Segment>(`/api/v1/projects/${project}/segments/${focusedId}`)
-        .then((item) => {
-          if (active) setRecords((current) => ({ ...current, [item.segment_id]: item }));
-        })
-        .catch((value) => { if (active) setListError(String(value)); });
-      return () => { active = false; };
-    }
+  const focusedId = selection.focusedKey || orderedIds[0] || "";
 
-    const focusedIndex = orderedIds.indexOf(focused.segment_id);
-    if (focusedIndex < 0) return;
-    const neighborIds: string[] = [];
-    for (const direction of [-1, 1]) {
-      let index = focusedIndex + direction;
-      let found = 0;
-      while (index >= 0 && index < orderedIds.length && found < 2) {
-        const candidateId = orderedIds[index];
-        const candidate = records[candidateId];
-        if (candidate && (candidate.file_id !== focused.file_id || candidate.part_id !== focused.part_id)) break;
-        if (!candidate) neighborIds.push(candidateId);
-        found += 1;
-        index += direction;
-      }
+  useEffect(() => {
+    if (!focusedId) {
+      setFocusedDetail(null);
+      return;
     }
-    if (!neighborIds.length) return;
+    if (!showContext && records[focusedId]) {
+      setFocusedDetail(null);
+      return;
+    }
     let active = true;
-    void Promise.all(
-      neighborIds.map((segmentId) => api<Segment>(`/api/v1/projects/${project}/segments/${segmentId}`)),
-    )
-      .then((items) => {
+    setFocusedDetail(null);
+    void api<SegmentDetail>(`/api/v1/projects/${project}/segments/${focusedId}`)
+      .then((item) => {
         if (!active) return;
-        setRecords((current) => {
-          const next = { ...current };
-          for (const item of items) next[item.segment_id] = item;
-          return next;
-        });
+        setRecords((current) => ({ ...current, [item.segment_id]: item }));
+        setFocusedDetail(item);
       })
       .catch((value) => { if (active) setListError(String(value)); });
     return () => { active = false; };
-  }, [project, selection.focusedKey, orderedIds, records]);
+  }, [project, focusedId, showContext, file, status, search]);
 
   useEffect(() => {
     if (!selected) return;
@@ -241,16 +223,11 @@ export function SegmentWorkspace({
     selection.selectedKeys.has(segmentId)
   ));
 
-  const neighbors = selected
-    ? orderedIds
-      .map((id) => records[id])
-      .filter((item): item is Segment => Boolean(item))
-      .filter((item) => item.file_id === selected.file_id && item.part_id === selected.part_id)
-    : [];
-  const selectedIndex = neighbors.findIndex((item) => item.segment_id === selected?.segment_id);
-  const before = neighbors.slice(Math.max(0, selectedIndex - 2), selectedIndex);
-  const after = neighbors.slice(selectedIndex + 1, selectedIndex + 3);
-  const showContext = status !== "all" || search.trim() !== "";
+  const context = focusedDetail?.segment_id === selected?.segment_id
+    ? focusedDetail.context
+    : null;
+  const before = context?.before ?? [];
+  const after = context?.after ?? [];
 
   function resetFilterSelection() {
     selection.reset();
@@ -281,10 +258,11 @@ export function SegmentWorkspace({
     const visibleIds = await reloadIndex(selected.segment_id);
     if (visibleIds.includes(selected.segment_id)) {
       try {
-        const fresh = await api<Segment>(
+        const fresh = await api<SegmentDetail>(
           `/api/v1/projects/${project}/segments/${selected.segment_id}`,
         );
         setRecords((current) => ({ ...current, [fresh.segment_id]: fresh }));
+        setFocusedDetail(fresh);
       } catch (value) {
         setListError(String(value));
       }

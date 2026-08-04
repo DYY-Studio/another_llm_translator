@@ -150,6 +150,31 @@ def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
         assert window["total_segments"] == len(ordered_ids)
 
 
+def test_segment_detail_context_uses_unfiltered_source_neighbors(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(
+        tmp_path,
+        "before\nmatch\nnear after\nfar after",
+    )
+    store = WebStore(project)
+    ordered_ids = segment_ids(project)
+
+    assert store.segment_index(search="match")["segment_ids"] == [ordered_ids[1]]
+    store.save_translation({"segment_id": ordered_ids[0], "text": "上文译文"})
+
+    detail = store.segment_detail(ordered_ids[1])
+    context = detail["context"]
+    assert [item["segment_id"] for item in context["before"]] == [ordered_ids[0]]
+    assert [item["segment_id"] for item in context["after"]] == ordered_ids[2:]
+    assert context["before"][0]["translation"]["text"] == "上文译文"
+    assert all(
+        item["file_id"] == detail["file_id"]
+        and item["part_id"] == detail["part_id"]
+        for item in [*context["before"], *context["after"]]
+    )
+
+
 def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:
     project = create_web_store_project(tmp_path, "one")
     store = WebStore(project)

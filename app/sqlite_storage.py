@@ -727,6 +727,48 @@ def query_segments(
         connection.close()
 
 
+def query_segment_neighbors(
+    project: Path,
+    *,
+    file_id: str,
+    part_id: str,
+    line_index: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    connection = _with_db(project)
+    try:
+        before_rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM segments
+            WHERE file_id = ?
+              AND part_id = ?
+              AND is_empty = 0
+              AND line_index < ?
+            ORDER BY line_index DESC
+            LIMIT 2
+            """,
+            (file_id, part_id, line_index),
+        ).fetchall()
+        after_rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM segments
+            WHERE file_id = ?
+              AND part_id = ?
+              AND is_empty = 0
+              AND line_index > ?
+            ORDER BY line_index
+            LIMIT 2
+            """,
+            (file_id, part_id, line_index),
+        ).fetchall()
+        before = [_load(str(row[0])) for row in reversed(before_rows)]
+        after = [_load(str(row[0])) for row in after_rows]
+        return before, after
+    finally:
+        connection.close()
+
+
 def segment_ids(
     project: Path,
     *,
