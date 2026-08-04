@@ -135,7 +135,19 @@ def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
         database.close()
 
     assert [item["source"] for item in query_segments(project)] == ["second", "first"]
-    assert segment_ids(project) == ["F0002-S000001", "F0001-S000001"]
+    ordered_ids = segment_ids(project)
+    assert ordered_ids == ["F0002-S000001", "F0001-S000001"]
+
+    store = WebStore(project)
+    index = store.segment_index()
+    assert index["segment_ids"] == ordered_ids
+    assert index["total"] == len(ordered_ids)
+    for offset, limit in ((0, 1), (1, 1), (0, 2)):
+        window = store.overview(offset=offset, limit=limit)
+        assert [item["segment_id"] for item in window["segments"]] == ordered_ids[
+            offset : offset + limit
+        ]
+        assert window["total_segments"] == len(ordered_ids)
 
 
 def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path) -> None:

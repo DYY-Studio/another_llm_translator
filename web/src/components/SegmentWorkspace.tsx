@@ -81,6 +81,7 @@ export function SegmentWorkspace({
   const [listError, setListError] = useState("");
   const [loading, setLoading] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const indexRequestRef = useRef(0);
   const pageSize = 100;
   const [batchAction, setBatchAction] = useState<{
     kind: "reset" | "apply";
@@ -102,12 +103,14 @@ export function SegmentWorkspace({
   if (search.trim()) query.set("q", search.trim());
 
   const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
+    const requestId = ++indexRequestRef.current;
     setLoading(true);
     setListError("");
     try {
       const index = await api<{ segment_ids: string[]; total: number }>(
         `/api/v1/projects/${project}/segments/ids?${query.toString()}`,
       );
+      if (requestId !== indexRequestRef.current) return [];
       setOrderedIds(index.segment_ids);
       setTotal(index.total);
       if (!preserveSegmentId) {
@@ -129,13 +132,14 @@ export function SegmentWorkspace({
       }
       return index.segment_ids;
     } catch (value) {
+      if (requestId !== indexRequestRef.current) return [];
       setListError(String(value));
       setOrderedIds([]);
       setTotal(0);
       selection.reset();
       return [];
     } finally {
-      setLoading(false);
+      if (requestId === indexRequestRef.current) setLoading(false);
     }
   }, [project, stage, file, status, search]);
 
@@ -144,6 +148,7 @@ export function SegmentWorkspace({
   const virtualizer = useVirtualizer({
     count: orderedIds.length,
     getScrollElement: () => listRef.current,
+    getItemKey: (index) => orderedIds[index] ?? index,
     estimateSize: () => 82,
     overscan: 8,
   });
@@ -378,7 +383,14 @@ export function SegmentWorkspace({
           <div className="segment-row-stack" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualItems.map((virtualItem) => {
               const item = records[orderedIds[virtualItem.index]];
-              if (!item) return <div key={virtualItem.key} className="segment-row-placeholder" style={{ height: virtualItem.size, transform: `translateY(${virtualItem.start}px)` }} />;
+              const rowPosition = {
+                position: "absolute" as const,
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${virtualItem.start}px)`,
+              };
+              if (!item) return <div key={virtualItem.key} className="segment-row-placeholder" style={{ ...rowPosition, height: virtualItem.size }} />;
               const itemStatus = statusFor(item, stage);
               const result = resultFor(item, stage);
               const error = item.stage_errors?.[stage];
@@ -387,10 +399,10 @@ export function SegmentWorkspace({
                 : stage === "translation" ? result?.text : result?.suggested_text ?? item.reviews[stage].base?.text;
               return (
                 <button
-                  key={item.segment_id}
+                  key={virtualItem.key}
                   ref={virtualizer.measureElement}
                   data-index={virtualItem.index}
-                  style={{ position: "absolute", top: 0, transform: `translateY(${virtualItem.start}px)`, height: Math.max(virtualItem.size - 1, 1) }}
+                  style={rowPosition}
                   className={`segment-row${selection.selectedKeys.has(item.segment_id) ? " selected" : ""}${selection.focusedKey === item.segment_id ? " focused" : ""}`}
                   onClick={(event) => selection.select(
                     item.segment_id,

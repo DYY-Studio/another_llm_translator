@@ -366,7 +366,7 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert "segment-row-boundary" not in script.text
     assert (
         ".segment-row-stack{min-width:0;width:100%;max-width:100%;"
-        "display:grid;grid-auto-rows:max-content;gap:2px;background:var(--border)}"
+        "display:grid;grid-auto-rows:max-content;background:var(--surface)}"
     ) in css.text
     assert ".segment-row-stack{min-width:0;width:100%;max-width:100%;" in css.text
     assert ".segment-list{min-width:0;min-height:0;width:100%;max-width:100%;" in css.text
@@ -374,9 +374,12 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert ".segment-row:after" not in css.text
     segment_row = re.search(r"\.segment-row\{([^}]*)\}", css.text)
     assert segment_row is not None
-    assert "border-bottom" not in segment_row.group(1)
+    assert "border-bottom:1px solid var(--row-border)" in segment_row.group(1)
     assert "grid-template-columns:14px 72px minmax(0,1fr)" in segment_row.group(1)
-    assert ".segment-row{content-visibility:auto;contain-intrinsic-block-size:70px;contain-intrinsic-inline-size:0}" in css.text
+    placeholder = re.search(r"\.segment-row-placeholder\{([^}]*)\}", css.text)
+    assert placeholder is not None
+    assert "border-bottom:1px solid var(--row-border)" in placeholder.group(1)
+    assert "content-visibility" not in css.text
     assert "contain-intrinsic-size" not in css.text
     assert "rate_limit_waiting_requests" in script.text
     assert "rate_limit_wait_count" not in script.text
