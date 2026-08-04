@@ -1,6 +1,6 @@
-# Minimal LLM Translator
+# Another LLM Translator
 
-Minimal LLM Translator 是一个面向本地使用的、可恢复的 LLM 工程化翻译工作台。
+Another LLM Translator 是一个面向本地使用的、可恢复的 LLM 工程化翻译工作台。
 它将文档导入、术语管理、翻译、校对、润色、人工审校和文档导出组织为一条可追踪
 的工作流，同时提供 CLI 和本地 Web 两种操作方式。
 
