@@ -69,6 +69,11 @@ git switch dev
 git switch -c feat/segment-recovery
 ```
 
+Commit each key step you have made.
+When creating git commits:
+- Keep current git user identity.
+- Add: Co-authored-by: Codex <codex@openai.com>
+
 Use `feat/`, `fix/`, `docs/`, or `test/` and Conventional Commit messages such as
 `feat: add segment recovery`. Commit each independently verified step. After the
 stage passes its tests and `git diff --check`, merge with an explicit merge commit:
