@@ -13,6 +13,7 @@ from .project import load_source_files
 from .sqlite_storage import (
     get_segment,
     latest_stage_results,
+    query_segment_neighbors,
     query_segments,
     segment_count,
     segment_ids,
@@ -375,7 +376,17 @@ class WebStore:
 
     def segment_detail(self, segment_id: str) -> dict[str, Any]:
         segment = self._require_segment(segment_id)
-        segment_filter = [segment_id]
+        before_segments, after_segments = query_segment_neighbors(
+            self.project,
+            file_id=str(segment["file_id"]),
+            part_id=str(segment["part_id"]),
+            line_index=int(segment["line_index"]),
+        )
+        context_segments = [*before_segments, *after_segments]
+        segment_filter = [
+            segment_id,
+            *(str(item["segment_id"]) for item in context_segments),
+        ]
         histories = {
             stage: self._history(stage, segment_filter)
             for stage in (
@@ -386,6 +397,25 @@ class WebStore:
                 "polishing_applied",
             )
         }
+        detail = self._segment_detail_view(segment, histories)
+        detail["context"] = {
+            "before": [
+                self._segment_detail_view(item, histories)
+                for item in before_segments
+            ],
+            "after": [
+                self._segment_detail_view(item, histories)
+                for item in after_segments
+            ],
+        }
+        return detail
+
+    def _segment_detail_view(
+        self,
+        segment: dict[str, Any],
+        histories: dict[str, dict[str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        segment_id = str(segment["segment_id"])
         return {
             "segment_id": segment_id,
             "file_id": segment["file_id"],
