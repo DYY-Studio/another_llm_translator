@@ -84,6 +84,10 @@ export function SegmentWorkspace({
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
   const pageSize = 100;
+  const pageCacheRef = useRef(new Set<string>());
+  const pageRequestsRef = useRef(new Set<string>());
+  const pageGenerationRef = useRef(0);
+  const activePageQueryRef = useRef("");
   const [batchAction, setBatchAction] = useState<{
     kind: "reset" | "apply";
     scope: "selected" | "filtered";
@@ -98,11 +102,24 @@ export function SegmentWorkspace({
     if (focusFailures) setStatus("error");
   }, [focusFailures]);
 
+  const normalizedSearch = search.trim();
   const query = new URLSearchParams({ stage });
   if (file !== "all") query.set("file_id", file);
   if (status !== "all") query.set("status", status === "error" ? "failed" : status);
-  if (search.trim()) query.set("q", search.trim());
-  const showContext = status !== "all" || search.trim() !== "";
+  if (normalizedSearch) query.set("q", normalizedSearch);
+  const pageQueryKey = JSON.stringify([project, stage, file, status, normalizedSearch]);
+  const showContext = status !== "all" || normalizedSearch !== "";
+  const resetPageCache = useCallback(() => {
+    pageGenerationRef.current += 1;
+    pageCacheRef.current.clear();
+    pageRequestsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    if (activePageQueryRef.current === pageQueryKey) return;
+    activePageQueryRef.current = pageQueryKey;
+    resetPageCache();
+  }, [pageQueryKey, resetPageCache]);
 
   const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
     const requestId = ++indexRequestRef.current;
@@ -116,6 +133,7 @@ export function SegmentWorkspace({
       setOrderedIds(index.segment_ids);
       setTotal(index.total);
       if (!preserveSegmentId) {
+        resetPageCache();
         setRecords({});
         setFocusedDetail(null);
         selection.reset(index.segment_ids[0] ?? "");
@@ -124,6 +142,7 @@ export function SegmentWorkspace({
         // A save can move the focused row out of a status filter. In that
         // case reset only the now-invalid focus; an unchanged row keeps its
         // window, selection, and scroll position.
+        resetPageCache();
         setRecords({});
         setFocusedDetail(null);
         selection.reset(index.segment_ids[0] ?? "");
@@ -137,6 +156,7 @@ export function SegmentWorkspace({
       return index.segment_ids;
     } catch (value) {
       if (requestId !== indexRequestRef.current) return [];
+      resetPageCache();
       setListError(String(value));
       setOrderedIds([]);
       setTotal(0);
@@ -146,7 +166,7 @@ export function SegmentWorkspace({
     } finally {
       if (requestId === indexRequestRef.current) setLoading(false);
     }
-  }, [project, stage, file, status, search]);
+  }, [project, stage, file, status, normalizedSearch, resetPageCache]);
 
   useEffect(() => { void reloadIndex(); }, [reloadIndex]);
 
@@ -164,24 +184,53 @@ export function SegmentWorkspace({
       virtualItems.map((item) => Math.floor(item.index / pageSize) * pageSize),
     );
     if (!offsets.size) return;
-    let cancelled = false;
-    void Promise.all([...offsets].map(async (offset) => {
+    const requestQuery = pageQueryKey;
+    const requestGeneration = pageGenerationRef.current;
+    for (const offset of offsets) {
+      const pageKey = JSON.stringify([requestQuery, offset]);
+      const requestToken = JSON.stringify([requestGeneration, pageKey]);
+      if (
+        pageCacheRef.current.has(pageKey)
+        || pageRequestsRef.current.has(requestToken)
+      ) continue;
+      pageRequestsRef.current.add(requestToken);
       const params = new URLSearchParams({ stage, offset: String(offset), limit: String(pageSize) });
       if (file !== "all") params.set("file_id", file);
       if (status !== "all") params.set("status", status === "error" ? "failed" : status);
-      if (search.trim()) params.set("q", search.trim());
-      const page = await api<ProjectOverview>(`/api/v1/projects/${project}?${params.toString()}`);
-      return page.segments;
-    })).then((pages) => {
-      if (cancelled) return;
-      setRecords((current) => {
-        const next = { ...current };
-        for (const page of pages) for (const item of page) next[item.segment_id] = item;
-        return next;
-      });
-    }).catch((value) => { if (!cancelled) setListError(String(value)); });
-    return () => { cancelled = true; };
-  }, [project, stage, file, status, search, orderedIds, virtualItems.map((item) => item.index).join(",")]);
+      if (normalizedSearch) params.set("q", normalizedSearch);
+      void api<ProjectOverview>(`/api/v1/projects/${project}?${params.toString()}`)
+        .then((page) => {
+          if (
+            requestGeneration !== pageGenerationRef.current
+            || requestQuery !== activePageQueryRef.current
+          ) return;
+          pageCacheRef.current.add(pageKey);
+          setRecords((current) => {
+            const next = { ...current };
+            for (const item of page.segments) next[item.segment_id] = item;
+            return next;
+          });
+        })
+        .catch((value) => {
+          if (
+            requestGeneration === pageGenerationRef.current
+            && requestQuery === activePageQueryRef.current
+          ) setListError(String(value));
+        })
+        .finally(() => {
+          pageRequestsRef.current.delete(requestToken);
+        });
+    }
+  }, [
+    project,
+    stage,
+    file,
+    status,
+    normalizedSearch,
+    pageQueryKey,
+    orderedIds,
+    virtualItems.map((item) => item.index).join(","),
+  ]);
 
   const focusedId = selection.focusedKey || orderedIds[0] || "";
 
@@ -204,7 +253,7 @@ export function SegmentWorkspace({
       })
       .catch((value) => { if (active) setListError(String(value)); });
     return () => { active = false; };
-  }, [project, focusedId, showContext, file, status, search]);
+  }, [project, focusedId, showContext, file, status, normalizedSearch]);
 
   useEffect(() => {
     if (!selected) return;
