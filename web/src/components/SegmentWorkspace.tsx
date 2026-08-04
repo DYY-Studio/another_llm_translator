@@ -223,7 +223,8 @@ export function SegmentWorkspace({
     selection.selectedKeys.has(segmentId)
   ));
 
-  const context = focusedDetail?.segment_id === selected?.segment_id
+  const context = focusedDetail && selected
+    && focusedDetail.segment_id === selected.segment_id
     ? focusedDetail.context
     : null;
   const before = context?.before ?? [];
