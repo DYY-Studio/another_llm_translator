@@ -367,6 +367,16 @@ Preset；内联 LLM 连接配置不再支持。
 - 共享 Shell、仪表盘和运行状态使用消息目录；内容、Prompt、目标语言和模型输出
   不随界面语言改变。
 
+## 发行包资源完整性（未实现）
+
+当前发布说明以源码目录运行为准，不把 `pip install .`、wheel 或 sdist 作为支持的
+安装方式。现有 Python 发行配置尚未完整纳入 `llm_presets/*.json`；后续发行阶段需要：
+
+- 将 Preset 及所有运行时必需资源纳入 wheel 和 sdist，并明确安装后的应用根目录。
+- 在全新虚拟环境中验证源码安装、wheel 安装、sdist 安装和两个 console script 入口。
+- 验证内置 Web 静态资源、全局配置、Prompt、JSON Adapter 和 Preset 均可被发现。
+- 在发行包完成前，继续在 README 中只记录源码运行方式，不对 `pip install .` 做兼容承诺。
+
 ## Stage 21：桌面共享运行时、凭据与局域网
 
 - 使用 Tauri 和打包后的 Python/FastAPI sidecar，复用现有 React、API、执行和
