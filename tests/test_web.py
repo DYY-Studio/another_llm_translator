@@ -315,6 +315,10 @@ def test_windows_drive_probe_keeps_unavailable_drive_visible(
     ]
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows drive roots are only available on Windows",
+)
 def test_web_returns_drive_entries_at_a_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -594,6 +598,7 @@ def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
     )
     assert detail.status_code == 200
     assert detail.json()["part_id"] == "OEBPS/text/ch2.xhtml"
+    assert detail.json()["context"] == {"before": [], "after": []}
 
 
 def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None:
