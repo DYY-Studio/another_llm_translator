@@ -218,6 +218,64 @@ def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> No
     ).status_code == 400
 
 
+def test_web_browses_server_directories_one_level_and_filters_symlinks(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    external = tmp_path / "external"
+    nested = external / "nested"
+    nested.mkdir(parents=True)
+    (external / "note.txt").write_text("not a directory", encoding="utf-8")
+    symlink = external / "project-link"
+    symlink_created = True
+    try:
+        symlink.symlink_to(project, target_is_directory=True)
+    except OSError:
+        symlink_created = False
+    client = TestClient(create_app(projects_root=projects_root))
+
+    root_listing = client.get(
+        "/api/v1/directories", params={"path": str(projects_root)}
+    )
+    assert root_listing.status_code == 200
+    sample = next(
+        item
+        for item in root_listing.json()["directories"]
+        if item["name"] == "sample"
+    )
+    assert sample["is_project"] is True
+
+    listing = client.get(
+        "/api/v1/directories", params={"path": str(external)}
+    )
+    assert listing.status_code == 200
+    assert listing.json()["path"] == str(external.resolve())
+    assert listing.json()["is_project"] is False
+    assert [item["name"] for item in listing.json()["directories"]] == [
+        "nested"
+    ]
+
+    project_listing = client.get(
+        "/api/v1/directories", params={"path": str(project)}
+    )
+    assert project_listing.status_code == 200
+    assert project_listing.json()["is_project"] is True
+
+    assert client.get(
+        "/api/v1/directories", params={"path": "relative/path"}
+    ).status_code == 400
+    assert client.get(
+        "/api/v1/directories", params={"path": str(external / "note.txt")}
+    ).status_code == 400
+    if symlink_created:
+        assert "project-link" not in {
+            item["name"] for item in listing.json()["directories"]
+        }
+        assert client.get(
+            "/api/v1/directories", params={"path": str(symlink)}
+        ).status_code == 400
+
+
 def test_web_build_includes_editor_layout_context_and_theme_controls(
     tmp_path: Path,
 ) -> None:
@@ -236,6 +294,7 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     css = client.get(stylesheet.group(1))
     assert css.status_code == 200
     assert ".segment-batch-actions" in css.text
+    assert ".directory-picker-modal" in css.text
     assert script.text.count("segment-row-stack") == 1
     assert "segment-row-boundary" not in script.text
     assert (
@@ -294,6 +353,9 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "翻译 Preset",
         "打开现有项目",
         "保存父目录",
+        "浏览目录",
+        "选择服务端目录",
+        "/api/v1/directories",
         "只打开此目录",
         "执行与分块",
         "参考上下文",
