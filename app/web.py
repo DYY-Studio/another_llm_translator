@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import tempfile
@@ -62,6 +63,38 @@ PROMPT_FILES = {
     "proofreading": "proofreading.middle.txt",
     "polishing": "polishing.middle.txt",
 }
+_WINDOWS_DRIVE_TYPES = {
+    0: "unknown",
+    1: "unavailable",
+    2: "removable",
+    3: "fixed",
+    4: "network",
+    5: "cdrom",
+    6: "ramdisk",
+}
+
+
+def _windows_drive_entries() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+
+    logical_drives = int(ctypes.windll.kernel32.GetLogicalDrives())
+    entries: list[dict[str, Any]] = []
+    for index in range(26):
+        if not logical_drives & (1 << index):
+            continue
+        letter = chr(ord("A") + index)
+        root = f"{letter}:\\"
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(root))
+        entries.append(
+            {
+                "name": f"{letter}:",
+                "path": root,
+                "type": _WINDOWS_DRIVE_TYPES.get(drive_type, "unknown"),
+                "available": os.path.isdir(root),
+            }
+        )
+    return entries
 
 
 def create_app(
@@ -325,11 +358,13 @@ def create_app(
                     "is_project": database_path(child).is_file(),
                 }
             )
+        drives = _windows_drive_entries() if current.parent == current else []
         return {
             "path": str(current),
             "parent": None if current.parent == current else str(current.parent),
             "is_project": database_path(current).is_file(),
             "directories": directories,
+            "drives": drives,
         }
 
     @app.get("/api/v1/document-adapters")

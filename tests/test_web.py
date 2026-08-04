@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import app.web as web_module
 from app.web_store import WebStore
 from app.config import load_config, load_project_config
 from app.diagnostics import Diagnostics
@@ -251,6 +252,7 @@ def test_web_browses_server_directories_one_level_and_filters_symlinks(
     assert listing.status_code == 200
     assert listing.json()["path"] == str(external.resolve())
     assert listing.json()["is_project"] is False
+    assert listing.json()["drives"] == []
     assert [item["name"] for item in listing.json()["directories"]] == [
         "nested"
     ]
@@ -274,6 +276,71 @@ def test_web_browses_server_directories_one_level_and_filters_symlinks(
         assert client.get(
             "/api/v1/directories", params={"path": str(symlink)}
         ).status_code == 400
+
+
+def test_windows_drive_probe_keeps_unavailable_drive_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeKernel32:
+        def GetLogicalDrives(self) -> int:
+            return (1 << 2) | (1 << 3)
+
+        def GetDriveTypeW(self, path: str) -> int:
+            return {"C:\\": 3, "D:\\": 5}[path]
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    monkeypatch.setattr(web_module.os, "name", "nt")
+    monkeypatch.setattr(web_module.ctypes, "windll", FakeWindll(), raising=False)
+    monkeypatch.setattr(
+        web_module.os.path,
+        "isdir",
+        lambda path: path == "C:\\",
+    )
+
+    assert web_module._windows_drive_entries() == [
+        {
+            "name": "C:",
+            "path": "C:\\",
+            "type": "fixed",
+            "available": True,
+        },
+        {
+            "name": "D:",
+            "path": "D:\\",
+            "type": "cdrom",
+            "available": False,
+        },
+    ]
+
+
+def test_web_returns_drive_entries_at_a_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drives = [
+        {
+            "name": "C:",
+            "path": "C:\\",
+            "type": "fixed",
+            "available": True,
+        },
+        {
+            "name": "D:",
+            "path": "D:\\",
+            "type": "cdrom",
+            "available": False,
+        },
+    ]
+    monkeypatch.setattr(web_module, "_windows_drive_entries", lambda: drives)
+    client = TestClient(create_app(projects_root=tmp_path / "projects"))
+
+    root = Path(Path.cwd().anchor)
+    response = client.get("/api/v1/directories", params={"path": str(root)})
+
+    assert response.status_code == 200
+    assert response.json()["drives"] == drives
 
 
 def test_web_build_includes_editor_layout_context_and_theme_controls(

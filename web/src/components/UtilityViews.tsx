@@ -39,11 +39,19 @@ interface DirectoryEntry {
   is_project: boolean;
 }
 
+interface DriveEntry {
+  name: string;
+  path: string;
+  type: string;
+  available: boolean;
+}
+
 interface DirectoryListing {
   path: string;
   parent: string | null;
   is_project: boolean;
   directories: DirectoryEntry[];
+  drives: DriveEntry[];
 }
 
 type DirectoryPickerMode = "parent" | "project";
@@ -51,6 +59,20 @@ type DirectoryPickerMode = "parent" | "project";
 function extensionOf(path: string) {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase();
+}
+
+function driveTypeLabel(type: string, language: Language) {
+  const labels: Record<string, [string, string]> = {
+    unknown: ["未知", "Unknown"],
+    unavailable: ["不可用", "Unavailable"],
+    removable: ["可移动磁盘", "Removable"],
+    fixed: ["本地磁盘", "Fixed"],
+    network: ["网络驱动器", "Network"],
+    cdrom: ["光盘驱动器", "CD/DVD"],
+    ramdisk: ["内存磁盘", "RAM disk"],
+  };
+  const label = labels[type] ?? [type, type];
+  return label[language === "en" ? 1 : 0];
 }
 
 function InputQueue({
@@ -564,7 +586,23 @@ function DirectoryPicker({
           <button type="button" className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button>
         </div>
         {error && <div className="error-banner" role="alert">{error}</div>}
+        <div className="directory-picker-toolbar">
+          {listing?.drives.length ? <span>{translate("directory.drives", language)}</span> : <span />}
+          <button type="button" className="quiet-button" disabled={loading} onClick={() => void load(requestedPath)}>{translate("directory.refresh", language)}</button>
+        </div>
         <div className="directory-list" aria-live="polite">
+          {listing?.drives.map((entry) => (
+            <button
+              type="button"
+              className={`directory-entry directory-drive${entry.available ? "" : " unavailable"}`}
+              disabled={loading || !entry.available}
+              key={entry.path}
+              onClick={() => void load(entry.path)}
+            >
+              <strong>{entry.name}</strong>
+              <small>{driveTypeLabel(entry.type, language)} · {entry.available ? translate("directory.available", language) : translate("directory.unavailable", language)}</small>
+            </button>
+          ))}
           {listing?.parent && <button type="button" className="directory-entry directory-parent" disabled={loading} onClick={() => void load(listing.parent as string)}><strong>{translate("directory.up", language)}</strong><small>{listing.parent}</small></button>}
           {listing?.directories.map((entry) => (
             <button type="button" className="directory-entry" disabled={loading} key={entry.path} onClick={() => void load(entry.path)}>
@@ -573,7 +611,7 @@ function DirectoryPicker({
             </button>
           ))}
           {loading && <div className="directory-list-state">{translate("directory.loading", language)}</div>}
-          {!loading && !error && listing && !listing.directories.length && <div className="directory-list-state">{translate("directory.empty", language)}</div>}
+          {!loading && !error && listing && !listing.directories.length && !listing.drives.length && <div className="directory-list-state">{translate("directory.empty", language)}</div>}
         </div>
         {mode === "project" && !listing?.is_project && !loading && !error && <p className="error-text">{translate("directory.notProject", language)}</p>}
         <div className="modal-actions">
