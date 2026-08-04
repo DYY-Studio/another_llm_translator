@@ -284,6 +284,54 @@ def create_app(
             "default_projects_path": str(projects_root.resolve()),
         }
 
+    @app.get("/api/v1/directories")
+    async def list_directories(path: str = "") -> dict[str, Any]:
+        raw_path = path.strip()
+        if raw_path and "\0" in raw_path:
+            raise UsageError("目录路径包含无效字符")
+        try:
+            candidate = (
+                projects_root if not raw_path else Path(raw_path).expanduser()
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise UsageError("目录路径无效") from exc
+        if raw_path and not candidate.is_absolute():
+            raise UsageError("目录路径必须是绝对路径")
+        if candidate.is_symlink():
+            raise UsageError("目录路径不能是符号链接")
+        try:
+            current = candidate.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise UsageError(
+                f"目录不存在或无法访问：{candidate}"
+            ) from exc
+        if not current.is_dir():
+            raise UsageError(f"路径不是目录：{current}")
+        try:
+            children = sorted(
+                current.iterdir(),
+                key=lambda item: (item.name.casefold(), item.name),
+            )
+        except OSError as exc:
+            raise UsageError(f"无法读取目录：{current}: {exc}") from exc
+        directories = []
+        for child in children:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            directories.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "is_project": database_path(child).is_file(),
+                }
+            )
+        return {
+            "path": str(current),
+            "parent": None if current.parent == current else str(current.parent),
+            "is_project": database_path(current).is_file(),
+            "directories": directories,
+        }
+
     @app.get("/api/v1/document-adapters")
     async def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}

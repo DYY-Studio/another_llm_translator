@@ -33,6 +33,21 @@ interface PendingInput {
   adapterId: string;
 }
 
+interface DirectoryEntry {
+  name: string;
+  path: string;
+  is_project: boolean;
+}
+
+interface DirectoryListing {
+  path: string;
+  parent: string | null;
+  is_project: boolean;
+  directories: DirectoryEntry[];
+}
+
+type DirectoryPickerMode = "parent" | "project";
+
 function extensionOf(path: string) {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase();
@@ -417,6 +432,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [error, setError] = useState("");
+  const [directoryPickerMode, setDirectoryPickerMode] = useState<DirectoryPickerMode | null>(null);
   useEffect(() => {
     void api<{ default_projects_path: string }>("/api/v1/projects")
       .then((value) => {
@@ -455,24 +471,114 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
     }
   }
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="dialog-tabs" role="tablist" aria-label={language === "en" ? "Project actions" : "项目操作"}>
-          <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>{translate("dialog.new", language)}</button>
-          <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>{translate("dialog.open", language)}</button>
+    <>
+      <div className="modal-backdrop" onMouseDown={onClose}>
+        <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="dialog-tabs" role="tablist" aria-label={language === "en" ? "Project actions" : "项目操作"}>
+            <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>{translate("dialog.new", language)}</button>
+            <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>{translate("dialog.open", language)}</button>
+          </div>
+          {error && <div className="error-banner" role="alert">{error}</div>}
+          {mode === "open" ? <>
+            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => setDirectoryPickerMode("project")}>{translate("dialog.browse", language)}</button></div></label>
+            <p className="muted">{language === "en" ? "Only this directory is opened; parent directories are not scanned." : "只打开此目录，不扫描父目录，也不会移动项目。"}</p>
+            <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
+          </> : <>
+            <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+            <label>{translate("dialog.parentDir", language)}<div className="path-picker-control"><input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /><button type="button" className="quiet-button" disabled={!parentDir.trim()} onClick={() => setDirectoryPickerMode("parent")}>{translate("dialog.browse", language)}</button></div></label>
+            <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
+            <p className="muted">{translate("dialog.emptyHint", language)}</p>
+            <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>
+          </>}
+        </div>
+      </div>
+      {directoryPickerMode && <DirectoryPicker
+        initialPath={directoryPickerMode === "parent" ? parentDir : projectPath}
+        mode={directoryPickerMode}
+        language={language}
+        onClose={() => setDirectoryPickerMode(null)}
+        onSelect={(path) => {
+          if (directoryPickerMode === "parent") setParentDir(path);
+          else setProjectPath(path);
+          setDirectoryPickerMode(null);
+        }}
+      />}
+    </>
+  );
+}
+
+function DirectoryPicker({
+  initialPath,
+  mode,
+  language,
+  onClose,
+  onSelect,
+}: {
+  initialPath: string;
+  mode: DirectoryPickerMode;
+  language: Language;
+  onClose: () => void;
+  onSelect: (path: string) => void;
+}) {
+  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [requestedPath, setRequestedPath] = useState(initialPath);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const requestRevision = useRef(0);
+
+  async function load(path: string) {
+    const revision = ++requestRevision.current;
+    const normalized = path.trim();
+    setRequestedPath(normalized);
+    setListing(null);
+    setLoading(true);
+    setError("");
+    try {
+      const query = normalized ? `?path=${encodeURIComponent(normalized)}` : "";
+      const result = await api<DirectoryListing>(`/api/v1/directories${query}`);
+      if (revision !== requestRevision.current) return;
+      setListing(result);
+    } catch (reason) {
+      if (revision === requestRevision.current) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (revision === requestRevision.current) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load(initialPath);
+    return () => { requestRevision.current += 1; };
+  }, [initialPath]);
+
+  const canSelect = Boolean(listing) && (mode === "parent" || listing?.is_project === true);
+  return (
+    <div className="modal-backdrop directory-picker-backdrop" onMouseDown={onClose}>
+      <div className="modal directory-picker-modal" role="dialog" aria-modal="true" aria-labelledby="directory-picker-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="directory-picker-heading">
+          <div>
+            <h2 id="directory-picker-title">{translate("directory.title", language)}</h2>
+            <p><span>{translate("directory.current", language)}：</span><code>{listing?.path ?? requestedPath}</code></p>
+          </div>
+          <button type="button" className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button>
         </div>
         {error && <div className="error-banner" role="alert">{error}</div>}
-        {mode === "open" ? <>
-          <label>{translate("dialog.projectPath", language)}<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /></label>
-          <p className="muted">{language === "en" ? "Only this directory is opened; parent directories are not scanned." : "只打开此目录，不扫描父目录，也不会移动项目。"}</p>
-          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
-        </> : <>
-          <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label>{translate("dialog.parentDir", language)}<input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /></label>
-          <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
-          <p className="muted">{translate("dialog.emptyHint", language)}</p>
-          <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>
-        </>}
+        <div className="directory-list" aria-live="polite">
+          {listing?.parent && <button type="button" className="directory-entry directory-parent" disabled={loading} onClick={() => void load(listing.parent as string)}><strong>{translate("directory.up", language)}</strong><small>{listing.parent}</small></button>}
+          {listing?.directories.map((entry) => (
+            <button type="button" className="directory-entry" disabled={loading} key={entry.path} onClick={() => void load(entry.path)}>
+              <strong>{entry.name}</strong>
+              <small>{entry.is_project ? translate("directory.project", language) : ""}</small>
+            </button>
+          ))}
+          {loading && <div className="directory-list-state">{translate("directory.loading", language)}</div>}
+          {!loading && !error && listing && !listing.directories.length && <div className="directory-list-state">{translate("directory.empty", language)}</div>}
+        </div>
+        {mode === "project" && !listing?.is_project && !loading && !error && <p className="error-text">{translate("directory.notProject", language)}</p>}
+        <div className="modal-actions">
+          <button type="button" className="primary-button" disabled={!canSelect || loading} onClick={() => { if (listing) onSelect(listing.path); }}>{translate("directory.select", language)}</button>
+        </div>
       </div>
     </div>
   );
