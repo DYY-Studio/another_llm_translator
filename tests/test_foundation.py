@@ -178,12 +178,35 @@ def test_config_defaults_alias_collision_for_existing_projects(
         config_path.read_text(encoding="utf-8").replace(
             'alias_primary_collision = "conflict"\n',
             "",
-        ),
+        ).replace("cross_boundary_batching = []\n", ""),
         encoding="utf-8",
     )
     assert load_config(config_path)["terminology"]["alias_primary_collision"] == (
         "conflict"
     )
+    assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('["unknown"]', "未知阶段"),
+        ('["translation", "translation"]', "重复阶段"),
+    ],
+)
+def test_config_rejects_invalid_cross_boundary_batching(
+    tmp_path: Path, value: str, message: str
+) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "cross_boundary_batching = []", f"cross_boundary_batching = {value}"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
@@ -198,6 +221,7 @@ def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "[context.translation]" in text
     assert 'target_language = "简体中文 \\"测试\\""' in text
+    assert "cross_boundary_batching = []" in text
 
 
 def test_decode_gbk_as_gb18030() -> None:

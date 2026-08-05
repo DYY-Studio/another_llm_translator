@@ -117,6 +117,7 @@ export interface DiagnosticsResponse {
     project: string | null;
     stage: string | null;
     active_requests: number;
+    total_requests: number;
     http_errors: number;
     retry_count: number;
     rate_limit_waiting_requests: number;
@@ -124,6 +125,8 @@ export interface DiagnosticsResponse {
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
+    throughput_input_tokens_per_second: number | null;
+    throughput_output_tokens_per_second: number | null;
     throughput_tokens_per_second: number | null;
   };
   logs: Array<{
@@ -285,6 +288,7 @@ export interface ProjectConfig {
   chunking: {
     target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
+    cross_boundary_batching: LLMStage[];
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;

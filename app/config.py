@@ -34,6 +34,7 @@ SCHEMA: dict[str, Any] = {
     "chunking": {
         "target_chunk_input_tokens": None,
         "allow_split_oversized_segment": None,
+        "cross_boundary_batching": None,
     },
     "context": {
         "translation": {"enabled": None, "previous_segments": None},
@@ -189,6 +190,21 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("retry.max_delay_seconds 不能小于 base_delay_seconds")
     if not isinstance(config["chunking"]["allow_split_oversized_segment"], bool):
         raise ConfigError("chunking.allow_split_oversized_segment 必须是布尔值")
+    cross_boundary_batching = config["chunking"]["cross_boundary_batching"]
+    if not isinstance(cross_boundary_batching, list) or any(
+        not isinstance(stage, str) for stage in cross_boundary_batching
+    ):
+        raise ConfigError(
+            "chunking.cross_boundary_batching 必须是 LLM 阶段名称数组"
+        )
+    unknown_stages = sorted(set(cross_boundary_batching) - set(LLM_STAGES))
+    if unknown_stages:
+        raise ConfigError(
+            "chunking.cross_boundary_batching 包含未知阶段："
+            + ", ".join(unknown_stages)
+        )
+    if len(cross_boundary_batching) != len(set(cross_boundary_batching)):
+        raise ConfigError("chunking.cross_boundary_batching 不能包含重复阶段")
     # TODO: 主流程完成全面验证后，实现可配置归一化与大小写匹配并补充真实用例。
     # 当前两项只是明确占位，术语实现固定使用 NFKC、casefold。
     if not isinstance(config["terminology"]["unicode_normalization"], str):
@@ -268,6 +284,8 @@ def _toml_scalar(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
     return str(value)
 
 
@@ -279,6 +297,9 @@ def load_config(path: Path) -> dict[str, Any]:
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "conflict")
+    chunking = config.get("chunking")
+    if isinstance(chunking, dict):
+        chunking.setdefault("cross_boundary_batching", [])
     validate_config(config)
     return config
 

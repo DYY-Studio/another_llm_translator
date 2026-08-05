@@ -73,6 +73,7 @@ class Diagnostics:
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -124,6 +125,7 @@ class Diagnostics:
         self.project = project
         self.stage = stage
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -156,6 +158,7 @@ class Diagnostics:
         max_attempts: int,
         segment_id_map: dict[str, str] | None = None,
     ) -> None:
+        self.total_requests += 1
         normalized_messages = []
         for message in messages:
             content, truncated = _bounded(
@@ -311,21 +314,21 @@ class Diagnostics:
         if self._started_monotonic is not None and self._running:
             elapsed = time.monotonic() - self._started_monotonic
         usage_available = bool(self.usage and self.usage.get("available") is True)
-        throughput = None
+        input_tokens = int(self.usage["input_tokens"]) if usage_available else 0
+        output_tokens = int(self.usage["output_tokens"]) if usage_available else 0
+        throughput_input = None
+        throughput_output = None
+        throughput_total = None
         if usage_available and elapsed > 0:
-            throughput = round(
-                (
-                    int(self.usage["input_tokens"])
-                    + int(self.usage["output_tokens"])
-                )
-                / elapsed,
-                2,
-            )
+            throughput_input = round(input_tokens / elapsed, 2)
+            throughput_output = round(output_tokens / elapsed, 2)
+            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
         return {
             "metrics": {
                 "project": self.project,
                 "stage": self.stage,
                 "active_requests": self.active_requests,
+                "total_requests": self.total_requests,
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
                 "rate_limit_waiting_requests": self.rate_limit_waiting_requests,
@@ -334,14 +337,12 @@ class Diagnostics:
                     if self.latest_latency_seconds is not None
                     else None
                 ),
-                "input_tokens": (
-                    int(self.usage["input_tokens"]) if usage_available else 0
-                ),
-                "output_tokens": (
-                    int(self.usage["output_tokens"]) if usage_available else 0
-                ),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "usage_available": usage_available,
-                "throughput_tokens_per_second": throughput,
+                "throughput_input_tokens_per_second": throughput_input,
+                "throughput_output_tokens_per_second": throughput_output,
+                "throughput_tokens_per_second": throughput_total,
             },
             "logs": logs,
             "requests": [

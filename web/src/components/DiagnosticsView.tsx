@@ -1,9 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
 import { translate, type Language } from "../i18n";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
+type ThroughputMetric = "input" | "output" | "total";
+
+const THROUGHPUT_STORAGE_KEY = "minimal-llm-translator.throughput.v1";
+
+function readThroughputMetric(): ThroughputMetric {
+  try {
+    const stored = window.localStorage.getItem(THROUGHPUT_STORAGE_KEY);
+    if (stored === "input" || stored === "output" || stored === "total") {
+      return stored;
+    }
+  } catch {
+    // Browser storage is optional; use the default for this page.
+  }
+  return "total";
+}
 
 function number(value: number | null, language: Language, suffix = "", unavailable = "不可用") {
   return value === null ? unavailable : `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")}${suffix}`;
@@ -21,6 +36,28 @@ function clock(value: string, language: Language) {
   });
 }
 
+function layoutDetailsColumns(bar: HTMLDivElement) {
+  const spans = Array.from(bar.querySelectorAll<HTMLElement>(":scope > span"));
+  if (!spans.length) return;
+  bar.style.gridTemplateColumns = "repeat(6, max-content)";
+  const widths = spans.map((span) => span.getBoundingClientRect().width);
+  const inner = bar.clientWidth - 32;
+  const gap = 24;
+  let columns = 1;
+  for (let k = 6; k >= 1; k--) {
+    const tracks = new Array<number>(k).fill(0);
+    for (let index = 0; index < widths.length; index++) {
+      tracks[index % k] = Math.max(tracks[index % k], widths[index]);
+    }
+    const rowWidth = tracks.reduce((sum, width) => sum + width, 0) + (k - 1) * gap;
+    if (rowWidth <= inner + 1) {
+      columns = k;
+      break;
+    }
+  }
+  bar.style.gridTemplateColumns = `repeat(${columns}, max-content)`;
+}
+
 export function DiagnosticsView({ language }: { language: Language }) {
   const en = language === "en";
   const statusLabels = en ? {
@@ -34,12 +71,29 @@ export function DiagnosticsView({ language }: { language: Language }) {
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
+  const [throughputMetric, setThroughputMetric] = useState<ThroughputMetric>(readThroughputMetric);
   const [error, setError] = useState("");
   const [selectedRequest, setSelectedRequest] = useState<string | null>(null);
   const [detail, setDetail] = useState<DiagnosticsRequestDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [detailTab, setDetailTab] = useState<DetailTab>("request");
   const logRef = useRef<HTMLDivElement>(null);
+  const detailsRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const bar = detailsRef.current;
+    if (!bar) return;
+    layoutDetailsColumns(bar);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => layoutDetailsColumns(bar));
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const bar = detailsRef.current;
+    if (bar) layoutDetailsColumns(bar);
+  }, [language]);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams();
@@ -106,6 +160,23 @@ export function DiagnosticsView({ language }: { language: Language }) {
   };
 
   const metrics = value?.metrics;
+  const throughput = metrics
+    ? {
+        input: metrics.throughput_input_tokens_per_second,
+        output: metrics.throughput_output_tokens_per_second,
+        total: metrics.throughput_tokens_per_second,
+      }[throughputMetric]
+    : null;
+
+  function changeThroughputMetric(metric: ThroughputMetric) {
+    setThroughputMetric(metric);
+    try {
+      window.localStorage.setItem(THROUGHPUT_STORAGE_KEY, metric);
+    } catch {
+      // The selected metric still applies for this page when storage is unavailable.
+    }
+  }
+
   return (
     <section className="diagnostics-page">
       <header className="diagnostics-heading">
@@ -123,17 +194,19 @@ export function DiagnosticsView({ language }: { language: Language }) {
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
+        <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
         <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
         <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
+        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(throughput, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
-      <div className="diagnostics-details" aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
+      <div className="diagnostics-details" ref={detailsRef} aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
         <span>Usage <strong>{metrics?.usage_available ? (en ? "Complete" : "完整") : (en ? "Unavailable" : "不可用")}</strong></span>
         <span>{en ? "Latency" : "请求延迟"} <strong>{number(metrics?.latest_latency_ms ?? null, language, " ms", en ? "Unavailable" : "不可用")}</strong></span>
         <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
         <span>{en ? "Retries" : "重试"} <strong>{number(metrics?.retry_count ?? 0, language)}</strong></span>
         <span>{en ? "Rate-limit waits" : "限流等待"} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>
+        <span>{translate("diagnostics.throughputMetric", language)} <select aria-label={translate("diagnostics.throughputMetric", language)} value={throughputMetric} onChange={(event) => changeThroughputMetric(event.target.value as ThroughputMetric)}><option value="total">{translate("diagnostics.throughputTotal", language)}</option><option value="input">{translate("diagnostics.throughputInput", language)}</option><option value="output">{translate("diagnostics.throughputOutput", language)}</option></select></span>
       </div>
 
       <div className="diagnostics-grid">

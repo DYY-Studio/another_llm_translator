@@ -178,8 +178,10 @@ Preset；内联 LLM 连接配置不再支持。
 - EPUB Adapter 在不透明状态中保存 Ruby 原始结构和复合定位；不引入宿主
   通用 DOM、排版树或跨格式中间表示。
 - 一个 EPUB 仍对应一个 File；每个 spine XHTML 作为该 File 内部的 `part_id`。
-  新建 Segment、Chunk、参考上下文以及格式/校验修复均限制在同一
-  `(file_id, part_id)`，调度和列表仍按 EPUB File 进行。
+  默认新建 Segment、Chunk、参考上下文以及格式/校验修复均限制在同一
+  `(file_id, part_id)`；阶段启用 `chunking.cross_boundary_batching` 后，Chunk 和
+  请求可按源文顺序跨 File 或空区间跨 part，参考上下文仍不跨首 Segment 的边界，
+  调度和列表仍按 EPUB File 进行。
 - `ImportedFile.segment_part_ids` 是可选且与 Segment 对齐的导入字段；TXT 和
   普通 Adapter 使用 `document`。新项目持久化每条 Segment 的 `part_id`；旧项目
   缺少有效 part 数据时要求重新创建，不提供迁移或从 locator 补齐。
@@ -311,8 +313,9 @@ Preset；内联 LLM 连接配置不再支持。
 - 普通 Run 创建后才按需要规划下一批 Chunk。调度只保留与 `max_parallel` 同阶的
   有界缓冲，Chunk ID 在进入调度时生成，debug manifest 随生成追加；取消后不再
   继续规划。
-- `ordered_by_file` 继续保证单 File 顺序，`parallel` 继续受最大并发限制；所有
-  请求仍不得跨 `(file_id, part_id)`。
+- `ordered_by_file` 继续保证单 File 顺序，`parallel` 继续受最大并发限制；默认
+  请求不得跨 `(file_id, part_id)`，阶段启用跨边界配置后由 Chunk 内完整 File 集合
+  维护顺序。
 - dry-run 明确耗尽规划器，以返回完整 Chunk 数和 Token 估算。
 - 不根据模型输出动态调整 Chunk，不持久化 Chunk 业务状态，也不增加新的通用
   调度层。
@@ -366,6 +369,18 @@ Preset；内联 LLM 连接配置不再支持。
 - Web 顶栏可切换中文/英文，选择按浏览器保存；CLI 支持 `--language system|zh-CN|en`。
 - 共享 Shell、仪表盘和运行状态使用消息目录；内容、Prompt、目标语言和模型输出
   不随界面语言改变。
+
+## Stage 20.1：跨边界 Chunk 与 Run 诊断指标（已完成）
+
+- `chunking.cross_boundary_batching` 按阶段控制跨边界 Chunk，空数组保持原有
+  File/part 隔离；不同 File 可直接衔接，同一 File 跨 part 只允许跨越全为空的
+  `line_index` 区间。
+- 普通规划、格式修正和翻译校验修复共享同一边界规则；`ordered_by_file` 在跨
+  边界模式下使用全局源文顺序，调度器按 Chunk 的完整 File 集合防止同一 File
+  的请求重叠。
+- 诊断仪表盘显示当前 Run 发起的逻辑请求总数，HTTP 重试仍由独立重试计数表示。
+- Token 吞吐量同时提供 Input、Output 和 Total 三种指标，仪表盘下拉选择并保存在
+  浏览器 `localStorage`；后端在 usage 完整时一次返回三者。
 
 ## 发行包资源完整性（未实现）
 

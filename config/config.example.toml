@@ -48,6 +48,9 @@ target_chunk_input_tokens = 11000
 # 单个 Segment 超过输入硬限制时，是否允许内部切分并在完成后重新合并。
 # false 表示不切分，直接将该 Segment 记录为 failed。
 allow_split_oversized_segment = true
+# 允许指定阶段把按源文顺序相邻的跨 File 或 EPUB spine part Segment
+# 放入同一 Chunk；空数组表示保持 File/part 边界。
+cross_boundary_batching = []
 
 [context.translation]
 # 是否为翻译请求附带同一文件内的前文 Segment。
