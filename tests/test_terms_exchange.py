@@ -19,7 +19,13 @@ from app.stages import (
     publish_partial_terms,
     run_terminology,
 )
-from app.storage import append_jsonl, atomic_write_json, read_json, read_jsonl, record_header
+from app.sqlite_storage import (
+    append_jsonl,
+    read_json,
+    read_jsonl,
+    record_header,
+    write_json,
+)
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
@@ -68,9 +74,10 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     tmp_path: Path,
 ) -> None:
     project = make_project(tmp_path, "recover")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     task_id = "TERM-TASK-PARTIAL"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -82,6 +89,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "candidates.jsonl",
         record_header(
             "terminology_candidates",
@@ -114,8 +122,8 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     published = publish_partial_terms(project)
     assert published["published"] is True
     assert load_terms(project)["terms"][0]["source"] == "recover"
-    assert read_json(project / "terminology" / "active_task.json")["status"] == "partial_published"
-    assert read_jsonl(project / "terminology" / "candidates.jsonl")
+    assert read_json(project, project / "terminology" / "active_task.json")["status"] == "partial_published"
+    assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
 
 
 def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
@@ -151,7 +159,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(source, [term("Alpha")])
     first = import_terms(project, source, dry_run=False)
     assert first["terms_revision"] == 1
-    before = read_json(project / "terminology" / "terms.json")
+    before = read_json(project, project / "terminology" / "terms.json")
 
     second = import_terms(project, source, dry_run=False)
     assert second["changed"] is False
@@ -161,7 +169,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(invalid, [{"source": "Broken", "aliases": "wrong"}])
     with pytest.raises(UsageError, match="aliases"):
         import_terms(project, invalid, dry_run=False)
-    assert read_json(project / "terminology" / "terms.json") == before
+    assert read_json(project, project / "terminology" / "terms.json") == before
 
 
 def test_terms_cli_import_dry_run_and_export(
@@ -324,6 +332,6 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
             Scope(force=True),
             http_client=client,
         )
-    library = read_json(project / "terminology" / "terms.json")
+    library = read_json(project, project / "terminology" / "terms.json")
     assert library["terms_revision"] == 2
     assert [item["source"] for item in library["terms"]] == ["Alpha", "Beta"]

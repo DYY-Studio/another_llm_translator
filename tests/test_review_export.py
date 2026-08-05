@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from app.stages import (
     run_review,
     run_translation,
 )
-from app.storage import read_jsonl, write_jsonl
+from app.sqlite_storage import read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 
@@ -176,8 +177,8 @@ async def test_review_apply_and_export_restore_source_indentation(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
 
-    translation = read_jsonl(project / "stages" / "translation.jsonl")[-1]
-    suggestion = read_jsonl(project / "stages" / "proofreading.jsonl")[-1]
+    translation = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
+    suggestion = read_jsonl(project, project / "stages" / "proofreading.jsonl")[-1]
     assert translation["text"] == " \t\u3000translated  \t"
     assert suggestion["suggested_text"] == " \t\u3000fixed  \t"
 
@@ -189,12 +190,23 @@ async def test_review_apply_and_export_restore_source_indentation(
         confirmed_all=True,
     )
     applied_path = project / "stages" / "proofreading_applied.jsonl"
-    applied = read_jsonl(applied_path)
+    applied = read_jsonl(project, applied_path)
     assert applied[-1]["text"] == " \t\u3000fixed  \t"
 
     # Simulate a result written before local whitespace protection existed.
     applied[-1]["text"] = "\tlegacy  \t"
-    write_jsonl(applied_path, applied)
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE stage_results SET payload_json = ? WHERE record_id = ?",
+                (
+                    json.dumps(applied[-1], ensure_ascii=False, separators=(",", ":")),
+                    applied[-1]["record_id"],
+                ),
+            )
+    finally:
+        connection.close()
     export_project(project, "proofread", bilingual=False, allow_missing=False)
     export_project(project, "proofread", bilingual=True, allow_missing=False)
     assert (
@@ -264,8 +276,8 @@ async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> No
         "proofreading",
         "polishing",
     ]
-    assert read_jsonl(project / "stages" / "proofreading.jsonl")
-    assert read_jsonl(project / "stages" / "polishing.jsonl")
+    assert read_jsonl(project, project / "stages" / "proofreading.jsonl")
+    assert read_jsonl(project, project / "stages" / "polishing.jsonl")
     assert not (project / "stages" / "proofreading_applied.jsonl").exists()
     assert not (project / "stages" / "polishing_applied.jsonl").exists()
 
@@ -541,7 +553,7 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     assert review_calls == 1
     completed = [
         item
-        for item in read_jsonl(project / "stages" / f"{stage}.jsonl")
+        for item in read_jsonl(project, project / "stages" / f"{stage}.jsonl")
         if item["status"] == "completed"
     ]
     assert len(completed) == 1
@@ -580,7 +592,7 @@ async def test_oversized_review_segment_is_combined_once(
     assert summary["completed"] == 1
     completed = [
         item
-        for item in read_jsonl(project / "stages" / "proofreading.jsonl")
+        for item in read_jsonl(project, project / "stages" / "proofreading.jsonl")
         if item["status"] == "completed"
     ]
     assert len(completed) == 1

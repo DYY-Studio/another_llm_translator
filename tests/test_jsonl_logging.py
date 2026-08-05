@@ -18,7 +18,7 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.storage import read_json, read_jsonl
+from app.sqlite_storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
@@ -337,7 +337,7 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
                 {"type": "segment", "id": first_id, "translation": "first"}
             )
         else:
-            saved = read_jsonl(project / "stages" / "translation.jsonl")
+            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
             assert any(item.get("segment_id") == "F0001-S000001" for item in saved)
             assert [item["id"] for item in payload["segments"]] == [
                 "1"
@@ -465,8 +465,8 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
                 }
             )
         else:
-            assert read_jsonl(project / "terminology" / "candidates.jsonl")
-            scans = read_jsonl(project / "terminology" / "scans.jsonl")
+            assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
+            scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
             assert not any(item["status"] == "completed" for item in scans)
             content = '{"type":"end"}'
         return httpx.Response(
@@ -510,8 +510,8 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
 
-    candidates = read_jsonl(project / "terminology" / "candidates.jsonl")
-    scans = read_jsonl(project / "terminology" / "scans.jsonl")
+    candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+    scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
     assert calls == 3
     assert summary["published"] is False
     assert summary["failed"] == 1
@@ -520,7 +520,7 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert scans[-1]["status"] == "failed"
     assert scans[-1]["error_class"] == "format_error"
     assert not (project / "terminology" / "terms.json").exists()
-    manifest = read_json(project / "runs" / summary["run_id"] / "manifest.json")
+    manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
     assert manifest["failure_counts"] == {"format_error": 1}
 
 
