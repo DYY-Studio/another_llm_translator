@@ -424,7 +424,7 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
         "LLM 与采样",
         "全局 LLM Preset",
         "使用全局 Preset",
-        "翻译 Preset",
+        "{stage} Preset",
         "打开现有项目",
         "保存父目录",
         "浏览目录",
