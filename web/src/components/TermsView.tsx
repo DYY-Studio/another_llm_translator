@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { Language } from "../i18n";
+import { translate, type Language } from "../i18n";
 import type { Term, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
@@ -39,7 +39,6 @@ export function TermsView({
   focusFailures?: boolean;
   language: Language;
 }) {
-  const en = language === "en";
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
@@ -107,7 +106,7 @@ export function TermsView({
 
   async function save(disabled: boolean) {
     if (!form.source.trim()) {
-      setMessage(en ? "Source term is required" : "术语原文不能为空");
+      setMessage(translate("terms.sourceRequired", language));
       return;
     }
     setSaving(true);
@@ -131,7 +130,7 @@ export function TermsView({
       ) ?? null;
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
-      setMessage(disabled ? (en ? "Term removed" : "术语已移除") : selected?.disabled ? (en ? "Term restored" : "术语已恢复") : (en ? "Term saved" : "术语已保存"));
+      setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -154,7 +153,7 @@ export function TermsView({
       setData(value);
       selection.reset();
       setForm(emptyForm);
-      setMessage(en ? `Removed ${value.removed} terms` : `已移除 ${value.removed} 条术语`);
+      setMessage(translate("terms.removedCount", language, { count: value.removed }));
       setRemoveOpen(false);
     } catch (error) {
       setMessage(String(error));
@@ -178,7 +177,7 @@ export function TermsView({
       setData(value);
       selection.reset();
       setForm(emptyForm);
-      setMessage(en ? `Permanently deleted ${value.deleted} terms; future scans can discover them again` : `已彻底删除 ${value.deleted} 条术语；再次扫描可以重新发现`);
+      setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
     } catch (error) {
       setMessage(String(error));
@@ -198,60 +197,60 @@ export function TermsView({
                 setSearch(event.target.value);
                 resetFilterSelection();
               }}
-              placeholder={en ? "Search terms" : "搜索术语"}
+              placeholder={translate("terms.search", language)}
             />
             <button className="quiet-button" onClick={() => {
               selection.reset();
               setForm(emptyForm);
-            }}>{en ? "New" : "新增"}</button>
+            }}>{translate("terms.new", language)}</button>
           </div>
           <div className="term-secondary">
             <div className="term-filters">
               <label><input type="checkbox" checked={onlyConflicts} onChange={(event) => {
                 setOnlyConflicts(event.target.checked);
                 resetFilterSelection();
-              }} />{en ? "Conflicts only" : "只看冲突"}</label>
+              }} />{translate("terms.conflictsOnly", language)}</label>
               <label><input type="checkbox" checked={showDisabled} onChange={(event) => {
                 setShowDisabled(event.target.checked);
                 resetFilterSelection();
-              }} />{en ? "Show removed" : "显示已移除"}</label>
+              }} />{translate("terms.showRemoved", language)}</label>
             </div>
             <div className="term-stats">
-              <span>revision {data?.terms_revision ?? (en ? "none" : "无")}</span>
-              <span>{en ? "Conflicts" : "待裁决"} {data?.conflict_count ?? 0}</span>
+              <span>revision {data?.terms_revision ?? translate("terms.revisionNone", language)}</span>
+              <span>{translate("terms.conflicts", language)} {data?.conflict_count ?? 0}</span>
             </div>
           </div>
           <div className="batch-toolbar segment-batch-toolbar">
-            <span>{en ? `Selected ${selection.selectedKeys.size}` : `已选择 ${selection.selectedKeys.size} 条`}</span>
+            <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
-              <button className="quiet-button" onClick={() => setImportOpen(true)}>{en ? "Import" : "导入"}</button>
-              <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{en ? "Export" : "导出"}</button>
+              <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
+              <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               <button
                 className="danger-button"
                 disabled={!selectedActive.length}
                 onClick={() => setRemoveOpen(true)}
-              >{en ? "Remove selected" : "移除所选"}</button>
+              >{translate("terms.removeSelected", language)}</button>
               <button
                 className="danger-button"
                 disabled={!selectedTerms.length}
                 onClick={() => setDeleteOpen(true)}
-              >{en ? "Delete permanently" : "彻底删除所选"}</button>
+              >{translate("terms.deletePermanently", language)}</button>
             </div>
-            <small className="term-removal-help">{en ? "Remove keeps scan ignore rules; permanent deletion allows rediscovery." : "移除会保留扫描忽略规则；彻底删除后可再次发现。"}</small>
+            <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>
-              <strong>{en ? "Current scan" : "当前扫描"}</strong>
-              <span>{en ? `Done ${data.scan.completed} · Failed ${data.scan.failed} · Pending ${data.scan.pending}` : `已完成 ${data.scan.completed} · 失败 ${data.scan.failed} · 待处理 ${data.scan.pending}`}</span>
-              <span>{en ? `${data.scan.candidate_count} candidates available` : `可用候选 ${data.scan.candidate_count} 条`}</span>
+              <strong>{translate("terms.currentScan", language)}</strong>
+              <span>{translate("terms.scanStatus", language, { done: data.scan.completed, failed: data.scan.failed, pending: data.scan.pending })}</span>
+              <span>{translate("terms.scanCandidates", language, { count: data.scan.candidate_count })}</span>
               {Object.entries(data.scan.failure_counts).map(([key, count]) => <span key={key} className="scan-error-count">{key} {count}</span>)}
             </div>
             <div className="term-scan-actions">
-              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? (en ? "Hide failures" : "收起失败") : (en ? "View failures" : "查看失败")}</button>}
-              {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{en ? "Export current scan" : "导出当前扫描结果"}</button>}
-              {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{en ? "Publish available results" : "发布现有结果"}</button>}
+              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? translate("terms.hideFailures", language) : translate("terms.viewFailures", language)}</button>}
+              {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{translate("terms.exportCurrentScan", language)}</button>}
+              {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{translate("terms.publishAvailable", language)}</button>}
             </div>
             {showScanFailures && data.scan.failed_segments.length > 0 && (
               <div className="term-scan-failures">
@@ -260,7 +259,7 @@ export function TermsView({
                     <code>{item.segment_id}</code><span>{item.error_class} · {item.error_message}</span>
                   </div>
                 ))}
-                {data.scan.failed_segments_truncated && <small>{en ? "Showing the first 200 failures." : "仅显示前 200 条失败记录。"}</small>}
+                {data.scan.failed_segments_truncated && <small>{translate("terms.first200Failures", language)}</small>}
               </div>
             )}
           </div>
@@ -279,39 +278,39 @@ export function TermsView({
                 }}
               >
                 <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
-                <span><strong>{term.source}</strong><small>{term.preferred_translation || (en ? "No preferred translation" : "尚无推荐译名")}</small></span>
-                <em>{term.has_conflicts ? (en ? "Conflict" : "待裁决") : term.disabled ? (en ? "Removed" : "已移除") : (en ? "Active" : "有效")}</em>
+                <span><strong>{term.source}</strong><small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small></span>
+                <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
               </button>
             );
           })}
-          {data && !visible.length && <div className="empty">{en ? "No terms match the current filters" : "当前筛选下没有术语"}</div>}
-          {!data && <div className="empty">{en ? "Loading terms…" : "正在加载术语…"}</div>}
+          {data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
+          {!data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
       </section>
       <section className="term-editor">
         <div className="page-heading">
-          <div><h1>{selected ? (en ? "Edit term" : "编辑术语") : (en ? "New term" : "新增术语")}</h1><p>{en ? "Saving creates a new term revision immediately." : "保存后立即生成新的术语 revision。"}</p></div>
+          <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
-        <label>{en ? "Source term" : "术语原文"}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
-        <label>{en ? "Preferred translation" : "推荐译名"}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
+        <label>{translate("terms.sourceTerm", language)}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
+        <label>{translate("terms.preferredTranslation", language)}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
         {!!selected?.conflicts.preferred_translations.length && (
           <ConflictChoices
-            label={en ? "Preferred translation conflicts; choose or enter your own" : "推荐译名存在冲突，请选择或自行填写"}
+            label={translate("terms.conflictTranslations", language)}
             values={selected.conflicts.preferred_translations}
             onChoose={(value) => setForm({ ...form, preferredTranslation: value })}
           />
         )}
-        <label>{en ? "Category" : "类别"}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
+        <label>{translate("terms.category", language)}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
         {!!selected?.conflicts.categories.length && (
           <ConflictChoices
-            label={en ? "Category conflicts; choose or enter your own" : "类别存在冲突，请选择或自行填写"}
+            label={translate("terms.conflictCategories", language)}
             values={selected.conflicts.categories}
             onChoose={(value) => setForm({ ...form, category: value })}
           />
         )}
         {!!selected?.conflicts.alias_primaries.length && (
           <div className="conflict-box">
-            <strong>{en ? "An alias is another term's primary entry; change it before saving" : "别名同时是其他术语的主条目，请修改别名后保存"}</strong>
+            <strong>{translate("terms.aliasPrimaryConflict", language)}</strong>
             {selected.conflicts.alias_primaries.map((item) => (
               <p key={`${item.alias}-${item.primary_source}`}>
                 {item.alias} → {item.primary_source}
@@ -319,16 +318,16 @@ export function TermsView({
             ))}
           </div>
         )}
-        <label>{en ? "Description" : "说明"}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-        <label>{en ? "Aliases (one per line)" : "别名（每行一个）"}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
+        <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
+        <label>{translate("terms.aliases", language)}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
         {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
         <div className="editor-actions term-actions">
           {selected?.disabled ? (
-            <button className="primary-button" disabled={saving} onClick={() => save(false)}>{en ? "Restore" : "恢复"}</button>
+            <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
           ) : (
             <>
-              <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{en ? "Save" : "保存"}</button>
-              {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{en ? "Remove" : "移除"}</button>}
+              <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
+              {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
             </>
           )}
         </div>
@@ -336,8 +335,8 @@ export function TermsView({
       {removeOpen && (
         <ConfirmDialog
           language={language}
-          title={en ? "Remove selected terms" : "移除所选术语"}
-          text={en ? `Remove ${selectedActive.length} terms. Future scans will continue to ignore them.` : `将移除 ${selectedActive.length} 条术语。重新扫描不会自动恢复这些术语。`}
+          title={translate("terms.removeTitle", language)}
+          text={translate("terms.removeText", language, { count: selectedActive.length })}
           confirming={saving}
           onCancel={() => setRemoveOpen(false)}
           onConfirm={removeSelected}
@@ -346,9 +345,9 @@ export function TermsView({
       {deleteOpen && (
         <ConfirmDialog
           language={language}
-          title={en ? "Permanently delete selected terms" : "彻底删除所选术语"}
-          text={en ? `Delete ${selectedTerms.length} terms and their scan ignore rules. Future scans can rediscover them. This cannot be undone.` : `将删除 ${selectedTerms.length} 条术语及其扫描忽略规则；再次扫描可以重新发现。该操作不可撤销。`}
-          confirmLabel={en ? "Delete permanently" : "确认彻底删除"}
+          title={translate("terms.deleteTitle", language)}
+          text={translate("terms.deleteText", language, { count: selectedTerms.length })}
+          confirmLabel={translate("terms.confirmDelete", language)}
           confirming={saving}
           onCancel={() => setDeleteOpen(false)}
           onConfirm={deleteSelected}
@@ -364,7 +363,7 @@ export function TermsView({
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
-            setMessage(en ? "Term list imported" : "术语表已导入");
+            setMessage(translate("terms.imported", language));
           }}
         />
       )}
@@ -386,7 +385,7 @@ export function TermsView({
           onPublished={async () => {
             setPartialOpen(false);
             setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
-            setMessage(en ? "Available scan results published for later stages" : "现有扫描结果已发布并可用于后续阶段");
+            setMessage(translate("terms.published", language));
           }}
         />
       )}
@@ -430,14 +429,14 @@ function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const effectiveConfirmLabel = confirmLabel ?? (language === "en" ? "Confirm removal" : "确认移除");
+  const effectiveConfirmLabel = confirmLabel ?? translate("terms.confirmRemoval", language);
   return (
     <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <h2>{title}</h2>
         <p>{text}</p>
         <div className="modal-actions">
-          <button className="quiet-button" disabled={confirming} onClick={onCancel}>{language === "en" ? "Cancel" : "取消"}</button>
+          <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
           <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
         </div>
       </div>
@@ -480,14 +479,14 @@ function TermImportDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Import term list" : "导入术语表"}>
-        <h2>{language === "en" ? "Import term list" : "导入术语表"}</h2>
-        <p>{language === "en" ? "JSON or CSV is merged into the scan baseline; absent terms are not deleted." : "JSON 或 CSV 将增量合并到扫描基线；未出现的术语不会删除。"}</p>
-        <label>{language === "en" ? "Term file" : "术语文件"}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.importDialogTitle", language)}>
+        <h2>{translate("terms.importDialogTitle", language)}</h2>
+        <p>{translate("terms.importHint", language)}</p>
+        <label>{translate("terms.termFile", language)}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
-          <button className="quiet-button" disabled={saving} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" disabled={saving || !file} onClick={submit}>{language === "en" ? "Import" : "导入"}</button>
+          <button className="quiet-button" disabled={saving} onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={saving || !file} onClick={submit}>{translate("terms.import", language)}</button>
         </div>
       </div>
     </div>
@@ -519,7 +518,7 @@ function TermExportDialog({
       );
       if (!response.ok) {
         const value = await response.json();
-        throw new Error(value.error || `请求失败：${response.status}`);
+        throw new Error(value.error || translate("export.requestFailedStatus", language, { status: response.status }));
       }
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
@@ -535,15 +534,15 @@ function TermExportDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Export term list" : "导出术语表"}>
-        <h2>{language === "en" ? "Export term list" : "导出术语表"}</h2>
-        <label>{language === "en" ? "Source" : "来源"}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{language === "en" ? "Published terms" : "已发布术语表"}</option>{hasScanned && <option value="scanned">{language === "en" ? "Current scan candidates" : "当前扫描候选"}</option>}</select></label>
-        <label>{language === "en" ? "Format" : "格式"}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
-        <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{language === "en" ? "Include removed terms" : "包含已移除术语"}</label>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.exportDialogTitle", language)}>
+        <h2>{translate("terms.exportDialogTitle", language)}</h2>
+        <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
+        <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+        <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
-          <button className="quiet-button" onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" onClick={download}>{language === "en" ? "Download" : "下载"}</button>
+          <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" onClick={download}>{translate("terms.download", language)}</button>
         </div>
       </div>
     </div>
@@ -581,13 +580,13 @@ function PartialPublishDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Publish available scan results" : "发布现有扫描结果"}>
-        <h2>{language === "en" ? "Publish available scan results" : "发布现有扫描结果"}</h2>
-        <p>{language === "en" ? `Merge ${count} available candidate terms into the active term list. Incomplete segments remain unscanned and historical candidates are kept.` : `将合并当前可用的 ${count} 条候选术语，立即作为正式术语表使用。未完成 Segment 不会被标记为已扫描；历史候选仍会保留。`}</p>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.publishTitle", language)}>
+        <h2>{translate("terms.publishTitle", language)}</h2>
+        <p>{translate("terms.publishText", language, { count })}</p>
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
-          <button className="quiet-button" disabled={working} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? (language === "en" ? "Publishing…" : "正在发布…") : (language === "en" ? "Publish" : "确认发布")}</button>
+          <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? translate("terms.publishing", language) : translate("terms.publish", language)}</button>
         </div>
       </div>
     </div>
