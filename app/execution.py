@@ -446,9 +446,14 @@ def contiguous_groups(
     segments: Iterable[dict[str, Any]],
     *,
     all_segments: Iterable[dict[str, Any]],
+    cross_boundary: bool = False,
 ) -> list[list[dict[str, Any]]]:
     empty_positions = {
-        (*_segment_part_key(item), int(item["line_index"]))
+        (
+            (str(item["file_id"]), int(item["line_index"]))
+            if cross_boundary
+            else (*_segment_part_key(item), int(item["line_index"]))
+        )
         for item in all_segments
         if item["is_empty"]
     }
@@ -461,14 +466,25 @@ def contiguous_groups(
             groups.append([segment])
             continue
         previous = groups[-1][-1]
+        previous_file = str(previous["file_id"])
+        current_file = str(segment["file_id"])
         same_part = _segment_part_key(previous) == _segment_part_key(segment)
         previous_index = int(previous["line_index"])
         current_index = int(segment["line_index"])
-        part_key = _segment_part_key(segment)
-        gap_is_empty = same_part and current_index > previous_index and all(
-            (*part_key, line_index) in empty_positions
-            for line_index in range(previous_index + 1, current_index)
-        )
+        if cross_boundary:
+            gap_is_empty = current_file != previous_file or (
+                current_index > previous_index
+                and all(
+                    (current_file, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
+            )
+        else:
+            part_key = _segment_part_key(segment)
+            gap_is_empty = same_part and current_index > previous_index and all(
+                (*part_key, line_index) in empty_positions
+                for line_index in range(previous_index + 1, current_index)
+            )
         if gap_is_empty:
             groups[-1].append(segment)
         else:
@@ -480,9 +496,14 @@ def _iter_contiguous_groups(
     segments: Iterable[dict[str, Any]],
     *,
     all_segments: Iterable[dict[str, Any]],
+    cross_boundary: bool = False,
 ) -> Iterable[list[dict[str, Any]]]:
     empty_positions = {
-        (*_segment_part_key(item), int(item["line_index"]))
+        (
+            (str(item["file_id"]), int(item["line_index"]))
+            if cross_boundary
+            else (*_segment_part_key(item), int(item["line_index"]))
+        )
         for item in all_segments
         if item["is_empty"]
     }
@@ -500,15 +521,30 @@ def _iter_contiguous_groups(
             current = [segment]
             continue
         previous = current[-1]
+        previous_file = str(previous["file_id"])
+        current_file = str(segment["file_id"])
         same_part = _segment_part_key(previous) == _segment_part_key(segment)
         previous_index = int(previous["line_index"])
         current_index = int(segment["line_index"])
-        part_key = _segment_part_key(segment)
-        gap_is_empty = same_part and current_index > previous_index and all(
-            (*part_key, line_index) in empty_positions
-            for line_index in range(previous_index + 1, current_index)
-        )
-        if same_part and (current_index == previous_index or gap_is_empty):
+        if cross_boundary:
+            gap_is_empty = current_file != previous_file or (
+                current_index > previous_index
+                and all(
+                    (current_file, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
+            )
+            can_append = gap_is_empty
+        else:
+            part_key = _segment_part_key(segment)
+            gap_is_empty = same_part and current_index > previous_index and all(
+                (*part_key, line_index) in empty_positions
+                for line_index in range(previous_index + 1, current_index)
+            )
+            can_append = same_part and (
+                current_index == previous_index or gap_is_empty
+            )
+        if can_append:
             current.append(segment)
             continue
         yield current
@@ -522,6 +558,7 @@ def iter_chunk_plans(
     *,
     all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
+    stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> Iterable[ChunkPlan]:
@@ -595,8 +632,18 @@ def iter_chunk_plans(
                     estimated_input_tokens=estimated,
                 )
 
-    if config["execution"]["scheduling_mode"] != "ordered_by_file":
-        yield from plan_groups(_iter_contiguous_groups(work, all_segments=all_segments))
+    cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
+    if (
+        config["execution"]["scheduling_mode"] != "ordered_by_file"
+        or cross_boundary
+    ):
+        yield from plan_groups(
+            _iter_contiguous_groups(
+                work,
+                all_segments=all_segments,
+                cross_boundary=cross_boundary,
+            )
+        )
         return
 
     by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -605,7 +652,11 @@ def iter_chunk_plans(
     streams = [
         iter(
             plan_groups(
-                _iter_contiguous_groups(items, all_segments=all_segments)
+                _iter_contiguous_groups(
+                    items,
+                    all_segments=all_segments,
+                    cross_boundary=False,
+                )
             )
         )
         for items in by_file.values()
@@ -626,6 +677,7 @@ def build_chunk_plans(
     *,
     all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
+    stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> list[ChunkPlan]:
@@ -634,6 +686,7 @@ def build_chunk_plans(
             work,
             all_segments=all_segments,
             config=config,
+            stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -1576,48 +1629,65 @@ async def dispatch_chunks(
         raise ConfigError("max_parallel 必须是正整数")
     if mode == "ordered_by_file":
         iterator = iter(chunks)
-        pending: dict[asyncio.Task[Any], tuple[int, str]] = {}
-        buffered: dict[str, ChunkPlan] = {}
+        pending: dict[asyncio.Task[Any], tuple[int, frozenset[str]]] = {}
+        buffered: list[tuple[int, frozenset[str], ChunkPlan]] = []
         results: dict[int, Any] = {}
         active_files: set[str] = set()
         next_index = 0
-        deferred: ChunkPlan | None = None
+        source_exhausted = False
 
-        def start(chunk: ChunkPlan) -> None:
-            nonlocal next_index
-            file_id = str(chunk.file_id)
+        def file_ids(chunk: ChunkPlan) -> frozenset[str]:
+            ids = frozenset(str(item["file_id"]) for item in chunk.segments)
+            return ids or frozenset({str(chunk.file_id)})
+
+        def start(
+            index: int, file_ids_for_chunk: frozenset[str], chunk: ChunkPlan
+        ) -> None:
             task = asyncio.create_task(worker(chunk))
-            pending[task] = (next_index, file_id)
-            active_files.add(file_id)
-            next_index += 1
+            pending[task] = (index, file_ids_for_chunk)
+            active_files.update(file_ids_for_chunk)
+
+        def start_buffered() -> bool:
+            if len(pending) >= max_parallel:
+                return False
+            reserved: set[str] = set()
+            for index, file_ids_for_chunk, chunk in buffered:
+                if (
+                    file_ids_for_chunk.isdisjoint(active_files)
+                    and file_ids_for_chunk.isdisjoint(reserved)
+                ):
+                    buffered.remove((index, file_ids_for_chunk, chunk))
+                    start(index, file_ids_for_chunk, chunk)
+                    return True
+                reserved.update(file_ids_for_chunk)
+            return False
 
         def fill() -> None:
-            nonlocal deferred
+            nonlocal next_index, source_exhausted
             while len(pending) < max_parallel:
-                inactive = [
+                while start_buffered():
+                    pass
+                if len(pending) >= max_parallel:
+                    return
+                if source_exhausted or len(buffered) >= max_parallel:
+                    return
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    source_exhausted = True
+                    return
+                index = next_index
+                next_index += 1
+                file_ids_for_chunk = file_ids(chunk)
+                reserved = {
                     file_id
-                    for file_id in buffered
-                    if file_id not in active_files
-                ]
-                if inactive:
-                    file_id = inactive[0]
-                    start(buffered.pop(file_id))
+                    for _, buffered_ids, _ in buffered
+                    for file_id in buffered_ids
+                }
+                if file_ids_for_chunk.isdisjoint(active_files | reserved):
+                    start(index, file_ids_for_chunk, chunk)
                     continue
-                chunk = deferred
-                deferred = None
-                if chunk is None:
-                    try:
-                        chunk = next(iterator)
-                    except StopIteration:
-                        return
-                file_id = str(chunk.file_id)
-                if file_id in active_files:
-                    if file_id in buffered:
-                        deferred = chunk
-                        return
-                    buffered[file_id] = chunk
-                    continue
-                start(chunk)
+                buffered.append((index, file_ids_for_chunk, chunk))
 
         fill()
         try:
@@ -1626,8 +1696,8 @@ async def dispatch_chunks(
                     pending, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in done:
-                    index, file_id = pending.pop(task)
-                    active_files.discard(file_id)
+                    index, file_ids_for_chunk = pending.pop(task)
+                    active_files.difference_update(file_ids_for_chunk)
                     results[index] = task.result()
                 fill()
         except BaseException:

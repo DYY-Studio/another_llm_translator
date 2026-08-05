@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import type { Language } from "../i18n";
-import type { LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
+import type { LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { Icon } from "./Icons";
 
@@ -143,6 +143,12 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
     ["proofreading", localized(language, "校对 Preset", "Proofreading Preset")],
     ["polishing", localized(language, "润色 Preset", "Polishing Preset")],
   ];
+  const crossBoundaryStages: Array<[LLMStage, string]> = [
+    ["terminology", localized(language, "术语", "Terms")],
+    ["translation", localized(language, "翻译", "Translation")],
+    ["proofreading", localized(language, "校对", "Proofreading")],
+    ["polishing", localized(language, "润色", "Polishing")],
+  ];
   return (
     <section className="config-settings">
       <div className="page-heading config-heading settings-action-heading">
@@ -169,10 +175,11 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
           <NumberField label={localized(language, "校对温度", "Proofreading temperature")} value={config.llm.temperature_proofreading} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={localized(language, "润色温度", "Polishing temperature")} value={config.llm.temperature_polishing} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
-        <ConfigSection title={localized(language, "执行与分块", "Execution and chunks")} description={localized(language, "调度、Chunk 软目标和超长 Segment 行为。", "Scheduling, soft Chunk targets, and oversized Segment handling.")}>
+        <ConfigSection title={localized(language, "执行与分块", "Execution and chunks")} description={localized(language, "调度、Chunk 软目标、超长 Segment 行为，以及按阶段启用的跨 File / EPUB spine part 合并。", "Scheduling, soft Chunk targets, oversized Segment handling, and optional cross-file / EPUB spine-part batching by stage.")}>
           <Field label={localized(language, "调度模式", "Scheduling mode")}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{localized(language, "文件内有序", "Ordered within file")}</option><option value="parallel">{localized(language, "全部并发", "Parallel")}</option></select></Field>
           <NumberField label={localized(language, "目标 Chunk 输入 Token", "Target Chunk input tokens")} value={config.chunking.target_chunk_input_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.chunking.target_chunk_input_tokens = value; })} />
           <ToggleField label={localized(language, "允许拆分超长 Segment", "Allow oversized Segment splitting")} checked={config.chunking.allow_split_oversized_segment} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
+          {crossBoundaryStages.map(([stage, label]) => <ToggleField key={stage} label={localized(language, `${label}阶段允许跨边界合并`, `Allow ${label} cross-boundary batching`)} checked={config.chunking.cross_boundary_batching.includes(stage)} help={localized(language, "仅按源文顺序合并允许的边界；参考上文仍以 Chunk 首段的 File / part 为准。", "Only permitted source-order boundaries are merged; reference context still uses the first Segment's File / part.")} onChange={(value) => update((draft) => { const selected = new Set(draft.chunking.cross_boundary_batching); if (value) selected.add(stage); else selected.delete(stage); draft.chunking.cross_boundary_batching = crossBoundaryStages.map(([candidate]) => candidate).filter((candidate) => selected.has(candidate)); })} />)}
         </ConfigSection>
         <ConfigSection title={localized(language, "参考上下文", "Reference context")} description={localized(language, "各阶段携带同文件前文的数量。", "How many preceding Segments each stage can reference within a file.")}>
           {contextLabels.map(([stage, label]) => <div className="context-config-row" key={stage}><ToggleField label={localized(language, `${label}携带前文`, `${label} context`)} checked={config.context[stage].enabled} onChange={(value) => update((draft) => { draft.context[stage].enabled = value; })} /><NumberField label={localized(language, "前文 Segment 数", "Previous Segment count")} value={config.context[stage].previous_segments} min={0} step={1} onChange={(value) => update((draft) => { draft.context[stage].previous_segments = value; })} /></div>)}

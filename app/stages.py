@@ -1322,6 +1322,7 @@ async def run_terminology(
                 [segment],
                 all_segments=segments,
                 config=config,
+                stage="terminology",
                 prompt=prompt,
                 payload_builder=payload_builder,
             )
@@ -1348,6 +1349,7 @@ async def run_terminology(
                     [probe],
                     all_segments=segments,
                     config=config,
+                    stage="terminology",
                     prompt=prompt,
                     payload_builder=payload_builder,
                 )
@@ -1377,6 +1379,7 @@ async def run_terminology(
             request_segments,
             all_segments=segments,
             config=config,
+            stage="terminology",
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -1407,6 +1410,7 @@ async def run_terminology(
         request_segments,
         all_segments=segments,
         config=config,
+        stage="terminology",
         prompt=prompt,
         payload_builder=payload_builder,
     )
@@ -2195,6 +2199,7 @@ async def run_translation(
                 [segment],
                 all_segments=segments,
                 config=config,
+                stage="translation",
                 prompt=prompt,
                 payload_builder=payload_builder,
             )
@@ -2221,6 +2226,7 @@ async def run_translation(
                     [probe],
                     all_segments=segments,
                     config=config,
+                    stage="translation",
                     prompt=prompt,
                     payload_builder=payload_builder,
                 )
@@ -2253,6 +2259,7 @@ async def run_translation(
             request_segments,
             all_segments=segments,
             config=config,
+            stage="translation",
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -2283,6 +2290,7 @@ async def run_translation(
         request_segments,
         all_segments=segments,
         config=config,
+        stage="translation",
         prompt=prompt,
         payload_builder=payload_builder,
     )
@@ -2569,6 +2577,8 @@ async def run_translation(
             unresolved_groups = contiguous_groups(
                 (by_id[segment_id] for segment_id in unresolved),
                 all_segments=segments,
+                cross_boundary="translation"
+                in config["chunking"]["cross_boundary_batching"],
             )
             tasks.extend(
                 (
@@ -2754,6 +2764,8 @@ async def run_translation(
                 groups = contiguous_groups(
                     (item["segment"] for item in current_pending.values()),
                     all_segments=segments,
+                    cross_boundary="translation"
+                    in config["chunking"]["cross_boundary_batching"],
                 )
                 logger.warning(
                     "validation repair attempt=%d segments=%d chunks=%d",
@@ -3177,6 +3189,7 @@ async def run_review(
                 [segment],
                 all_segments=segments,
                 config=config,
+                stage=stage,
                 prompt=prompt,
                 payload_builder=payload_builder,
             )
@@ -3206,6 +3219,7 @@ async def run_review(
                     [probe],
                     all_segments=segments,
                     config=config,
+                    stage=stage,
                     prompt=prompt,
                     payload_builder=payload_builder,
                 )
@@ -3245,6 +3259,7 @@ async def run_review(
             request_segments,
             all_segments=segments,
             config=config,
+            stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -3274,6 +3289,7 @@ async def run_review(
         request_segments,
         all_segments=segments,
         config=config,
+        stage=stage,
         prompt=prompt,
         payload_builder=payload_builder,
     )
@@ -3535,6 +3551,7 @@ async def run_review(
             unresolved_groups = contiguous_groups(
                 (by_id[segment_id] for segment_id in unresolved),
                 all_segments=segments,
+                cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
             )
             tasks.extend(
                 (

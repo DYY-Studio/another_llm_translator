@@ -62,6 +62,8 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
     original = stage_fingerprint(first, "translation", prompt, terms_revision=1)
     first["chunking"]["target_chunk_input_tokens"] = 100
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
+    first["chunking"]["cross_boundary_batching"] = ["translation"]
+    assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
     first["execution"]["scheduling_mode"] = (
         "ordered_by_file"
         if first["execution"]["scheduling_mode"] == "parallel"
@@ -126,6 +128,7 @@ def test_chunk_plans_are_iterated_lazily() -> None:
         [source[0], source[2], source[3]],
         all_segments=source,
         config=current,
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=payload_builder,
     )
@@ -208,6 +211,7 @@ def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:
         work,
         all_segments=segments(),
         config=current,
+        stage="translation",
         prompt=prompt,
         payload_builder=payload_builder,
     )
@@ -245,6 +249,7 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
         work,
         all_segments=source,
         config=config(),
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=lambda items: {
             "segments": [
@@ -262,6 +267,7 @@ def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> No
         [source[0], source[4]],
         all_segments=source,
         config=config(),
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=lambda items: {
             "segments": [
@@ -312,6 +318,7 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
         [source[0], source[2], source[3]],
         all_segments=source,
         config=config(),
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=lambda items: {
             "segments": [
@@ -327,6 +334,115 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
     ]
     assert previous_context(source, source[2], 3) == []
     assert previous_context(source, source[3], 3) == [{"source": "第二章"}]
+
+
+def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None:
+    source = [
+        {
+            "segment_id": "F0001-S000001",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch1.xhtml",
+            "line_index": 0,
+            "source": "第一章",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0001-S000002",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch1.xhtml",
+            "line_index": 1,
+            "source": "",
+            "is_empty": True,
+        },
+        {
+            "segment_id": "F0001-S000003",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch2.xhtml",
+            "line_index": 2,
+            "source": "第二章",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0002-S000001",
+            "file_id": "F0002",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "另一个文件",
+            "is_empty": False,
+        },
+    ]
+    current = config()
+    current["chunking"]["cross_boundary_batching"] = ["translation"]
+    plans = build_chunk_plans(
+        [source[0], source[2], source[3]],
+        all_segments=source,
+        config=current,
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert [
+        [item["segment_id"] for item in plan.segments] for plan in plans
+    ] == [["F0001-S000001", "F0001-S000003", "F0002-S000001"]]
+
+    source[1]["source"] = "未选中的非空段"
+    source[1]["is_empty"] = False
+    plans = build_chunk_plans(
+        [source[0], source[2]],
+        all_segments=source,
+        config=current,
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=lambda items: {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        },
+    )
+    assert [len(plan.segments) for plan in plans] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_ordered_dispatch_tracks_all_files_in_cross_boundary_chunk() -> None:
+    started: list[str] = []
+    release = asyncio.Event()
+
+    def chunk(*file_ids: str) -> ChunkPlan:
+        return ChunkPlan(
+            file_id=file_ids[0],
+            segments=tuple(
+                {
+                    "segment_id": f"{file_id}-S1",
+                    "file_id": file_id,
+                }
+                for file_id in file_ids
+            ),
+            payload={},
+            estimated_input_tokens=1,
+        )
+
+    async def worker(current: ChunkPlan) -> str:
+        started.append(current.segments[0]["segment_id"])
+        await release.wait()
+        return current.segments[0]["segment_id"]
+
+    chunks = iter((chunk("F0001", "F0002"), chunk("F0002", "F0003"), chunk("F0004")))
+    task = asyncio.create_task(
+        dispatch_chunks(chunks, worker, mode="ordered_by_file", max_parallel=2)
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if len(started) == 2:
+            break
+    assert started == ["F0001-S1", "F0004-S1"]
+    release.set()
+    assert await task == ["F0001-S1", "F0002-S1", "F0004-S1"]
 
 
 def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
@@ -351,6 +467,7 @@ def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
         work,
         all_segments=source,
         config=current,
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=lambda items: {
             "segments": [
@@ -373,6 +490,7 @@ def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
         source,
         all_segments=source,
         config=current,
+        stage="translation",
         prompt=full_prompt("translation", "Translate."),
         payload_builder=lambda items: {
             "segments": [
@@ -406,6 +524,7 @@ def test_chunk_builder_splits_without_duplicating_segments() -> None:
         work,
         all_segments=segments(),
         config=current,
+        stage="translation",
         prompt=prompt,
         payload_builder=payload_builder,
     )
@@ -425,6 +544,7 @@ def test_chunk_builder_ignores_disabled_itpm() -> None:
         [segments()[0]],
         all_segments=segments(),
         config=current,
+        stage="translation",
         prompt=prompt,
         payload_builder=lambda items: {
             "segments": [

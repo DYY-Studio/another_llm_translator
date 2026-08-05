@@ -51,10 +51,12 @@ MVP 需要回答：
 
 ### File 与文档 part 是内容边界
 
-File 仍是存储、选择和导出的边界；任何 LLM 请求、Chunk 和参考上文都不得跨
-`(file_id, part_id)`。术语库可以在项目级汇总，但单次术语请求仍不得跨文档
-part。TXT 和普通 Adapter 使用 `part_id = "document"`；EPUB 使用每个 spine
-XHTML 的归档路径作为 part。调度仍按 File 进行，不把 EPUB 拆成多个 File。
+File 仍是存储、选择和导出的边界。默认情况下，任何 LLM 请求和 Chunk 都不得跨
+`(file_id, part_id)`；`reference_context` 始终不得跨该边界。项目配置可以按阶段
+启用 `chunking.cross_boundary_batching`，让满足源文顺序规则的 Chunk 和对应 LLM
+请求跨 File 或 part；这不改变 File 的存储、选择、导出和调度身份。术语库可以在
+项目级汇总。TXT 和普通 Adapter 使用 `part_id = "document"`；EPUB 使用每个
+spine XHTML 的归档路径作为 part。调度仍按 File 进行，不把 EPUB 拆成多个 File。
 
 ### Segment 是进度单位
 
@@ -80,11 +82,16 @@ Segment 的精确前缀；正文内部和尾随空白不做本地保护。该行
 
 Chunk 由当前 Run 动态生成，只能包含：
 
-- 同一个 `file_id` 和 `part_id`。
+- 默认只包含同一个 `file_id` 和 `part_id`；阶段启用
+  `cross_boundary_batching` 时，允许按下述规则跨边界。
 - 按 `line_index` 保持顺序的非空 Segment。
 - 当前命令选定范围内仍需处理的 Segment。
 
-两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空 Segment 本身仍不提交 LLM。已完成、筛选范围外、不同 part 或其他不在待处理集合中的非空 Segment 会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
+两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空
+Segment 本身仍不提交 LLM。启用跨边界合并后，不同 File 之间的源文顺序边界可直接
+合并；同一 File 跨 part 时，两个 Segment 的 `line_index` 中间区间必须全部是空
+Segment。已完成、筛选范围外或其他不在待处理集合中的非空 Segment 会结束当前
+Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
 
 Chunk 没有长期业务身份，不能用于判断进度或恢复。只有启用调试模式时才持久化 Chunk Manifest。
 
@@ -727,12 +734,12 @@ enabled = true
 previous_segments = 3
 ```
 
-数量表示当前 `(file_id, part_id)` 中、当前 Chunk 首个 Segment 之前最近的非空
-Segment 数。
+数量表示当前 Chunk 首个 Segment 所在 `(file_id, part_id)` 中、该 Segment 之前
+最近的非空 Segment 数。跨边界 Chunk 的后续 Segment 不会改变这份上文的边界。
 
 规则：
 
-- 上文不得跨 `file_id` 或 `part_id`。
+- 上文不得跨 Chunk 首个 Segment 的 `file_id` 或 `part_id`。
 - 一个 Chunk 共享一份 `reference_context`。
 - `reference_context` 只携带理解所需的源文和可用目标文本，不携带 Segment ID。
 - 上文不属于本次进度范围，不要求 LLM 输出。
@@ -746,7 +753,8 @@ Segment 数。
 
 `ordered_by_file`：
 
-- 同一 `(file_id, part_id)` 内 Chunk 顺序执行。
+- 默认同一 `(file_id, part_id)` 内 Chunk 顺序执行；启用跨边界合并时，调度器按
+  每个 Chunk 包含的全部 File 保持这些 File 的 Chunk 不重叠。
 - 不同文件可并发。
 - 翻译、校对和润色上文可包含此前已有的阶段文本。
 
@@ -964,7 +972,8 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 修复流程：
 
 1. 汇总当前轮校验失败 Segment。
-2. 同一 `file_id + part_id` 内按源文顺序分组；中间只有空行时仍可组成一个修复 Chunk。
+2. 按当前阶段的 Chunk 边界配置分组；默认限制在同一 `file_id + part_id`，启用
+   跨边界合并时遵守不同 File 直连、同 File 跨 part 中间区间全为空的规则。
 3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
@@ -1596,7 +1605,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 四阶段上文数量分别生效且不跨 `file_id` 或 `part_id`。
+- 四阶段上文数量分别生效且不跨当前 Chunk 首 Segment 的 `file_id` 或 `part_id`；
+  `cross_boundary_batching` 只改变允许合并的请求 Segment 边界。
 - 术语上文只含源文，不计入扫描进度。
 - ordered_by_file 和 parallel 的上文内容符合定义。
 - 术语按 normalized source 合并，override 和 disabled 生效。
@@ -1614,7 +1624,9 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 每个 Chunk 只含同文件、保持源文顺序的待处理非空 Segment。
+- 默认每个 Chunk 只含同文件同 part、保持源文顺序的待处理非空 Segment；启用
+  `cross_boundary_batching` 的阶段还覆盖跨 File 直连和同 File 跨 part 的空区间
+  规则。
 - Chunk 可以跨空行，但不能跨已完成、范围外或其他未处理的非空 Segment。
 - 部分响应保存中间 Segment 后，其两侧未决项重新拆成独立 Chunk。
 - 修改 Chunk 大小、并发、限流或调度后不丢失 Segment 进度。
