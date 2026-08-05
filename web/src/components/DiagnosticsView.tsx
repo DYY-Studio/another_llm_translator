@@ -123,6 +123,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
+        <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
         <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
         <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
         <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(metrics?.throughput_tokens_per_second ?? null, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>

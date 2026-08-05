@@ -373,7 +373,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .diagnostics-heading p { margin: 0; color: var(--muted); }
 .diagnostics-live { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .diagnostics-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--status-success); }
-.diagnostics-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagnostics-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
 .diagnostics-metrics article { min-width: 0; display: grid; gap: 6px; padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .diagnostics-metrics span, .diagnostics-metrics small { color: var(--muted); font-size: 12px; }
 .diagnostics-metrics strong { overflow-wrap: anywhere; font-size: 25px; font-variant-numeric: tabular-nums; }
@@ -491,6 +491,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .workspace { grid-template-columns: minmax(330px, 42%) minmax(0, 1fr); }
   .terms-workspace { grid-template-columns: minmax(330px, 42%) minmax(375px, 1fr); }
   .settings-layout { grid-template-columns: 1fr 300px; }
+  .diagnostics-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 1300px) {

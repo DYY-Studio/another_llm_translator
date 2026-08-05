@@ -87,6 +87,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     snapshot = diagnostics.snapshot()
     metrics = snapshot["metrics"]
     assert metrics["active_requests"] == 0
+    assert metrics["total_requests"] == 1
     assert metrics["http_errors"] == 1
     assert metrics["retry_count"] == 1
     assert metrics["rate_limit_waiting_requests"] == 0
@@ -134,7 +135,22 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     unavailable = diagnostics.snapshot()["metrics"]
     assert unavailable["input_tokens"] == 0
     assert unavailable["output_tokens"] == 0
+    assert unavailable["total_requests"] == 1
     assert unavailable["throughput_tokens_per_second"] is None
+
+
+def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("first", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-1",
+            model="test-model",
+            messages=[],
+            max_attempts=1,
+        )
+        assert diagnostics.snapshot()["metrics"]["total_requests"] == 1
+    with diagnostics.activate("second", "translation"):
+        assert diagnostics.snapshot()["metrics"]["total_requests"] == 0
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,7 @@ class Diagnostics:
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -124,6 +125,7 @@ class Diagnostics:
         self.project = project
         self.stage = stage
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -156,6 +158,7 @@ class Diagnostics:
         max_attempts: int,
         segment_id_map: dict[str, str] | None = None,
     ) -> None:
+        self.total_requests += 1
         normalized_messages = []
         for message in messages:
             content, truncated = _bounded(
@@ -326,6 +329,7 @@ class Diagnostics:
                 "project": self.project,
                 "stage": self.stage,
                 "active_requests": self.active_requests,
+                "total_requests": self.total_requests,
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
                 "rate_limit_waiting_requests": self.rate_limit_waiting_requests,

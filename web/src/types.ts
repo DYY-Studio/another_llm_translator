@@ -117,6 +117,7 @@ export interface DiagnosticsResponse {
     project: string | null;
     stage: string | null;
     active_requests: number;
+    total_requests: number;
     http_errors: number;
     retry_count: number;
     rate_limit_waiting_requests: number;
