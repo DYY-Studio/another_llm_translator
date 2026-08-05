@@ -11,27 +11,25 @@ from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
 from .project import load_source_files
 from .sqlite_storage import (
+    append_jsonl,
     get_segment,
     latest_stage_results,
+    new_record_id,
     query_segment_neighbors,
     query_segments,
+    read_json,
+    read_jsonl,
+    record_exists,
+    record_header,
     segment_count,
     segment_ids,
+    write_json,
 )
 from .stages import (
     build_term_library_rows,
     load_terms,
     normalize_term,
     validate_translation_text,
-)
-from .storage import (
-    append_jsonl,
-    atomic_write_json,
-    logical_record_exists,
-    new_record_id,
-    read_json,
-    read_jsonl,
-    record_header,
 )
 
 REVIEW_STAGES = {"proofreading", "polishing"}
@@ -43,7 +41,7 @@ class WebStore:
     def __init__(self, project: Path):
         self.project = project
         self.config = load_project_config(project)
-        self.metadata = read_json(project / "project.json")
+        self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
 
     @property
@@ -172,7 +170,11 @@ class WebStore:
 
     def terminology_scan(self) -> dict[str, Any]:
         active_path = self.project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = (
+            read_json(self.project, active_path)
+            if record_exists(self.project, active_path)
+            else None
+        )
         base = {
             "active_task_id": None,
             "status": active.get("status", "none") if active else "none",
@@ -191,7 +193,7 @@ class WebStore:
         base["active_task_id"] = task_id
         scans = [
             record
-            for record in read_jsonl(self.project / "terminology" / "scans.jsonl")
+            for record in read_jsonl(self.project, self.project / "terminology" / "scans.jsonl")
             if record.get("active_task_id") == task_id
             and record.get("segment_id")
         ]
@@ -224,7 +226,7 @@ class WebStore:
         ]
         candidate_records = [
             record
-            for record in read_jsonl(self.project / "terminology" / "candidates.jsonl")
+            for record in read_jsonl(self.project, self.project / "terminology" / "candidates.jsonl")
             if record.get("active_task_id") == task_id
         ]
         candidate_sources = {
@@ -482,7 +484,7 @@ class WebStore:
             request_id=None,
             origin="web",
         )
-        append_jsonl(stage_result_path(self.project, "translation"), record)
+        append_jsonl(self.project, stage_result_path(self.project, "translation"), record)
         return self._result_view(record) or {}
 
     def save_review(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -529,7 +531,7 @@ class WebStore:
             request_id=None,
             origin="web",
         )
-        append_jsonl(stage_result_path(self.project, stage), suggestion)
+        append_jsonl(self.project, stage_result_path(self.project, stage), suggestion)
         applied = None
         if payload.get("apply"):
             text = (
@@ -553,7 +555,7 @@ class WebStore:
                 request_id=None,
                 origin="web",
             )
-            append_jsonl(stage_result_path(self.project, applied_stage), applied)
+            append_jsonl(self.project, stage_result_path(self.project, applied_stage), applied)
         return {
             "suggestion": self._result_view(suggestion),
             "applied": self._result_view(applied),
@@ -586,6 +588,7 @@ class WebStore:
                     if segment_id not in current:
                         continue
                     append_jsonl(
+                        self.project,
                         stage_result_path(self.project, target_stage),
                         record_header(
                             "stage_reset",
@@ -614,7 +617,7 @@ class WebStore:
             str(item["normalized"]): dict(item)
             for item in (library or {}).get("terms", [])
         }
-        overrides_document = read_json(self.project / "terminology" / "overrides.json")
+        overrides_document = read_json(self.project, self.project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
@@ -700,7 +703,8 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        atomic_write_json(
+        write_json(
+            self.project,
             self.project / "terminology" / "overrides.json",
             override_record,
         )
@@ -724,7 +728,8 @@ class WebStore:
             terms=terms,
             origin=origin,
         )
-        atomic_write_json(
+        write_json(
+            self.project,
             self.project / "terminology" / "terms.json",
             term_record,
         )
@@ -746,7 +751,7 @@ class WebStore:
                 for item in (library or {}).get("terms", [])
             }
             overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(overrides_path)
+            overrides_document = read_json(self.project, overrides_path)
             overrides = {
                 str(item["normalized"]): dict(item)
                 for item in overrides_document.get("overrides", [])
@@ -804,7 +809,7 @@ class WebStore:
                 for item in (library or {}).get("terms", [])
             }
             overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(overrides_path)
+            overrides_document = read_json(self.project, overrides_path)
             overrides = {
                 str(item["normalized"]): dict(item)
                 for item in overrides_document.get("overrides", [])
@@ -864,7 +869,7 @@ class WebStore:
             for item in (library or {}).get("terms", [])
         }
         overrides_path = self.project / "terminology" / "overrides.json"
-        overrides_document = read_json(overrides_path)
+        overrides_document = read_json(self.project, overrides_path)
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])

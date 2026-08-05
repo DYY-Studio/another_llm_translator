@@ -10,9 +10,8 @@ from app.web_store import WebStore
 from app.errors import UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
-from app.sqlite_storage import query_segments, segment_ids
+from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
 from app.stages import export_project, load_terms, match_terms
-from app.storage import atomic_write_json, read_json, record_header
 from tests.test_foundation import make_app_root
 
 
@@ -31,7 +30,7 @@ def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
 
 
 def seed_conflicted_terms(project: Path) -> None:
-    project_id = str(read_json(project / "project.json")["project_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
     terms = [
         {
             "record_id": "TERM-000001",
@@ -73,7 +72,8 @@ def seed_conflicted_terms(project: Path) -> None:
             },
         },
     ]
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "terms.json",
         record_header(
             "terminology_library",
@@ -403,7 +403,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
         }
     )
     assert renamed["terms_revision"] == 2
-    overrides = read_json(project / "terminology" / "overrides.json")["overrides"]
+    overrides = read_json(project, project / "terminology" / "overrides.json")["overrides"]
     assert next(item for item in overrides if item["normalized"] == "alice")[
         "disabled"
     ]
@@ -466,13 +466,13 @@ def test_web_store_permanently_deletes_term_override_for_future_scans(
             "disabled": True,
         }
     )
-    assert read_json(project / "terminology" / "overrides.json")["overrides"]
+    assert read_json(project, project / "terminology" / "overrides.json")["overrides"]
 
     deleted = store.delete_terms({"normalized": ["alicia"]})
 
     assert deleted["deleted"] == 1
     assert load_terms(project)["terms"] == []
-    assert read_json(project / "terminology" / "overrides.json")["overrides"] == []
+    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
 
 
 def test_web_store_exposes_and_resolves_term_conflicts_independently(
@@ -567,7 +567,7 @@ def test_web_store_can_remove_conflicted_term_without_resolving_it(
     )
     override = next(
         item
-        for item in read_json(project / "terminology" / "overrides.json")[
+        for item in read_json(project, project / "terminology" / "overrides.json")[
             "overrides"
         ]
         if item["normalized"] == "gamma"

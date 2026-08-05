@@ -17,7 +17,12 @@ from app.project import (
     resolve_project_parent,
     sync_global_templates,
 )
-from app.storage import append_jsonl, read_json, read_jsonl, record_header
+from app.sqlite_storage import (
+    _validate_record,
+    read_files,
+    read_json,
+    read_segments,
+)
 
 
 def make_app_root(tmp_path: Path) -> Path:
@@ -256,15 +261,15 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
 
     assert project is not None
     assert summary["file_count"] == 3
-    assert read_json(project / "project.json")["name"] == "demo"
-    files = read_jsonl(project / "source" / "files.jsonl")
+    assert read_json(project, project / "project.json")["name"] == "demo"
+    files = read_files(project)
     assert len(files) == 3
     assert [item["original_name"] for item in files] == [
         "2.txt",
         "10.txt",
         "chapter/1.txt",
     ]
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    segments = read_segments(project)
     assert len(segments) == 9
     assert sum(bool(item["is_empty"]) for item in segments) == 4
     by_source = {str(item["source"]): bool(item["is_empty"]) for item in segments}
@@ -326,7 +331,7 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
     )
     assert "已保留项目模板" in warnings
     assert project_prompt.read_text(encoding="utf-8") == "project custom"
-    assert read_json(project / "project.json")["global_bundle_hash_seen"] == bundle_hash(
+    assert read_json(project, project / "project.json")["global_bundle_hash_seen"] == bundle_hash(
         app_root
     )
 
@@ -399,7 +404,7 @@ def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> Non
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    before = read_json(project / "project.json")["global_bundle_hash_seen"]
+    before = read_json(project, project / "project.json")["global_bundle_hash_seen"]
     (app_root / "prompts" / "translation.middle.txt").write_text(
         "changed", encoding="utf-8"
     )
@@ -407,39 +412,9 @@ def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> Non
         project, app_root=app_root, interactive=False
     )
     assert any("非交互环境" in warning for warning in warnings)
-    assert read_json(project / "project.json")["global_bundle_hash_seen"] == before
+    assert read_json(project, project / "project.json")["global_bundle_hash_seen"] == before
 
 
-def test_jsonl_tail_repair(tmp_path: Path) -> None:
-    path = tmp_path / "records.jsonl"
-    append_jsonl(path, record_header("test", "PRJ", value=1))
-    with path.open("ab") as handle:
-        handle.write(b'{"schema_version":1')
-    records = read_jsonl(path)
-    assert [item["value"] for item in records] == [1]
-    assert list(tmp_path.glob("records.jsonl.*.corrupt-tail"))
-    assert json.loads(path.read_text(encoding="utf-8"))
-
-
-def test_jsonl_middle_corruption_stops_without_repair(tmp_path: Path) -> None:
-    path = tmp_path / "records.jsonl"
-    path.write_text(
-        '{"schema_version":1,"value":1}\n'
-        '{"schema_version":\n'
-        '{"schema_version":1,"value":2}\n',
-        encoding="utf-8",
-    )
-    original = path.read_bytes()
-    with pytest.raises(StorageError, match="中间行损坏"):
-        read_jsonl(path)
-    assert path.read_bytes() == original
-
-
-def test_persisted_record_rejects_unsupported_enum(tmp_path: Path) -> None:
-    path = tmp_path / "record.json"
-    path.write_text(
-        '{"schema_version":1,"status":"unknown"}\n',
-        encoding="utf-8",
-    )
+def test_persisted_record_rejects_unsupported_enum() -> None:
     with pytest.raises(StorageError, match="不支持的 status"):
-        read_json(path)
+        _validate_record({"schema_version": 1, "status": "unknown"}, "test")

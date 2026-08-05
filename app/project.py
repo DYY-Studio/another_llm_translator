@@ -16,21 +16,18 @@ import chardet
 from .config import load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
-from .storage import (
-    atomic_write_json,
-    new_record_id,
-    read_json,
-    record_header,
-    utc_now,
-)
 from .sqlite_storage import (
     database_path,
     initialize as initialize_project_database,
+    new_record_id,
     read_adapter_state,
     read_files as read_sqlite_files,
     read_project_meta,
     read_segments as read_sqlite_segments,
+    record_header,
     replace_source,
+    utc_now,
+    write_json,
 )
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -635,8 +632,6 @@ def init_project(
             metadata,
             adapter_state_records,
         )
-        from .sqlite_storage import write_json
-
         write_json(
             temp,
             temp / "terminology" / "overrides.json",
@@ -1075,28 +1070,23 @@ def sync_global_templates(
     else:
         warnings.append("已保留项目模板")
     metadata["global_bundle_hash_seen"] = current_hash
-    atomic_write_json(project / "project.json", metadata)
+    write_json(project, project / "project.json", metadata)
     return warnings
 
 
-def load_source_files(
-    project: Path, *, repair_tail: bool = True
-) -> list[dict[str, object]]:
+def load_source_files(project: Path) -> list[dict[str, object]]:
     metadata = read_project_meta(project)
     files = read_sqlite_files(project)
     return _resolve_file_adapters(metadata, files)
 
 
-def load_segments(
-    project: Path, *, repair_tail: bool = True
-) -> list[dict[str, object]]:
-    return _load_segment_records(project, repair_tail=repair_tail)
+def load_segments(project: Path) -> list[dict[str, object]]:
+    return _load_segment_records(project)
 
 
 def _load_segment_records(
     project: Path,
     *,
-    repair_tail: bool = True,
     include_model_contract: bool = True,
 ) -> list[dict[str, object]]:
     segments = read_sqlite_segments(project)

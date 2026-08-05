@@ -33,13 +33,15 @@ from .errors import (
 )
 from .logging_utils import get_logger
 from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
-from .storage import (
+from .sqlite_storage import (
     append_jsonl,
+    append_jsonl_file,
     atomic_write_json,
     read_json,
     read_jsonl,
     record_header,
     utc_now,
+    write_json,
 )
 
 
@@ -159,9 +161,9 @@ def stage_result_path(project: Path, stage: str) -> Path:
 
 
 def load_stage_history(
-    project: Path, stage: str, *, repair_tail: bool = True
+    project: Path, stage: str
 ) -> list[dict[str, Any]]:
-    return read_jsonl(stage_result_path(project, stage), repair_tail=repair_tail)
+    return read_jsonl(project, stage_result_path(project, stage))
 
 
 def latest_completed_by_segment(
@@ -718,7 +720,7 @@ def create_run(
     reused_count: int,
     details: dict[str, Any] | None = None,
 ) -> tuple[str, Path]:
-    project_metadata = read_json(project / "project.json")
+    project_metadata = read_json(project, project / "project.json")
     suffix = uuid.uuid4().hex[:6].upper()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = f"RUN-{timestamp}-{STAGE_CODES[stage]}-{suffix}"
@@ -747,7 +749,7 @@ def create_run(
     )
     if stage in {"terminology", "translation", "proofreading", "polishing"}:
         manifest["usage_invocation_count"] = 0
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
 
@@ -783,7 +785,7 @@ def _interrupt_run(
     if reason == "resume_declined":
         manifest["resume_declined"] = True
     run_id = str(manifest["run_id"])
-    atomic_write_json(project / "runs" / run_id / "manifest.json", manifest)
+    write_json(project, project / "runs" / run_id / "manifest.json", manifest)
 
 
 def choose_running_run(
@@ -860,7 +862,7 @@ def scope_from_run(
     *,
     dry_run: bool,
 ) -> Scope:
-    manifest = read_json(project / "runs" / run_id / "manifest.json")
+    manifest = read_json(project, project / "runs" / run_id / "manifest.json")
     raw = manifest.get("scope")
     if not isinstance(raw, dict):
         raise StorageError(f"Run 缺少 scope：{run_id}")
@@ -892,7 +894,7 @@ def continue_run(
     reused_count: int,
 ) -> tuple[str, Path]:
     run_dir = project / "runs" / run_id
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     if manifest.get("status") != "running" or manifest.get("stage") != stage:
         raise StorageError(f"Run 不可续用：{run_id}")
     continuations = list(manifest.get("continuations", []))
@@ -922,7 +924,7 @@ def continue_run(
         }
     )
     manifest["continuations"] = continuations
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
 
@@ -939,6 +941,7 @@ def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
 
 
 def finalize_run(
+    project: Path,
     run_dir: Path,
     *,
     status: str,
@@ -948,7 +951,7 @@ def finalize_run(
     usage: dict[str, Any] | None = None,
     failure_counts: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     manifest.update(
         status=status,
         completed_segment_count=completed,
@@ -979,7 +982,7 @@ def finalize_run(
         manifest["usage_invocation_count"] = (
             invocation_count + 1 if type(invocation_count) is int else 1
         )
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return usage
 
 
@@ -1015,6 +1018,7 @@ def combine_usage(
 
 
 def save_debug_chunks(
+    project: Path,
     run_dir: Path,
     project_id: str,
     run_id: str,
@@ -1023,6 +1027,7 @@ def save_debug_chunks(
 ) -> None:
     for chunk in chunks:
         append_jsonl(
+            project,
             run_dir / "chunks.jsonl",
             record_header(
                 "chunk_manifest",
@@ -1221,7 +1226,7 @@ class LLMClient:
                 {"schema_version": 1, "error": error, "http_status": status},
             )
         async with self.log_lock:
-            append_jsonl(
+            append_jsonl_file(
                 self.run_dir / "attempts.jsonl",
                 record_header(
                     "request_attempt",

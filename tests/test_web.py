@@ -18,12 +18,12 @@ from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
-from app.storage import (
+from app.sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
+    read_files,
     read_json,
-    read_jsonl,
     record_header,
+    write_json,
 )
 from app.web import create_app
 from app.web_tasks import WebTaskManager
@@ -121,9 +121,9 @@ def test_web_deletes_project_only_after_confirmation_and_finished_runs(
     assert blocked.status_code == 400
     assert project.exists()
 
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     manifest["status"] = "failed"
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     deleted = client.request(
         "DELETE",
         "/api/v1/projects/sample",
@@ -554,9 +554,9 @@ def test_web_applies_epub_import_options_without_project_level_settings(
         "特別（スペシャル／とくべつ）だ。",
     ]
     project = projects_root / "ruby-option"
-    assert "adapter_options" not in read_json(project / "project.json")
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
-    state = read_json(project / str(file_record["document_adapter_state"]))
+    assert "adapter_options" not in read_json(project, project / "project.json")
+    file_record = read_files(project)[0]
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
     assert state["state"]["ruby_mode"] == "parenthetical"
 
 
@@ -1009,13 +1009,13 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    before = read_jsonl(project / "source" / "files.jsonl")
+    before = read_files(project)
     response = client.post(
         "/api/v1/projects/sample/files/remove",
         json={"file_ids": ["F0001", "F9999"]},
     )
     assert response.status_code == 400
-    assert read_jsonl(project / "source" / "files.jsonl") == before
+    assert read_files(project) == before
 
 
 def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
@@ -1135,8 +1135,8 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     )
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] == 1
-    assert read_json(project / "terminology" / "terms.json")["terms"] == []
-    assert read_json(project / "terminology" / "overrides.json")["overrides"] == []
+    assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
+    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
 
 
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
@@ -1198,9 +1198,10 @@ def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
 
 def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path, "Alice")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     task_id = "TERM-TASK-WEB-PARTIAL"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -1212,6 +1213,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "candidates.jsonl",
         record_header(
             "terminology_candidates",
@@ -1573,9 +1575,10 @@ def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
-    project_id = str(read_json(project / "project.json")["project_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
     task_id = "TERM-TASK-COMPLETED"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -1587,6 +1590,7 @@ def test_web_task_options_include_completed_terminology_scans(
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "scans.jsonl",
         record_header(
             "terminology_scan",

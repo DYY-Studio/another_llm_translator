@@ -1,13 +1,130 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError
 
 SCHEMA_VERSION = 1
+
+STAGES = frozenset(
+    {
+        "terminology",
+        "translation",
+        "proofreading",
+        "proofreading_applied",
+        "polishing",
+        "polishing_applied",
+    }
+)
+RECORD_STATUSES = frozenset(
+    {
+        "active",
+        "running",
+        "completed",
+        "failed",
+        "interrupted",
+        "reset",
+        "partial_published",
+    }
+)
+REVIEW_STATUSES = frozenset({"accepted", "suggested"})
+VALIDATION_STATUSES = frozenset({"passed", "warning"})
+ERROR_CATEGORIES = frozenset(
+    {
+        "context_error",
+        "external_error",
+        "format_error",
+        "validation_error",
+        "stage_error",
+    }
+)
+
+
+def _validate_record(value: Any, location: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise StorageError(f"不支持或缺少 schema_version：{location}")
+    for key, allowed in (
+        ("stage", STAGES),
+        ("status", RECORD_STATUSES),
+        ("review_status", REVIEW_STATUSES),
+        ("validation_status", VALIDATION_STATUSES),
+        ("error_class", ERROR_CATEGORIES),
+    ):
+        if key in value and value[key] is not None and value[key] not in allowed:
+            raise StorageError(f"不支持的 {key}：{location}: {value[key]}")
+    return value
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def new_record_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:12].upper()}"
+
+
+def record_header(
+    record_type: str,
+    project_id: str,
+    *,
+    record_id: str | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "record_type": record_type,
+        "record_id": record_id or new_record_id("REC"),
+        "project_id": project_id,
+        **fields,
+        "created_at": utc_now(),
+    }
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def append_jsonl_file(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def database_path(project: Path) -> Path:
@@ -313,10 +430,6 @@ def _kind(path: Path, project: Path) -> tuple[str, str | None]:
     relative = _relative(path, project)
     if relative == "project.json":
         return "project", None
-    if relative == "source/files.jsonl":
-        return "files", None
-    if relative == "source/segments.jsonl":
-        return "segments", None
     if relative.startswith("source/adapters/") and relative.endswith(".json"):
         return "adapter_state", Path(relative).stem
     if relative.startswith("stages/") and relative.endswith(".jsonl"):
@@ -339,42 +452,36 @@ def _kind(path: Path, project: Path) -> tuple[str, str | None]:
     return "file", None
 
 
-def recognizes(path: Path) -> bool:
-    for parent in (path.resolve(), *path.resolve().parents):
-        if (parent / "project.sqlite").is_file():
-            try:
-                return _kind(path, parent)[0] != "file"
-            except ValueError:
-                return False
-    return False
-
-
-def read_json(project: Path, path: Path) -> dict[str, Any] | None:
+def read_json(project: Path, path: Path) -> dict[str, Any]:
     ensure_supported(project)
     kind, key = _kind(path, project)
     if kind == "project":
-        return read_project_meta(project)
-    if kind == "adapter_state":
-        return read_adapter_state(project, str(key))
-    if kind in {"terms", "overrides", "active_task"}:
+        value = read_project_meta(project)
+    elif kind == "adapter_state":
+        value = read_adapter_state(project, str(key))
+    elif kind in {"terms", "overrides", "active_task"}:
         connection = _with_db(project)
         try:
             row = connection.execute(
                 "SELECT payload_json FROM terms_state WHERE key = ?", (kind,)
             ).fetchone()
-            return _load(str(row[0])) if row is not None else None
+            value = _load(str(row[0])) if row is not None else None
         finally:
             connection.close()
-    if kind == "run_manifest":
+    elif kind == "run_manifest":
         connection = _with_db(project)
         try:
             row = connection.execute(
                 "SELECT payload_json FROM runs WHERE run_id = ?", (key,)
             ).fetchone()
-            return _load(str(row[0])) if row is not None else None
+            value = _load(str(row[0])) if row is not None else None
         finally:
             connection.close()
-    raise StorageError(f"SQLite 不支持读取 JSON 路径：{path}")
+    else:
+        raise StorageError(f"SQLite 不支持读取 JSON 路径：{path}")
+    if value is None:
+        raise StorageError(f"SQLite 记录不存在：{path}")
+    return _validate_record(value, str(path))
 
 
 def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
@@ -462,63 +569,12 @@ def _records(project: Path, kind: str, key: str | None = None) -> list[dict[str,
         connection.close()
 
 
-def read_jsonl(project: Path, path: Path, *, repair_tail: bool = True) -> list[dict[str, Any]]:
-    del repair_tail
+def read_jsonl(project: Path, path: Path) -> list[dict[str, Any]]:
     kind, key = _kind(path, project)
-    if kind == "files":
-        return read_files(project)
-    if kind == "segments":
-        return read_segments(project)
-    return _records(project, kind, key)
-
-
-def write_jsonl(project: Path, path: Path, values: Iterable[dict[str, Any]]) -> None:
-    kind, key = _kind(path, project)
-    records = [dict(value) for value in values]
-    connection = _with_db(project)
-    try:
-        with connection:
-            if kind == "files":
-                connection.execute("DELETE FROM segments")
-                connection.execute("DELETE FROM files")
-                connection.executemany(
-                    "INSERT INTO files(file_id, file_order, payload_json) VALUES (?, ?, ?)",
-                    [(str(item["file_id"]), int(item["file_order"]), _json(item)) for item in records],
-                )
-            elif kind == "segments":
-                connection.execute("DELETE FROM segments")
-                connection.executemany(
-                    """
-                    INSERT INTO segments(segment_id,file_id,line_index,part_id,source,is_empty,model_source,payload_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            str(item["segment_id"]), str(item["file_id"]), int(item["line_index"]),
-                            str(item["part_id"]), str(item["source"]), int(bool(item["is_empty"])),
-                            item.get("model_source"), _json(item),
-                        )
-                        for item in records
-                    ],
-                )
-            elif kind == "stage":
-                connection.execute("DELETE FROM stage_results WHERE stage = ?", (key,))
-                _insert_stage(connection, records)
-            elif kind == "scans":
-                connection.execute("DELETE FROM terminology_scans")
-                _insert_scans(connection, records)
-            elif kind == "candidates":
-                connection.execute("DELETE FROM terminology_candidates")
-                _insert_candidates(connection, records)
-            elif kind == "chunks":
-                connection.execute("DELETE FROM run_chunks WHERE run_id = ?", (key,))
-                _insert_chunks(connection, records, str(key))
-            else:
-                raise StorageError(f"SQLite 不支持写入记录类型：{kind}")
-    except sqlite3.Error as exc:
-        raise StorageError(f"无法写入 SQLite 记录：{path}: {exc}") from exc
-    finally:
-        connection.close()
+    return [
+        _validate_record(item, str(path))
+        for item in _records(project, kind, key)
+    ]
 
 
 def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:

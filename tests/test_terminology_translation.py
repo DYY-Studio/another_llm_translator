@@ -18,7 +18,7 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.storage import read_json, read_jsonl
+from app.sqlite_storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_foundation import make_app_root
 
@@ -377,7 +377,7 @@ async def test_partial_response_context_split_does_not_retry_completed_segment(
     ]
     assert calls[2:]
     assert all(all(segment_id == "1" for segment_id in request) for request in calls[2:])
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     assert [
         record["segment_id"]
         for record in records
@@ -443,7 +443,7 @@ async def test_dynamic_itpm_failure_finalizes_translation_run(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     manifests = [
-        read_json(path)
+        read_json(project, path)
         for path in (project / "runs").glob("*/manifest.json")
     ]
     assert len(manifests) == 1
@@ -533,7 +533,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     ] == [
         ["1", "2", "3"],
     ]
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     assert all(record["validation_status"] == "passed" for record in records)
 
 
@@ -586,7 +586,7 @@ async def test_oversized_segment_is_split_and_saved_once(
     assert summary["completed"] == 1
     assert len(requested_ids) > 1
     assert all(segment_id.isdigit() for segment_id in requested_ids)
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     completed = [record for record in records if record["status"] == "completed"]
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
@@ -643,7 +643,11 @@ async def test_model_context_error_triggers_runtime_segment_split(
     )
     assert completed["F0001-S000001"]["text"] == "abcdefgh"
     run_dir = next((project / "runs").iterdir())
-    attempts = read_jsonl(run_dir / "attempts.jsonl")
+    attempts = [
+        json.loads(line)
+        for line in (run_dir / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert any(item.get("parent_request_id") for item in attempts)
 
 
@@ -701,7 +705,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 1
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     completed = [item for item in records if item["status"] == "completed"]
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"

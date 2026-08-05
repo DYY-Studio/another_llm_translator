@@ -30,9 +30,24 @@ from app.execution import (
     stage_fingerprint,
 )
 from app.llm_adapter import load_json_adapter
+from app.project import init_project
+from app.sqlite_storage import read_json, write_json
+from tests.test_foundation import make_app_root
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def _finalize_project(tmp_path: Path) -> Path:
+    project, _ = init_project(
+        [],
+        name="finalize",
+        empty=True,
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    return project
 
 
 def config() -> dict:
@@ -1160,13 +1175,15 @@ async def test_llm_client_without_usage_mapping_has_no_summary(
 
 
 def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    project = _finalize_project(tmp_path)
+    run_dir = project / "runs" / "RUN-TEST"
+    run_dir.mkdir(parents=True)
 
     def write_manifest() -> None:
-        (run_dir / "manifest.json").write_text(
-            json.dumps({"schema_version": 1, "status": "running"}),
-            encoding="utf-8",
+        write_json(
+            project,
+            run_dir / "manifest.json",
+            {"schema_version": 1, "status": "running"},
         )
 
     usage = {
@@ -1176,40 +1193,41 @@ def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
         "available": True,
     }
     write_manifest()
-    finalize_run(run_dir, status="completed", completed=2, failed=0, usage=usage)
-    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    finalize_run(project, run_dir, status="completed", completed=2, failed=0, usage=usage)
+    manifest = read_json(project, run_dir / "manifest.json")
     assert manifest["usage"] == usage
     assert manifest["status"] == "completed"
 
     write_manifest()
-    finalize_run(run_dir, status="failed", completed=0, failed=1)
-    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    finalize_run(project, run_dir, status="failed", completed=0, failed=1)
+    manifest = read_json(project, run_dir / "manifest.json")
     assert "usage" not in manifest
 
 
 def test_finalize_run_accumulates_exact_usage_across_continuations(
     tmp_path: Path,
 ) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "running",
-                "usage_invocation_count": 1,
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 4,
-                    "total_tokens": 14,
-                    "available": True,
-                },
-            }
-        ),
-        encoding="utf-8",
+    project = _finalize_project(tmp_path)
+    run_dir = project / "runs" / "RUN-TEST"
+    run_dir.mkdir(parents=True)
+    write_json(
+        project,
+        run_dir / "manifest.json",
+        {
+            "schema_version": 1,
+            "status": "running",
+            "usage_invocation_count": 1,
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "available": True,
+            },
+        },
     )
 
     combined = finalize_run(
+        project,
         run_dir,
         status="completed",
         completed=2,
@@ -1228,7 +1246,7 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
         "total_tokens": 24,
         "available": True,
     }
-    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    manifest = read_json(project, run_dir / "manifest.json")
     assert manifest["usage"] == combined
     assert manifest["usage_invocation_count"] == 2
 
@@ -1248,26 +1266,27 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
 def test_finalize_run_marks_incomplete_or_legacy_continuation_usage_unavailable(
     tmp_path: Path, current: dict[str, object] | None
 ) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "running",
-                "continuations": [{"started_at": "now"}],
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 4,
-                    "total_tokens": 14,
-                    "available": True,
-                },
-            }
-        ),
-        encoding="utf-8",
+    project = _finalize_project(tmp_path)
+    run_dir = project / "runs" / "RUN-TEST"
+    run_dir.mkdir(parents=True)
+    write_json(
+        project,
+        run_dir / "manifest.json",
+        {
+            "schema_version": 1,
+            "status": "running",
+            "continuations": [{"started_at": "now"}],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "available": True,
+            },
+        },
     )
 
     usage = finalize_run(
+        project,
         run_dir,
         status="completed",
         completed=2,
