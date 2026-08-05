@@ -119,6 +119,7 @@ button { cursor: pointer; }
 .icon-button:hover { background: var(--hover); }
 .run-panel { margin-top: auto; padding: 18px 8px 4px; border-top: 1px solid var(--border); }
 .run-button { width: 100%; }
+.run-button .run-label-short { display: none; }
 .task-summary { display: grid; gap: 6px; margin-top: 14px; font-size: 12px; color: var(--muted); }
 .task-summary strong { color: var(--accent); font-size: 14px; }
 .mobile-run-bar { display: none; }
@@ -488,8 +489,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .nav-item { justify-content: center; padding: 0; }
   .nav-item span, .run-panel .task-summary { display: none; }
   .run-panel { padding-inline: 0; }
-  .run-button { padding: 0; font-size: 0; }
-  .run-button::after { content: "运行"; font-size: 12px; }
+  .run-button { padding: 0; }
+  .run-button .run-label-full { display: none; }
+  .run-button .run-label-short { display: inline; font-size: 12px; }
   .workspace { grid-template-columns: minmax(330px, 42%) minmax(0, 1fr); }
   .terms-workspace { grid-template-columns: minmax(330px, 42%) minmax(375px, 1fr); }
   .settings-layout { grid-template-columns: 1fr 300px; }

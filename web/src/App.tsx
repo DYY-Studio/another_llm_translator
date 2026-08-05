@@ -17,7 +17,7 @@ import type {
   TaskState,
   ThemeMode,
 } from "./types";
-import { detectLanguage, type Language } from "./i18n";
+import { detectLanguage, translate, type Language } from "./i18n";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
@@ -83,7 +83,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.lang = language;
-    document.title = language === "en" ? "Translator" : "译工坊";
+    document.title = translate("brand", language);
     try {
       window.localStorage.setItem("minimal-llm-translator.language.v1", language);
     } catch {
@@ -139,7 +139,7 @@ export default function App() {
       ));
       writeRecentProjectPaths(validPaths);
       const failures = results.length - validPaths.length;
-      if (failures) setError(language === "en" ? `${failures} recent project paths were invalid and removed` : `${failures} 个最近项目路径已失效并移除`);
+      if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
       await loadProjects();
     }).catch((value) => setError(String(value)));
   }, []);
@@ -221,7 +221,7 @@ export default function App() {
     setStage(target);
   }
 
-  let content = <div className="empty-page">{language === "en" ? "Select or create a project to begin." : "选择或创建项目后开始工作。"}</div>;
+  let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
     else if (stage === "settings") content = <SettingsView project={project} language={language} />;
   else if (project && overview) {
