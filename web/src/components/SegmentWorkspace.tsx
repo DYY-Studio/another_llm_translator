@@ -1,9 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, type Language } from "../i18n";
 import type { ProjectOverview, Segment, SegmentDetail, Stage } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
+
+interface WorkspaceCacheEntry {
+  orderedIds: string[];
+  total: number;
+  records: Record<string, Segment>;
+  focusedId: string;
+  scrollTop: number;
+}
+
+// Survives tab switches so returning to a stage renders instantly. Keyed by
+// the full query (project + stage + filters); cleared when the project
+// changes so cached data never leaks across projects.
+const workspaceCache = new Map<string, WorkspaceCacheEntry>();
+const workspaceProjectRef = { current: "" };
 
 function resultFor(segment: Segment, stage: Stage) {
   if (stage === "translation") return segment.translation;
@@ -65,6 +79,8 @@ export function SegmentWorkspace({
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
   const indexInFlightRef = useRef(false);
+  const preserveFocusRef = useRef("");
+  const restoredScrollTopRef = useRef<number | null>(null);
   const pageSize = 100;
   const pageCacheRef = useRef(new Set<string>());
   const pageRequestsRef = useRef(new Set<string>());
@@ -98,10 +114,52 @@ export function SegmentWorkspace({
   }, []);
 
   useEffect(() => {
+    if (workspaceProjectRef.current !== project) {
+      workspaceProjectRef.current = project;
+      workspaceCache.clear();
+    }
+  }, [project]);
+
+  // Restore a cached window synchronously during render so the browser never
+  // paints an empty frame when switching back to this stage. reloadIndex below
+  // refreshes the cached data in the background (preserving focus when the
+  // segment set is unchanged), so the list converges to the latest state.
+  if (activePageQueryRef.current !== pageQueryKey) {
+    const cached = workspaceCache.get(pageQueryKey);
+    if (cached) {
+      activePageQueryRef.current = pageQueryKey;
+      resetPageCache();
+      preserveFocusRef.current = cached.focusedId;
+      restoredScrollTopRef.current = cached.scrollTop;
+      setOrderedIds(cached.orderedIds);
+      setTotal(cached.total);
+      setRecords(cached.records);
+      selection.reset(cached.focusedId);
+    }
+  }
+
+  useEffect(() => {
     if (activePageQueryRef.current === pageQueryKey) return;
     activePageQueryRef.current = pageQueryKey;
     resetPageCache();
+    preserveFocusRef.current = "";
   }, [pageQueryKey, resetPageCache]);
+
+  useLayoutEffect(() => {
+    if (restoredScrollTopRef.current === null) return;
+    if (listRef.current) listRef.current.scrollTop = restoredScrollTopRef.current;
+    restoredScrollTopRef.current = null;
+  });
+
+  useEffect(() => {
+    workspaceCache.set(pageQueryKey, {
+      orderedIds,
+      total,
+      records,
+      focusedId: selection.focusedKey,
+      scrollTop: listRef.current?.scrollTop ?? 0,
+    });
+  }, [pageQueryKey, orderedIds, total, records, selection.focusedKey]);
 
   const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
     const requestId = ++indexRequestRef.current;
@@ -154,7 +212,7 @@ export function SegmentWorkspace({
     }
   }, [project, stage, file, status, normalizedSearch, resetPageCache]);
 
-  useEffect(() => { void reloadIndex(); }, [reloadIndex]);
+  useEffect(() => { void reloadIndex(preserveFocusRef.current); }, [reloadIndex]);
 
   const virtualizer = useVirtualizer({
     count: orderedIds.length,
@@ -394,7 +452,10 @@ export function SegmentWorkspace({
           {batchMessage && <span className="success-text">{batchMessage}</span>}
         </div>
         <div className="list-header"><span>{translate("workspace.idStatus", language)}</span><span>{translate("workspace.sourceResultPreview", language)}</span></div>
-        <div className="segment-list" ref={listRef}>
+        <div className="segment-list" ref={listRef} onScroll={(event) => {
+          const cached = workspaceCache.get(pageQueryKey);
+          if (cached) cached.scrollTop = event.currentTarget.scrollTop;
+        }}>
           <div className="segment-row-stack" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualItems.map((virtualItem) => {
               const item = records[orderedIds[virtualItem.index]];
