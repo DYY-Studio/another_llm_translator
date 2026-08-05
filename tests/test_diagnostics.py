@@ -95,7 +95,14 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert metrics["usage_available"] is True
     assert metrics["input_tokens"] == 12
     assert metrics["output_tokens"] == 3
+    assert metrics["throughput_input_tokens_per_second"] is not None
+    assert metrics["throughput_output_tokens_per_second"] is not None
     assert metrics["throughput_tokens_per_second"] is not None
+    assert metrics["throughput_tokens_per_second"] == pytest.approx(
+        metrics["throughput_input_tokens_per_second"]
+        + metrics["throughput_output_tokens_per_second"],
+        abs=0.02,
+    )
     assert "reasoning" not in snapshot
     assert snapshot["requests"] == [
         {
@@ -136,6 +143,8 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert unavailable["input_tokens"] == 0
     assert unavailable["output_tokens"] == 0
     assert unavailable["total_requests"] == 1
+    assert unavailable["throughput_input_tokens_per_second"] is None
+    assert unavailable["throughput_output_tokens_per_second"] is None
     assert unavailable["throughput_tokens_per_second"] is None
 
 

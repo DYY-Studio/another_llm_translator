@@ -314,16 +314,15 @@ class Diagnostics:
         if self._started_monotonic is not None and self._running:
             elapsed = time.monotonic() - self._started_monotonic
         usage_available = bool(self.usage and self.usage.get("available") is True)
-        throughput = None
+        input_tokens = int(self.usage["input_tokens"]) if usage_available else 0
+        output_tokens = int(self.usage["output_tokens"]) if usage_available else 0
+        throughput_input = None
+        throughput_output = None
+        throughput_total = None
         if usage_available and elapsed > 0:
-            throughput = round(
-                (
-                    int(self.usage["input_tokens"])
-                    + int(self.usage["output_tokens"])
-                )
-                / elapsed,
-                2,
-            )
+            throughput_input = round(input_tokens / elapsed, 2)
+            throughput_output = round(output_tokens / elapsed, 2)
+            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
         return {
             "metrics": {
                 "project": self.project,
@@ -338,14 +337,12 @@ class Diagnostics:
                     if self.latest_latency_seconds is not None
                     else None
                 ),
-                "input_tokens": (
-                    int(self.usage["input_tokens"]) if usage_available else 0
-                ),
-                "output_tokens": (
-                    int(self.usage["output_tokens"]) if usage_available else 0
-                ),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "usage_available": usage_available,
-                "throughput_tokens_per_second": throughput,
+                "throughput_input_tokens_per_second": throughput_input,
+                "throughput_output_tokens_per_second": throughput_output,
+                "throughput_tokens_per_second": throughput_total,
             },
             "logs": logs,
             "requests": [

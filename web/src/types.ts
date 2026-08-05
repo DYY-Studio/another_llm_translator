@@ -125,6 +125,8 @@ export interface DiagnosticsResponse {
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
+    throughput_input_tokens_per_second: number | null;
+    throughput_output_tokens_per_second: number | null;
     throughput_tokens_per_second: number | null;
   };
   logs: Array<{
