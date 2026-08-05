@@ -159,22 +159,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
         <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
         <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
         <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language, "", en ? "Unavailable" : "不可用") : (en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
-        <article>
-          <div className="diagnostics-metric-label">
-            <span>{translate("diagnostics.throughput", language)}</span>
-            <select
-              aria-label={translate("diagnostics.throughputMetric", language)}
-              value={throughputMetric}
-              onChange={(event) => changeThroughputMetric(event.target.value as ThroughputMetric)}
-            >
-              <option value="total">{translate("diagnostics.throughputTotal", language)}</option>
-              <option value="input">{translate("diagnostics.throughputInput", language)}</option>
-              <option value="output">{translate("diagnostics.throughputOutput", language)}</option>
-            </select>
-          </div>
-          <strong>{number(throughput, language, "", en ? "Unavailable" : "不可用")}</strong>
-          <small>{translate("diagnostics.tokensPerSecond", language)}</small>
-        </article>
+        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(throughput, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
@@ -183,6 +168,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
         <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
         <span>{en ? "Retries" : "重试"} <strong>{number(metrics?.retry_count ?? 0, language)}</strong></span>
         <span>{en ? "Rate-limit waits" : "限流等待"} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>
+        <span>{translate("diagnostics.throughputMetric", language)} <select aria-label={translate("diagnostics.throughputMetric", language)} value={throughputMetric} onChange={(event) => changeThroughputMetric(event.target.value as ThroughputMetric)}><option value="total">{translate("diagnostics.throughputTotal", language)}</option><option value="input">{translate("diagnostics.throughputInput", language)}</option><option value="output">{translate("diagnostics.throughputOutput", language)}</option></select></span>
       </div>
 
       <div className="diagnostics-grid">
