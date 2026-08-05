@@ -617,6 +617,126 @@ async def _execute_stage_run(
     )
 
 
+async def _localized_request_loop(
+    group: list[dict[str, Any]],
+    *,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt: str,
+    config: dict[str, Any],
+    llm: LLMClient,
+    stage: str,
+    accept: Callable[[str, str, Any], Awaitable[None]],
+    save_error: Callable[[list[str], str, str], Awaitable[None]],
+    parse: Callable[
+        [str, dict[str, str]],
+        tuple[dict[str, Any], list[str], list[str], bool],
+    ],
+    format_correction: str,
+    by_id: dict[str, dict[str, Any]],
+    segments: list[dict[str, Any]],
+    logger: Any,
+    initial_parent_request_id: str | None = None,
+    repair_candidates: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    exhausted: list[str] = []
+    tasks: list[
+        tuple[
+            list[dict[str, Any]],
+            str | None,
+            int,
+            list[dict[str, Any]],
+        ]
+    ] = [(group, initial_parent_request_id, 0, group[:1])]
+    while tasks:
+        items, parent_request_id, format_attempt, anchor = tasks.pop(0)
+        expected = [str(item["segment_id"]) for item in items]
+        payload = payload_builder(items or anchor)
+        if not items:
+            payload["segments"] = []
+        if repair_candidates is not None:
+            payload["segments"] = [
+                {
+                    "id": item["segment_id"],
+                    "source": segment_model_source(item),
+                    "failed_candidate": repair_candidates[
+                        str(item["segment_id"])
+                    ]["candidate"],
+                    "validation_matches": repair_candidates[
+                        str(item["segment_id"])
+                    ]["findings"],
+                }
+                for item in items
+            ]
+            payload["validation_repair"] = (
+                "返回不含所列残留字符的完整修正版译文。"
+            )
+        if format_attempt:
+            payload["format_correction"] = format_correction
+        payload, id_map = localize_request_ids(payload, items)
+        messages = render_messages(prompt, payload)
+        request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+        estimated = _request_estimate(messages, config, request_id)
+        try:
+            response, _ = await llm.chat(
+                messages=messages,
+                temperature=config["llm"][f"temperature_{stage}"],
+                estimated_input_tokens=estimated,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                segment_id_map=id_map,
+            )
+            valid, unresolved, parse_errors, response_complete = parse(
+                response.content, id_map
+            )
+        except FatalExternalError:
+            raise
+        except ContextLengthError as exc:
+            if exc.segment_ids is None:
+                exc.segment_ids = tuple(expected)
+            raise
+        except ExternalError as exc:
+            await save_error(expected, request_id, str(exc))
+            continue
+        for segment_id, value in valid.items():
+            try:
+                await accept(segment_id, request_id, value)
+            except IncompleteError as exc:
+                parse_errors.append(str(exc))
+                if segment_id not in unresolved:
+                    unresolved.append(segment_id)
+                continue
+        if response_complete and not unresolved:
+            continue
+        logger.warning(
+            "format correction request=%s attempt=%d unresolved=%d errors=%d",
+            request_id,
+            format_attempt + 1,
+            len(unresolved),
+            len(parse_errors),
+        )
+        if format_attempt >= config["retry"]["format_max_attempts"]:
+            exhausted.extend(unresolved)
+            continue
+        if not unresolved:
+            tasks.append(([], request_id, format_attempt + 1, anchor))
+            continue
+        unresolved_groups = contiguous_groups(
+            (by_id[segment_id] for segment_id in unresolved),
+            all_segments=segments,
+            cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
+        )
+        tasks.extend(
+            (
+                unresolved_group,
+                request_id,
+                format_attempt + 1,
+                unresolved_group[:1],
+            )
+            for unresolved_group in unresolved_groups
+        )
+    return list(dict.fromkeys(exhausted))
+
+
 def _restore_leading_whitespace(source: str, text: str) -> str:
     prefix_end = 0
     while prefix_end < len(source) and source[prefix_end].isspace():
@@ -2595,132 +2715,47 @@ async def run_translation(
         on_usage=on_usage,
     )
 
-    async def request_translations(
-        group: list[dict[str, Any]],
-        *,
-        repair_candidates: dict[str, dict[str, Any]] | None = None,
-        initial_parent_request_id: str | None = None,
-    ) -> tuple[dict[str, tuple[str, str]], list[str]]:
-        valid_total: dict[str, tuple[str, str]] = {}
-        exhausted: list[str] = []
-        tasks: list[
-            tuple[
-                list[dict[str, Any]],
-                str | None,
-                int,
-                list[dict[str, Any]],
-            ]
-        ] = [(group, initial_parent_request_id, 0, group[:1])]
-        while tasks:
-            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
-            expected = [str(item["segment_id"]) for item in items]
-            payload = payload_builder(items or anchor)
-            if not items:
-                payload["segments"] = []
-            if repair_candidates is not None:
-                payload["segments"] = [
-                    {
-                        "id": item["segment_id"],
-                        "source": segment_model_source(item),
-                        "failed_candidate": repair_candidates[
-                            str(item["segment_id"])
-                        ]["candidate"],
-                        "validation_matches": repair_candidates[
-                            str(item["segment_id"])
-                        ]["findings"],
-                    }
-                    for item in items
-                ]
-                payload["validation_repair"] = (
-                    "返回不含所列残留字符的完整修正版译文。"
-                )
-            if format_attempt:
-                payload["format_correction"] = (
-                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
-                )
-            payload, id_map = localize_request_ids(payload, items)
-            messages = render_messages(prompt, payload)
-            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
-            try:
-                response, _ = await state.llm.chat(
-                    messages=messages,
-                    temperature=config["llm"]["temperature_translation"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    segment_id_map=id_map,
-                )
-                valid, unresolved, parse_errors, response_complete = (
-                    _map_local_translation_response(response.content, id_map)
-                )
-            except FatalExternalError:
-                raise
-            except ContextLengthError as exc:
-                if exc.segment_ids is None:
-                    exc.segment_ids = tuple(expected)
-                raise
-            except ExternalError as exc:
-                for segment_id in expected:
-                    await save_failed(
-                        segment_id,
-                        request_id,
-                        "external_error",
-                        str(exc),
-                    )
-                continue
-            for segment_id, text in valid.items():
-                try:
-                    await accept_candidate(segment_id, text, request_id)
-                except IncompleteError as exc:
-                    parse_errors.append(str(exc))
-                    if segment_id not in unresolved:
-                        unresolved.append(segment_id)
-                    continue
-                valid_total[segment_id] = (text, request_id)
-            if response_complete and not unresolved:
-                continue
-            logger.warning(
-                "format correction request=%s attempt=%d unresolved=%d errors=%d",
+    async def accept_translation(
+        segment_id: str, request_id: str, text: Any
+    ) -> None:
+        await accept_candidate(segment_id, str(text), request_id)
+
+    async def save_external_error(
+        expected: list[str], request_id: str, message: str
+    ) -> None:
+        for segment_id in expected:
+            await save_failed(
+                segment_id,
                 request_id,
-                format_attempt + 1,
-                len(unresolved),
-                len(parse_errors),
+                "external_error",
+                message,
             )
-            if format_attempt >= config["retry"]["format_max_attempts"]:
-                exhausted.extend(unresolved)
-                continue
-            if not unresolved:
-                tasks.append(([], request_id, format_attempt + 1, anchor))
-                continue
-            unresolved_groups = contiguous_groups(
-                (by_id[segment_id] for segment_id in unresolved),
-                all_segments=segments,
-                cross_boundary="translation"
-                in config["chunking"]["cross_boundary_batching"],
-            )
-            tasks.extend(
-                (
-                    unresolved_group,
-                    request_id,
-                    format_attempt + 1,
-                    unresolved_group[:1],
-                )
-                for unresolved_group in unresolved_groups
-            )
-        return valid_total, list(dict.fromkeys(exhausted))
 
     async def process_once(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> None:
         group = list(chunk.segments)
-        valid, unresolved = await request_translations(
+        exhausted = await _localized_request_loop(
             group,
+            payload_builder=payload_builder,
+            prompt=prompt,
+            config=config,
+            llm=state.llm,
+            stage="translation",
+            accept=accept_translation,
+            save_error=save_external_error,
+            parse=_map_local_translation_response,
+            format_correction=(
+                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
+            ),
+            by_id=by_id,
+            segments=segments,
+            logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
-        for segment_id in unresolved:
+        for segment_id in exhausted:
             await save_failed(
                 segment_id,
                 f"REQ-{uuid.uuid4().hex[:12].upper()}",
@@ -2734,10 +2769,25 @@ async def run_translation(
         parent_request_id: str | None = None,
     ) -> None:
         try:
-            valid, unresolved = await request_translations(
+            exhausted = await _localized_request_loop(
                 group,
-                repair_candidates=subset,
+                payload_builder=payload_builder,
+                prompt=prompt,
+                config=config,
+                llm=state.llm,
+                stage="translation",
+                accept=accept_translation,
+                save_error=save_external_error,
+                parse=_map_local_translation_response,
+                format_correction=(
+                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
+                ),
+                by_id=by_id,
+                segments=segments,
+                logger=logger,
                 initial_parent_request_id=parent_request_id,
+                repair_candidates=subset,
             )
         except ContextLengthError as exc:
             if len(group) > 1:
@@ -2786,7 +2836,7 @@ async def run_translation(
                 }
                 await repair_group([part], child_subset, exc.request_id)
             return
-        for segment_id in unresolved:
+        for segment_id in exhausted:
             validation_pending[segment_id] = subset[segment_id]
 
     async def record_preflight_failure(
@@ -3395,103 +3445,39 @@ async def run_review(
             },
         )
 
+    async def save_external_error(
+        expected: list[str], request_id: str, message: str
+    ) -> None:
+        for segment_id in expected:
+            await save_result(segment_id, request_id, error=message)
+
     async def process_once(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> None:
-        exhausted: list[str] = []
-        tasks: list[
-            tuple[
-                list[dict[str, Any]],
-                str | None,
-                int,
-                list[dict[str, Any]],
-            ]
-        ] = [
-            (
-                list(chunk.segments),
-                initial_parent_request_id,
-                0,
-                list(chunk.segments[:1]),
-            )
-        ]
-        while tasks:
-            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
-            expected = [str(item["segment_id"]) for item in items]
-            payload = payload_builder(items or anchor)
-            if not items:
-                payload["segments"] = []
-            if format_attempt:
-                payload["format_correction"] = (
-                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    'ID。accepted 每行使用 {"type":"segment","id":"...",'
-                    '"status":"accepted"}；suggested 每行使用 '
-                    '{"type":"segment","id":"...","status":"suggested",'
-                    '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
-                    '也可为 null。最后输出 {"type":"end"}。'
-                )
-            payload, id_map = localize_request_ids(payload, items)
-            messages = render_messages(prompt, payload)
-            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
-            try:
-                response, _ = await state.llm.chat(
-                    messages=messages,
-                    temperature=config["llm"][f"temperature_{stage}"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    segment_id_map=id_map,
-                )
-                valid, unresolved, parse_errors, response_complete = (
-                    _map_local_review_response(response.content, id_map)
-                )
-            except FatalExternalError:
-                raise
-            except ContextLengthError as exc:
-                if exc.segment_ids is None:
-                    exc.segment_ids = tuple(expected)
-                raise
-            except ExternalError as exc:
-                for segment_id in expected:
-                    await save_result(segment_id, request_id, error=str(exc))
-                continue
-            for segment_id, parsed in valid.items():
-                try:
-                    await accept_result(segment_id, request_id, parsed)
-                except IncompleteError as exc:
-                    parse_errors.append(str(exc))
-                    if segment_id not in unresolved:
-                        unresolved.append(segment_id)
-            if response_complete and not unresolved:
-                continue
-            logger.warning(
-                "format correction request=%s attempt=%d unresolved=%d errors=%d",
-                request_id,
-                format_attempt + 1,
-                len(unresolved),
-                len(parse_errors),
-            )
-            if format_attempt >= config["retry"]["format_max_attempts"]:
-                exhausted.extend(unresolved)
-                continue
-            if not unresolved:
-                tasks.append(([], request_id, format_attempt + 1, anchor))
-                continue
-            unresolved_groups = contiguous_groups(
-                (by_id[segment_id] for segment_id in unresolved),
-                all_segments=segments,
-                cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
-            )
-            tasks.extend(
-                (
-                    unresolved_group,
-                    request_id,
-                    format_attempt + 1,
-                    unresolved_group[:1],
-                )
-                for unresolved_group in unresolved_groups
-            )
+        exhausted = await _localized_request_loop(
+            list(chunk.segments),
+            payload_builder=payload_builder,
+            prompt=prompt,
+            config=config,
+            llm=state.llm,
+            stage=stage,
+            accept=accept_result,
+            save_error=save_external_error,
+            parse=_map_local_review_response,
+            format_correction=(
+                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                'ID。accepted 每行使用 {"type":"segment","id":"...",'
+                '"status":"accepted"}；suggested 每行使用 '
+                '{"type":"segment","id":"...","status":"suggested",'
+                '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
+                '也可为 null。最后输出 {"type":"end"}。'
+            ),
+            by_id=by_id,
+            segments=segments,
+            logger=logger,
+            initial_parent_request_id=initial_parent_request_id,
+        )
         for segment_id in dict.fromkeys(exhausted):
             await save_result(
                 segment_id,
