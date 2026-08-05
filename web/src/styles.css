@@ -299,6 +299,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .settings-action-heading > div:first-child { flex: 1 1 280px; }
 .settings-action-heading > .button-group { flex: none; margin-left: auto; }
 .settings-action-heading > .button-group button, .settings-action-heading > button { white-space: nowrap; }
+.settings-action-heading > button { margin-left: auto; }
 .settings-sticky-heading { position: sticky; top: 0; z-index: 2; margin: 0 -30px 24px; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .settings-row { display: flex; align-items: flex-end; gap: 20px; padding: 16px 0; border-block: 1px solid var(--border); }
 .settings-row label { display: grid; gap: 7px; min-width: 330px; font-size: 13px; font-weight: 650; }
@@ -567,8 +568,6 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .code-field textarea { min-height: 440px; }
   .config-settings { height: auto; overflow: visible; padding: 0 14px 60px; }
   .config-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
-  .config-heading { display: grid; }
-  .config-heading .primary-button { width: 100%; }
   .settings-sticky-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
   .config-grid { grid-template-columns: 1fr; }
   .config-section { padding: 16px 14px; }
@@ -578,7 +577,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .preset-list-body { order: 2; overflow: visible; padding: 0 0 18px; border-right: 0; border-bottom: 1px solid var(--border); }
   .preset-editor-heading { order: 3; }
   .preset-editor-body { order: 4; }
-  .preset-editor-heading { display: grid; padding: 20px 14px; }
+  .preset-editor-heading { padding: 20px 14px; }
   .preset-editor-body { overflow: visible; padding: 20px 14px 60px; }
   .model-picker-popover { max-height: calc(100vh - 150px); }
   .model-options { max-height: min(280px, 42vh); }
