@@ -25,7 +25,7 @@ from .stages import (
     run_terminology,
     run_translation,
 )
-from .storage import read_json, utc_now
+from .sqlite_storage import read_json, utc_now
 
 
 WEB_LLM_STAGES = frozenset(
@@ -272,10 +272,11 @@ class WebTaskManager:
                     if resume_run_id is not None:
                         resuming = True
                         manifest = read_json(
+                            state.project,
                             state.project
                             / "runs"
                             / resume_run_id
-                            / "manifest.json"
+                            / "manifest.json",
                         )
                         if type(manifest.get("usage_invocation_count")) is int:
                             raw_usage = manifest.get("usage")

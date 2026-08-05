@@ -66,15 +66,14 @@ from .execution import (
 from .logging_utils import get_logger
 from .project import load_segments, load_source_files
 from .plugins import get_document_adapter
-from .storage import (
+from .sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
     atomic_write_text,
-    logical_record_exists,
-    new_record_id,
     read_json,
     read_jsonl,
+    record_exists,
     record_header,
+    write_json,
 )
 
 JAPANESE_RE = re.compile(
@@ -104,7 +103,7 @@ def _normalize_model_text(
 
 
 def _project_context(
-    project: Path, *, dry_run: bool, stage: str | None = None
+    project: Path, *, stage: str | None = None
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -112,9 +111,9 @@ def _project_context(
     list[dict[str, Any]],
 ]:
     config = load_project_config(project, stage=stage)
-    metadata = read_json(project / "project.json")
-    files = load_source_files(project, repair_tail=not dry_run)
-    segments = load_segments(project, repair_tail=not dry_run)
+    metadata = read_json(project, project / "project.json")
+    files = load_source_files(project)
+    segments = load_segments(project)
     adapter_options: dict[str, dict[str, Any]] = {}
     adapters: dict[str, dict[str, str]] = {}
     for file_record in files:
@@ -125,7 +124,7 @@ def _project_context(
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
             continue
-        state = read_json(project / state_path)
+        state = read_json(project, project / state_path)
         adapter_options[str(file_record["file_id"])] = {
             key: state[key]
             for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
@@ -173,6 +172,7 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
 
 
 def _finalize_planning_failure(
+    project: Path,
     run_dir: Path | None,
     *,
     requested_count: int,
@@ -183,6 +183,7 @@ def _finalize_planning_failure(
     if run_dir is None:
         return
     finalize_run(
+        project,
         run_dir,
         status="failed",
         completed=reused_count,
@@ -316,7 +317,7 @@ def _prompt(project: Path, stage: str) -> str:
 
 def load_terms(project: Path) -> dict[str, Any] | None:
     path = project / "terminology" / "terms.json"
-    return read_json(path) if logical_record_exists(path) else None
+    return read_json(project, path) if record_exists(project, path) else None
 
 
 def normalize_term(value: str) -> str:
@@ -739,13 +740,13 @@ def _term_exchange_rows(
         raise UsageError("术语导出 source 必须是 published 或 scanned")
     if source == "scanned":
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = read_json(project, active_path) if record_exists(project, active_path) else None
         if not active or active.get("status") != "active":
             return []
         task_id = str(active.get("active_task_id", ""))
         records = [
             record
-            for record in read_jsonl(project / "terminology" / "candidates.jsonl")
+            for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
             if record.get("active_task_id") == task_id
         ]
         merged: dict[str, dict[str, Any]] = {}
@@ -753,7 +754,7 @@ def _term_exchange_rows(
             for candidate in record.get("terms", []):
                 if isinstance(candidate, dict):
                     _add_term_candidate(merged, candidate)
-        overrides_document = read_json(project / "terminology" / "overrides.json")
+        overrides_document = read_json(project, project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
@@ -794,7 +795,7 @@ def _term_exchange_rows(
         str(item["normalized"]): dict(item)
         for item in (library or {}).get("terms", [])
     }
-    overrides_document = read_json(project / "terminology" / "overrides.json")
+    overrides_document = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): dict(item)
         for item in overrides_document.get("overrides", [])
@@ -929,7 +930,7 @@ def import_terms(
             target[key].extend(item[key])
 
     overrides_path = project / "terminology" / "overrides.json"
-    overrides_document = read_json(overrides_path)
+    overrides_document = read_json(project, overrides_path)
     original_overrides = [
         dict(item) for item in overrides_document.get("overrides", [])
     ]
@@ -971,14 +972,14 @@ def import_terms(
         return summary
     override_record = record_header(
         "terminology_overrides",
-        str(read_json(project / "project.json")["project_id"]),
+        str(read_json(project, project / "project.json")["project_id"]),
         record_id="TERMINOLOGY-OVERRIDES",
         overrides=overrides_list,
         origin="terms_import",
     )
     library_record = record_header(
         "terminology_library",
-        str(read_json(project / "project.json")["project_id"]),
+        str(read_json(project, project / "project.json")["project_id"]),
         record_id=f"TERMS-{next_revision}",
         terms_revision=next_revision,
         published_run_id=library.get("published_run_id") if library else None,
@@ -986,8 +987,8 @@ def import_terms(
         terms=terms,
         origin="terms_import",
     )
-    atomic_write_json(overrides_path, override_record)
-    atomic_write_json(project / "terminology" / "terms.json", library_record)
+    write_json(project, overrides_path, override_record)
+    write_json(project, project / "terminology" / "terms.json", library_record)
     return summary
 
 
@@ -1038,7 +1039,7 @@ def _merge_and_publish_terms(
     previous = load_terms(project)
     candidates = [
         record
-        for record in read_jsonl(project / "terminology" / "candidates.jsonl")
+        for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
         if record.get("active_task_id") == task_id
     ]
     merged: dict[str, dict[str, Any]] = {}
@@ -1047,7 +1048,7 @@ def _merge_and_publish_terms(
         for candidate in record.get("terms", []):
             _add_term_candidate(merged, candidate)
 
-    overrides_data = read_json(project / "terminology" / "overrides.json")
+    overrides_data = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): item for item in overrides_data.get("overrides", [])
     }
@@ -1066,11 +1067,11 @@ def _merge_and_publish_terms(
         active_task_id=task_id,
         terms=terms,
     )
-    atomic_write_json(project / "terminology" / "terms.json", library)
-    active = read_json(project / "terminology" / "active_task.json")
+    write_json(project, project / "terminology" / "terms.json", library)
+    active = read_json(project, project / "terminology" / "active_task.json")
     active["status"] = active_status
     active["terms_revision"] = revision
-    atomic_write_json(project / "terminology" / "active_task.json", active)
+    write_json(project, project / "terminology" / "active_task.json", active)
     return library
 
 
@@ -1079,15 +1080,15 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     if find_running_runs(project, "terminology"):
         raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
     active_path = project / "terminology" / "active_task.json"
-    if not logical_record_exists(active_path):
+    if not record_exists(project, active_path):
         raise UsageError("当前没有可发布的活动术语扫描")
-    active = read_json(active_path)
+    active = read_json(project, active_path)
     if active.get("status") != "active":
         raise UsageError("当前没有可发布的活动术语扫描")
     task_id = str(active.get("active_task_id", ""))
     candidates = [
         record
-        for record in read_jsonl(project / "terminology" / "candidates.jsonl")
+        for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
         if record.get("active_task_id") == task_id and record.get("terms")
     ]
     if not candidates:
@@ -1098,7 +1099,7 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
         for term in record.get("terms", [])
         if isinstance(term, dict) and term.get("source")
     }
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     published_run_id = str(candidates[-1].get("run_id") or task_id)
     library = _merge_and_publish_terms(
         project,
@@ -1146,17 +1147,17 @@ async def run_terminology(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage="terminology"
+        project, stage="terminology"
     )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, "terminology")
     fingerprint = stage_fingerprint(config, "terminology", prompt)
     active_path = project / "terminology" / "active_task.json"
-    active = read_json(active_path) if logical_record_exists(active_path) else None
+    active = read_json(project, active_path) if record_exists(project, active_path) else None
     published = load_terms(project)
 
     resume_manifest = (
-        read_json(project / "runs" / resume_run_id / "manifest.json")
+        read_json(project, project / "runs" / resume_run_id / "manifest.json")
         if resume_run_id is not None
         else None
     )
@@ -1184,7 +1185,7 @@ async def run_terminology(
             initial_stage_fingerprint=fingerprint,
         )
         if not scope.dry_run:
-            atomic_write_json(active_path, active)
+            write_json(project, active_path, active)
     elif active and active.get("status") == "active":
         task_id = str(active["active_task_id"])
     else:
@@ -1196,10 +1197,7 @@ async def run_terminology(
         selected = [segment for segment in segments if not segment["is_empty"]]
     scans = [
         record
-        for record in read_jsonl(
-            project / "terminology" / "scans.jsonl",
-            repair_tail=not scope.dry_run,
-        )
+        for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
         if record.get("active_task_id") == task_id
     ]
     completed_ids = {
@@ -1305,6 +1303,7 @@ async def run_terminology(
 
     def fail_planning(error: BaseException) -> None:
         _finalize_planning_failure(
+            project,
             run_dir,
             requested_count=len(work),
             reused_count=len(selected) - len(work),
@@ -1420,6 +1419,7 @@ async def run_terminology(
         def debug_chunks() -> Iterable[ChunkPlan]:
             for chunk in planned_chunks:
                 save_debug_chunks(
+                    project,
                     run_dir,
                     str(metadata["project_id"]),
                     run_id,
@@ -1459,6 +1459,7 @@ async def run_terminology(
         )
         if config["debug"]["enabled"]:
             save_debug_chunks(
+                project,
                 run_dir,
                 str(metadata["project_id"]),
                 run_id,
@@ -1515,6 +1516,7 @@ async def run_terminology(
                         failure_counts["external_error"] += 1
                         report_progress()
                         append_jsonl(
+                            project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
                                 "terminology_scan",
@@ -1543,6 +1545,7 @@ async def run_terminology(
             async with write_lock:
                 if terms:
                     append_jsonl(
+                        project,
                         project / "terminology" / "candidates.jsonl",
                         record_header(
                             "terminology_candidates",
@@ -1581,6 +1584,7 @@ async def run_terminology(
                         failure_counts["format_error"] += 1
                         report_progress()
                         append_jsonl(
+                            project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
                                 "terminology_scan",
@@ -1621,6 +1625,7 @@ async def run_terminology(
                         completed_originals.append(original_id)
                 for segment_id in completed_originals:
                     append_jsonl(
+                        project,
                         project / "terminology" / "scans.jsonl",
                         record_header(
                             "terminology_scan",
@@ -1695,6 +1700,7 @@ async def run_terminology(
                         failure_counts["context_error"] += 1
                         report_progress()
                         append_jsonl(
+                            project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
                                 "terminology_scan",
@@ -1743,6 +1749,7 @@ async def run_terminology(
                     failure_counts["context_error"] += 1
                     report_progress()
                     append_jsonl(
+                        project,
                         project / "terminology" / "scans.jsonl",
                         record_header(
                             "terminology_scan",
@@ -1771,6 +1778,7 @@ async def run_terminology(
     except asyncio.CancelledError:
         usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="interrupted",
             completed=(len(selected) - len(work)) if resume_run_id else 0,
@@ -1784,6 +1792,7 @@ async def run_terminology(
         if isinstance(exc, FatalExternalError):
             usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="failed",
             completed=(len(selected) - len(work)) if resume_run_id else 0,
@@ -1804,7 +1813,7 @@ async def run_terminology(
     all_nonempty = [segment for segment in segments if not segment["is_empty"]]
     task_scans = [
         record
-        for record in read_jsonl(project / "terminology" / "scans.jsonl")
+        for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
         if record.get("active_task_id") == task_id
     ]
     task_completed_ids = {
@@ -1824,6 +1833,7 @@ async def run_terminology(
         )
         published_now = True
     usage = finalize_run(
+        project,
         run_dir,
         status="completed" if failed == 0 else "failed",
         completed=(
@@ -2067,7 +2077,7 @@ async def run_translation(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage="translation"
+        project, stage="translation"
     )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, "translation")
@@ -2077,7 +2087,7 @@ async def run_translation(
         config, "translation", prompt, terms_revision=terms_revision
     )
     history = load_stage_history(
-        project, "translation", repair_tail=not scope.dry_run
+        project, "translation"
     )
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
@@ -2182,6 +2192,7 @@ async def run_translation(
 
     def fail_planning(error: BaseException) -> None:
         _finalize_planning_failure(
+            project,
             run_dir,
             requested_count=len(selection.work),
             reused_count=len(selection.reusable),
@@ -2300,6 +2311,7 @@ async def run_translation(
         def debug_chunks() -> Iterable[ChunkPlan]:
             for chunk in planned_chunks:
                 save_debug_chunks(
+                    project,
                     run_dir,
                     str(metadata["project_id"]),
                     run_id,
@@ -2344,6 +2356,7 @@ async def run_translation(
         )
         if config["debug"]["enabled"]:
             save_debug_chunks(
+                project,
                 run_dir,
                 str(metadata["project_id"]),
                 run_id,
@@ -2366,6 +2379,7 @@ async def run_translation(
         )
         async with write_lock:
             append_jsonl(
+                project,
                 result_path,
                 record_header(
                     "stage_result",
@@ -2407,6 +2421,7 @@ async def run_translation(
         failure_counts[error_class] += 1
         async with write_lock:
             append_jsonl(
+                project,
                 result_path,
                 record_header(
                     "stage_result",
@@ -2786,6 +2801,7 @@ async def run_translation(
     except asyncio.CancelledError:
         usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="interrupted",
             completed=(
@@ -2803,6 +2819,7 @@ async def run_translation(
         if isinstance(exc, FatalExternalError):
             usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="failed",
             completed=(
@@ -2878,6 +2895,7 @@ async def run_translation(
             )
     failed_count = len(failed_ids)
     usage = finalize_run(
+        project,
         run_dir,
         status="completed" if failed_count == 0 else "failed",
         completed=(
@@ -2919,15 +2937,13 @@ def require_success(summary: dict[str, Any]) -> None:
 def _base_results(
     project: Path,
     stage: str,
-    *,
-    repair_tail: bool,
 ) -> dict[str, dict[str, Any]]:
     translations = {
         str(key): value
         for key, value in classify_stage(
             [],
             load_stage_history(
-                project, "translation", repair_tail=repair_tail
+                project, "translation"
             ),
             force=False,
         ).latest_completed.items()
@@ -2937,7 +2953,7 @@ def _base_results(
     applied = classify_stage(
         [],
         load_stage_history(
-            project, "proofreading_applied", repair_tail=repair_tail
+            project, "proofreading_applied"
         ),
         force=False,
     ).latest_completed
@@ -3037,7 +3053,7 @@ async def run_review(
         )
         scope = resumed_scope
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage=stage
+        project, stage=stage
     )
     _require_nonempty_segments(segments)
     prompt = _prompt(project, stage)
@@ -3047,7 +3063,7 @@ async def run_review(
         config, stage, prompt, terms_revision=terms_revision
     )
     selected_segments = select_scope(segments, files, scope)
-    bases = _base_results(project, stage, repair_tail=not scope.dry_run)
+    bases = _base_results(project, stage)
     missing_base = [
         str(segment["segment_id"])
         for segment in selected_segments
@@ -3067,7 +3083,7 @@ async def run_review(
                     "text": str(segment["source"]),
                 },
             )
-    history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
+    history = load_stage_history(project, stage)
     selection = classify_stage(selected_segments, history, force=scope.force)
     warnings: list[str] = []
     usage: dict[str, Any] | None = None
@@ -3172,6 +3188,7 @@ async def run_review(
 
     def fail_planning(error: BaseException) -> None:
         _finalize_planning_failure(
+            project,
             run_dir,
             requested_count=len(selection.work),
             reused_count=len(selection.reusable),
@@ -3299,6 +3316,7 @@ async def run_review(
         def debug_chunks() -> Iterable[ChunkPlan]:
             for chunk in planned_chunks:
                 save_debug_chunks(
+                    project,
                     run_dir,
                     str(metadata["project_id"]),
                     run_id,
@@ -3342,6 +3360,7 @@ async def run_review(
         )
         if config["debug"]["enabled"]:
             save_debug_chunks(
+                project,
                 run_dir,
                 str(metadata["project_id"]),
                 run_id,
@@ -3376,6 +3395,7 @@ async def run_review(
                         suggested_text,
                     )
                 append_jsonl(
+                    project,
                     result_path,
                     record_header(
                         "stage_result",
@@ -3404,6 +3424,7 @@ async def run_review(
             else:
                 failure_counts["stage_error"] += 1
                 append_jsonl(
+                    project,
                     result_path,
                     record_header(
                         "stage_result",
@@ -3659,6 +3680,7 @@ async def run_review(
     except asyncio.CancelledError:
         usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="interrupted",
             completed=(
@@ -3676,6 +3698,7 @@ async def run_review(
         if isinstance(exc, FatalExternalError):
             usage = llm.usage_summary()
         finalize_run(
+            project,
             run_dir,
             status="failed",
             completed=(
@@ -3696,6 +3719,7 @@ async def run_review(
         )
         raise
     usage = finalize_run(
+        project,
         run_dir,
         status="completed" if not failed_ids else "failed",
         completed=(
@@ -3741,17 +3765,15 @@ def run_apply(
     if not confirmed_all:
         raise UsageError("apply 必须显式传入 --all")
     logger = get_logger("apply")
-    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    config, metadata, files, segments = _project_context(project)
     _require_nonempty_segments(segments)
     selected = select_scope(segments, files, scope)
     suggestions = classify_stage(
         selected,
-        load_stage_history(
-            project, review_stage, repair_tail=not scope.dry_run
-        ),
+        load_stage_history(project, review_stage),
         force=False,
     ).latest_completed
-    bases = _base_results(project, review_stage, repair_tail=not scope.dry_run)
+    bases = _base_results(project, review_stage)
     missing = [
         str(item["segment_id"])
         for item in selected
@@ -3825,6 +3847,7 @@ def run_apply(
             str(text),
         )
         append_jsonl(
+            project,
             result_path,
             record_header(
                 "stage_result",
@@ -3843,6 +3866,7 @@ def run_apply(
         )
     warnings = ["已强制应用旧基准建议"] if outdated else []
     finalize_run(
+        project,
         run_dir,
         status="completed",
         completed=len(selected),
@@ -3878,7 +3902,7 @@ def export_project(
     if output_format not in {"original", "txt"}:
         raise UsageError(f"不支持的导出格式：{output_format}")
     logger = get_logger("export")
-    config, _, files, segments = _project_context(project, dry_run=False)
+    config, _, files, segments = _project_context(project)
     if file_ids is not None:
         if not file_ids:
             raise UsageError("导出文件范围不能为空")
@@ -4032,7 +4056,7 @@ def export_project(
                 )
             state_path = file_record.get("document_adapter_state")
             if state_path is not None:
-                state_record = read_json(project / str(state_path))
+                state_record = read_json(project, project / str(state_path))
                 if (
                     state_record.get("adapter_id") != adapter_id
                     or str(state_record.get("adapter_version"))
@@ -4092,7 +4116,7 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
 ) -> dict[str, Any]:
-    _require_nonempty_segments(load_segments(project, repair_tail=not scope.dry_run))
+    _require_nonempty_segments(load_segments(project))
     stages = ("terminology", "translation", "proofreading", "polishing")
     configs = {
         stage: load_project_config(project, stage=stage) for stage in stages
@@ -4123,7 +4147,7 @@ async def run_all(
         summaries: list[dict[str, Any]] = []
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = read_json(project, active_path) if record_exists(project, active_path) else None
         if scope.force or terms is None or (
             active and active.get("status") == "active"
         ):
@@ -4195,7 +4219,7 @@ async def run_all(
 
 
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    config, metadata, files, segments = _project_context(project, dry_run=dry_run)
+    config, metadata, files, segments = _project_context(project)
     nonempty = [item for item in segments if not item["is_empty"]]
     active_segment_ids = {
         str(item["segment_id"]) for item in nonempty
@@ -4238,15 +4262,12 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     if library:
         summary["terms_revision"] = library["terms_revision"]
     active_path = project / "terminology" / "active_task.json"
-    if logical_record_exists(active_path):
-        active = read_json(active_path)
+    if record_exists(project, active_path):
+        active = read_json(project, active_path)
         if active.get("status") in {"active", "completed"}:
             scans = [
                 item
-                for item in read_jsonl(
-                    project / "terminology" / "scans.jsonl",
-                    repair_tail=not dry_run,
-                )
+                for item in read_jsonl(project, project / "terminology" / "scans.jsonl")
                 if item.get("active_task_id") == active.get("active_task_id")
                 and str(item.get("segment_id")) in active_segment_ids
             ]
@@ -4285,7 +4306,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         "polishing",
         "polishing_applied",
     ):
-        history = load_stage_history(project, stage, repair_tail=not dry_run)
+        history = load_stage_history(project, stage)
         active_history = [
             item
             for item in history
@@ -4353,7 +4374,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         suggestions = classify_stage(
             [], histories[review_stage], force=False
         ).latest_completed
-        bases = _base_results(project, review_stage, repair_tail=not dry_run)
+        bases = _base_results(project, review_stage)
         summary["outdated_suggestions"][review_stage] = sum(
             suggestion.get("base_result_id")
             != bases.get(segment_id, {}).get("record_id")

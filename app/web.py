@@ -44,7 +44,7 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
-from .sqlite_storage import database_path
+from .sqlite_storage import atomic_write_json, atomic_write_text, database_path, read_json
 from .stages import (
     export_project,
     export_terms,
@@ -52,7 +52,6 @@ from .stages import (
     publish_partial_terms,
     run_apply,
 )
-from .storage import atomic_write_json, atomic_write_text, read_json
 from .web_tasks import WebTaskManager, task_options
 
 
@@ -285,7 +284,7 @@ def create_app(
             matches = [
                 path
                 for path in project_paths()
-                if str(read_json(path / "project.json")["project_id"]) == name
+                if str(read_json(path, path / "project.json")["project_id"]) == name
             ]
             if len(matches) != 1:
                 raise ProjectError(f"项目不存在或标识冲突：{name}")
@@ -296,7 +295,7 @@ def create_app(
         values = []
         selectors: set[str] = set()
         for item in project_paths():
-            metadata = read_json(item / "project.json")
+            metadata = read_json(item, item / "project.json")
             selector = project_selector(item, metadata)
             if selector in selectors:
                 raise UsageError(f"项目标识冲突：{selector}")
@@ -620,7 +619,7 @@ def create_app(
             ]
         assert path is not None
         remember_project(path)
-        metadata = read_json(path / "project.json")
+        metadata = read_json(path, path / "project.json")
         summary["project_path"] = str(path)
         summary["project_selector"] = project_selector(path, metadata)
         summary["external"] = path.parent != projects_root.resolve()
@@ -635,7 +634,7 @@ def create_app(
         if not candidate.is_absolute():
             raise UsageError("项目路径必须是绝对路径")
         root = resolve_project(str(candidate))
-        metadata = read_json(root / "project.json")
+        metadata = read_json(root, root / "project.json")
         remember_project(root)
         return {
             "selector": project_selector(root, metadata),
