@@ -12,7 +12,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +195,213 @@ def _finalize_planning_failure(
 
 def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
+
+
+def _resume_scope(
+    project: Path, scope: Scope, resume_run_id: str | None
+) -> tuple[Scope, bool]:
+    if resume_run_id is None:
+        return scope, False
+    resumed_scope = scope_from_run(project, resume_run_id, dry_run=scope.dry_run)
+    resume_arguments_ignored = (
+        scope.from_file,
+        scope.only_file,
+        scope.only_segment,
+        scope.force,
+    ) != (
+        resumed_scope.from_file,
+        resumed_scope.only_file,
+        resumed_scope.only_segment,
+        resumed_scope.force,
+    )
+    return resumed_scope, resume_arguments_ignored
+
+
+def _assemble_warnings(
+    *,
+    stage: str,
+    resume_run_id: str | None,
+    resume_arguments_ignored: bool,
+    resume_message: str,
+    config: dict[str, Any],
+    fingerprint: str,
+    existing_fingerprints: set[str] | frozenset[str],
+    reusable_count: int,
+    force: bool,
+    reuse_allowed: bool,
+    dry_run: bool,
+    extra: list[str],
+) -> list[str]:
+    warnings: list[str] = []
+    if resume_run_id is not None:
+        warnings.append(resume_message)
+        if resume_arguments_ignored:
+            warnings.append("续作已忽略本次命令的范围参数或 --force")
+    configured_output_warning = _configured_output_warning(config)
+    if configured_output_warning:
+        warnings.append(configured_output_warning)
+    warnings.extend(extra)
+    fingerprint_warning = _confirm_fingerprint_reuse(
+        stage,
+        existing_fingerprints,
+        fingerprint,
+        reusable_count,
+        force=force,
+        resume_run_id=resume_run_id,
+        reuse_allowed=reuse_allowed,
+        dry_run=dry_run,
+    )
+    if fingerprint_warning:
+        warnings.append(fingerprint_warning)
+    return warnings
+
+
+def _create_or_continue_run(
+    project: Path,
+    stage: str,
+    *,
+    scope: Scope,
+    config: dict[str, Any],
+    fingerprint: str,
+    prompt: str,
+    resume_run_id: str | None,
+    selected_count: int,
+    requested_count: int,
+    reused_count: int,
+    details: dict[str, Any] | None,
+    warnings: list[str],
+) -> tuple[str | None, Path | None, Callable[[BaseException], None]]:
+    run_id: str | None = None
+    run_dir: Path | None = None
+    if not scope.dry_run:
+        if resume_run_id is not None:
+            run_id, run_dir = continue_run(
+                project,
+                resume_run_id,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                scope=scope,
+                selected_count=selected_count,
+                requested_count=requested_count,
+                reused_count=reused_count,
+            )
+        else:
+            run_id, run_dir = create_run(
+                project,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                selected_count=selected_count,
+                requested_count=requested_count,
+                reused_count=reused_count,
+                details=details,
+            )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            project,
+            run_dir,
+            requested_count=requested_count,
+            reused_count=reused_count,
+            warnings=warnings,
+            error=error,
+        )
+
+    return run_id, run_dir, fail_planning
+
+
+@dataclass
+class _Preflight:
+    request_segments: list[dict[str, Any]]
+    part_original: dict[str, str]
+    original_parts: dict[str, list[str]]
+    preflight_failed: list[dict[str, Any]]
+
+
+def _split_oversized_preflight(
+    work: Iterable[dict[str, Any]],
+    *,
+    stage: str,
+    config: dict[str, Any],
+    segments: list[dict[str, Any]],
+    prompt: str,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    fail_planning: Callable[[BaseException], None],
+    make_probe: Callable[[dict[str, Any], Any], dict[str, Any]],
+    split_part: Callable[[Any], list[Any]],
+    accept_part: Callable[[dict[str, Any], str, Any], dict[str, Any]],
+    initial_part: Callable[[dict[str, Any]], Any] | None = None,
+    cleanup_probe: Callable[[str], None] | None = None,
+) -> _Preflight:
+    request_segments: list[dict[str, Any]] = []
+    part_original: dict[str, str] = {}
+    original_parts: dict[str, list[str]] = {}
+    preflight_failed: list[dict[str, Any]] = []
+    for segment in work:
+        try:
+            build_chunk_plans(
+                [segment],
+                all_segments=segments,
+                config=config,
+                stage=stage,
+                prompt=prompt,
+                payload_builder=payload_builder,
+            )
+            request_segments.append(segment)
+            continue
+        except RequestSizeError as exc:
+            if exc.reason != "context":
+                fail_planning(exc)
+                raise
+            if not config["chunking"]["allow_split_oversized_segment"]:
+                preflight_failed.append(segment)
+                continue
+        pending_parts: list[Any] = [
+            initial_part(segment) if initial_part is not None else str(segment["source"])
+        ]
+        accepted_parts: list[Any] = []
+        while pending_parts:
+            part = pending_parts.pop(0)
+            probe = make_probe(segment, part)
+            try:
+                build_chunk_plans(
+                    [probe],
+                    all_segments=segments,
+                    config=config,
+                    stage=stage,
+                    prompt=prompt,
+                    payload_builder=payload_builder,
+                )
+                accepted_parts.append(part)
+            except RequestSizeError as exc:
+                if exc.reason != "context":
+                    fail_planning(exc)
+                    raise
+                try:
+                    children = split_part(part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
+                pending_parts[0:0] = children
+            finally:
+                if cleanup_probe is not None:
+                    cleanup_probe(f"{segment['segment_id']}-PROBE")
+        part_ids: list[str] = []
+        for index, part in enumerate(accepted_parts, start=1):
+            part_id = f"{segment['segment_id']}-P{index:03d}"
+            request_segments.append(accept_part(segment, part_id, part))
+            part_original[part_id] = str(segment["segment_id"])
+            part_ids.append(part_id)
+        original_parts[str(segment["segment_id"])] = part_ids
+    return _Preflight(
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+    )
 
 
 def _restore_leading_whitespace(source: str, text: str) -> str:
@@ -1129,23 +1336,7 @@ async def run_terminology(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage="terminology"
     )
@@ -1222,31 +1413,24 @@ async def run_terminology(
         and str(record.get("segment_id")) in selected_ids
         and record.get("stage_fingerprint")
     }
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
+    warnings = _assemble_warnings(
+        stage="terminology",
+        resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
             f"续用 Run {resume_run_id} 的原始范围和术语任务；"
             "本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        "terminology",
-        existing_fingerprints,
-        fingerprint,
-        len(selected_ids & completed_ids),
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=existing_fingerprints,
+        reusable_count=len(selected_ids & completed_ids),
         force=scope.force,
-        resume_run_id=resume_run_id,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=[],
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
-
     context_config = config["context"]["terminology"]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1269,109 +1453,48 @@ async def run_terminology(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage="terminology",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selected),
-                requested_count=len(work),
-                reused_count=len(selected) - len(work),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage="terminology",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selected),
-                requested_count=len(work),
-                reused_count=len(selected) - len(work),
-                details={
-                    "active_task_id": task_id,
-                    "scope": _scope_record(scope, force_all=scope.force),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        "terminology",
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selected),
+        requested_count=len(work),
+        reused_count=len(selected) - len(work),
+        details={
+            "active_task_id": task_id,
+            "scope": _scope_record(scope, force_all=scope.force),
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            project,
-            run_dir,
-            requested_count=len(work),
-            reused_count=len(selected) - len(work),
-            warnings=warnings,
-            error=error,
-        )
-
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                stage="terminology",
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        sources = [str(segment["source"])]
-        accepted_sources: list[str] = []
-        while sources:
-            source_part = sources.pop(0)
-            probe = {
-                **segment,
-                "segment_id": f"{segment['segment_id']}-PROBE",
-                "source": source_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    stage="terminology",
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_sources.append(source_part)
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left, right = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                sources[0:0] = [left, right]
-        part_ids: list[str] = []
-        for index, source_part in enumerate(accepted_sources, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            request_segments.append(
-                {**segment, "segment_id": part_id, "source": source_part}
-            )
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+    preflight = _split_oversized_preflight(
+        work,
+        stage="terminology",
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=lambda segment, part: {
+            **segment,
+            "segment_id": f"{segment['segment_id']}-PROBE",
+            "source": part,
+        },
+        split_part=lambda part: list(_split_source_once(part)),
+        accept_part=lambda segment, part_id, part: {
+            **segment,
+            "segment_id": part_id,
+            "source": part,
+        },
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -2059,23 +2182,7 @@ async def run_translation(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage="translation"
     )
@@ -2091,31 +2198,27 @@ async def run_translation(
     )
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
-            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    if library is None:
-        warnings.append("没有已发布术语库；本次翻译 terms_revision = null")
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        "translation",
-        selection.fingerprints,
-        fingerprint,
-        len(selection.reusable),
-        force=scope.force,
+    warnings = _assemble_warnings(
+        stage="translation",
         resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=selection.fingerprints,
+        reusable_count=len(selection.reusable),
+        force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=(
+            ["没有已发布术语库；本次翻译 terms_revision = null"]
+            if library is None
+            else []
+        ),
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
     latest_text = {
         segment_id: str(record["text"])
         for segment_id, record in selection.latest_completed.items()
@@ -2158,112 +2261,48 @@ async def run_translation(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage="translation",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage="translation",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-                details={
-                    "terms_revision": terms_revision,
-                    "scope": _scope_record(scope),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        "translation",
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selection.selected),
+        requested_count=len(selection.work),
+        reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            project,
-            run_dir,
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            warnings=warnings,
-            error=error,
-        )
-
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in selection.work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                stage="translation",
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        sources = [str(segment["source"])]
-        accepted_sources: list[str] = []
-        while sources:
-            source_part = sources.pop(0)
-            probe = {
-                **segment,
-                "segment_id": f"{segment['segment_id']}-PROBE",
-                "source": source_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    stage="translation",
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_sources.append(source_part)
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left, right = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                sources[0:0] = [left, right]
-        part_ids: list[str] = []
-        for index, source_part in enumerate(accepted_sources, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            part = {
-                **segment,
-                "segment_id": part_id,
-                "source": source_part,
-            }
-            request_segments.append(part)
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+    preflight = _split_oversized_preflight(
+        selection.work,
+        stage="translation",
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=lambda segment, part: {
+            **segment,
+            "segment_id": f"{segment['segment_id']}-PROBE",
+            "source": part,
+        },
+        split_part=lambda part: list(_split_source_once(part)),
+        accept_part=lambda segment, part_id, part: {
+            **segment,
+            "segment_id": part_id,
+            "source": part,
+        },
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -3035,23 +3074,7 @@ async def run_review(
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
     logger = get_logger(stage)
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage=stage
     )
@@ -3085,34 +3108,30 @@ async def run_review(
             )
     history = load_stage_history(project, stage)
     selection = classify_stage(selected_segments, history, force=scope.force)
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
-            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    if missing_base:
-        warnings.append(
-            f"{stage} dry-run 使用源文占位估算；"
-            f"实际运行仍缺少 {len(missing_base)} 条上游结果"
-        )
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        stage,
-        selection.fingerprints,
-        fingerprint,
-        len(selection.reusable),
-        force=scope.force,
+    warnings = _assemble_warnings(
+        stage=stage,
         resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=selection.fingerprints,
+        reusable_count=len(selection.reusable),
+        force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=(
+            [
+                f"{stage} dry-run 使用源文占位估算；"
+                f"实际运行仍缺少 {len(missing_base)} 条上游结果"
+            ]
+            if missing_base
+            else []
+        ),
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
     context_config = config["context"][stage]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3154,122 +3173,73 @@ async def run_review(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage=stage,
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage=stage,
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-                details={
-                    "terms_revision": terms_revision,
-                    "scope": _scope_record(scope),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        stage,
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selection.selected),
+        requested_count=len(selection.work),
+        reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            project,
-            run_dir,
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            warnings=warnings,
-            error=error,
+    def make_probe(segment: dict[str, Any], part: tuple[str, str]) -> dict[str, Any]:
+        probe_id = f"{segment['segment_id']}-PROBE"
+        bases[probe_id] = {
+            "record_id": bases[str(segment["segment_id"])]["record_id"],
+            "text": part[1],
+        }
+        return {**segment, "segment_id": probe_id, "source": part[0]}
+
+    def initial_part(segment: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(segment["source"]),
+            str(bases[str(segment["segment_id"])]["text"]),
         )
 
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in selection.work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                stage=stage,
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        pending_parts = [
-            (str(segment["source"]), str(bases[str(segment["segment_id"])]["text"]))
+    def split_part(part: tuple[str, str]) -> list[tuple[str, str]]:
+        left_source, right_source = _split_source_once(part[0])
+        split_at = round(len(part[1]) * len(left_source) / len(part[0]))
+        return [
+            (left_source, part[1][:split_at]),
+            (right_source, part[1][split_at:]),
         ]
-        accepted_parts: list[tuple[str, str]] = []
-        while pending_parts:
-            source_part, text_part = pending_parts.pop(0)
-            probe_id = f"{segment['segment_id']}-PROBE"
-            probe = {**segment, "segment_id": probe_id, "source": source_part}
-            bases[probe_id] = {
-                "record_id": bases[str(segment["segment_id"])]["record_id"],
-                "text": text_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    stage=stage,
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_parts.append((source_part, text_part))
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left_source, right_source = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                split_at = round(len(text_part) * len(left_source) / len(source_part))
-                pending_parts[0:0] = [
-                    (left_source, text_part[:split_at]),
-                    (right_source, text_part[split_at:]),
-                ]
-            finally:
-                bases.pop(probe_id, None)
-        part_ids: list[str] = []
-        for index, (source_part, text_part) in enumerate(accepted_parts, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            request_segments.append(
-                {**segment, "segment_id": part_id, "source": source_part}
-            )
-            bases[part_id] = {
-                "record_id": bases[str(segment["segment_id"])]["record_id"],
-                "text": text_part,
-            }
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+
+    def accept_part(
+        segment: dict[str, Any], part_id: str, part: tuple[str, str]
+    ) -> dict[str, Any]:
+        bases[part_id] = {
+            "record_id": bases[str(segment["segment_id"])]["record_id"],
+            "text": part[1],
+        }
+        return {**segment, "segment_id": part_id, "source": part[0]}
+
+    preflight = _split_oversized_preflight(
+        selection.work,
+        stage=stage,
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=make_probe,
+        split_part=split_part,
+        accept_part=accept_part,
+        initial_part=initial_part,
+        cleanup_probe=lambda probe_id: bases.pop(probe_id, None),
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
