@@ -184,7 +184,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
           <h1>{translate("diagnostics.title", language)}</h1>
           <p>
             {metrics?.project
-            ? translate("diagnostics.currentRun", language, { project: metrics.project ?? "", stage: metrics.stage })
+            ? translate("diagnostics.currentRun", language, { project: metrics.project ?? "", stage: metrics.stage ?? "" })
               : translate("diagnostics.noRun", language)}
           </p>
         </div>
