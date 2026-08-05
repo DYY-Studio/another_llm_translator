@@ -1476,7 +1476,8 @@ python -m app.main export PROJECT --stage translated --file F0001 --file F0003
 
 除各 File 来源格式和 TXT 外，不提供任意格式转换。
 文件范围同时适用于原格式和 TXT；只校验所选 File 的阶段结果。宿主保持
-`file_order`，不提供按 Segment 导出或跨 File 合并。
+`file_order`，不提供按 Segment 导出或跨 File 合并；跨 File 合并只属于启用配置的
+LLM Chunk 请求规划。
 
 `--allow-missing` 回退：
 

@@ -245,7 +245,8 @@ python -m app.main export novel --stage translated --file F0001
 
 `translated`、`proofread` 和 `polished` 分别对应翻译、已应用的校对和已应用的润色结果。
 原格式导出按每个 File 的来源 Adapter 重建；使用 `--format txt` 时统一通过 TXT Adapter 导出。
-当前不支持跨 File 合并或按 Segment 单独导出。
+导出不支持跨 File 合并或按 Segment 单独导出；跨 File 合并只适用于启用配置的 LLM
+Chunk 请求规划。
 
 ## 本地 Web
 
