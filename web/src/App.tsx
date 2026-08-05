@@ -224,17 +224,20 @@ export default function App() {
   let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
     else if (stage === "settings") content = <SettingsView project={project} language={language} />;
+  else if (stage === "overview") content = (
+    <Overview
+      projects={projects}
+      project={project}
+      value={overview}
+      onProject={setProject}
+      onCreate={() => setCreateOpen(true)}
+      onFilesChanged={refreshProject}
+      onDeleted={handleProjectDeleted}
+      language={language}
+    />
+  );
   else if (project && overview) {
-    if (stage === "overview") content = (
-      <Overview
-        project={project}
-        value={overview}
-        onFilesChanged={refreshProject}
-        onDeleted={handleProjectDeleted}
-        language={language}
-      />
-    );
-    else if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} />;
+    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
@@ -243,14 +246,11 @@ export default function App() {
   return (
     <>
       <AppShell
-        projects={projects}
         project={project}
         stage={stage}
         task={task}
-        onProject={setProject}
         onStage={navigateStage}
         onShowFailures={showFailures}
-        onCreate={() => setCreateOpen(true)}
         onRun={openRunDialog}
         onCancel={cancelRun}
         canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count)}

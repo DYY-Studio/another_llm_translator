@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
+import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { translate } from "../i18n";
@@ -15,14 +15,11 @@ const items: Array<{ id: Stage; key: string }> = [
 ];
 
 export function AppShell({
-  projects,
   project,
   stage,
   task,
-  onProject,
   onStage,
   onShowFailures,
-  onCreate,
   onRun,
   onCancel,
   canRun,
@@ -33,14 +30,11 @@ export function AppShell({
   onLanguage,
   children,
 }: {
-  projects: ProjectSummary[];
   project: string;
   stage: Stage;
   task: TaskState | null;
-  onProject: (value: string) => void;
   onStage: (value: Stage) => void;
   onShowFailures: () => void;
-  onCreate: () => void;
   onRun: () => void;
   onCancel: () => void;
   canRun: boolean;
@@ -86,11 +80,6 @@ export function AppShell({
     <div className={`app${task ? " has-run-status" : ""}`}>
       <header className="topbar">
         <div className="brand">{translate("brand", language)}</div>
-        <select value={project} onChange={(event) => onProject(event.target.value)}>
-          <option value="">{translate("project.select", language)}</option>
-          {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
-        </select>
-        <button className="quiet-button create-button" onClick={onCreate}>{translate("project.create", language)}</button>
         <div className="topbar-spacer" />
         <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
           {themeIcon}

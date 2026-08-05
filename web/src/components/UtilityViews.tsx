@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview } from "../types";
+import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
 
 type InputKind = "file" | "folder";
@@ -228,20 +228,59 @@ function InputQueue({
   );
 }
 
+function ProjectBar({
+  projects,
+  project,
+  onProject,
+  onCreate,
+  language,
+}: {
+  projects: ProjectSummary[];
+  project: string;
+  onProject: (value: string) => void;
+  onCreate: () => void;
+  language: Language;
+}) {
+  return (
+    <div className="overview-project-bar">
+      <select value={project} onChange={(event) => onProject(event.target.value)} aria-label={translate("project.select", language)}>
+        <option value="">{translate("project.select", language)}</option>
+        {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
+      </select>
+      <button className="quiet-button" onClick={onCreate}>{translate("project.create", language)}</button>
+    </div>
+  );
+}
+
 export function Overview({
+  projects,
   project,
   value,
+  onProject,
+  onCreate,
   onFilesChanged,
   onDeleted,
   language,
 }: {
+  projects: ProjectSummary[];
   project: string;
-  value: ProjectOverview;
+  value: ProjectOverview | null;
+  onProject: (value: string) => void;
+  onCreate: () => void;
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
   language: Language;
 }) {
+  if (!value) {
+    return (
+      <div className="page">
+        <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
+        <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
+      </div>
+    );
+  }
   const completed = value.completed_segments;
+  const projectPath = value.path;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -306,9 +345,9 @@ export function Overview({
         body: JSON.stringify({ confirm: true }),
       });
       setDeleting(false);
-      await onDeleted(value.path);
-    } catch (value) {
-      setError(String(value));
+      await onDeleted(projectPath);
+    } catch (reason) {
+      setError(String(reason));
     } finally {
       setBusy(false);
     }
@@ -316,6 +355,7 @@ export function Overview({
 
   return (
     <div className="page">
+      <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
         <div><h1>{value.name}</h1><p>{value.path}</p></div>
         <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
