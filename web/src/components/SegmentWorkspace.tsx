@@ -64,6 +64,7 @@ export function SegmentWorkspace({
   const [loading, setLoading] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
+  const indexInFlightRef = useRef(false);
   const pageSize = 100;
   const pageCacheRef = useRef(new Set<string>());
   const pageRequestsRef = useRef(new Set<string>());
@@ -104,6 +105,7 @@ export function SegmentWorkspace({
 
   const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
     const requestId = ++indexRequestRef.current;
+    indexInFlightRef.current = true;
     setLoading(true);
     setListError("");
     try {
@@ -145,7 +147,10 @@ export function SegmentWorkspace({
       selection.reset();
       return [];
     } finally {
-      if (requestId === indexRequestRef.current) setLoading(false);
+      if (requestId === indexRequestRef.current) {
+        indexInFlightRef.current = false;
+        setLoading(false);
+      }
     }
   }, [project, stage, file, status, normalizedSearch, resetPageCache]);
 
@@ -161,6 +166,7 @@ export function SegmentWorkspace({
   const virtualItems = virtualizer.getVirtualItems();
 
   useEffect(() => {
+    if (indexInFlightRef.current) return;
     const offsets = new Set(
       virtualItems.map((item) => Math.floor(item.index / pageSize) * pageSize),
     );
