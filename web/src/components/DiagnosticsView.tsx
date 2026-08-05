@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
 import { translate, type Language } from "../i18n";
@@ -36,6 +36,28 @@ function clock(value: string, language: Language) {
   });
 }
 
+function layoutDetailsColumns(bar: HTMLDivElement) {
+  const spans = Array.from(bar.querySelectorAll<HTMLElement>(":scope > span"));
+  if (!spans.length) return;
+  bar.style.gridTemplateColumns = "repeat(6, max-content)";
+  const widths = spans.map((span) => span.getBoundingClientRect().width);
+  const inner = bar.clientWidth - 32;
+  const gap = 24;
+  let columns = 1;
+  for (let k = 6; k >= 1; k--) {
+    const tracks = new Array<number>(k).fill(0);
+    for (let index = 0; index < widths.length; index++) {
+      tracks[index % k] = Math.max(tracks[index % k], widths[index]);
+    }
+    const rowWidth = tracks.reduce((sum, width) => sum + width, 0) + (k - 1) * gap;
+    if (rowWidth <= inner + 1) {
+      columns = k;
+      break;
+    }
+  }
+  bar.style.gridTemplateColumns = `repeat(${columns}, max-content)`;
+}
+
 export function DiagnosticsView({ language }: { language: Language }) {
   const en = language === "en";
   const statusLabels = en ? {
@@ -56,6 +78,22 @@ export function DiagnosticsView({ language }: { language: Language }) {
   const [detailError, setDetailError] = useState("");
   const [detailTab, setDetailTab] = useState<DetailTab>("request");
   const logRef = useRef<HTMLDivElement>(null);
+  const detailsRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const bar = detailsRef.current;
+    if (!bar) return;
+    layoutDetailsColumns(bar);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => layoutDetailsColumns(bar));
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const bar = detailsRef.current;
+    if (bar) layoutDetailsColumns(bar);
+  }, [language]);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams();
@@ -162,7 +200,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
         <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(throughput, language, "", en ? "Unavailable" : "不可用")}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
-      <div className="diagnostics-details" aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
+      <div className="diagnostics-details" ref={detailsRef} aria-label={en ? "Request diagnostics summary" : "请求诊断摘要"}>
         <span>Usage <strong>{metrics?.usage_available ? (en ? "Complete" : "完整") : (en ? "Unavailable" : "不可用")}</strong></span>
         <span>{en ? "Latency" : "请求延迟"} <strong>{number(metrics?.latest_latency_ms ?? null, language, " ms", en ? "Unavailable" : "不可用")}</strong></span>
         <span>{en ? "HTTP errors" : "HTTP 错误"} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
