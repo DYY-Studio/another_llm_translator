@@ -404,6 +404,219 @@ def _split_oversized_preflight(
     )
 
 
+@dataclass
+class StageRunState:
+    project: Path
+    stage: str
+    config: dict[str, Any]
+    metadata: dict[str, Any]
+    segments: list[dict[str, Any]]
+    prompt: str
+    fingerprint: str
+    resume_run_id: str | None
+    warnings: list[str]
+    run_id: str
+    run_dir: Path
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None
+    llm: LLMClient | None = None
+
+
+async def _execute_stage_run(
+    state: StageRunState,
+    *,
+    request_segments: list[dict[str, Any]],
+    part_original: dict[str, str],
+    original_parts: dict[str, list[str]],
+    preflight_failed: list[dict[str, Any]],
+    limiter: SlidingWindowLimiter | None,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    process_once: Callable[..., Awaitable[None]],
+    record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    before_finalize: Callable[[], Awaitable[None]],
+    completed_count: Callable[[], int],
+    failed_count: Callable[[], int],
+    exception_completed: Callable[[], int],
+    exception_failed: Callable[[], int],
+    failure_counts: Counter[str],
+    http_client: httpx.AsyncClient | None = None,
+    runtime_parts_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    logger = get_logger(state.stage)
+    logger.info("run start run=%s", state.run_id)
+    planned = iter_chunk_plans(
+        request_segments,
+        all_segments=state.segments,
+        config=state.config,
+        stage=state.stage,
+        prompt=state.prompt,
+        payload_builder=payload_builder,
+    )
+    chunks = materialize_chunk_stream(state.run_id, state.stage, planned)
+    if state.config["debug"]["enabled"]:
+        planned_chunks = chunks
+
+        def debug_chunks() -> Iterable[ChunkPlan]:
+            for chunk in planned_chunks:
+                save_debug_chunks(
+                    state.project,
+                    state.run_dir,
+                    str(state.metadata["project_id"]),
+                    state.run_id,
+                    state.stage,
+                    [chunk],
+                )
+                yield chunk
+
+        chunks = debug_chunks()
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            state.config["execution"]["requests_per_minute"],
+            state.config["execution"]["input_tokens_per_minute"],
+        )
+
+    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
+        if chunk.chunk_id is not None:
+            return chunk
+        materialized = replace(
+            chunk,
+            chunk_id=f"CHK-{state.run_id}-R-{uuid.uuid4().hex[:10].upper()}",
+        )
+        if state.config["debug"]["enabled"]:
+            save_debug_chunks(
+                state.project,
+                state.run_dir,
+                str(state.metadata["project_id"]),
+                state.run_id,
+                state.stage,
+                [materialized],
+            )
+        return materialized
+
+    async def process(
+        chunk: ChunkPlan,
+        split_parent_request_id: str | None = None,
+    ) -> None:
+        chunk = ensure_runtime_chunk(chunk)
+        try:
+            await process_once(chunk, split_parent_request_id)
+            return
+        except ContextLengthError as exc:
+            logger.warning(
+                "context split parent_request=%s segments=%d",
+                exc.request_id,
+                len(chunk.segments),
+            )
+            requested_ids = (
+                set(exc.segment_ids) if exc.segment_ids is not None else None
+            )
+            items = [
+                item
+                for item in chunk.segments
+                if requested_ids is None
+                or str(item["segment_id"]) in requested_ids
+            ]
+            if not items:
+                return
+            if len(items) > 1:
+                midpoint = len(items) // 2
+                groups = (items[:midpoint], items[midpoint:])
+            elif (
+                state.config["chunking"]["allow_split_oversized_segment"]
+                and len(str(items[0]["source"])) > 1
+            ):
+                groups = tuple(
+                    [part]
+                    for part in _replace_with_runtime_parts(
+                        items[0],
+                        part_original=part_original,
+                        original_parts=original_parts,
+                        **(runtime_parts_kwargs or {}),
+                    )
+                )
+            else:
+                groups = ()
+            if not groups:
+                await record_context_failure(items)
+                return
+            for group in groups:
+                await process(
+                    ChunkPlan(
+                        file_id=str(group[0]["file_id"]),
+                        segments=tuple(group),
+                        payload={},
+                        estimated_input_tokens=0,
+                    ),
+                    exc.request_id,
+                )
+
+    usage: dict[str, Any] | None = None
+    try:
+        async with LLMClient(
+            state.config,
+            limiter,
+            run_dir=state.run_dir,
+            project_id=str(state.metadata["project_id"]),
+            run_id=state.run_id,
+            stage=state.stage,
+            client=http_client,
+            on_usage=state.on_usage,
+        ) as llm:
+            state.llm = llm
+            await record_preflight_failure(preflight_failed)
+            await dispatch_chunks(
+                chunks,
+                process,
+                mode=state.config["execution"]["scheduling_mode"],
+                max_parallel=state.config["execution"]["max_parallel"],
+            )
+            await before_finalize()
+        _extend_unique(state.warnings, llm.warnings)
+        usage = llm.usage_summary()
+    except asyncio.CancelledError:
+        usage = llm.usage_summary()
+        finalize_run(
+            state.project,
+            state.run_dir,
+            status="interrupted",
+            completed=exception_completed(),
+            failed=0,
+            warnings=[*state.warnings, "任务已由用户取消"],
+            usage=usage,
+            failure_counts=dict(failure_counts),
+        )
+        raise
+    except (FatalExternalError, ConfigError) as exc:
+        if isinstance(exc, FatalExternalError):
+            usage = llm.usage_summary()
+        finalize_run(
+            state.project,
+            state.run_dir,
+            status="failed",
+            completed=exception_completed(),
+            failed=exception_failed(),
+            warnings=state.warnings,
+            usage=usage,
+            failure_counts=dict(failure_counts),
+        )
+        logger.error(
+            "run failed run=%s error_type=%s",
+            state.run_id,
+            type(exc).__name__,
+        )
+        raise
+    return finalize_run(
+        state.project,
+        state.run_dir,
+        status="completed" if failed_count() == 0 else "failed",
+        completed=completed_count(),
+        failed=failed_count(),
+        warnings=state.warnings,
+        usage=usage,
+        failure_counts=dict(failure_counts),
+    )
+
+
 def _restore_leading_whitespace(source: str, text: str) -> str:
     prefix_end = 0
     while prefix_end < len(source) and source[prefix_end].isspace():
@@ -1527,40 +1740,25 @@ async def run_terminology(
         }
 
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        stage="terminology",
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, "terminology", planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    project,
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    "terminology",
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     write_lock = asyncio.Lock()
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
     failure_counts: Counter[str] = Counter()
     completed_original_ids: set[str] = set()
+    state = StageRunState(
+        project=project,
+        stage="terminology",
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -1572,24 +1770,6 @@ async def run_terminology(
             )
 
     report_progress()
-
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                project,
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                "terminology",
-                [materialized],
-            )
-        return materialized
 
     async def process_once(
         chunk: ChunkPlan,
@@ -1609,7 +1789,7 @@ async def run_terminology(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                response, _ = await llm.chat(
+                response, _ = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1772,210 +1952,128 @@ async def run_terminology(
             return len(completed_originals), 0
         return 0, len(unresolved)
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
-    ) -> tuple[int, int]:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            return await process_once(chunk, split_parent_request_id)
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
-            )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return 0, 0
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                original_id = part_original.get(
-                    str(items[0]["segment_id"]), str(items[0]["segment_id"])
-                )
-                async with write_lock:
-                    if original_id not in failed_originals:
-                        failed_originals.add(original_id)
-                        failure_counts["context_error"] += 1
-                        report_progress()
-                        append_jsonl(
-                            project,
-                            project / "terminology" / "scans.jsonl",
-                            record_header(
-                                "terminology_scan",
-                                str(metadata["project_id"]),
-                                stage="terminology",
-                                segment_id=original_id,
-                                status="failed",
-                                run_id=run_id,
-                                request_id=None,
-                                active_task_id=task_id,
-                                stage_fingerprint=fingerprint,
-                                error_class="context_error",
-                                error_message="模型报告上下文过长",
-                            ),
-                        )
-                return 0, 1
-            values = [
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
-                for group in groups
-            ]
-            return sum(item[0] for item in values), sum(item[1] for item in values)
-
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage="terminology",
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            async with write_lock:
-                for segment in preflight_failed:
-                    segment_id = str(segment["segment_id"])
-                    failed_originals.add(segment_id)
-                    failure_counts["context_error"] += 1
-                    report_progress()
-                    append_jsonl(
-                        project,
-                        project / "terminology" / "scans.jsonl",
-                        record_header(
-                            "terminology_scan",
-                            str(metadata["project_id"]),
-                            stage="terminology",
-                            segment_id=segment_id,
-                            status="failed",
-                            run_id=run_id,
-                            request_id=None,
-                            active_task_id=task_id,
-                            stage_fingerprint=fingerprint,
-                            error_class="context_error",
-                            error_message=(
-                                "单 Segment 超过模型限制且内部拆分已关闭"
-                            ),
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
+    ) -> None:
+        async with write_lock:
+            for segment in failed:
+                segment_id = str(segment["segment_id"])
+                if segment_id in failed_originals:
+                    continue
+                failed_originals.add(segment_id)
+                failure_counts["context_error"] += 1
+                report_progress()
+                append_jsonl(
+                    project,
+                    project / "terminology" / "scans.jsonl",
+                    record_header(
+                        "terminology_scan",
+                        str(metadata["project_id"]),
+                        stage="terminology",
+                        segment_id=segment_id,
+                        status="failed",
+                        run_id=run_id,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        error_class="context_error",
+                        error_message=(
+                            "单 Segment 超过模型限制且内部拆分已关闭"
                         ),
-                    )
-            results = await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="interrupted",
-            completed=(len(selected) - len(work)) if resume_run_id else 0,
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="failed",
-            completed=(len(selected) - len(work)) if resume_run_id else 0,
-            failed=len(work),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s error_type=%s",
-            run_id,
-            type(exc).__name__,
-        )
-        raise
+                    ),
+                )
 
-    completed = sum(value[0] for value in results)
-    failed = len(failed_originals)
-    all_nonempty = [segment for segment in segments if not segment["is_empty"]]
-    task_scans = [
-        record
-        for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
-        if record.get("active_task_id") == task_id
-    ]
-    task_completed_ids = {
-        str(record["segment_id"])
-        for record in task_scans
-        if record.get("status") == "completed"
-    }
-    published_now = False
-    if active and active.get("status") == "active" and all(
-        str(segment["segment_id"]) in task_completed_ids for segment in all_nonempty
-    ):
-        published = _merge_and_publish_terms(
-            project,
-            task_id=task_id,
-            project_id=str(metadata["project_id"]),
-            published_run_id=run_id,
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        original_id = part_original.get(
+            str(items[0]["segment_id"]), str(items[0]["segment_id"])
         )
-        published_now = True
-    usage = finalize_run(
-        project,
-        run_dir,
-        status="completed" if failed == 0 else "failed",
-        completed=(
-            sum(
+        async with write_lock:
+            if original_id not in failed_originals:
+                failed_originals.add(original_id)
+                failure_counts["context_error"] += 1
+                report_progress()
+                append_jsonl(
+                    project,
+                    project / "terminology" / "scans.jsonl",
+                    record_header(
+                        "terminology_scan",
+                        str(metadata["project_id"]),
+                        stage="terminology",
+                        segment_id=original_id,
+                        status="failed",
+                        run_id=run_id,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        error_class="context_error",
+                        error_message="模型报告上下文过长",
+                    ),
+                )
+
+    published_now = False
+    task_completed_ids: set[str] = set()
+
+    async def before_finalize() -> None:
+        nonlocal published, published_now, task_completed_ids
+        all_nonempty = [segment for segment in segments if not segment["is_empty"]]
+        task_scans = [
+            record
+            for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
+            if record.get("active_task_id") == task_id
+        ]
+        task_completed_ids = {
+            str(record["segment_id"])
+            for record in task_scans
+            if record.get("status") == "completed"
+        }
+        if active and active.get("status") == "active" and all(
+            str(segment["segment_id"]) in task_completed_ids for segment in all_nonempty
+        ):
+            published = _merge_and_publish_terms(
+                project,
+                task_id=task_id,
+                project_id=str(metadata["project_id"]),
+                published_run_id=run_id,
+            )
+            published_now = True
+
+    def completed_count() -> int:
+        if resume_run_id:
+            return sum(
                 str(segment["segment_id"]) in task_completed_ids
                 for segment in selected
             )
-            if resume_run_id
-            else completed
+        return len(completed_original_ids)
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_originals),
+        exception_completed=lambda: (
+            (len(selected) - len(work)) if resume_run_id else 0
         ),
-        failed=failed,
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        exception_failed=lambda: len(work),
+        failure_counts=failure_counts,
+        http_client=http_client,
     )
+    failed = len(failed_originals)
+    all_nonempty = [segment for segment in segments if not segment["is_empty"]]
     logger.info(
         "run complete run=%s completed=%d failed=%d pending=%d",
         run_id,
-        completed,
+        len(completed_original_ids),
         failed,
         len(all_nonempty) - len(task_completed_ids),
     )
@@ -1983,7 +2081,7 @@ async def run_terminology(
         "stage": "terminology",
         "run_id": run_id,
         "active_task_id": task_id,
-        "completed": completed,
+        "completed": len(completed_original_ids),
         "reused": len(selected) - len(work),
         "failed": failed,
         "failure_counts": dict(failure_counts),
@@ -2335,35 +2433,6 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        stage="translation",
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, "translation", planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    project,
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    "translation",
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
@@ -2385,24 +2454,6 @@ async def run_translation(
             )
 
     report_progress()
-
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                project,
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                "translation",
-                [materialized],
-            )
-        return materialized
 
     async def save_completed(
         segment_id: str,
@@ -2529,6 +2580,21 @@ async def run_translation(
         else:
             await save_completed(original_id, combined, combined_request_id)
 
+    state = StageRunState(
+        project=project,
+        stage="translation",
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
+
     async def request_translations(
         group: list[dict[str, Any]],
         *,
@@ -2578,7 +2644,7 @@ async def run_translation(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                response, _ = await llm.chat(
+                response, _ = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_translation"],
                     estimated_input_tokens=estimated,
@@ -2662,68 +2728,6 @@ async def run_translation(
                 "格式修正次数耗尽",
             )
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
-    ) -> None:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            await process_once(chunk, split_parent_request_id)
-            return
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
-            )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                        by_id=by_id,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                await save_failed(
-                    str(items[0]["segment_id"]),
-                    "REQ-NONE",
-                    "context_error",
-                    "模型报告上下文过长",
-                )
-                return
-            for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
-
     async def repair_group(
         group: list[dict[str, Any]],
         subset: dict[str, dict[str, Any]],
@@ -2785,168 +2789,136 @@ async def run_translation(
         for segment_id in unresolved:
             validation_pending[segment_id] = subset[segment_id]
 
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage="translation",
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            for segment in preflight_failed:
-                await save_failed(
-                    str(segment["segment_id"]),
-                    f"REQ-{uuid.uuid4().hex[:12].upper()}",
-                    "context_error",
-                    "单 Segment 超过模型限制且内部拆分已关闭",
-                )
-            await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-            max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-            for repair_attempt in range(1, max_repairs + 1):
-                if not validation_pending:
-                    break
-                current_pending = dict(validation_pending)
-                validation_pending.clear()
-                groups = contiguous_groups(
-                    (item["segment"] for item in current_pending.values()),
-                    all_segments=segments,
-                    cross_boundary="translation"
-                    in config["chunking"]["cross_boundary_batching"],
-                )
-                logger.warning(
-                    "validation repair attempt=%d segments=%d chunks=%d",
-                    repair_attempt,
-                    len(current_pending),
-                    len(groups),
-                )
-                for group in groups:
-                    subset = {
-                        str(item["segment_id"]): current_pending[
-                            str(item["segment_id"])
-                        ]
-                        for item in group
-                    }
-                    await repair_group(group, subset)
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="interrupted",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="failed",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=len(selection.work) - len(completed_ids),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s completed=%d error_type=%s",
-            run_id,
-            len(completed_ids),
-            type(exc).__name__,
-        )
-        raise
-
-    exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
-    if exhausted_mode == "warning":
-        pending_part_originals = {
-            part_original[segment_id]
-            for segment_id in validation_pending
-            if segment_id in part_original
-        }
-        for original_id in pending_part_originals:
-            expected = original_parts[original_id]
-            combined_parts: list[str] = []
-            request_id = "REQ-NONE"
-            for part_id in expected:
-                if part_id in validation_pending:
-                    item = validation_pending[part_id]
-                    combined_parts.append(str(item["candidate"]))
-                    request_id = str(item["request_id"])
-                elif part_id in part_results.get(original_id, {}):
-                    text, request_id = part_results[original_id][part_id]
-                    combined_parts.append(text)
-                else:
-                    break
-            else:
-                combined = "".join(combined_parts)
-                await save_completed(
-                    original_id,
-                    combined,
-                    request_id,
-                    validation_status="warning",
-                    findings=validate_translation_text(
-                        combined,
-                        config["validation"]["translation"],
-                    ),
-                )
-                for part_id in expected:
-                    validation_pending.pop(part_id, None)
-    for segment_id, item in validation_pending.items():
-        if exhausted_mode == "warning":
-            await save_completed(
-                segment_id,
-                item["candidate"],
-                item["request_id"],
-                validation_status="warning",
-                findings=item["findings"],
-            )
-        else:
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
+    ) -> None:
+        for segment in failed:
             await save_failed(
-                segment_id,
-                item["request_id"],
-                "validation_error",
-                "翻译文字校验修复次数耗尽",
-                candidate=item["candidate"],
-                findings=item["findings"],
+                str(segment["segment_id"]),
+                f"REQ-{uuid.uuid4().hex[:12].upper()}",
+                "context_error",
+                "单 Segment 超过模型限制且内部拆分已关闭",
             )
-    failed_count = len(failed_ids)
-    usage = finalize_run(
-        project,
-        run_dir,
-        status="completed" if failed_count == 0 else "failed",
-        completed=(
+
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        await save_failed(
+            str(items[0]["segment_id"]),
+            "REQ-NONE",
+            "context_error",
+            "模型报告上下文过长",
+        )
+
+    async def before_finalize() -> None:
+        max_repairs = config["validation"]["translation"]["max_retry_attempts"]
+        for repair_attempt in range(1, max_repairs + 1):
+            if not validation_pending:
+                break
+            current_pending = dict(validation_pending)
+            validation_pending.clear()
+            groups = contiguous_groups(
+                (item["segment"] for item in current_pending.values()),
+                all_segments=segments,
+                cross_boundary="translation"
+                in config["chunking"]["cross_boundary_batching"],
+            )
+            logger.warning(
+                "validation repair attempt=%d segments=%d chunks=%d",
+                repair_attempt,
+                len(current_pending),
+                len(groups),
+            )
+            for group in groups:
+                subset = {
+                    str(item["segment_id"]): current_pending[
+                        str(item["segment_id"])
+                    ]
+                    for item in group
+                }
+                await repair_group(group, subset)
+        exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
+        if exhausted_mode == "warning":
+            pending_part_originals = {
+                part_original[segment_id]
+                for segment_id in validation_pending
+                if segment_id in part_original
+            }
+            for original_id in pending_part_originals:
+                expected = original_parts[original_id]
+                combined_parts: list[str] = []
+                request_id = "REQ-NONE"
+                for part_id in expected:
+                    if part_id in validation_pending:
+                        item = validation_pending[part_id]
+                        combined_parts.append(str(item["candidate"]))
+                        request_id = str(item["request_id"])
+                    elif part_id in part_results.get(original_id, {}):
+                        text, request_id = part_results[original_id][part_id]
+                        combined_parts.append(text)
+                    else:
+                        break
+                else:
+                    combined = "".join(combined_parts)
+                    await save_completed(
+                        original_id,
+                        combined,
+                        request_id,
+                        validation_status="warning",
+                        findings=validate_translation_text(
+                            combined,
+                            config["validation"]["translation"],
+                        ),
+                    )
+                    for part_id in expected:
+                        validation_pending.pop(part_id, None)
+        for segment_id, item in validation_pending.items():
+            if exhausted_mode == "warning":
+                await save_completed(
+                    segment_id,
+                    item["candidate"],
+                    item["request_id"],
+                    validation_status="warning",
+                    findings=item["findings"],
+                )
+            else:
+                await save_failed(
+                    segment_id,
+                    item["request_id"],
+                    "validation_error",
+                    "翻译文字校验修复次数耗尽",
+                    candidate=item["candidate"],
+                    findings=item["findings"],
+                )
+
+    def completed_count() -> int:
+        return (
             len(selection.reusable) + len(completed_ids)
             if resume_run_id
             else len(completed_ids)
-        ),
-        failed=failed_count,
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        )
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_ids),
+        exception_completed=completed_count,
+        exception_failed=lambda: len(selection.work) - len(completed_ids),
+        failure_counts=failure_counts,
+        http_client=http_client,
+        runtime_parts_kwargs={"by_id": by_id},
     )
+    failed_count = len(failed_ids)
     logger.info(
         "run complete run=%s completed=%d failed=%d",
         run_id,
@@ -3271,35 +3243,6 @@ async def run_review(
             "warnings": warnings,
         }
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        stage=stage,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, stage, planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    project,
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    stage,
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     result_path = stage_result_path(project, stage)
     write_lock = asyncio.Lock()
     completed_ids: set[str] = set()
@@ -3310,6 +3253,20 @@ async def run_review(
         {str(item["segment_id"]): item for item in request_segments}
     )
     part_results: dict[str, dict[str, tuple[dict[str, Any], str]]] = {}
+    state = StageRunState(
+        project=project,
+        stage=stage,
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -3320,24 +3277,6 @@ async def run_review(
             )
 
     report_progress()
-
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                project,
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                stage,
-                [materialized],
-            )
-        return materialized
 
     async def save_result(
         segment_id: str,
@@ -3496,7 +3435,7 @@ async def run_review(
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                response, _ = await llm.chat(
+                response, _ = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"][f"temperature_{stage}"],
                     estimated_input_tokens=estimated,
@@ -3560,147 +3499,54 @@ async def run_review(
                 error="格式修正次数耗尽",
             )
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
     ) -> None:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            await process_once(chunk, split_parent_request_id)
-            return
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
+        for segment in failed:
+            await save_result(
+                str(segment["segment_id"]),
+                "REQ-NONE",
+                error="单 Segment 超过模型限制且内部拆分已关闭",
             )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                        by_id=by_id,
-                        bases=bases,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                await save_result(
-                    str(items[0]["segment_id"]),
-                    "REQ-NONE",
-                    error="模型报告上下文过长",
-                )
-                return
-            for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
 
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage=stage,
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            for segment in preflight_failed:
-                await save_result(
-                    str(segment["segment_id"]),
-                    "REQ-NONE",
-                    error="单 Segment 超过模型限制且内部拆分已关闭",
-                )
-            await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="interrupted",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        await save_result(
+            str(items[0]["segment_id"]),
+            "REQ-NONE",
+            error="模型报告上下文过长",
         )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            project,
-            run_dir,
-            status="failed",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=len(selection.work) - len(completed_ids),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s completed=%d error_type=%s",
-            run_id,
-            len(completed_ids),
-            type(exc).__name__,
-        )
-        raise
-    usage = finalize_run(
-        project,
-        run_dir,
-        status="completed" if not failed_ids else "failed",
-        completed=(
+
+    async def before_finalize() -> None:
+        return None
+
+    def completed_count() -> int:
+        return (
             len(selection.reusable) + len(completed_ids)
             if resume_run_id
             else len(completed_ids)
-        ),
-        failed=len(failed_ids),
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        )
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_ids),
+        exception_completed=completed_count,
+        exception_failed=lambda: len(selection.work) - len(completed_ids),
+        failure_counts=failure_counts,
+        http_client=http_client,
+        runtime_parts_kwargs={"by_id": by_id, "bases": bases},
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
