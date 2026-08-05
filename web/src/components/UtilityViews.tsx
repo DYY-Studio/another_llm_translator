@@ -62,17 +62,17 @@ function extensionOf(path: string) {
 }
 
 function driveTypeLabel(type: string, language: Language) {
-  const labels: Record<string, [string, string]> = {
-    unknown: ["未知", "Unknown"],
-    unavailable: ["不可用", "Unavailable"],
-    removable: ["可移动磁盘", "Removable"],
-    fixed: ["本地磁盘", "Fixed"],
-    network: ["网络驱动器", "Network"],
-    cdrom: ["光盘驱动器", "CD/DVD"],
-    ramdisk: ["内存磁盘", "RAM disk"],
+  const labels: Record<string, string> = {
+    unknown: "drive.unknown",
+    unavailable: "drive.unavailable",
+    removable: "drive.removable",
+    fixed: "drive.fixed",
+    network: "drive.network",
+    cdrom: "drive.cdrom",
+    ramdisk: "drive.ramdisk",
   };
-  const label = labels[type] ?? [type, type];
-  return label[language === "en" ? 1 : 0];
+  const key = labels[type] ?? type;
+  return translate(key, language);
 }
 
 function InputQueue({
@@ -130,13 +130,13 @@ function InputQueue({
           ignored.push(relative);
           continue;
         }
-        setMessage(language === "en" ? `Unsupported input file: ${relative}` : `不支持的输入文件：${relative}`);
+        setMessage(translate("inputQueue.unsupported", language, { path: relative }));
         return;
       }
       incoming.push({ file, path: relative, kind, adapterId });
     }
     if (!incoming.length) {
-      setMessage(language === "en" ? "The selected folder has no supported input files" : "所选文件夹中没有受支持的输入文件");
+      setMessage(translate("inputQueue.noSupported", language));
       return;
     }
     const known = new Set(
@@ -146,14 +146,14 @@ function InputQueue({
     for (const item of incoming) {
       const key = item.path.toLocaleLowerCase();
       if (known.has(key)) {
-        setMessage(language === "en" ? `Duplicate input path; this selection was not added: ${item.path}` : `输入路径重名，本次选择未加入：${item.path}`);
+        setMessage(translate("inputQueue.duplicate", language, { path: item.path }));
         return;
       }
       known.add(key);
     }
     onChange([...value, ...incoming]);
     if (ignored.length) {
-      setMessage(language === "en" ? `Ignored ${ignored.length} unsupported files` : `已忽略 ${ignored.length} 个不支持的文件`);
+      setMessage(translate("inputQueue.ignored", language, { count: ignored.length }));
     }
   }
 
@@ -164,7 +164,7 @@ function InputQueue({
   return (
     <div className="input-queue">
       <div className="input-queue-heading">
-        <div><strong>{language === "en" ? "Input queue" : "待输入列表"}</strong><small>{language === "en" ? "Add files or folders in multiple batches; folder paths stay relative." : "可分多次选择；文件夹导入保留内部相对路径。"}</small></div>
+        <div><strong>{translate("inputQueue.title", language)}</strong><small>{translate("inputQueue.hint", language)}</small></div>
         <div className="button-group">
           <input
             ref={fileRef}
@@ -188,11 +188,11 @@ function InputQueue({
               clearInput(folderRef);
             }}
           />
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>{language === "en" ? "Choose files" : "选择文件"}</button>
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>{language === "en" ? "Choose folder" : "选择文件夹"}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>{translate("inputQueue.chooseFiles", language)}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>{translate("inputQueue.chooseFolder", language)}</button>
         </div>
       </div>
-      {!folderSelectionSupported && <small className="muted">{language === "en" ? "This browser cannot select folders; individual files are still available." : "当前浏览器不支持文件夹选择，可继续选择单独文件。"}</small>}
+      {!folderSelectionSupported && <small className="muted">{translate("inputQueue.noFolderSupport", language)}</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
       {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
         ? [...adapter.import_options, ...adapter.run_options].map((option) => (
@@ -211,16 +211,16 @@ function InputQueue({
             >
               {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
             </select>
-            <small>{language === "en" ? "Applies to this import only; re-import existing files after changing it." : "仅用于本次导入；修改既有文件需重新导入。"}</small>
+            <small>{translate("inputQueue.optionHint", language)}</small>
           </label>
         ))
         : [])}
       <div className="input-queue-list">
-        {!value.length && <div className="input-queue-empty">{language === "en" ? "No files selected." : "尚未选择文件。"}</div>}
+        {!value.length && <div className="input-queue-empty">{translate("inputQueue.empty", language)}</div>}
         {value.map((item, index) => (
           <div className="input-queue-row" key={`${item.path}-${index}`}>
-            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? (language === "en" ? "Folder" : "文件夹") : (language === "en" ? "File" : "单独文件")}</small></span>
-            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{language === "en" ? "Remove" : "移除"}</button>
+            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? translate("inputQueue.folder", language) : translate("inputQueue.file", language)}</small></span>
+            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{translate("common.remove", language)}</button>
           </div>
         ))}
       </div>
@@ -326,7 +326,7 @@ export function Overview({
         <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
       </div>
       <div className="section-heading">
-        <div><h2>{translate("overview.fileHeading", language)}</h2><p>{language === "en" ? "Each file keeps its source format." : "每个文件保留其来源格式"}</p></div>
+        <div><h2>{translate("overview.fileHeading", language)}</h2><p>{translate("overview.fileHint", language)}</p></div>
         <div className="section-actions">
           <button className="primary-button" disabled={busy || !pendingInputs.length} onClick={() => void upload()}>
             {translate("overview.add", language)}
@@ -359,20 +359,20 @@ export function Overview({
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <h2>{language === "en" ? `Remove ${selection.selectedKeys.size} files?` : `移除 ${selection.selectedKeys.size} 个文件？`}</h2>
-            <p>{language === "en" ? "The project copies and active Segments will be removed; historical stage results and existing outputs remain. Re-adding files assigns new File and Segment IDs." : "项目内源文件副本和活动 Segment 将被删除；历史阶段结果与既有输出文件会保留。以后重新添加会分配新的 File 与 Segment ID。"}</p>
+            <h2>{translate("overview.removeFiles", language, { count: selection.selectedKeys.size })}</h2>
+            <p>{translate("overview.removeFilesHint", language)}</p>
             <div className="modal-actions">
-              <button className="quiet-button" onClick={() => setRemoving(false)}>{language === "en" ? "Cancel" : "取消"}</button>
-              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>{language === "en" ? "Remove" : "确认移除"}</button>
+              <button className="quiet-button" onClick={() => setRemoving(false)}>{translate("common.cancel", language)}</button>
+              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>{translate("overview.confirmRemove", language)}</button>
             </div>
           </div>
         </div>
       )}
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
-          <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Delete project permanently" : "永久删除项目"} onMouseDown={(event) => event.stopPropagation()}>
-            <h2>{language === "en" ? "Delete project permanently?" : "永久删除项目？"}</h2>
-            <p>{language === "en" ? "This deletes the project directory, source files, Runs, term library, and stage results. It cannot be undone; confirm that nothing needs to be kept." : "将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。"}</p>
+          <div className="modal" role="dialog" aria-modal="true" aria-label={translate("overview.deleteTitle", language)} onMouseDown={(event) => event.stopPropagation()}>
+            <h2>{translate("overview.deleteTitle", language)}?</h2>
+            <p>{translate("overview.deleteHint", language)}</p>
             {error && <p className="error-text">{error}</p>}
             <div className="modal-actions">
               <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>{translate("dialog.cancel", language)}</button>
@@ -418,14 +418,14 @@ export function ExportView({
   return (
     <div className="page narrow-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
-      <label>{language === "en" ? "Result stage" : "结果阶段"}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{language === "en" ? "Translation" : "翻译"}</option><option value="proofread">{language === "en" ? "Applied proofreading" : "已应用校对"}</option><option value="polished">{language === "en" ? "Applied polishing" : "已应用润色"}</option></select></label>
-      <label>{language === "en" ? "Output format" : "输出格式"}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{language === "en" ? "Keep each file's format" : "保留各文件原格式"}</option><option value="txt">{language === "en" ? "Unified TXT" : "统一输出 TXT"}</option></select></label>
+      <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
+      <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
       <div className="export-file-heading">
         <div>
-          <strong>{language === "en" ? "File scope" : "文件范围"}</strong>
-          <small>{selection.selectedKeys.size ? (language === "en" ? `${selection.selectedKeys.size} files selected` : `已选择 ${selection.selectedKeys.size} 个文件`) : (language === "en" ? "All files when none are selected" : "未选择时导出全部文件")}</small>
+          <strong>{translate("export.fileScope", language)}</strong>
+          <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
         </div>
-        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{language === "en" ? "Clear selection" : "清除选择"}</button>
+        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
       </div>
       <div className="file-list export-file-list">
         {overview.files.map((item) => (
@@ -439,8 +439,8 @@ export function ExportView({
           </button>
         ))}
       </div>
-      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {language === "en" ? "Generate bilingual output" : "生成双语对照"}</label>
-      <button className="primary-button" onClick={run}>{language === "en" ? "Generate output" : "生成输出"}</button>
+      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
+      <button className="primary-button" onClick={run}>{translate("export.generate", language)}</button>
       {result && <pre className="result-box">{result}</pre>}
     </div>
   );
@@ -496,14 +496,14 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
     <>
       <div className="modal-backdrop" onMouseDown={onClose}>
         <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="dialog-tabs" role="tablist" aria-label={language === "en" ? "Project actions" : "项目操作"}>
+          <div className="dialog-tabs" role="tablist" aria-label={translate("dialog.projectActions", language)}>
             <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>{translate("dialog.new", language)}</button>
             <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>{translate("dialog.open", language)}</button>
           </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           {mode === "open" ? <>
             <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => setDirectoryPickerMode("project")}>{translate("dialog.browse", language)}</button></div></label>
-            <p className="muted">{language === "en" ? "Only this directory is opened; parent directories are not scanned." : "只打开此目录，不扫描父目录，也不会移动项目。"}</p>
+            <p className="muted">{translate("dialog.openHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
           </> : <>
             <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
