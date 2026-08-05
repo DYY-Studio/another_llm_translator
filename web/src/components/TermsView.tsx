@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { translate, type Language } from "../i18n";
 import type { Term, TermsResponse } from "../types";
@@ -19,6 +19,21 @@ const emptyForm: TermForm = {
   description: "",
   aliases: "",
 };
+
+interface TermsCacheEntry {
+  data: TermsResponse;
+  search: string;
+  onlyConflicts: boolean;
+  showDisabled: boolean;
+  focusedKey: string;
+  scrollTop: number;
+}
+
+// Survives tab switches so returning renders the term list instantly. Keyed
+// by project; cleared when the project changes so cached data never leaks
+// across projects.
+const termsCache = new Map<string, TermsCacheEntry>();
+const termsProjectRef = { current: "" };
 
 function formFor(term: Term): TermForm {
   return {
@@ -53,20 +68,64 @@ export function TermsView({
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
+  const termListRef = useRef<HTMLDivElement>(null);
+  const restoredScrollRef = useRef<number | null>(null);
+  const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
 
-  useEffect(() => {
+  // Cached data does not survive project switches: changing the project drops
+  // the previous project's cache. Within the same project, restore the cached
+  // view synchronously during render so the browser never paints an empty
+  // frame when switching back; the load effect refreshes in the background.
+  if (termsProjectRef.current !== project) {
+    termsProjectRef.current = project;
+    termsCache.clear();
     setData(null);
+    selection.reset();
+  } else if (!termsRestoredRef.current) {
+    termsRestoredRef.current = true;
+    const cached = termsCache.get(project);
+    if (cached) {
+      setData(cached.data);
+      setSearch(cached.search);
+      setOnlyConflicts(cached.onlyConflicts);
+      setShowDisabled(cached.showDisabled);
+      selection.reset(cached.focusedKey);
+      restoredScrollRef.current = cached.scrollTop;
+    } else {
+      setData(null);
+      selection.reset();
+    }
+  }
+
+  useEffect(() => {
     setForm(emptyForm);
     setMessage("");
-    selection.reset();
     void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
       .then(setData)
       .catch((error) => setMessage(String(error)));
   }, [project]);
+
+  useEffect(() => {
+    if (!data) return;
+    termsCache.set(project, {
+      data,
+      search,
+      onlyConflicts,
+      showDisabled,
+      focusedKey: selection.focusedKey,
+      scrollTop: termListRef.current?.scrollTop ?? 0,
+    });
+  }, [project, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
+
+  useLayoutEffect(() => {
+    if (restoredScrollRef.current === null) return;
+    if (termListRef.current) termListRef.current.scrollTop = restoredScrollRef.current;
+    restoredScrollRef.current = null;
+  });
 
   useEffect(() => {
     if (focusFailures) setShowScanFailures(true);
@@ -264,7 +323,10 @@ export function TermsView({
             )}
           </div>
         )}
-        <div className="term-list">
+        <div className="term-list" ref={termListRef} onScroll={(event) => {
+          const cached = termsCache.get(project);
+          if (cached) cached.scrollTop = event.currentTarget.scrollTop;
+        }}>
           {visible.map((term) => {
             const selectedRow = selection.selectedKeys.has(term.normalized);
             const focused = selection.focusedKey === term.normalized;
