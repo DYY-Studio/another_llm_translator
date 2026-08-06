@@ -208,13 +208,13 @@ TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
-python -m app.main init BOOK.epub --document-adapter epub --epub-ruby-mode aozora --name PROJECT_NAME
+python -m app.main init BOOK.epub --document-adapter epub --adapter-option epub.ruby_mode=aozora --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
-python -m app.main files-add PROJECT BOOK.epub --epub-ruby-mode base_only
+python -m app.main files-add PROJECT BOOK.epub --adapter-option epub.ruby_mode=base_only
 python -m app.main files-remove PROJECT FILE_ID...
 ```
 
