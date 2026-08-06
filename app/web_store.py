@@ -29,6 +29,7 @@ from .stages import (
     build_term_library_rows,
     load_terms,
     normalize_term,
+    prompt_middle_digests,
     term_normalization,
     validate_translation_text,
 )
@@ -64,17 +65,6 @@ class WebStore:
         library = load_terms(self.project)
         return int(library["terms_revision"]) if library else None
 
-    def _prompt(self, stage: str) -> str:
-        from .execution import full_prompt
-
-        name = {
-            "translation": "translation.middle.txt",
-            "proofreading": "proofreading.middle.txt",
-            "polishing": "polishing.middle.txt",
-        }[stage]
-        middle = (self.project / "prompts" / name).read_text(encoding="utf-8")
-        return full_prompt(stage, middle)
-
     def _fingerprint(self, stage: str) -> str:
         if stage.endswith("_applied"):
             return stage_fingerprint(
@@ -89,7 +79,7 @@ class WebStore:
         return stage_fingerprint(
             self.config,
             stage,
-            self._prompt(stage),
+            prompt_middle_digests(self.project, stage),
             terms_revision=self._terms_revision(),
         )
 

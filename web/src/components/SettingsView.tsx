@@ -451,12 +451,39 @@ function Field({ label, help, children }: { label: string; help?: string; childr
 function NumberField({ label, value, onChange, help, min, max, step }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number }) { return <Field label={label} help={help}><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
 function ToggleField({ label, checked, onChange, help, disabled = false }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean }) { return <label className="config-toggle"><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
+interface PromptView {
+  content: string;
+  language: string;
+  assembled: string;
+  languages: string[];
+}
+
 function PromptSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
-  const [stage, setStage] = useState("translation"); const [content, setContent] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
+  const [stage, setStage] = useState("translation");
+  const [promptLanguage, setPromptLanguage] = useState("zh-CN");
+  const [content, setContent] = useState("");
+  const [assembled, setAssembled] = useState("");
+  const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
-  useEffect(() => { setMessage(""); setError(""); void api<{ content: string }>(path).then((value) => setContent(value.content)).catch((reason) => setError(errorMessage(reason, language))); }, [path]);
-  async function save() { try { await api(path, { method: "PUT", body: JSON.stringify({ content }) }); setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language)); } catch (reason) { setError(errorMessage(reason, language)); } }
-  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div><label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /></section>;
+  useEffect(() => {
+    setMessage("");
+    setError("");
+    void api<PromptView>(`${path}?language=${promptLanguage}`).then((value) => {
+      setContent(value.content);
+      setAssembled(value.assembled);
+      setLanguages(value.languages);
+      setPromptLanguage(value.language);
+    }).catch((reason) => setError(errorMessage(reason, language)));
+  }, [path, promptLanguage]);
+  async function save() {
+    try {
+      await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content }) });
+      setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div><label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label><label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /><div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div></section>;
 }
 
 function errorMessage(reason: unknown, language: Language): string { return reason instanceof Error ? reason.message : translate("common.requestFailed", language); }

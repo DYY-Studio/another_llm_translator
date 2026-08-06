@@ -1,0 +1,5 @@
+Extract terms from the pending source text that affect translation consistency or comprehension accuracy.
+
+Prioritize people, places, organizations, titles, objects, abilities, and proper concepts within the work. Merge full-width and half-width variants and explicit aliases of the same term; do not invent a preferred translation when information is insufficient.
+
+reference_context is only for judging a person's gender, reference, identity, and contextual meaning. Do not extract a term solely because it appears in reference_context.

@@ -72,7 +72,7 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
     first = config()
     prompt = full_prompt(
         "translation",
-        (ROOT / "prompts" / "translation.middle.txt").read_text(encoding="utf-8"),
+        (ROOT / "prompts" / "translation.zh-CN.middle.txt").read_text(encoding="utf-8"),
     )
     original = stage_fingerprint(first, "translation", prompt, terms_revision=1)
     first["chunking"]["target_chunk_input_tokens"] = 100

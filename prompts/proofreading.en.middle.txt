@@ -1,0 +1,3 @@
+Proofread the source against the current translation, focusing on mistranslation, omission, negation or tense errors, wrong references, terminology inconsistency, and obvious grammar problems.
+
+Accept the current translation when it is accurate and needs no change; otherwise provide a complete replacement suggestion and briefly state the key problem. Do not suggest changes purely from personal stylistic preference.

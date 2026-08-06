@@ -158,6 +158,7 @@ class WebTaskManager:
         scope: Scope,
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
+        prompt_language: str | None = None,
     ) -> dict[str, Any]:
         if stage not in {
             "terminology",
@@ -226,6 +227,7 @@ class WebTaskManager:
                     scope=scope,
                     reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                     run_action=run_action,
+                    prompt_language=prompt_language,
                 )
             )
             return state.view()
@@ -237,6 +239,7 @@ class WebTaskManager:
         scope: Scope,
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
+        prompt_language: str | None = None,
     ) -> None:
         state.status = "running"
         state.started_at = utc_now()
@@ -288,6 +291,7 @@ class WebTaskManager:
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
                     )
@@ -297,6 +301,7 @@ class WebTaskManager:
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
                     )
@@ -307,6 +312,7 @@ class WebTaskManager:
                         scope,
                         resume_run_id=resume_run_id,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
                     )
@@ -315,6 +321,7 @@ class WebTaskManager:
                         state.project,
                         scope,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        prompt_language=prompt_language,
                     )
             state.summary = summary
             state.completed_segments = int(summary.get("completed", 0)) + int(

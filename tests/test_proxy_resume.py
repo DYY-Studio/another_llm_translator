@@ -427,7 +427,7 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
         json.dumps(preset), encoding="utf-8"
     )
     monkeypatch.setattr("app.config.APP_ROOT", preset_root)
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nCURRENT PROMPT",
         encoding="utf-8",
