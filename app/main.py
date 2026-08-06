@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .execution import Scope, choose_running_run
-from .errors import AppError
+from .errors import AppError, UsageError
 from .i18n import cli_language
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
@@ -59,9 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="输入输出格式 Adapter ID（默认：txt）",
     )
     init.add_argument(
-        "--epub-ruby-mode",
-        choices=("aozora", "base_only", "parenthetical"),
-        help="EPUB Ruby 导入形式（默认：aozora）",
+        "--adapter-option",
+        dest="adapter_options",
+        action="append",
+        metavar="ADAPTER.OPTION=VALUE",
+        help="Document Adapter 选项；可重复使用",
     )
     init.add_argument("--dry-run", action="store_true")
     init.add_argument(
@@ -78,9 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
     )
     files_add.add_argument(
-        "--epub-ruby-mode",
-        choices=("aozora", "base_only", "parenthetical"),
-        help="EPUB Ruby 导入形式（默认：aozora）",
+        "--adapter-option",
+        dest="adapter_options",
+        action="append",
+        metavar="ADAPTER.OPTION=VALUE",
+        help="Document Adapter 选项；可重复使用",
     )
 
     files_remove = subparsers.add_parser(
@@ -178,6 +182,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_adapter_option_args(values: list[str]) -> dict[str, dict[str, str]]:
+    resolved: dict[str, dict[str, str]] = {}
+    for value in values:
+        key, separator, option_value = value.partition("=")
+        adapter_id, _, option_id = key.partition(".")
+        if (
+            not separator
+            or not adapter_id
+            or not option_id
+            or "." in adapter_id
+            or "." in option_id
+        ):
+            raise UsageError(f"Adapter 选项格式无效：{value}")
+        if option_id in resolved.setdefault(adapter_id, {}):
+            raise UsageError(f"Adapter 选项重复：{value}")
+        resolved[adapter_id][option_id] = option_value
+    return resolved
+
+
 def run(argv: list[str] | None = None) -> int:
     configure_cli_logging()
     logger = get_logger()
@@ -197,8 +220,8 @@ def run(argv: list[str] | None = None) -> int:
             recursive=args.recursive,
             document_adapter_id=args.document_adapter,
             adapter_options=(
-                {"epub": {"ruby_mode": args.epub_ruby_mode}}
-                if args.epub_ruby_mode
+                parse_adapter_option_args(args.adapter_options)
+                if args.adapter_options
                 else None
             ),
             empty=args.empty,
@@ -229,8 +252,8 @@ def run(argv: list[str] | None = None) -> int:
                 recursive=args.recursive,
                 document_adapter_id=args.document_adapter,
                 adapter_options=(
-                    {"epub": {"ruby_mode": args.epub_ruby_mode}}
-                    if args.epub_ruby_mode
+                    parse_adapter_option_args(args.adapter_options)
+                    if args.adapter_options
                     else None
                 ),
             )

@@ -10,7 +10,7 @@ import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, stage_result_path
-from app.main import build_parser
+from app.main import build_parser, parse_adapter_option_args
 from app.project import (
     add_project_files,
     init_project,
@@ -76,7 +76,7 @@ def test_export_cli_collects_repeated_file_ids() -> None:
     assert args.file_ids == ["F0001", "F0003"]
 
 
-def test_epub_ruby_mode_is_available_for_cli_imports() -> None:
+def test_adapter_options_are_collected_for_cli_imports() -> None:
     init_args = build_parser().parse_args(
         [
             "init",
@@ -85,16 +85,36 @@ def test_epub_ruby_mode_is_available_for_cli_imports() -> None:
             "book",
             "--document-adapter",
             "epub",
-            "--epub-ruby-mode",
-            "parenthetical",
+            "--adapter-option",
+            "epub.ruby_mode=parenthetical",
         ]
     )
     add_args = build_parser().parse_args(
-        ["files-add", "book", "next.epub", "--epub-ruby-mode", "base_only"]
+        [
+            "files-add",
+            "book",
+            "next.epub",
+            "--adapter-option",
+            "epub.ruby_mode=base_only",
+        ]
     )
 
-    assert init_args.epub_ruby_mode == "parenthetical"
-    assert add_args.epub_ruby_mode == "base_only"
+    assert init_args.adapter_options == ["epub.ruby_mode=parenthetical"]
+    assert add_args.adapter_options == ["epub.ruby_mode=base_only"]
+
+
+def test_parse_adapter_option_args_builds_adapter_dict() -> None:
+    assert parse_adapter_option_args(
+        ["record.source_style=marked", "record.line_ending=crlf", "a.b=x"]
+    ) == {
+        "record": {"source_style": "marked", "line_ending": "crlf"},
+        "a": {"b": "x"},
+    }
+    with pytest.raises(UsageError, match="重复"):
+        parse_adapter_option_args(["a.b=1", "a.b=2"])
+    for value in ("a.b", "=x", "a=x", ".b=x", "a.=x", "a.b.c=x"):
+        with pytest.raises(UsageError, match="格式无效"):
+            parse_adapter_option_args([value])
 
 
 def test_empty_project_can_open_inspect_and_add_txt_files(

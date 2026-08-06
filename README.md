@@ -181,10 +181,12 @@ EPUB 初始化时需要明确指定 Adapter：
 python -m app.main init book.epub \
   --name book \
   --document-adapter epub \
-  --epub-ruby-mode aozora
+  --adapter-option epub.ruby_mode=aozora
 ```
 
-EPUB Ruby 模式包括 `aozora`、`base_only` 和 `parenthetical`。导入选项会固化在该 File
+任意 Document Adapter 的导入与运行选项都通过可重复的
+`--adapter-option ADAPTER.OPTION=VALUE` 传入（如 EPUB Ruby 模式
+`aozora`、`base_only` 和 `parenthetical`）。导入选项会固化在该 File
 的 Adapter 状态中；修改选项需要移除并重新导入文件。
 
 ### 阶段与范围

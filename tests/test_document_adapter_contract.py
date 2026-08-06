@@ -12,6 +12,7 @@ import pytest
 from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import IncompleteError, UsageError
 from app.execution import Scope, stage_fingerprint
+from app.main import run
 from app.plugins import PLUGIN_PROTOCOL_VERSION, PluginDescriptor
 from app.project import init_project, load_segments, load_source_files
 from app.sqlite_storage import read_json, write_json
@@ -556,3 +557,32 @@ def test_contract_fingerprint_tracks_adapter_version(
     base = stage_fingerprint(config, "translation", "prompt")
     config["_document_adapters"]["F0001"]["version"] = "2"
     assert stage_fingerprint(config, "translation", "prompt") != base
+
+
+def test_contract_cli_adapter_option_reaches_import_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_plugin(monkeypatch, RecordDocumentAdapter())
+    source = tmp_path / "book.rec"
+    write_record(source, "line one")
+    parent = tmp_path / "projects-root"
+    parent.mkdir()
+
+    code = run(
+        [
+            "init",
+            str(source),
+            "--name",
+            "cli-demo",
+            "--document-adapter",
+            "record",
+            "--adapter-option",
+            "record.source_style=marked",
+            "--parent-dir",
+            str(parent),
+        ]
+    )
+
+    assert code == 0
+    project = parent / "cli-demo"
+    assert load_segments(project)[0]["model_source"] == "<k1>line one</k1>"
