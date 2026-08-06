@@ -20,7 +20,7 @@ fn start_sidecar() -> Option<Child> {
         "-m",
         "app.web",
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         &web_port(),
     ]);
@@ -65,13 +65,6 @@ fn select_folder() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-fn select_project() -> Option<String> {
-    rfd::FileDialog::new()
-        .pick_folder()
-        .map(|path| path.to_string_lossy().into_owned())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -90,11 +83,7 @@ pub fn run() {
                 .build();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            select_file,
-            select_folder,
-            select_project
-        ])
+        .invoke_handler(tauri::generate_handler![select_file, select_folder])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")
         .run(|_app_handle, event| {

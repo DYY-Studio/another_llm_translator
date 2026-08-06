@@ -24,7 +24,3 @@ export function pickNativeFile(): Promise<string | null> {
 export function pickNativeFolder(): Promise<string | null> {
   return pick("select_folder");
 }
-
-export function pickNativeProject(): Promise<string | null> {
-  return pick("select_project");
-}
