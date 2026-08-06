@@ -110,7 +110,7 @@ export function SegmentWorkspace({
   const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(null);
   const [total, setTotal] = useState(0);
   const [listError, setListError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
   const indexInFlightRef = useRef(false);
@@ -150,7 +150,14 @@ export function SegmentWorkspace({
   useEffect(() => {
     if (workspaceProjectRef.current !== project) {
       workspaceProjectRef.current = project;
-      workspaceCache.clear();
+      // Drop only entries of other projects. Entries are keyed by project, so
+      // nothing leaks across projects, while the current project's prefetched
+      // entries for unvisited stages survive for the first mount.
+      for (const key of [...workspaceCache.keys()]) {
+        if ((JSON.parse(key) as string[])[0] !== project) {
+          workspaceCache.delete(key);
+        }
+      }
     }
   }, [project]);
 
@@ -334,7 +341,7 @@ export function SegmentWorkspace({
     return () => { active = false; };
   }, [project, focusedId, showContext, file, status, normalizedSearch]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!selected) return;
     if (stage === "translation") {
       setText(selected.translation?.text ?? "");
@@ -527,7 +534,7 @@ export function SegmentWorkspace({
               );
             })}
           </div>
-          {!total && <div className="empty">{translate("workspace.noSegments", language)}</div>}
+          {!total && !loading && <div className="empty">{translate("workspace.noSegments", language)}</div>}
           {loading && <div className="list-loading">{translate("workspace.loadingSegments", language)}</div>}
           {listError && <div className="error-text">{listError}</div>}
         </div>
