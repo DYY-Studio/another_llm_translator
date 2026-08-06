@@ -1588,7 +1588,10 @@ def test_web_preset_models_discovery_fetches_and_parses(
     preset.update(
         {
             "base_url": "https://draft.example/v2",
-            "api_key_env": "DRAFT_LLM_API_KEY",
+            "credential": {
+                "kind": "environment",
+                "name": "DRAFT_LLM_API_KEY",
+            },
             "proxy_url": "https://proxy.example",
             "request_timeout_seconds": 45,
         }
@@ -1653,7 +1656,7 @@ def test_web_preset_models_discovery_fails_fast(
     assert "未声明模型发现规格" in no_spec.json()["error"]
 
     preset["adapter_id"] = "openai-compatible"
-    monkeypatch.delenv(preset["api_key_env"], raising=False)
+    monkeypatch.delenv(preset["credential"]["name"], raising=False)
     missing_key = client.post(
         "/api/v1/global/presets/default/models", json=preset
     )

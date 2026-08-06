@@ -21,7 +21,7 @@ _PRESET_KEYS = frozenset(
         "base_url",
         "endpoint",
         "model",
-        "api_key_env",
+        "credential",
         "proxy_url",
         "context_window_tokens",
         "max_output_tokens",
@@ -60,6 +60,11 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError(f"LLM Preset 不是合法 JSON：{path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
+    if value.get("schema_version") != 2:
+        raise ConfigError(
+            "LLM Preset schema_version 必须是 2；v1 的 api_key_env 字段已移除，"
+            "请改用显式 credential 引用"
+        )
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
     if unknown:
@@ -70,8 +75,6 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError(
             f"LLM Preset 缺少字段：{', '.join(sorted(missing))}"
         )
-    if value["schema_version"] != 1:
-        raise ConfigError("LLM Preset schema_version 必须是 1")
     preset_id = value["preset_id"]
     if not isinstance(preset_id, str) or not _PRESET_ID_RE.fullmatch(preset_id):
         raise ConfigError("LLM Preset preset_id 格式无效")
@@ -80,10 +83,21 @@ def load_llm_preset(path: Path) -> LLMPreset:
         "base_url",
         "endpoint",
         "model",
-        "api_key_env",
     ):
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
+    credential = value["credential"]
+    if not isinstance(credential, dict) or set(credential) != {"kind", "name"}:
+        raise ConfigError("LLM Preset credential 必须是包含 kind 和 name 的对象")
+    if credential["kind"] not in {"environment", "keychain"}:
+        raise ConfigError(
+            "LLM Preset credential.kind 必须是 environment 或 keychain"
+        )
+    if (
+        not isinstance(credential["name"], str)
+        or not credential["name"].strip()
+    ):
+        raise ConfigError("LLM Preset credential.name 必须是非空字符串")
     if "${" in value["endpoint"].replace("${model}", ""):
         raise ConfigError("LLM Preset endpoint 只允许 ${model} 占位符")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
