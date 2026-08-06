@@ -8,6 +8,10 @@
 - `prompts/`: global stage prompts.
 - `projects/`: runtime project data; do not commit generated projects.
 - `docs/ROADMAP.md`: authoritative MVP behavior and boundaries.
+- `src-tauri/`: Tauri 2 desktop shell (sidecar orchestration, native pickers).
+- `packaging/`: PyInstaller spec for the frozen Python/FastAPI sidecar.
+- `scripts/`: dev/build helpers; `sidecar-dist/` and `dist/` are build
+  artifacts and are never committed.
 
 Preserve the File/Segment/Chunk/Run meanings in the specification. Segment is
 the progress unit; Chunk is never durable business state. Avoid speculative

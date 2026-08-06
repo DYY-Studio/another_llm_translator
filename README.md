@@ -318,7 +318,27 @@ sidecar 常驻监听 `0.0.0.0`，非回环访问由中间件守卫（未开启�
 接口确认语义，CLI Web 模式仍为真实绑定地址。环境变量：
 `MINIMAL_LLM_PYTHON`（默认 `.venv/bin/python`）、`MINIMAL_LLM_WEB_PORT`
 （默认 `8765`）。终端 Ctrl+C 会同时终止应用与 sidecar。
-打包（PyInstaller 侧车、未签名 ad-hoc 安装包）在 Stage 22 进行。
+
+## 打包与安装（macOS）
+
+`scripts/build-app.sh` 一键产出未签名 ad-hoc 应用与 zip：构建前端、用
+PyInstaller 冻结 Python/FastAPI sidecar（内置 config、Prompt、Adapter、
+Preset 与 Web 静态资源），再经 Tauri 打包为 `.app`。产物位于
+`dist/minimal-llm-translator-<版本>-macos-arm64/`：
+
+```bash
+bash scripts/build-app.sh
+```
+
+安装：解压后把 `Minimal LLM Translator.app` 拖入“应用程序”；未签名应用首次
+打开需在“系统设置 → 隐私与安全性”放行（或右键 → 打开）。项目、全局配置、
+凭据索引、`server.toml` 与日志保存在
+`~/Library/Application Support/minimal-llm-translator/`；升级 = 用新版本覆盖
+旧 `.app`，用户数据目录自动保留。卸载直接删除 `.app`，用户数据目录手动清理。
+
+桌面壳优先启动 bundle 内的冻结 sidecar，找不到时才回退
+`python -m app.web` 开发模式。异常退出（强制终止）后 sidecar 可能残留，
+再次启动会复用既有服务继续工作；残留进程需手动结束或重启机器。
 
 ## 输入与输出范围
 

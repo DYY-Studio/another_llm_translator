@@ -16,7 +16,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求
   编辑逻辑均由 Web 内部职责提供。
 - 本地 Web Alpha 已覆盖项目、术语、结果审校、阶段决策、apply 和 export，并
   保持回环地址和单写任务安全边界。
-- 产品路线 Stage 1 至 Stage 21 已完成；下一阶段是 macOS Tauri 公开 Beta。
+- 产品路线 Stage 1 至 Stage 22 已完成；下一阶段是 Windows Tauri 公开 Beta。
 
 ## Stage 1：项目文件生命周期（已完成）
 
@@ -425,7 +425,7 @@ Preset；内联 LLM 连接配置不再支持。
 桌面模式下 sidecar 常驻 `0.0.0.0`，由中间件守卫非回环访问；`lan.bind_address`
 在桌面退化为接口确认语义，CLI Web 模式仍为真实绑定地址。
 
-## Stage 22：macOS Tauri 公开 Beta
+## Stage 22：macOS Tauri 公开 Beta（已完成）
 
 - 构建并验证 macOS Tauri 应用、Python sidecar、系统钥匙串、用户数据目录和
   原生选择器。
@@ -434,6 +434,13 @@ Preset；内联 LLM 连接配置不再支持。
 - 覆盖全新安装、手动升级、项目移动、外部项目、真实钥匙串、LAN 移动访问、
   取消任务和异常退出恢复。
 - 使用手动下载安装升级；不实现自动更新、远程遥测或崩溃上传。
+
+实现：`scripts/build-app.sh` 构建冻结 sidecar（PyInstaller，内置 config、
+Prompt、Adapter、Preset 与 Web 静态资源）与未签名 `.app` + zip。桌面壳优先
+启动 bundle 内 sidecar，开发模式回退 `python -m app.web`。首次启动显示
+中英文欢迎页（服务端标志文件，仅一次）。异常退出后孤儿 sidecar 保留既有
+服务，再次启动复用；残留进程需手动结束。真实钥匙串与 LAN 移动访问仍需在
+真机手动验收。
 - 从本阶段起，已发布 SQLite 项目和 Preset schema 的后续变更必须提供明确迁移
   或主版本边界，不再静默要求重建。
 
