@@ -16,6 +16,7 @@ import chardet
 from .config import load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
+from .user_config import effective_path, user_root
 from .sqlite_storage import (
     database_path,
     initialize as initialize_project_database,
@@ -36,9 +37,7 @@ APP_ROOT = (
     if (_SOURCE_ROOT / "config" / "config.toml").is_file()
     else Path(sys.prefix)
 )
-GLOBAL_CONFIG = APP_ROOT / "config" / "config.toml"
-GLOBAL_PROMPTS = APP_ROOT / "prompts"
-PROJECTS_ROOT = APP_ROOT / "projects"
+PROJECTS_ROOT = user_root() / "projects"
 PROMPT_NAMES = (
     "terminology.middle.txt",
     "translation.middle.txt",
@@ -441,29 +440,42 @@ class TXTDocumentAdapter:
         return [relative]
 
 
+BUNDLE_FILES = (Path("config.toml"),) + tuple(
+    Path("prompts") / name for name in PROMPT_NAMES
+)
+
+
+def _bundle_source(app_root: Path) -> dict[Path, Path]:
+    sources: dict[Path, Path] = {}
+    for relative in BUNDLE_FILES:
+        global_relative = (
+            Path("config") / "config.toml"
+            if relative == Path("config.toml")
+            else relative
+        )
+        sources[relative] = effective_path(global_relative, builtin_root=app_root)
+    return sources
+
+
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
-    paths = [app_root / "config" / "config.toml"] + [
-        app_root / "prompts" / name for name in PROMPT_NAMES
-    ]
     digest = hashlib.sha256()
-    for path in paths:
-        if not path.is_file():
-            raise ConfigError(f"全局模板缺失：{path}")
-        relative = path.relative_to(app_root).as_posix().encode()
-        payload = path.read_bytes()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
+    for relative, source in _bundle_source(app_root).items():
+        if not source.is_file():
+            raise ConfigError(f"全局模板缺失：{relative}")
+        rel = relative.as_posix().encode()
+        payload = source.read_bytes()
+        digest.update(len(rel).to_bytes(4, "big"))
+        digest.update(rel)
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return f"sha256:{digest.hexdigest()}"
 
 
 def _copy_bundle(source_root: Path, target: Path) -> None:
-    shutil.copy2(source_root / "config" / "config.toml", target / "config.toml")
-    prompt_target = target / "prompts"
-    prompt_target.mkdir(parents=True, exist_ok=True)
-    for name in PROMPT_NAMES:
-        shutil.copy2(source_root / "prompts" / name, prompt_target / name)
+    for relative, source in _bundle_source(source_root).items():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def init_project(
@@ -489,8 +501,8 @@ def init_project(
         raise UsageError("项目名不能为空，也不能包含路径分隔符")
     if empty == bool(inputs):
         raise UsageError("必须提供输入文件，或显式使用 --empty 创建空项目")
-    projects_root = projects_root or app_root / "projects"
-    global_config = load_config(app_root / "config" / "config.toml")
+    projects_root = projects_root or user_root() / "projects"
+    global_config = load_config(effective_path("config/config.toml", builtin_root=app_root))
     global_hash = bundle_hash(app_root)
     imports: list[tuple[DocumentAdapter, ImportedFile]] = []
     warnings: list[str] = []
@@ -961,7 +973,11 @@ def delete_project(
     root = project.resolve()
     if not database_path(root).is_file():
         raise ProjectError(f"项目不存在或无效：{project}")
-    protected = {PROJECTS_ROOT.resolve(), APP_ROOT.resolve()}
+    protected = {
+        PROJECTS_ROOT.resolve(),
+        APP_ROOT.resolve(),
+        user_root().resolve(),
+    }
     protected.update(Path(value).resolve() for value in protected_roots)
     if root in protected or root.parent == root:
         raise ProjectError("不能删除项目根目录")
@@ -1018,22 +1034,14 @@ def sync_global_templates(
 ) -> list[str]:
     metadata = read_project_meta(project)
     try:
-        load_config(app_root / "config" / "config.toml")
+        load_config(effective_path("config/config.toml", builtin_root=app_root))
         current_hash = bundle_hash(app_root)
     except ConfigError as exc:
         return [f"全局模板无效，继续使用项目副本：{exc}"]
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
-    bundle_files = [Path("config.toml")] + [
-        Path("prompts") / name for name in PROMPT_NAMES
-    ]
     changed = []
-    for relative in bundle_files:
-        global_path = (
-            app_root / "config" / "config.toml"
-            if relative == Path("config.toml")
-            else app_root / relative
-        )
+    for relative, global_path in _bundle_source(app_root).items():
         project_path = project / relative
         if (
             not project_path.is_file()
@@ -1059,7 +1067,7 @@ def sync_global_templates(
     if choice not in {"update", "keep"}:
         raise UsageError("模板选择必须是 update 或 keep")
     if choice == "update":
-        load_config(app_root / "config" / "config.toml")
+        load_config(effective_path("config/config.toml", builtin_root=app_root))
         timestamp = utc_now().replace(":", "").replace("-", "")
         backup = project / "snapshots" / "template_updates" / timestamp
         backup.mkdir(parents=True, exist_ok=False)

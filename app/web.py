@@ -52,6 +52,7 @@ from .stages import (
     publish_partial_terms,
     run_apply,
 )
+from .user_config import effective_path, user_root, write_user
 from .web_tasks import WebTaskManager, task_options
 
 
@@ -101,11 +102,12 @@ def create_app(
     projects_root: Path = PROJECTS_ROOT,
     web_dist: Path = WEB_DIST,
     app_root: Path = DEFAULT_APP_ROOT,
+    log_path: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
-    app.state.diagnostics = Diagnostics(app_root / "logs" / "app.log")
+    app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
     app.state.tasks = WebTaskManager(app.state.diagnostics)
     app.state.external_projects = set()
 
@@ -375,7 +377,7 @@ def create_app(
     ) -> LLMPreset:
         if payload.get("preset_id") != preset_id:
             raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
-        presets = app_root / "llm_presets"
+        presets = user_root() / "llm_presets"
         presets.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -390,7 +392,10 @@ def create_app(
         try:
             preset = load_llm_preset(temporary)
             adapter = load_json_adapter(
-                app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+                effective_path(
+                    f"llm_adapters/{preset.adapter_id}.json",
+                    builtin_root=app_root,
+                )
             )
             if adapter.adapter_id != preset.adapter_id:
                 raise UsageError(
@@ -411,7 +416,11 @@ def create_app(
 
     @app.get("/api/v1/global/config")
     async def get_global_config() -> dict[str, Any]:
-        return {"config": load_config(app_root / "config" / "config.toml")}
+        return {
+            "config": load_config(
+                effective_path("config/config.toml", builtin_root=app_root)
+            )
+        }
 
     @app.put("/api/v1/global/config")
     async def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
@@ -422,7 +431,7 @@ def create_app(
         resolve_global_config(config, app_root)
         for stage in LLM_STAGES:
             resolve_global_config(config, app_root, stage=stage)
-        atomic_write_text(app_root / "config" / "config.toml", content)
+        atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
 
     @app.get("/api/v1/global/prompts/{stage}")
@@ -432,9 +441,9 @@ def create_app(
         except KeyError as exc:
             raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
         return {
-            "content": (app_root / "prompts" / filename).read_text(
-                encoding="utf-8"
-            )
+            "content": effective_path(
+                f"prompts/{filename}", builtin_root=app_root
+            ).read_text(encoding="utf-8")
         }
 
     @app.put("/api/v1/global/prompts/{stage}")
@@ -448,18 +457,22 @@ def create_app(
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 必须是非空字符串")
-        atomic_write_text(app_root / "prompts" / filename, content)
+        atomic_write_text(write_user(f"prompts/{filename}"), content)
         return {"saved": True}
 
     @app.get("/api/v1/global/presets")
     async def list_global_presets() -> dict[str, Any]:
         selected = str(
-            load_config(app_root / "config" / "config.toml")["llm"].get(
-                "preset", ""
-            )
+            load_config(
+                effective_path("config/config.toml", builtin_root=app_root)
+            )["llm"].get("preset", "")
         )
         values = []
-        for path in sorted((app_root / "llm_presets").glob("*.json")):
+        paths: dict[str, Path] = {}
+        for root in (user_root(), app_root):
+            for path in sorted((root / "llm_presets").glob("*.json")):
+                paths.setdefault(path.stem, path)
+        for path in sorted(paths.values(), key=lambda value: value.stem):
             try:
                 preset = load_llm_preset(path)
                 values.append(
@@ -484,21 +497,28 @@ def create_app(
                 )
         return {"presets": values}
 
+    def preset_file(preset_id: str) -> Path:
+        preset_path(app_root, preset_id)
+        return effective_path(f"llm_presets/{preset_id}.json", builtin_root=app_root)
+
     @app.get("/api/v1/global/presets/{preset_id}")
     async def get_global_preset(preset_id: str) -> dict[str, Any]:
-        return load_llm_preset(preset_path(app_root, preset_id)).definition
+        return load_llm_preset(preset_file(preset_id)).definition
 
     @app.put("/api/v1/global/presets/{preset_id}")
     async def put_global_preset(
         preset_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
-        atomic_write_json(preset_path(app_root, preset_id), payload)
+        atomic_write_json(write_user(f"llm_presets/{preset_id}.json"), payload)
         return {"saved": True, "digest": preset.digest}
 
     @app.delete("/api/v1/global/presets/{preset_id}")
     async def delete_global_preset(preset_id: str) -> dict[str, bool]:
-        config = load_config(app_root / "config" / "config.toml")
+        preset_file(preset_id)
+        config = load_config(
+            effective_path("config/config.toml", builtin_root=app_root)
+        )
         if config["llm"].get("preset") == preset_id:
             raise UsageError("不能删除全局配置正在使用的 LLM Preset")
         for item in projects_root.iterdir() if projects_root.exists() else ():
@@ -507,17 +527,22 @@ def create_app(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
-        path = preset_path(app_root, preset_id)
-        if not path.is_file():
-            raise UsageError(f"LLM Preset 不存在：{preset_id}")
-        path.unlink()
-        return {"deleted": True}
+        user_file = user_root() / "llm_presets" / f"{preset_id}.json"
+        builtin_file = app_root / "llm_presets" / f"{preset_id}.json"
+        if user_file.is_file():
+            user_file.unlink()
+            return {"deleted": True}
+        if builtin_file.is_file():
+            raise UsageError(f"内置 LLM Preset 不能删除：{preset_id}")
+        raise UsageError(f"LLM Preset 不存在：{preset_id}")
 
     @app.get("/api/v1/global/presets/{preset_id}/preview")
     async def preview_global_preset(preset_id: str) -> dict[str, Any]:
-        preset = load_llm_preset(preset_path(app_root, preset_id))
+        preset = load_llm_preset(preset_file(preset_id))
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
+            )
         )
         headers, body = adapter.build_request(
             api_key="***",
@@ -546,7 +571,9 @@ def create_app(
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
+            )
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
@@ -655,7 +682,7 @@ def create_app(
         with project_write_lock(root):
             result = delete_project(
                 root,
-                protected_roots=(projects_root, app_root),
+                protected_roots=(projects_root, app_root, user_root()),
             )
         app.state.external_projects.discard(root.resolve())
         return result
@@ -893,7 +920,11 @@ def create_app(
     @app.get("/api/v1/global/adapters")
     async def list_global_adapters() -> dict[str, Any]:
         adapters = []
-        for path in sorted((app_root / "llm_adapters").glob("*.json")):
+        paths: dict[str, Path] = {}
+        for root in (user_root(), app_root):
+            for path in sorted((root / "llm_adapters").glob("*.json")):
+                paths.setdefault(path.stem, path)
+        for path in sorted(paths.values(), key=lambda value: value.stem):
             try:
                 adapter = load_json_adapter(path)
                 adapters.append(
@@ -917,7 +948,9 @@ def create_app(
     @app.get("/api/v1/global/adapters/{adapter_id}")
     async def get_global_adapter(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{adapter_id}.json", builtin_root=app_root
+            )
         )
         return adapter.definition
 
@@ -927,10 +960,12 @@ def create_app(
     ) -> dict[str, Any]:
         if payload.get("adapter_id") != adapter_id:
             raise UsageError("URL 与 Adapter ID 不一致")
+        adapters_dir = user_root() / "llm_adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=app_root / "llm_adapters",
+            dir=adapters_dir,
             prefix=".adapter.",
             suffix=".json",
             delete=False,
@@ -940,9 +975,7 @@ def create_app(
             temporary = Path(handle.name)
         try:
             adapter = load_json_adapter(temporary)
-            atomic_write_json(
-                app_root / "llm_adapters" / f"{adapter_id}.json", payload
-            )
+            atomic_write_json(write_user(f"llm_adapters/{adapter_id}.json"), payload)
         finally:
             temporary.unlink(missing_ok=True)
         return {"saved": True, "digest": adapter.digest}
@@ -950,7 +983,9 @@ def create_app(
     @app.get("/api/v1/global/adapters/{adapter_id}/preview")
     async def adapter_preview(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{adapter_id}.json", builtin_root=app_root
+            )
         )
         headers, body = adapter.build_request(
             api_key="***",

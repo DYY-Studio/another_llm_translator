@@ -888,8 +888,11 @@ def test_web_manages_global_adapters(tmp_path: Path) -> None:
     )
     assert saved.status_code == 200
     assert json.loads(
-        (app_root / "llm_adapters" / "alternate.json").read_text("utf-8")
+        (
+            tmp_path / "user-root" / "llm_adapters" / "alternate.json"
+        ).read_text(encoding="utf-8")
     )["adapter_id"] == "alternate"
+    assert not (app_root / "llm_adapters" / "alternate.json").exists()
     listed = client.get("/api/v1/global/adapters").json()
     assert {item["adapter_id"] for item in listed["adapters"]} >= {
         "openai-compatible",
@@ -1158,7 +1161,7 @@ def test_web_adapter_validation_preview_and_secret_redaction(
     assert saved.status_code == 200
     assert json.loads(
         (
-            app_root / "llm_adapters" / "openai-compatible.json"
+            tmp_path / "user-root" / "llm_adapters" / "openai-compatible.json"
         ).read_text(encoding="utf-8")
     )["body"]["response_format"] == {"type": "json_object"}
     preview = client.get(
