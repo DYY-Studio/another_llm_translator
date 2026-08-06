@@ -1,0 +1,9 @@
+{
+  "identifier": "main-remote",
+  "description": "IPC access for the sidecar-served web app loaded in the main window",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1/*"]
+  },
+  "permissions": ["core:default"]
+}

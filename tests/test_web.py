@@ -1702,3 +1702,66 @@ def test_web_preset_models_discovery_fails_fast(
         assert "不是数组" in bad_shape.json()["error"]
     finally:
         del os.environ["LLM_API_KEY"]
+
+
+def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    single = tmp_path / "single.txt"
+    single.write_text("one\ntwo", encoding="utf-8")
+    folder = tmp_path / "book"
+    folder.mkdir()
+    (folder / "chapter1.txt").write_text("three", encoding="utf-8")
+    (folder / "nested").mkdir()
+    (folder / "nested" / "chapter2.txt").write_text("four", encoding="utf-8")
+    (folder / "notes.md").write_text("ignored", encoding="utf-8")
+
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "server-path-project",
+            "empty": "false",
+            "parent_dir": str(projects_root),
+            "server_paths": [str(single), str(folder)],
+            "server_input_kinds": ["file", "folder"],
+            "adapter_options": "{}",
+        },
+    )
+    assert created.status_code == 200, created.text
+    overview = client.get("/api/v1/projects/server-path-project").json()
+    names = {item["name"] for item in overview["files"]}
+    assert names == {"single.txt", "chapter1.txt", "nested/chapter2.txt"}
+
+
+def test_web_server_paths_reject_invalid_inputs(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    folder = tmp_path / "book"
+    folder.mkdir()
+    (folder / "notes.md").write_text("x", encoding="utf-8")
+
+    def post(**fields: object):
+        return client.post(
+            "/api/v1/projects",
+            data={
+                "name": "bad-inputs",
+                "empty": "false",
+                "parent_dir": str(projects_root),
+                "adapter_options": "{}",
+                **fields,
+            },
+        )
+
+    missing = post(server_paths=[str(tmp_path / "nope.txt")], server_input_kinds=["file"])
+    assert missing.status_code == 400
+    assert "不存在或无法访问" in missing.json()["error"]
+
+    unsupported = post(server_paths=[str(tmp_path / "nope.txt")], server_input_kinds=["folder"])
+    assert unsupported.status_code == 400
+
+    empty_folder = post(server_paths=[str(folder)], server_input_kinds=["folder"])
+    assert empty_folder.status_code == 400
+    assert "没有受支持的输入文件" in empty_folder.json()["error"]
+
+    relative = post(server_paths=["relative.txt"], server_input_kinds=["file"])
+    assert relative.status_code == 400

@@ -186,6 +186,8 @@ def create_app(
         uploads: list[UploadFile],
         relative_paths: list[str] | None,
         input_kinds: list[str] | None,
+        server_paths: list[str] | None = None,
+        server_input_kinds: list[str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         paths = (
             relative_paths
@@ -216,6 +218,58 @@ def create_app(
         if any(kind not in {"file", "folder"} for kind in kinds):
             raise UsageError("输入来源类型必须是 file 或 folder")
 
+        server_entries: list[tuple[str, Path]] = []
+        if server_paths is not None:
+            server_kinds = (
+                server_input_kinds
+                if server_input_kinds is not None
+                else ["file"] * len(server_paths)
+            )
+            if len(server_paths) != len(server_kinds):
+                raise UsageError("服务端路径与来源类型数量不一致")
+            if any(kind not in {"file", "folder"} for kind in server_kinds):
+                raise UsageError("输入来源类型必须是 file 或 folder")
+            for raw, kind in zip(server_paths, server_kinds, strict=True):
+                if not isinstance(raw, str) or not raw.strip():
+                    raise UsageError("服务端路径必须是非空字符串")
+                try:
+                    current = Path(raw).resolve(strict=True)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise UsageError(f"路径不存在或无法访问：{raw}: {exc}") from exc
+                if kind == "folder":
+                    if not current.is_dir():
+                        raise UsageError(f"路径不是目录：{raw}")
+                    found: list[tuple[str, Path]] = []
+                    for dirpath, dirnames, filenames in os.walk(
+                        current, followlinks=False
+                    ):
+                        dirnames.sort()
+                        for filename in sorted(filenames):
+                            full = Path(dirpath) / filename
+                            relative = full.relative_to(current).as_posix()
+                            try:
+                                get_document_adapter_for_extension(full.suffix)
+                            except UsageError:
+                                continue
+                            found.append((relative, full))
+                    if not found:
+                        raise UsageError(f"目录中没有受支持的输入文件：{raw}")
+                    server_entries.extend(found)
+                else:
+                    if not current.is_file():
+                        raise UsageError(f"路径不是文件：{raw}")
+                    try:
+                        get_document_adapter_for_extension(current.suffix)
+                    except UsageError:
+                        raise UsageError(f"不支持的输入文件：{raw}") from None
+                    server_entries.append((current.name, current))
+
+        for relative, source in server_entries:
+            key = relative.casefold()
+            if key in seen:
+                raise UsageError(f"输入文件存在重复相对路径：{relative}")
+            seen.add(key)
+
         inputs: list[str] = []
         original_names: list[str] = []
         ignored: list[str] = []
@@ -234,6 +288,12 @@ def create_app(
             target.write_bytes(await upload.read())
             inputs.append(str(target))
             original_names.append(name)
+        for relative, source in server_entries:
+            target = upload_root.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            inputs.append(str(target))
+            original_names.append(relative)
         warnings = []
         if ignored:
             examples = "、".join(ignored[:5])
@@ -902,13 +962,20 @@ def create_app(
         files: list[UploadFile] | None = File(None),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        server_paths: list[str] | None = Form(None),
+        server_input_kinds: list[str] | None = Form(None),
         adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
         uploads = files or []
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
             inputs, original_names, upload_warnings = await stage_uploads(
-                upload_root, uploads, relative_paths, input_kinds
+                upload_root,
+                uploads,
+                relative_paths,
+                input_kinds,
+                server_paths,
+                server_input_kinds,
             )
             if empty == bool(inputs):
                 raise UsageError("必须上传输入文件，或显式选择创建空项目")
@@ -1004,18 +1071,26 @@ def create_app(
     @app.post("/api/v1/projects/{name}/files")
     async def add_files(
         name: str,
-        files: list[UploadFile] = File(...),
+        files: list[UploadFile] | None = File(None),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        server_paths: list[str] | None = Form(None),
+        server_input_kinds: list[str] | None = Form(None),
         adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
-        if not files:
-            raise UsageError("至少上传一个输入文件")
+        uploads = files or []
+        if not uploads and not server_paths:
+            raise UsageError("至少提供一个输入文件")
         root = project(name)
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
             inputs, original_names, upload_warnings = await stage_uploads(
-                upload_root, files, relative_paths, input_kinds
+                upload_root,
+                uploads,
+                relative_paths,
+                input_kinds,
+                server_paths,
+                server_input_kinds,
             )
             if not inputs:
                 raise UsageError("没有受支持的输入文件")

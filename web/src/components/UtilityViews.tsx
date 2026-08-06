@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
+import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, pickNativeProject } from "../native";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
@@ -27,7 +28,8 @@ interface AdapterSummary {
 type AdapterOptions = Record<string, Record<string, string>>;
 
 interface PendingInput {
-  file: File;
+  file?: File;
+  serverPath?: string;
   path: string;
   kind: InputKind;
   adapterId: string;
@@ -161,6 +163,31 @@ function InputQueue({
     if (ref.current) ref.current.value = "";
   }
 
+  async function addNativeBatch(kind: InputKind) {
+    const picked = kind === "file"
+      ? await pickNativeFile()
+      : await pickNativeFolder();
+    if (!picked) return;
+    setMessage("");
+    const adapterId = extensionOwners.get(extensionOf(picked));
+    if (!adapterId) {
+      setMessage(translate("inputQueue.unsupported", language, { path: picked }));
+      return;
+    }
+    const relative = kind === "file"
+      ? (picked.split(/[\\/]/).pop() ?? picked)
+      : picked;
+    const known = new Set(
+      [...existingPaths, ...value.map((item) => item.path)]
+        .map((path) => path.toLocaleLowerCase()),
+    );
+    if (known.has(relative.toLocaleLowerCase())) {
+      setMessage(translate("inputQueue.duplicate", language, { path: relative }));
+      return;
+    }
+    onChange([...value, { serverPath: picked, path: relative, kind, adapterId }]);
+  }
+
   return (
     <div className="input-queue">
       <div className="input-queue-heading">
@@ -188,8 +215,8 @@ function InputQueue({
               clearInput(folderRef);
             }}
           />
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>{translate("inputQueue.chooseFiles", language)}</button>
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>{translate("inputQueue.chooseFolder", language)}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => { if (nativeBridgeAvailable()) void addNativeBatch("file"); else fileRef.current?.click(); }}>{translate("inputQueue.chooseFiles", language)}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || (!nativeBridgeAvailable() && !folderSelectionSupported)} onClick={() => { if (nativeBridgeAvailable()) void addNativeBatch("folder"); else folderRef.current?.click(); }}>{translate("inputQueue.chooseFolder", language)}</button>
         </div>
       </div>
       {!folderSelectionSupported && <small className="muted">{translate("inputQueue.noFolderSupport", language)}</small>}
@@ -297,7 +324,14 @@ export function Overview({
     try {
       const body = new FormData();
       for (const item of pendingInputs) {
-        body.append("files", item.file, item.file.name);
+        if (item.serverPath) {
+          body.append("server_paths", item.serverPath);
+          body.append("server_input_kinds", item.kind);
+          continue;
+        }
+        if (item.file) {
+          body.append("files", item.file, item.file.name);
+        }
         body.append("relative_paths", item.path);
         body.append("input_kinds", item.kind);
       }
@@ -509,7 +543,14 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
     body.append("empty", String(pendingInputs.length === 0));
     body.append("parent_dir", parentDir.trim());
     for (const item of pendingInputs) {
-      body.append("files", item.file, item.file.name);
+      if (item.serverPath) {
+        body.append("server_paths", item.serverPath);
+        body.append("server_input_kinds", item.kind);
+        continue;
+      }
+      if (item.file) {
+        body.append("files", item.file, item.file.name);
+      }
       body.append("relative_paths", item.path);
       body.append("input_kinds", item.kind);
     }
@@ -542,12 +583,12 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
           </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           {mode === "open" ? <>
-            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => setDirectoryPickerMode("project")}>{translate("dialog.browse", language)}</button></div></label>
+            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeProject().then((path) => { if (path) setProjectPath(path); }); } else { setDirectoryPickerMode("project"); } }}>{translate("dialog.browse", language)}</button></div></label>
             <p className="muted">{translate("dialog.openHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
           </> : <>
             <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-            <label>{translate("dialog.parentDir", language)}<div className="path-picker-control"><input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /><button type="button" className="quiet-button" disabled={!parentDir.trim()} onClick={() => setDirectoryPickerMode("parent")}>{translate("dialog.browse", language)}</button></div></label>
+            <label>{translate("dialog.parentDir", language)}<div className="path-picker-control"><input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /><button type="button" className="quiet-button" disabled={!parentDir.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeFolder().then((path) => { if (path) setParentDir(path); }); } else { setDirectoryPickerMode("parent"); } }}>{translate("dialog.browse", language)}</button></div></label>
             <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
             <p className="muted">{translate("dialog.emptyHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>

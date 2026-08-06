@@ -33,3 +33,7 @@ playwright-report/
 .idea/
 .vscode/
 *.swp
+
+# Tauri
+/src-tauri/target/
+/src-tauri/gen

@@ -299,6 +299,24 @@ Web 与 CLI 共用同一项目目录、SQLite 存储、阶段执行、限速、�
 Web 默认只监听回环地址并限制 Host 和 Origin，适合可信的本机用户。局域网共享
 需要显式开启，首版使用 HTTP，不提供 TLS、多账号、角色、密码找回或公网访问。
 
+## 桌面开发壳（Tauri）
+
+`src-tauri/` 提供 Tauri 2 桌面开发壳：启动时拉起 Python/FastAPI sidecar
+（`python -m app.web`），健康探测通过后打开窗口加载 `http://127.0.0.1:8765`，
+退出时关闭 sidecar。开发运行方式：
+
+```bash
+npm run build --prefix web   # 先构建前端到 app/web_dist
+bash scripts/desktop-dev.sh  # 设置环境后 cargo run
+```
+
+侧车选择器通过 Tauri command 暴露为 `select_file` / `select_folder` /
+`select_project`，前端在 `window.__TAURI__` 可用时改用原生对话框选择输入文件、
+文件夹和项目路径（提交为服务端路径）；普通浏览器和 LAN 客户端继续使用上传与
+服务端目录浏览。环境变量：`MINIMAL_LLM_PYTHON`（默认 `.venv/bin/python`）、
+`MINIMAL_LLM_WEB_PORT`（默认 `8765`）。终端 Ctrl+C 会同时终止应用与 sidecar。
+打包（PyInstaller 侧车、签名、公证、安装包）在 Stage 22 进行。
+
 ## 输入与输出范围
 
 ### TXT
