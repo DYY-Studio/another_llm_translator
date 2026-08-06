@@ -31,6 +31,7 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    ProjectError,
     RequestSizeError,
     StorageError,
     UsageError,

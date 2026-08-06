@@ -22,7 +22,7 @@ from app.plugins import (
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project
-from app.stages import export_project
+from app.stages import _normalize_model_text, export_project
 from app.sqlite_storage import (
     append_jsonl,
     read_files,
@@ -1236,3 +1236,13 @@ def test_plugin_host_rejects_invalid_choice_option(
     )
     with pytest.raises(ConfigError, match="导入选项声明无效"):
         load_plugins()
+
+
+def test_normalize_model_text_rejects_unknown_file_reference() -> None:
+    with pytest.raises(ProjectError, match="未知文件"):
+        _normalize_model_text(
+            files=[],
+            segment={"file_id": "missing"},
+            text="模型输出",
+            stage="translation",
+        )
