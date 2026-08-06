@@ -860,8 +860,26 @@ def load_terms(project: Path) -> dict[str, Any] | None:
     return read_json(project, path) if record_exists(project, path) else None
 
 
-def normalize_term(value: str) -> str:
-    return unicodedata.normalize("NFKC", value).casefold().strip()
+@dataclass(frozen=True)
+class TermNormalization:
+    form: str | None
+    casefold: bool
+
+
+def term_normalization(config: dict[str, Any]) -> TermNormalization:
+    terminology = config["terminology"]
+    return TermNormalization(
+        form=terminology["unicode_normalization"] or None,
+        casefold=terminology["case_insensitive"],
+    )
+
+
+def normalize_term(value: str, spec: TermNormalization) -> str:
+    if spec.form:
+        value = unicodedata.normalize(spec.form, value)
+    if spec.casefold:
+        value = value.casefold()
+    return value.strip()
 
 
 def _term_bucket() -> dict[str, Any]:
@@ -879,8 +897,9 @@ def _term_bucket() -> dict[str, Any]:
 def _add_term_candidate(
     merged: dict[str, dict[str, Any]],
     candidate: dict[str, Any],
+    spec: TermNormalization,
 ) -> None:
-    normalized = normalize_term(str(candidate["source"]))
+    normalized = normalize_term(str(candidate["source"]), spec)
     current = merged.setdefault(normalized, _term_bucket())
     current["sources"].append(str(candidate["source"]))
     category = candidate.get("category")
@@ -912,12 +931,13 @@ def _add_term_candidate(
 def _seed_published_terms(
     merged: dict[str, dict[str, Any]],
     library: dict[str, Any] | None,
+    spec: TermNormalization,
 ) -> None:
     for term in (library or {}).get("terms", []):
-        _add_term_candidate(merged, term)
+        _add_term_candidate(merged, term, spec)
         description = term.get("description")
         if description and "；" in str(description):
-            current = merged[normalize_term(str(term["source"]))]
+            current = merged[normalize_term(str(term["source"]), spec)]
             current["descriptions"].remove(str(description))
             current["descriptions"].extend(
                 part for part in str(description).split("；") if part
@@ -950,6 +970,7 @@ def _alias_primary_collisions(
     merged: dict[str, dict[str, Any]],
     *,
     policy: str,
+    spec: TermNormalization,
 ) -> None:
     primary_sources = {
         normalized: sorted(
@@ -961,7 +982,7 @@ def _alias_primary_collisions(
     claims: dict[str, list[tuple[str, str]]] = {}
     for owner, item in merged.items():
         for alias in sorted(set(item["aliases"])):
-            target = normalize_term(alias)
+            target = normalize_term(alias, spec)
             if target in merged and target != owner:
                 claims.setdefault(target, []).append((owner, alias))
     if not claims:
@@ -1042,8 +1063,9 @@ def _build_term_rows(
     merged: dict[str, dict[str, Any]],
     *,
     alias_policy: str,
+    spec: TermNormalization,
 ) -> list[dict[str, Any]]:
-    _alias_primary_collisions(merged, policy=alias_policy)
+    _alias_primary_collisions(merged, policy=alias_policy, spec=spec)
     terms: list[dict[str, Any]] = []
     for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
         categories = sorted(set(item["categories"]))
@@ -1054,7 +1076,7 @@ def _build_term_rows(
             {
                 alias
                 for alias in item["aliases"]
-                if normalize_term(alias) != normalized
+                if normalize_term(alias, spec) != normalized
             }
         )
         terms.append(
@@ -1093,13 +1115,15 @@ def build_term_library_rows(
     base_terms: list[dict[str, Any]],
     overrides: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, {"terms": base_terms})
-    _apply_term_overrides(merged, overrides)
     config = load_project_config(project)
+    spec = term_normalization(config)
+    merged: dict[str, dict[str, Any]] = {}
+    _seed_published_terms(merged, {"terms": base_terms}, spec)
+    _apply_term_overrides(merged, overrides)
     return _build_term_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
+        spec=spec,
     )
 
 
@@ -1115,7 +1139,9 @@ TERM_CSV_FIELDS = (
 )
 
 
-def _exchange_term(value: Any, location: str) -> dict[str, Any]:
+def _exchange_term(
+    value: Any, location: str, spec: TermNormalization
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise UsageError(f"术语必须是对象：{location}")
     allowed = {
@@ -1180,7 +1206,7 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
             alias.strip()
             for alias in aliases
             if alias.strip()
-            and normalize_term(alias) != normalize_term(source)
+            and normalize_term(alias, spec) != normalize_term(source, spec)
         ],
         "disabled": disabled,
         "conflicts": {
@@ -1198,7 +1224,9 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
     }
 
 
-def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
+def _load_term_exchange(
+    path: Path, spec: TermNormalization
+) -> list[dict[str, Any]]:
     suffix = path.suffix.casefold()
     try:
         content = path.read_text(encoding="utf-8-sig")
@@ -1222,7 +1250,7 @@ def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
         if not isinstance(values, list):
             raise UsageError("术语 JSON 的 terms 必须是数组")
         return [
-            _exchange_term(value, f"terms[{index}]")
+            _exchange_term(value, f"terms[{index}]", spec)
             for index, value in enumerate(values)
         ]
     if suffix != ".csv":
@@ -1263,6 +1291,7 @@ def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
                         },
                     },
                     f"第 {index} 行",
+                    spec,
                 )
             )
         return values
@@ -1279,6 +1308,8 @@ def _term_exchange_rows(
     if source not in {"published", "scanned"}:
         raise UsageError("术语导出 source 必须是 published 或 scanned")
     if source == "scanned":
+        config = load_project_config(project)
+        spec = term_normalization(config)
         active_path = project / "terminology" / "active_task.json"
         active = read_json(project, active_path) if record_exists(project, active_path) else None
         if not active or active.get("status") != "active":
@@ -1293,20 +1324,18 @@ def _term_exchange_rows(
         for record in records:
             for candidate in record.get("terms", []):
                 if isinstance(candidate, dict):
-                    _add_term_candidate(merged, candidate)
+                    _add_term_candidate(merged, candidate, spec)
         overrides_document = read_json(project, project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
         }
         _apply_term_overrides(merged, overrides)
-        alias_policy = str(
-            load_project_config(project)["terminology"]["alias_primary_collision"]
-        )
-        candidates = _build_term_rows(merged, alias_policy=alias_policy)
+        alias_policy = str(config["terminology"]["alias_primary_collision"])
+        candidates = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
         rows: list[dict[str, Any]] = []
         for term in candidates:
-            normalized = normalize_term(str(term["source"]))
+            normalized = normalize_term(str(term["source"]), spec)
             override = overrides.get(normalized, {})
             disabled = bool(override.get("disabled", False))
             if disabled and not include_disabled:
@@ -1442,22 +1471,24 @@ def import_terms(
     *,
     dry_run: bool,
 ) -> dict[str, Any]:
-    imported = _load_term_exchange(input_path)
+    config = load_project_config(project)
+    spec = term_normalization(config)
+    imported = _load_term_exchange(input_path, spec)
     disabled_by_normalized: dict[str, bool] = {}
     merged_import: dict[str, dict[str, Any]] = {}
     for item in imported:
-        normalized = normalize_term(item["source"])
+        normalized = normalize_term(item["source"], spec)
         previous_disabled = disabled_by_normalized.setdefault(
             normalized, item["disabled"]
         )
         if previous_disabled != item["disabled"]:
             raise UsageError(f"同一 normalized 术语的 disabled 冲突：{item['source']}")
         if not item["disabled"]:
-            _add_term_candidate(merged_import, item)
+            _add_term_candidate(merged_import, item, spec)
 
     library = load_terms(project)
     merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, library)
+    _seed_published_terms(merged, library, spec)
     for normalized, item in merged_import.items():
         target = merged.setdefault(normalized, _term_bucket())
         for key in (
@@ -1480,7 +1511,7 @@ def import_terms(
     for item in imported:
         if not item["disabled"]:
             continue
-        normalized = normalize_term(item["source"])
+        normalized = normalize_term(item["source"], spec)
         current = overrides.get(normalized, {"normalized": normalized})
         overrides[normalized] = {
             **current,
@@ -1488,10 +1519,10 @@ def import_terms(
             "disabled": True,
         }
     _apply_term_overrides(merged, overrides)
-    config = load_project_config(project)
     terms = _build_term_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
+        spec=spec,
     )
     overrides_list = [overrides[key] for key in sorted(overrides)]
     existing_terms = list((library or {}).get("terms", []))
@@ -1576,6 +1607,8 @@ def _merge_and_publish_terms(
     published_run_id: str,
     active_status: str = "completed",
 ) -> dict[str, Any]:
+    config = load_project_config(project)
+    spec = term_normalization(config)
     previous = load_terms(project)
     candidates = [
         record
@@ -1583,20 +1616,18 @@ def _merge_and_publish_terms(
         if record.get("active_task_id") == task_id
     ]
     merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, previous)
+    _seed_published_terms(merged, previous, spec)
     for record in candidates:
         for candidate in record.get("terms", []):
-            _add_term_candidate(merged, candidate)
+            _add_term_candidate(merged, candidate, spec)
 
     overrides_data = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): item for item in overrides_data.get("overrides", [])
     }
     _apply_term_overrides(merged, overrides)
-    alias_policy = str(
-        load_project_config(project)["terminology"]["alias_primary_collision"]
-    )
-    terms = _build_term_rows(merged, alias_policy=alias_policy)
+    alias_policy = str(config["terminology"]["alias_primary_collision"])
+    terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
     revision = int(previous["terms_revision"]) + 1 if previous else 1
     library = record_header(
         "terminology_library",
@@ -1633,8 +1664,10 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     ]
     if not candidates:
         raise UsageError("当前活动扫描没有可发布的候选术语")
+    config = load_project_config(project)
+    spec = term_normalization(config)
     candidate_sources = {
-        normalize_term(str(term.get("source")))
+        normalize_term(str(term.get("source")), spec)
         for record in candidates
         for term in record.get("terms", [])
         if isinstance(term, dict) and term.get("source")
@@ -2213,21 +2246,27 @@ async def run_terminology(
     }
 
 
-def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list[dict]:
+def match_terms(
+    source: str,
+    library: dict[str, Any] | None,
+    limit: int,
+    spec: TermNormalization,
+) -> list[dict]:
     if library is None:
         return []
-    normalized_source = normalize_term(source)
+    normalized_source = normalize_term(source, spec)
     matched: list[tuple[int, int, int, dict[str, Any]]] = []
     for term in library.get("terms", []):
-        main_name = normalize_term(str(term.get("source", "")))
+        main_name = normalize_term(str(term.get("source", "")), spec)
         conflicted_aliases = {
-            normalize_term(str(item.get("alias", "")))
+            normalize_term(str(item.get("alias", "")), spec)
             for item in term.get("conflicts", {}).get("alias_primaries", [])
         }
         alias_names = [
-            normalize_term(str(name))
+            normalize_term(str(name), spec)
             for name in term.get("aliases", [])
-            if name and normalize_term(str(name)) not in conflicted_aliases
+            if name
+            and normalize_term(str(name), spec) not in conflicted_aliases
         ]
         main_hit = bool(main_name and main_name in normalized_source)
         hits = [
@@ -2459,11 +2498,13 @@ async def run_translation(
             else []
         )
         terms_by_source: dict[str, dict[str, Any]] = {}
+        term_spec = term_normalization(config)
         for item in items:
             for term in match_terms(
                 str(item["source"]),
                 library,
                 config["terminology"]["max_terms_per_segment"],
+                term_spec,
             ):
                 terms_by_source[str(term["source"])] = term
         return {
@@ -3174,11 +3215,13 @@ async def run_review(
             else []
         )
         terms_by_source: dict[str, dict[str, Any]] = {}
+        term_spec = term_normalization(config)
         for item in items:
             for term in match_terms(
                 str(item["source"]),
                 library,
                 config["terminology"]["max_terms_per_segment"],
+                term_spec,
             ):
                 terms_by_source[str(term["source"])] = term
         return {
