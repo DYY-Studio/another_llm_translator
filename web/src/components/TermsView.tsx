@@ -35,6 +35,27 @@ interface TermsCacheEntry {
 const termsCache = new Map<string, TermsCacheEntry>();
 const termsProjectRef = { current: "" };
 
+// Warms the cache when a project is opened so the first visit to the
+// terminology page renders instantly. Best-effort: failures are left to the
+// view, which fetches and surfaces them on visit; the write guard keeps a
+// mounted view's fresher entry (with its filters and scroll state) intact.
+export function prefetchTerms(project: string) {
+  if (termsCache.has(project)) return;
+  void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
+    .then((data) => {
+      if (termsCache.has(project)) return;
+      termsCache.set(project, {
+        data,
+        search: "",
+        onlyConflicts: false,
+        showDisabled: false,
+        focusedKey: "",
+        scrollTop: 0,
+      });
+    })
+    .catch(() => {});
+}
+
 function formFor(term: Term): TermForm {
   return {
     source: term.source,
@@ -76,16 +97,22 @@ export function TermsView({
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
 
-  // Cached data does not survive project switches: changing the project drops
-  // the previous project's cache. Within the same project, restore the cached
-  // view synchronously during render so the browser never paints an empty
-  // frame when switching back; the load effect refreshes in the background.
+  // Restore a cached view synchronously during render so the browser never
+  // paints an empty frame. This runs on the first mount too: prefetchTerms
+  // warms the cache when the project is opened, so entering the terminology
+  // page renders instantly. Switching projects drops every entry except the
+  // current project's (including its prefetched entry), so cached data never
+  // leaks across projects; the load effect refreshes in the background.
   if (termsProjectRef.current !== project) {
     termsProjectRef.current = project;
-    termsCache.clear();
+    for (const key of [...termsCache.keys()]) {
+      if (key !== project) termsCache.delete(key);
+    }
     setData(null);
     selection.reset();
-  } else if (!termsRestoredRef.current) {
+    termsRestoredRef.current = false;
+  }
+  if (!termsRestoredRef.current) {
     termsRestoredRef.current = true;
     const cached = termsCache.get(project);
     if (cached) {

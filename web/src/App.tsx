@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { AppShell } from "./components/AppShell";
-import { SegmentWorkspace } from "./components/SegmentWorkspace";
-import { TermsView } from "./components/TermsView";
+import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
+import { TermsView, prefetchTerms } from "./components/TermsView";
 import { CreateProjectDialog, ExportView, Overview } from "./components/UtilityViews";
 import { SettingsView } from "./components/SettingsView";
 import { RunDialog } from "./components/RunDialog";
@@ -144,6 +144,14 @@ export default function App() {
     }).catch((value) => setError(String(value)));
   }, []);
   useEffect(() => { void refresh().catch((value) => setError(String(value))); }, [refresh]);
+  // Warm the terminology and segment head caches when a project is opened so
+  // the first visit to those pages renders instantly; the pages restore the
+  // cached data synchronously and refresh it in the background.
+  useEffect(() => {
+    if (!project) return;
+    prefetchTerms(project);
+    prefetchWorkspace(project);
+  }, [project]);
   useEffect(() => {
     if (!task || !["queued", "running", "cancelling"].includes(task.status)) return;
     const timer = window.setInterval(() => {
