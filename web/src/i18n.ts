@@ -3,6 +3,13 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "brand": "译工坊",
+    "welcome.title": "欢迎使用译工坊",
+    "welcome.subtitle": "本机 Web 与桌面工作台：翻译、校对、润色与格式导出。",
+    "welcome.userData": "项目、全局配置与日志保存在平台用户数据目录。",
+    "welcome.credentials": "API 密钥可存入系统钥匙串，Preset 通过环境变量或钥匙串引用。",
+    "welcome.lan": "局域网共享默认关闭；开启时同网段设备拥有完整项目与 LLM 操作权限。",
+    "welcome.getStarted": "开始使用",
+    "welcome.skip": "跳过",
     "project.select": "选择项目",
     "project.create": "新建 / 打开",
     "nav.overview": "项目概览",
@@ -521,6 +528,13 @@ const messages: Record<Language, Record<string, string>> = {
   },
   en: {
     "brand": "Translator",
+    "welcome.title": "Welcome to Translator",
+    "welcome.subtitle": "A local web and desktop workspace for translation, proofreading, polishing and format export.",
+    "welcome.userData": "Projects, global config and logs live in the platform user data directory.",
+    "welcome.credentials": "Store API keys in the system keychain; presets reference them via environment or keychain.",
+    "welcome.lan": "LAN sharing is off by default; when enabled, devices on the same subnet get full project and LLM access.",
+    "welcome.getStarted": "Get started",
+    "welcome.skip": "Skip",
     "project.select": "Select project",
     "project.create": "New / Open",
     "nav.overview": "Overview",

@@ -417,6 +417,21 @@ def create_app(
             status_code=400,
         )
 
+    def welcome_seen() -> bool:
+        return (user_root() / ".welcome-seen").is_file()
+
+    def mark_welcome_seen() -> None:
+        (user_root() / ".welcome-seen").write_text("1", encoding="utf-8")
+
+    @app.get("/api/v1/welcome")
+    async def welcome() -> dict[str, Any]:
+        return {"first": not welcome_seen()}
+
+    @app.post("/api/v1/welcome/dismiss")
+    async def dismiss_welcome() -> dict[str, bool]:
+        mark_welcome_seen()
+        return {"ok": True}
+
     def remember_project(path: Path) -> None:
         normalized = path.resolve()
         if normalized.parent == projects_root.resolve():

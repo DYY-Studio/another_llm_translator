@@ -83,6 +83,7 @@ export default function App() {
   });
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -96,6 +97,16 @@ export default function App() {
       // normal flow and the next 401 surfaces the login gate.
     });
     return () => { active = false; remove(); };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void api<{ first: boolean }>("/api/v1/welcome").then((value) => {
+      if (active && value.first) setWelcomeOpen(true);
+    }).catch(() => {
+      // The welcome endpoint needs auth on LAN; leave the modal hidden.
+    });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -310,6 +321,23 @@ export default function App() {
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}
+      {welcomeOpen && (
+        <div className="welcome-overlay" role="dialog" aria-modal="true">
+          <div className="welcome-card">
+            <h1>{translate("welcome.title", language)}</h1>
+            <p className="muted">{translate("welcome.subtitle", language)}</p>
+            <ul className="welcome-list">
+              <li>{translate("welcome.userData", language)}</li>
+              <li>{translate("welcome.credentials", language)}</li>
+              <li>{translate("welcome.lan", language)}</li>
+            </ul>
+            <div className="button-group">
+              <button className="primary-button" onClick={() => { void api("/api/v1/welcome/dismiss", { method: "POST" }).catch(() => {}); setWelcomeOpen(false); }}>{translate("welcome.getStarted", language)}</button>
+              <button className="quiet-button" onClick={() => { void api("/api/v1/welcome/dismiss", { method: "POST" }).catch(() => {}); setWelcomeOpen(false); }}>{translate("welcome.skip", language)}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {runOptions && (
         <RunDialog
           key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}

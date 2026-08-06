@@ -41,3 +41,4 @@ playwright-report/
 # PyInstaller sidecar
 sidecar-dist/
 build/
+/dist/

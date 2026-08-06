@@ -77,3 +77,13 @@ def test_web_preset_with_keychain_credential_validates(
     loaded = client.get("/api/v1/global/presets/default").json()
     assert loaded["credential"] == {"kind": "keychain", "name": "openai-main"}
     assert "schema_version" in loaded and loaded["schema_version"] == 2
+
+
+def test_web_welcome_first_and_dismiss(tmp_path: Path, monkeypatch) -> None:
+    marker = tmp_path / "welcome"
+    marker.mkdir()
+    monkeypatch.setattr("app.web.user_root", lambda: marker)
+    client = TestClient(create_app(projects_root=tmp_path / "projects"))
+    assert client.get("/api/v1/welcome").json() == {"first": True}
+    assert client.post("/api/v1/welcome/dismiss").json() == {"ok": True}
+    assert client.get("/api/v1/welcome").json() == {"first": False}
