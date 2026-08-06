@@ -364,3 +364,15 @@ export interface CredentialSummary {
   id: string;
   updated_at: number;
 }
+
+export interface ServerStatus {
+  lan: { enabled: boolean; bind_address: string };
+  auth: { required: boolean; username: string };
+  authed: boolean;
+  loopback: boolean;
+}
+
+export interface InterfaceEntry {
+  name: string;
+  address: string;
+}

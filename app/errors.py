@@ -14,6 +14,12 @@ class UsageError(AppError):
     code = "usage_error"
 
 
+class InvalidCredentialsError(UsageError):
+    """LAN login rejected; keeps the same safe message on every failure."""
+
+    code = "invalid_credentials"
+
+
 class ConfigError(AppError):
     exit_code = 2
     code = "config_error"

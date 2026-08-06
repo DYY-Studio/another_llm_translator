@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hmac
 import json
 import os
+import secrets
+import socket
+import struct
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,6 +20,11 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+try:
+    import fcntl
+except ImportError:  # Windows: LAN interface enumeration lands in a later stage
+    fcntl = None  # type: ignore[assignment]
 
 from .config import (
     LLM_STAGES,
@@ -27,12 +37,20 @@ from .credentials import (
     credential_summaries,
     delete_credential,
     read_credential,
+    read_lan_password,
     resolve_api_key,
     save_credential,
+    save_lan_password,
 )
 from .diagnostics import Diagnostics
 from .web_store import WebStore
-from .errors import AppError, ExternalError, ProjectError, UsageError
+from .errors import (
+    AppError,
+    ExternalError,
+    InvalidCredentialsError,
+    ProjectError,
+    UsageError,
+)
 from .execution import Scope
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
@@ -52,6 +70,7 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
+from .server_config import load_server_config, save_server_config
 from .sqlite_storage import atomic_write_json, atomic_write_text, database_path, read_json
 from .stages import (
     export_project,
@@ -67,6 +86,9 @@ from .project import PROMPT_LANGUAGES, prompt_file
 
 
 WEB_DIST = Path(__file__).with_name("web_dist")
+SESSION_COOKIE = "minimal_llm_session"
+_SESSION_TTL_SECONDS = 30 * 24 * 3600
+_SIOCGIFADDR = 0x8915
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
     1: "unavailable",
@@ -101,12 +123,54 @@ def _windows_drive_entries() -> list[dict[str, Any]]:
     return entries
 
 
+def _is_loopback(request: Request) -> bool:
+    client = request.client.host if request.client else ""
+    return client in {"127.0.0.1", "::1", "localhost", "testclient", "testserver"}
+
+
+def lan_interfaces() -> list[dict[str, str]]:
+    """IPv4 addresses of non-loopback interfaces; empty on unsupported hosts."""
+    if fcntl is None:
+        return []
+    interfaces = []
+    try:
+        names = socket.if_nameindex()
+    except OSError:
+        return []
+    for _, name in names:
+        if name == "lo" or name.startswith("lo"):
+            continue
+        address = _interface_ipv4(name)
+        if address:
+            interfaces.append({"name": name, "address": address})
+    return interfaces
+
+
+def _interface_ipv4(name: str) -> str | None:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        packed = fcntl.ioctl(  # type: ignore[union-attr]
+            sock.fileno(),
+            _SIOCGIFADDR,
+            struct.pack("256s", name.encode("utf-8")[:15]),
+        )
+        return socket.inet_ntoa(packed[20:24])
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
 def create_app(
     *,
     projects_root: Path = PROJECTS_ROOT,
     web_dist: Path = WEB_DIST,
     app_root: Path = DEFAULT_APP_ROOT,
     log_path: Path | None = None,
+    server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
@@ -114,6 +178,8 @@ def create_app(
     app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
     app.state.tasks = WebTaskManager(app.state.diagnostics)
     app.state.external_projects = set()
+    app.state.server_config = server_config or load_server_config()
+    app.state.sessions: dict[str, float] = {}
 
     async def stage_uploads(
         upload_root: Path,
@@ -197,10 +263,48 @@ def create_app(
                 raise UsageError("Document Adapter 导入选项格式无效")
         return value
 
+    def valid_session(token: str | None) -> bool:
+        if not token:
+            return False
+        expires = app.state.sessions.get(token)
+        if expires is None:
+            return False
+        if expires <= time.time():
+            app.state.sessions.pop(token, None)
+            return False
+        return True
+
     @app.middleware("http")
-    async def local_only(request: Request, call_next: Any) -> Any:
+    async def gate_access(request: Request, call_next: Callable) -> Any:
+        config = app.state.server_config
+        loopback = _is_loopback(request)
+        if not loopback:
+            if not config["lan"]["enabled"]:
+                return JSONResponse(
+                    {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                )
+            path = request.url.path
+            public = (
+                path
+                in {
+                    "/api/v1/server/status",
+                    "/api/v1/server/session",
+                    "/api/v1/auth/login",
+                    "/api/v1/auth/logout",
+                }
+                or not path.startswith("/api/")
+            )
+            if (
+                config["auth"]["required"]
+                and not public
+                and not valid_session(request.cookies.get(SESSION_COOKIE))
+            ):
+                return JSONResponse(
+                    {"error": "需要登录", "code": "auth_required"}, status_code=401
+                )
+            return await call_next(request)
         host = request.headers.get("host", "").split(":", 1)[0]
-        if host not in {"127.0.0.1", "localhost", "testserver"}:
+        if host not in {"127.0.0.1", "localhost", "testserver", "testclient"}:
             return JSONResponse(
                 {"error": "只允许本机访问", "code": "local_only"}, status_code=403
             )
@@ -684,6 +788,111 @@ def create_app(
         if read_credential(credential_id) is None:
             raise UsageError(f"凭据不存在：{credential_id}")
         return {"ok": True}
+
+    @app.get("/api/v1/server/status")
+    async def server_status(request: Request) -> dict[str, Any]:
+        config = app.state.server_config
+        loopback = _is_loopback(request)
+        return {
+            "lan": dict(config["lan"]),
+            "auth": {
+                "required": config["auth"]["required"],
+                "username": config["auth"]["username"],
+            },
+            "authed": loopback
+            or not config["auth"]["required"]
+            or valid_session(request.cookies.get(SESSION_COOKIE)),
+            "loopback": loopback,
+        }
+
+    @app.get("/api/v1/server/session")
+    async def server_session(request: Request) -> dict[str, bool]:
+        loopback = _is_loopback(request)
+        return {
+            "authed": loopback
+            or not app.state.server_config["auth"]["required"]
+            or valid_session(request.cookies.get(SESSION_COOKIE))
+        }
+
+    @app.get("/api/v1/server/interfaces")
+    async def server_interfaces() -> dict[str, Any]:
+        return {"interfaces": lan_interfaces()}
+
+    @app.put("/api/v1/server/config")
+    async def put_server_config(payload: dict[str, Any]) -> dict[str, Any]:
+        config = app.state.server_config
+        lan = payload.get("lan")
+        auth = payload.get("auth")
+        if not isinstance(lan, dict) or not isinstance(auth, dict):
+            raise UsageError("lan 和 auth 必须是对象")
+        enabled = lan.get("enabled")
+        bind_address = lan.get("bind_address")
+        if not isinstance(enabled, bool) or not isinstance(bind_address, str):
+            raise UsageError("lan.enabled 必须是布尔值，lan.bind_address 必须是字符串")
+        if bind_address:
+            addresses = {item["address"] for item in lan_interfaces()}
+            if bind_address not in addresses:
+                raise UsageError("lan.bind_address 必须是本机可用的非回环接口地址")
+        required = auth.get("required")
+        username = auth.get("username")
+        if not isinstance(required, bool) or not isinstance(username, str):
+            raise UsageError("auth.required 必须是布尔值，auth.username 必须是字符串")
+        if required and not username.strip():
+            raise UsageError("开启认证时必须设置用户名")
+        password = auth.get("password")
+        if password is not None and not isinstance(password, str):
+            raise UsageError("auth.password 必须是字符串")
+        if required and not password and read_lan_password() is None:
+            raise UsageError("开启认证时必须设置密码")
+        if password:
+            save_lan_password(password)
+        if not enabled:
+            app.state.sessions.clear()
+        config["lan"]["enabled"] = enabled
+        config["lan"]["bind_address"] = bind_address
+        config["auth"]["required"] = required
+        config["auth"]["username"] = username.strip()
+        save_server_config(config)
+        warning = (
+            "同网段设备拥有完整项目和 LLM 操作权限" if enabled and not required else ""
+        )
+        return {"saved": True, "warning": warning}
+
+    @app.post("/api/v1/auth/login")
+    async def auth_login(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        config = app.state.server_config
+        username = payload.get("username")
+        password = payload.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise UsageError("用户名和密码必须是字符串")
+        stored = read_lan_password()
+        if not config["auth"]["required"]:
+            raise UsageError("当前未开启认证")
+        if username != config["auth"]["username"] or not stored:
+            raise InvalidCredentialsError("用户名或密码错误")
+        if not hmac.compare_digest(password.encode(), stored.encode()):
+            raise InvalidCredentialsError("用户名或密码错误")
+        token = secrets.token_urlsafe(32)
+        app.state.sessions[token] = time.time() + _SESSION_TTL_SECONDS
+        response = JSONResponse({"ok": True})
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=_SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/v1/auth/logout")
+    async def auth_logout(request: Request) -> dict[str, bool]:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            app.state.sessions.pop(token, None)
+        return {"logged_out": True}
 
     @app.post("/api/v1/projects")
     async def create_project(
@@ -1237,19 +1446,28 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m app.web",
         description="启动本地 Web 翻译工作台",
     )
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="",
+        help="绑定地址；省略时按 server.toml 决定（默认 127.0.0.1）",
+    )
     parser.add_argument("--port", type=int, default=8765)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.host not in {"127.0.0.1", "localhost"}:
-        raise SystemExit("error: Web Alpha 只允许绑定本机回环地址")
+    if args.host:
+        host = args.host
+    else:
+        config = load_server_config()
+        host = (
+            config["lan"]["bind_address"] if config["lan"]["enabled"] else "127.0.0.1"
+        )
     uvicorn.run(
         "app.web:create_app",
         factory=True,
-        host=args.host,
+        host=host,
         port=args.port,
     )
 

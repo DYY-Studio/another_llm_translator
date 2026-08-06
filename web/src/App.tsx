@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
 import { TermsView, prefetchTerms } from "./components/TermsView";
 import { CreateProjectDialog, ExportView, Overview } from "./components/UtilityViews";
 import { SettingsView } from "./components/SettingsView";
+import { LoginView } from "./components/ServerSettings";
 import { RunDialog } from "./components/RunDialog";
 import { DiagnosticsView } from "./components/DiagnosticsView";
 import type {
@@ -12,6 +13,7 @@ import type {
   ProjectOverview,
   ProjectSummary,
   RunDecision,
+  ServerStatus,
   Stage,
   TaskOptions,
   TaskState,
@@ -80,6 +82,21 @@ export default function App() {
     }
   });
   const [language, setLanguage] = useState<Language>(detectLanguage);
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const remove = onAuthRequired(() => {
+      if (active) setServerStatus((current) => current ? { ...current, authed: false } : current);
+    });
+    void api<ServerStatus>("/api/v1/server/status").then((value) => {
+      if (active) setServerStatus(value);
+    }).catch(() => {
+      // The status endpoint is public; failure here leaves the app on the
+      // normal flow and the next 401 surfaces the login gate.
+    });
+    return () => { active = false; remove(); };
+  }, []);
 
   useEffect(() => {
     setUiLanguage(language);
@@ -252,6 +269,15 @@ export default function App() {
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
   }
 
+  if (serverStatus?.auth.required && !serverStatus.authed) {
+    return (
+      <LoginView
+        language={language}
+        onLoggedIn={() => setServerStatus((current) => current ? { ...current, authed: true } : current)}
+      />
+    );
+  }
+
   return (
     <>
       <AppShell
@@ -277,6 +303,9 @@ export default function App() {
           return next;
         })}
       >
+        {serverStatus?.lan.enabled && !serverStatus.auth.required && (
+          <div className="warning-banner warning-banner-sticky" role="alert">{translate("server.warningEnabled", language)}</div>
+        )}
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}
       </AppShell>

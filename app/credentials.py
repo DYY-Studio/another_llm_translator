@@ -13,6 +13,7 @@ from .errors import ConfigError, ExternalError
 from .user_config import user_root
 
 SERVICE = "minimal-llm-translator"
+LAN_ACCOUNT = "lan-auth"
 _CREDENTIAL_ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*")
 
 
@@ -111,3 +112,19 @@ def resolve_api_key(credential: dict[str, Any]) -> str:
             raise ExternalError(f"缺少钥匙串凭据：{name}")
         return value
     raise ExternalError(f"未知凭据类型：{kind}")
+
+
+def save_lan_password(secret: str) -> None:
+    if not isinstance(secret, str) or not secret:
+        raise ConfigError("LAN 密码必须是非空字符串")
+    try:
+        keyring.set_password(SERVICE, LAN_ACCOUNT, secret)
+    except keyring.errors.KeyringError as exc:
+        raise ConfigError(f"无法写入系统钥匙串：{exc}") from exc
+
+
+def read_lan_password() -> str | None:
+    try:
+        return keyring.get_password(SERVICE, LAN_ACCOUNT)
+    except keyring.errors.KeyringError as exc:
+        raise ConfigError(f"无法读取系统钥匙串：{exc}") from exc
