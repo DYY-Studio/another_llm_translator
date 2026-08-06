@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import sys
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -13,7 +14,12 @@ from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import effective_path
 
 
-APP_ROOT = Path(__file__).parents[1]
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = (
+    _SOURCE_ROOT
+    if (_SOURCE_ROOT / "config" / "config.toml").is_file()
+    else Path(sys.prefix)
+)
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
 
 

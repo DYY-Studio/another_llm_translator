@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -12,18 +13,30 @@ fn web_port() -> String {
     std::env::var("MINIMAL_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
 }
 
+fn bundled_sidecar() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let resources = exe_dir
+        .parent()?
+        .join("Resources")
+        .join("_up_")
+        .join("sidecar-dist")
+        .join("translator-sidecar")
+        .join("translator-sidecar");
+    resources.is_file().then_some(resources)
+}
+
 fn start_sidecar() -> Option<Child> {
+    let port = web_port();
+    if let Some(executable) = bundled_sidecar() {
+        return Command::new(executable)
+            .args(["--host", "0.0.0.0", "--port", &port])
+            .spawn()
+            .ok();
+    }
     let python =
         std::env::var("MINIMAL_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
     let mut command = Command::new(python);
-    command.args([
-        "-m",
-        "app.web",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        &web_port(),
-    ]);
+    command.args(["-m", "app.web", "--host", "0.0.0.0", "--port", &port]);
     if let Ok(root) = std::env::var("MINIMAL_LLM_REPO_ROOT") {
         command.current_dir(root);
     }

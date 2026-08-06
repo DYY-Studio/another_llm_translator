@@ -8,6 +8,7 @@ import os
 import secrets
 import socket
 import struct
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -85,7 +86,11 @@ from .execution import full_prompt
 from .project import PROMPT_LANGUAGES, prompt_file
 
 
-WEB_DIST = Path(__file__).with_name("web_dist")
+WEB_DIST = (
+    Path(__file__).with_name("web_dist")
+    if Path(__file__).with_name("web_dist").is_dir()
+    else Path(sys.prefix) / "app" / "web_dist"
+)
 SESSION_COOKIE = "minimal_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
 _SIOCGIFADDR = 0x8915
