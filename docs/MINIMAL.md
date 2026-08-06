@@ -428,9 +428,14 @@ inject_invalid_json_every = 0
 inject_missing_segment_every = 0
 ```
 
-`unicode_normalization` 和 `case_insensitive` 当前尚未实现为可变行为，只是后续
-能力占位。术语实现固定使用 `NFKC` 和 `casefold`，因此现阶段只接受上述值。
-待核心主流程完成全面验证后，再基于真实用例实现其他取值并补充测试。
+`terminology.unicode_normalization` 接受 `""`（关闭）或 `NFC`、`NFD`、`NFKC`、
+`NFKD`，作用于术语主名称、别名与匹配文本的归一化。`terminology.case_insensitive`
+为 `false` 时不做 casefold，按原始大小写匹配。两项设置共同决定扫描候选去重、
+导入合并、alias 冲突判定与翻译时匹配；关闭归一化后仍保留首尾空白裁剪。
+已发布术语库中的 `normalized` 键是持久化标识，配置变更后不做迁移：旧术语与
+override 继续按原键生效，新配置只影响之后的扫描、导入与匹配。术语阶段指纹包含
+全部术语配置，变更后重新扫描会自然产生新 revision；翻译、校对、润色阶段不记录
+术语配置到指纹，复用旧 Run 的翻译结果不会重新匹配。
 
 Preset 中的 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示
 禁用 RPM 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标
@@ -844,11 +849,15 @@ override 规则写入 SQLite 中的普通术语库，不添加 partial 标记，
 该操作只把当前活动扫描标记为 `partial_published`，保留 scans、candidates 和历史
 Run；下一次扫描创建新的活动任务，不删除旧记录。
 
-归一化：
+归一化按 `terminology.unicode_normalization`（`""` 表示跳过）和
+`terminology.case_insensitive` 进行：
 
 ```python
-normalized = unicodedata.normalize("NFKC", value)
-normalized = normalized.casefold().strip()
+if unicode_normalization:
+    value = unicodedata.normalize(unicode_normalization, value)
+if case_insensitive:
+    value = value.casefold()
+normalized = value.strip()
 ```
 
 候选以 normalized source 去重：
