@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -130,113 +129,101 @@ def test_project_parent_rejects_relative_and_unwritable_paths(
         resolve_project_parent(tmp_path)
 
 
-def test_config_rejects_unknown_key(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = config.read_text(encoding="utf-8").replace(
-        'output_encoding = "utf-8-sig"',
-        'output_encoding = "utf-8-sig"\nunknown = true',
-    )
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="未知配置键"):
-        load_config(path)
-
-
-def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = re.sub(
-        r"(?m)^target_chunk_input_tokens\s*=.*$",
-        "target_chunk_input_tokens = 1.5",
-        config.read_text(encoding="utf-8"),
-    )
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="target_chunk_input_tokens 必须是正整数"):
-        load_config(path)
-
-
-def test_config_rejects_unknown_alias_primary_collision_policy(
-    tmp_path: Path,
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"',
-            'alias_primary_collision = "guess"',
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        ConfigError,
-        match="alias_primary_collision 必须是 conflict 或 merge",
-    ):
-        load_config(config_path)
+CONFIG_TEMPLATE = Path(__file__).parents[1] / "config" / "config.toml"
 
 
 @pytest.mark.parametrize(
-    "normalization",
-    ["", "NFC", "NFD", "NFKC", "NFKD"],
-)
-def test_config_accepts_unicode_normalization_forms(
-    tmp_path: Path, normalization: str
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        re.sub(
-            r'(?m)^unicode_normalization\s*=.*$',
-            f'unicode_normalization = "{normalization}"',
-            config_path.read_text(encoding="utf-8"),
+    ("old", "new", "key", "expected"),
+    [
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+            "unicode_normalization",
+            "",
         ),
-        encoding="utf-8",
-    )
-    assert load_config(config_path)["terminology"]["unicode_normalization"] == (
-        normalization
-    )
-
-
-def test_config_accepts_case_insensitive_false(tmp_path: Path) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFC"',
+            "unicode_normalization",
+            "NFC",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFD"',
+            "unicode_normalization",
+            "NFD",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFKC"',
+            "unicode_normalization",
+            "NFKC",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFKD"',
+            "unicode_normalization",
+            "NFKD",
+        ),
+        (
             "case_insensitive = true",
             "case_insensitive = false",
+            "case_insensitive",
+            False,
         ),
+    ],
+)
+def test_config_accepts_selectable_terminology_settings(
+    tmp_path: Path, old: str, new: str, key: str, expected: object
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(old, new),
         encoding="utf-8",
     )
-    assert load_config(config_path)["terminology"]["case_insensitive"] is False
+    assert load_config(path)["terminology"][key] == expected
 
 
-def test_config_rejects_unknown_unicode_normalization_form(
-    tmp_path: Path,
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            'output_encoding = "utf-8-sig"',
+            'output_encoding = "utf-8-sig"\nunknown = true',
+            "未知配置键",
+        ),
+        (
+            "target_chunk_input_tokens = 11000",
+            "target_chunk_input_tokens = 1.5",
+            "target_chunk_input_tokens 必须是正整数",
+        ),
+        (
+            'alias_primary_collision = "conflict"',
+            'alias_primary_collision = "guess"',
+            "alias_primary_collision 必须是 conflict 或 merge",
+        ),
+        (
             'unicode_normalization = "NFKC"',
             'unicode_normalization = "FOO"',
+            "unicode_normalization 必须是空字符串或",
         ),
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigError, match="unicode_normalization 必须是空字符串或"):
-        load_config(config_path)
-
-
-def test_config_rejects_case_insensitive_non_bool(tmp_path: Path) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        (
             "case_insensitive = true",
             'case_insensitive = "yes"',
+            "case_insensitive 必须是布尔值",
         ),
+    ],
+)
+def test_config_rejects_invalid_values(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(old, new),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigError, match="case_insensitive 必须是布尔值"):
-        load_config(config_path)
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_config_defaults_alias_collision_for_existing_projects(

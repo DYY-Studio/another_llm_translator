@@ -249,7 +249,23 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
     assert [item["source"] for item in match_terms("Beta", library, 10, TermNormalization("NFKC", True))] == ["Beta"]
 
 
-def test_alias_primary_merge_absorbs_the_alias_entry(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("terms", "expected_aliases"),
+    [
+        ([term("Alpha", aliases=["Beta"]), term("Beta")], {"Beta"}),
+        (
+            [
+                term("Alpha", aliases=["Beta"]),
+                term("Beta", aliases=["Gamma"]),
+                term("Gamma"),
+            ],
+            {"Beta", "Gamma"},
+        ),
+    ],
+)
+def test_alias_primary_merge_absorbs_the_alias_entry(
+    tmp_path: Path, terms: list[dict], expected_aliases: set[str]
+) -> None:
     project = make_project(tmp_path)
     config_path = project / "config.toml"
     config_path.write_text(
@@ -260,12 +276,12 @@ def test_alias_primary_merge_absorbs_the_alias_entry(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     source = tmp_path / "terms.json"
-    write_exchange(source, [term("Alpha", aliases=["Beta"]), term("Beta")])
+    write_exchange(source, terms)
     import_terms(project, source, dry_run=False)
     library = load_terms(project)
     assert library is not None
     assert [item["source"] for item in library["terms"]] == ["Alpha"]
-    assert "Beta" in library["terms"][0]["aliases"]
+    assert set(library["terms"][0]["aliases"]) == expected_aliases
 
 
 @pytest.mark.parametrize(
@@ -306,32 +322,6 @@ def test_alias_primary_ambiguous_graph_requires_manual_conflict(
     ]
     assert collisions
     assert {collision["reason"] for collision in collisions} == {reason}
-
-
-def test_alias_primary_merge_supports_a_chain(tmp_path: Path) -> None:
-    project = make_project(tmp_path)
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"',
-            'alias_primary_collision = "merge"',
-        ),
-        encoding="utf-8",
-    )
-    source = tmp_path / "terms.json"
-    write_exchange(
-        source,
-        [
-            term("Alpha", aliases=["Beta"]),
-            term("Beta", aliases=["Gamma"]),
-            term("Gamma"),
-        ],
-    )
-    import_terms(project, source, dry_run=False)
-    library = load_terms(project)
-    assert library is not None
-    assert [item["source"] for item in library["terms"]] == ["Alpha"]
-    assert set(library["terms"][0]["aliases"]) == {"Beta", "Gamma"}
 
 
 @pytest.mark.asyncio
