@@ -219,8 +219,32 @@ ID、版本和状态位置；宿主只校验归属、版本和完整性，不解
 
 Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的
 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项
-由 Adapter 固化在 File 的 `opaque_state` 并进入阶段指纹。修改选项不会改写既有
+由 Adapter 固化在 File 的 `opaque_state`。Adapter ID 与版本进入阶段指纹
+（内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有
 Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+
+CLI 的 `init` 与 `files-add` 用可重复的
+`--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如
+`--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名
+`adapter_options` JSON。两者构建同一形状，取值语义统一在宿主
+`validate_document_import_options` 边界校验。
+
+### 契约测试
+
+`tests/test_document_adapter_contract.py` 是外部 Document Adapter 的契约
+基准：它用一个独立的第三方风格 Adapter（`record`，`.rec`）走通全部宿主路径
+——按扩展名与显式 ID 导入、选项校验与透传、`opaque_state` 存储往返、
+`part_id`/`model_source` 落地、翻译时 `normalize_model_output` 应用、双语与
+纯译文导出、运行选项固化生效，以及 Adapter 缺失、版本不匹配、状态损坏、
+能力不足和指纹跟踪。任何标准第三方 Adapter 必须通过该套件的通用路径。
+
+### 版本与升级策略
+
+Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配立即失败。Adapter
+升级或选项变更的方式是移除文件并重新导入：宿主不解释、不迁移 `opaque_state`，
+也不会改写既有 Segment 和阶段结果；指纹变化使旧结果不再复用。兼容范围
+（如 semver 前缀）语义不在当前协议中，等待至少一个真实第二实现出现后由用户
+决策引入；协议版本不匹配的插件直接快速失败。
 
 ### 导出
 

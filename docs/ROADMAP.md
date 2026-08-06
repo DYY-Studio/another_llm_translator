@@ -466,11 +466,12 @@ Preset 与规范化思考响应已落地。Stage 22 前相关 schema 仍可直�
 
 ### Document Adapter 与可信 Python 插件（Beta）
 
-内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。仍需：
+内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。外部
+Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）与
+Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
+`docs/ADAPTERS.md` §2）已落地。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
-- 明确 Adapter 版本和不透明状态升级策略；
-- 建立外部 Document Adapter 契约测试；
 - 维护至少一个独立发行的真实 Python Document 插件。
 
 Stage 15 只在 Document Adapter 边界增加可选结果契约，不建立独立校验器插件、
