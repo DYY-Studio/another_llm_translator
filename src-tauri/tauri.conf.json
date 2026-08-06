@@ -14,8 +14,9 @@
     "windows": []
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["app"],
+    "resources": ["../sidecar-dist/translator-sidecar"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -37,3 +37,8 @@ playwright-report/
 # Tauri
 /src-tauri/target/
 /src-tauri/gen
+
+# PyInstaller sidecar
+sidecar-dist/
+build/
+/dist/

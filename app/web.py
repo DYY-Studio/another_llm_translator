@@ -8,6 +8,7 @@ import os
 import secrets
 import socket
 import struct
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -85,7 +86,11 @@ from .execution import full_prompt
 from .project import PROMPT_LANGUAGES, prompt_file
 
 
-WEB_DIST = Path(__file__).with_name("web_dist")
+WEB_DIST = (
+    Path(__file__).with_name("web_dist")
+    if Path(__file__).with_name("web_dist").is_dir()
+    else Path(sys.prefix) / "app" / "web_dist"
+)
 SESSION_COOKIE = "minimal_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
 _SIOCGIFADDR = 0x8915
@@ -411,6 +416,21 @@ def create_app(
             },
             status_code=400,
         )
+
+    def welcome_seen() -> bool:
+        return (user_root() / ".welcome-seen").is_file()
+
+    def mark_welcome_seen() -> None:
+        (user_root() / ".welcome-seen").write_text("1", encoding="utf-8")
+
+    @app.get("/api/v1/welcome")
+    async def welcome() -> dict[str, Any]:
+        return {"first": not welcome_seen()}
+
+    @app.post("/api/v1/welcome/dismiss")
+    async def dismiss_welcome() -> dict[str, bool]:
+        mark_welcome_seen()
+        return {"ok": True}
 
     def remember_project(path: Path) -> None:
         normalized = path.resolve()
