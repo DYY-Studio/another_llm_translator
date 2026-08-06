@@ -538,13 +538,22 @@ def create_app(
             raise UsageError(f"无法读取目录：{current}: {exc}") from exc
         directories = []
         for child in children:
-            if child.is_symlink() or not child.is_dir():
+            try:
+                is_symlink = child.is_symlink()
+                is_dir = child.is_dir()
+            except OSError:
                 continue
+            if is_symlink or not is_dir:
+                continue
+            try:
+                is_project = database_path(child).is_file()
+            except OSError:
+                is_project = False
             directories.append(
                 {
                     "name": child.name,
                     "path": str(child),
-                    "is_project": database_path(child).is_file(),
+                    "is_project": is_project,
                 }
             )
         drives = _windows_drive_entries() if current.parent == current else []

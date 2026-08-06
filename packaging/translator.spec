@@ -14,7 +14,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH) if "SPECPATH" in globals() else Path.cwd()
-hiddenimports = collect_submodules("uvicorn") + collect_submodules("fastapi")
+hiddenimports = collect_submodules("uvicorn")
 
 a = Analysis(
     [str(ROOT / "sidecar_entry.py")],

@@ -7,7 +7,8 @@ npm run typecheck --prefix web
 npm run build --prefix web
 bash scripts/build-sidecar.sh
 cargo tauri build
-APP="$(find /Volumes/990EP/Caches/Cargo/cargo_targets/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)"
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+APP="$(find "$TARGET_DIR/release/bundle/macos" -maxdepth 1 -name '*.app' | head -1)"
 if [ -z "$APP" ]; then
   echo "未找到 bundle 产物" >&2
   exit 1

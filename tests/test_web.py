@@ -1765,3 +1765,23 @@ def test_web_server_paths_reject_invalid_inputs(tmp_path: Path) -> None:
 
     relative = post(server_paths=["relative.txt"], server_input_kinds=["file"])
     assert relative.status_code == 400
+
+
+def test_web_directory_browse_skips_unreadable_children(tmp_path: Path) -> None:
+    import stat as stat_module
+
+    projects_root, _ = make_project(tmp_path)
+    base = tmp_path / "base"
+    (base / "blocked").mkdir(parents=True)
+    (base / "open").mkdir(parents=True)
+    blocked = base / "blocked"
+    blocked.chmod(0)
+    try:
+        client = TestClient(create_app(projects_root=projects_root))
+        response = client.get("/api/v1/directories", params={"path": str(base)})
+        assert response.status_code == 200
+        by_name = {item["name"]: item for item in response.json()["directories"]}
+        assert "open" in by_name
+        assert by_name["blocked"]["is_project"] is False
+    finally:
+        blocked.chmod(stat_module.S_IRWXU)
