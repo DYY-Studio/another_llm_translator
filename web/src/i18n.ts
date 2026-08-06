@@ -964,6 +964,48 @@ export function translate(
   return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
 }
 
+const errorCodes: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    "usage_error": "操作无效",
+    "config_error": "配置无效",
+    "project_error": "项目操作失败",
+    "storage_error": "存储操作失败",
+    "external_error": "外部服务错误",
+    "incomplete_error": "结果不完整",
+    "request_validation_error": "请求参数无效：{fields}",
+    "local_only": "只允许本机访问",
+    "invalid_origin": "不允许的请求来源",
+  },
+  en: {
+    "usage_error": "Invalid operation",
+    "config_error": "Invalid configuration",
+    "project_error": "Project operation failed",
+    "storage_error": "Storage operation failed",
+    "external_error": "External service error",
+    "incomplete_error": "Incomplete results",
+    "request_validation_error": "Invalid request parameters: {fields}",
+    "local_only": "Local access only",
+    "invalid_origin": "Request origin not allowed",
+  },
+};
+
+let uiLanguage: Language = "zh-CN";
+
+export function setUiLanguage(language: Language): void {
+  uiLanguage = language;
+}
+
+export function translateError(
+  code: string,
+  params: Record<string, unknown>,
+): string | null {
+  const template = errorCodes[uiLanguage][code];
+  if (!template) return null;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    String(params[name] ?? match),
+  );
+}
+
 export function detectLanguage(): Language {
   try {
     const value = window.localStorage.getItem("minimal-llm-translator.language.v1");

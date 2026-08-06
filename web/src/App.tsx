@@ -17,7 +17,7 @@ import type {
   TaskState,
   ThemeMode,
 } from "./types";
-import { detectLanguage, translate, type Language } from "./i18n";
+import { detectLanguage, setUiLanguage, translate, type Language } from "./i18n";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
@@ -82,6 +82,7 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage);
 
   useEffect(() => {
+    setUiLanguage(language);
     document.documentElement.lang = language;
     document.title = translate("brand", language);
     try {

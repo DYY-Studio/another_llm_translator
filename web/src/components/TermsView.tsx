@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { translate, translateError, type Language } from "../i18n";
 import type { Term, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
@@ -606,8 +606,12 @@ function TermExportDialog({
         `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}&source=${source}`,
       );
       if (!response.ok) {
-        const value = await response.json();
-        throw new Error(value.error || translate("export.requestFailedStatus", language, { status: response.status }));
+        const value = await response.json().catch(() => null);
+        const code: unknown = value?.code;
+        const localized = typeof code === "string"
+          ? translateError(code, value?.params ?? {})
+          : null;
+        throw new Error(localized || value?.error || translate("export.requestFailedStatus", language, { status: response.status }));
       }
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
