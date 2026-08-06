@@ -104,6 +104,46 @@ def test_preset_endpoint_allows_model_placeholder(tmp_path: Path) -> None:
     )
 
 
+def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["credential"] = {"kind": "keychain", "name": "openai-main"}
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["credential"] == {
+        "kind": "keychain",
+        "name": "openai-main",
+    }
+
+
+@pytest.mark.parametrize(
+    ("credential", "message"),
+    [
+        ("string", "必须是包含 kind 和 name 的对象"),
+        ({"kind": "environment"}, "必须是包含 kind 和 name 的对象"),
+        ({"kind": "environment", "name": "X", "extra": 1}, "必须是包含 kind 和 name 的对象"),
+        ({"kind": "file", "name": "X"}, "kind 必须是 environment 或 keychain"),
+        ({"kind": "environment", "name": " "}, "name 必须是非空字符串"),
+    ],
+)
+def test_preset_rejects_invalid_credential_reference(
+    tmp_path: Path,
+    credential: object,
+    message: str,
+) -> None:
+    value = preset_definition()
+    value["credential"] = credential
+    with pytest.raises(ConfigError, match=message):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
+def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 1
+    value["api_key_env"] = "LLM_API_KEY"
+    del value["credential"]
+    with pytest.raises(ConfigError, match="schema_version 必须是 2"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
 def test_adapter_merges_extra_body_without_overwriting(tmp_path: Path) -> None:
     adapter = load_json_adapter(
         ROOT / "llm_adapters" / "openai-compatible.json"

@@ -25,7 +25,8 @@ python -m app.main --help
 ```
 
 Use `python -m app.main init INPUT --name PROJECT` to create a project. Put the
-API key named by `llm.api_key_env` in the environment, never in TOML.
+API key referenced by the Preset `credential` (an `environment` env var or a
+`keychain` entry) in the environment or system keychain, never in TOML.
 
 ## Coding Guidelines
 

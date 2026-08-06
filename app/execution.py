@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
+from .credentials import resolve_api_key
 from .i18n import SUPPORTED_LANGUAGES
 from .diagnostics import current_diagnostics
 from .errors import (
@@ -1351,11 +1352,7 @@ class LLMClient:
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
-        api_key = os.getenv(str(self.config["llm"]["api_key_env"]))
-        if not api_key:
-            raise ExternalError(
-                f"缺少环境变量：{self.config['llm']['api_key_env']}"
-            )
+        api_key = resolve_api_key(self.config["llm"]["credential"])
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
         configured_output = int(self.config["llm"]["max_output_tokens"])
         available_output = max(

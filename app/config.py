@@ -406,7 +406,7 @@ def _resolve_llm_config(
                 "base_url",
                 "endpoint",
                 "model",
-                "api_key_env",
+                "credential",
                 "proxy_url",
                 "context_window_tokens",
                 "max_output_tokens",

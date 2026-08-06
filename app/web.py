@@ -23,6 +23,7 @@ from .config import (
     resolve_global_config,
     resolve_project_config,
 )
+from .credentials import resolve_api_key
 from .diagnostics import Diagnostics
 from .web_store import WebStore
 from .errors import AppError, ExternalError, ProjectError, UsageError
@@ -616,11 +617,7 @@ def create_app(
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_key = os.getenv(str(preset.definition["api_key_env"]))
-        if not api_key:
-            raise UsageError(
-                f"缺少环境变量：{preset.definition['api_key_env']}"
-            )
+        api_key = resolve_api_key(preset.definition["credential"])
         endpoint, headers = adapter.build_models_request(api_key=api_key)
         url = (
             str(preset.definition["base_url"]).rstrip("/")

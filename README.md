@@ -101,7 +101,9 @@ python -m pip check
 首次使用前至少需要完成以下步骤：
 
 1. 编辑 `llm_presets/default.json`，将示例端点、模型和限流参数改为实际值。
-2. 将 `api_key_env` 指定的环境变量设置为真实 API Key。
+2. 确认 Preset 的 `credential` 引用：`{"kind": "environment", "name": "LLM_API_KEY"}`
+   指定环境变量，或 `{"kind": "keychain", "name": "<凭据 ID>"}` 指向系统钥匙串；
+   两种引用二选一，不隐式回退。然后设置对应的环境变量或写入钥匙串。
 3. 确认 `config/config.toml` 中的 `llm.preset` 指向所选 Preset。
 
 例如，使用 OpenAI-compatible 端点时：
@@ -110,16 +112,17 @@ python -m pip check
 export LLM_API_KEY="your-api-key"
 ```
 
-不要把 API Key 写入 TOML、Preset、Prompt、项目文件、Run 快照或日志。
+不要把 API Key 写入 TOML、Preset、Prompt、项目文件、Run 快照或日志。Preset
+只保存凭据引用，不保存密钥本身。
 
 仓库中的内置 Preset 是可编辑的示例：
 
-| Preset | Adapter | 当前示例密钥环境变量 | 说明 |
+| Preset | Adapter | 当前示例凭据引用 | 说明 |
 | --- | --- | --- | --- |
-| `default` | `openai-compatible` | `LLM_API_KEY` | 默认指向示例端点，必须修改后使用 |
-| `google-gemini` | `google-gemini` | `GEMINI_API_KEY` | Gemini 原生 JSON 端点示例 |
-| `openai-responses` | `openai-responses` | `OPENAI_API_KEY` | OpenAI Responses API 示例 |
-| `anthropic-claude` | `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API 示例 |
+| `default` | `openai-compatible` | `LLM_API_KEY` 环境变量 | 默认指向示例端点，必须修改后使用 |
+| `google-gemini` | `google-gemini` | `GEMINI_API_KEY` 环境变量 | Gemini 原生 JSON 端点示例 |
+| `openai-responses` | `openai-responses` | `OPENAI_API_KEY` 环境变量 | OpenAI Responses API 示例 |
+| `anthropic-claude` | `anthropic` | `ANTHROPIC_API_KEY` 环境变量 | Anthropic Messages API 示例 |
 
 项目可以在 `config.toml` 的 `llm.preset_terminology`、
 `llm.preset_translation`、`llm.preset_proofreading` 和
