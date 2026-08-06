@@ -18,6 +18,41 @@ interface WorkspaceCacheEntry {
 // changes so cached data never leaks across projects.
 const workspaceCache = new Map<string, WorkspaceCacheEntry>();
 const workspaceProjectRef = { current: "" };
+const pageSize = 100;
+
+// Warms each stage's head window when a project is opened so the first visit
+// to a stage renders instantly. Best-effort: failures are left to the
+// workspace, which fetches and surfaces them on visit; the write guard keeps
+// a mounted workspace's fresher entry intact. The cache key matches the
+// workspace's initial default-filter query, and focusedId is the first
+// segment so the mount-time index refresh preserves the restored window.
+export function prefetchWorkspace(project: string) {
+  for (const stage of ["translation", "proofreading", "polishing"] as const) {
+    const key = JSON.stringify([project, stage, "all", "all", ""]);
+    if (workspaceCache.has(key)) continue;
+    void Promise.all([
+      api<{ segment_ids: string[]; total: number }>(
+        `/api/v1/projects/${project}/segments/ids?stage=${stage}`,
+      ),
+      api<ProjectOverview>(
+        `/api/v1/projects/${project}?stage=${stage}&offset=0&limit=${pageSize}`,
+      ),
+    ])
+      .then(([index, page]) => {
+        if (workspaceCache.has(key)) return;
+        const records: Record<string, Segment> = {};
+        for (const item of page.segments) records[item.segment_id] = item;
+        workspaceCache.set(key, {
+          orderedIds: index.segment_ids,
+          total: index.total,
+          records,
+          focusedId: index.segment_ids[0] ?? "",
+          scrollTop: 0,
+        });
+      })
+      .catch(() => {});
+  }
+}
 
 function resultFor(segment: Segment, stage: Stage) {
   if (stage === "translation") return segment.translation;
@@ -81,7 +116,6 @@ export function SegmentWorkspace({
   const indexInFlightRef = useRef(false);
   const preserveFocusRef = useRef("");
   const restoredScrollTopRef = useRef<number | null>(null);
-  const pageSize = 100;
   const pageCacheRef = useRef(new Set<string>());
   const pageRequestsRef = useRef(new Set<string>());
   const pageGenerationRef = useRef(0);
