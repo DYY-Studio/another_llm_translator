@@ -14,8 +14,8 @@ Another LLM Translator 是一个面向本地使用的、可恢复的 LLM 工程�
 - 当前版本：`0.3.0`，对应 MVP 0.3 实现。
 - 当前形态：单机本地 CLI 和 Web Alpha。
 - 当前路线：Stage 1 至 Stage 20 已完成，后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
-- 当前发布方式：从源码目录运行。Python wheel/sdist 的完整发行包尚未作为支持的
-  安装方式发布。
+- 当前发布方式：从源码目录运行，或 `pip install .` 后使用两个 console script
+  （`minimal-llm-translator`、`minimal-llm-translator-web`）。
 
 本项目不面向远程部署、多人协作、局域网共享或公网服务。Web 默认只监听本机回环
 地址，并拒绝非本机 Host 和跨站 Origin。
@@ -93,7 +93,10 @@ python -m pip check
 ### 配置 LLM Preset
 
 项目配置只保存命名 Preset，不保存内联连接配置。全局 Preset 位于
-`llm_presets/<preset_id>.json`，全局配置位于 `config/config.toml`。
+`llm_presets/<preset_id>.json`，全局配置位于 `config/config.toml`。这些内置资源
+只读；用户在 Web 中修改的全局配置、Prompt、Adapter 和 Preset 会写入平台用户数据
+根目录（macOS `~/Library/Application Support/minimal-llm-translator`，可用
+`MINIMAL_LLM_USER_ROOT` 环境变量覆盖），同名文件优先于内置资源读取。
 
 首次使用前至少需要完成以下步骤：
 
@@ -159,8 +162,9 @@ python -m app.main export novel --stage polished
 
 ### 创建与管理项目
 
-项目默认创建在 `projects/<name>/`，也可以通过 `--parent-dir` 在明确的父目录创建，或
-直接使用项目绝对路径打开已有项目：
+项目默认创建在用户数据根目录的 `projects/<name>/` 下（可用 `MINIMAL_LLM_USER_ROOT`
+覆盖），也可以通过 `--parent-dir` 在明确的父目录创建，或直接使用项目绝对路径打开
+已有项目：
 
 ```bash
 python -m app.main init novel.txt --name novel
@@ -222,7 +226,8 @@ python -m app.main translate novel --from-file F0002
 - `--resume-run`、`--decline-run`：在非交互环境中明确处理同阶段未完成 Run。
 
 CLI 默认输出 JSON 摘要，日志写入标准错误和项目 `logs/app.log`。可以使用
-`--language system`、`--language zh-CN` 或 `--language en` 选择界面语言。
+`--language system`、`--language zh-CN` 或 `--language en` 选择界面语言；
+Run 的提示词语言跟随该选择（缺失的语言视图回退 `zh-CN`）。
 
 ### 术语交换
 
@@ -275,9 +280,11 @@ Web 与 CLI 共用同一项目目录、SQLite 存储、阶段执行、限速、�
 
 - 创建、打开、删除项目，以及打开外部绝对路径项目。
 - 上传、追加和移除 TXT/EPUB 文件。
-- 编辑项目配置、项目 Prompt、全局配置、全局 Prompt、LLM Preset 和 JSON Adapter。
+- 编辑项目配置、项目 Prompt、全局配置、全局 Prompt、LLM Preset 和 JSON Adapter；
+  全局编辑写入用户数据根目录，内置资源只读、不可删除，同名用户文件优先。
 - 手动检测模型列表、查看脱敏请求预览和检查诊断信息。
-- 运行、取消和恢复阶段任务。
+- 运行、取消和恢复阶段任务；Run 的提示词语言跟随界面语言，设置页可预览装配后
+  的完整提示词。
 - Segment 审校、批量 apply、单语/双语导出和文件范围选择。
 - 术语搜索、冲突裁决、编辑、移除、彻底删除和 JSON/CSV 交换。
 
@@ -359,7 +366,7 @@ projects/<name>/
 - 不支持 PDF、DOCX、Markdown 等通用文档转换。
 - 不提供自动质量评分或质量保证；模型结果仍需人工审阅。
 - 术语冲突需要人工裁决，强制重新扫描不会自动删除未再次发现的术语。
-- 当前以源码目录作为运行边界，发行包资源完整性仍待后续阶段处理。
+- 内置资源保持只读；用户内容写入用户数据根目录，删除内置资源在 Web 中明确失败。
 
 ## 验证与开发
 

@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import uvicorn

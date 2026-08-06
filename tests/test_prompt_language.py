@@ -9,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.execution import full_prompt, stage_fingerprint
-from app.main import run
 from app.project import init_project
 from app.sqlite_storage import read_json
 from app.stages import _prompt, _prompt_language, prompt_middle_digests, run_translation
@@ -44,7 +43,9 @@ def test_full_prompt_assembles_rules_and_middle_per_language() -> None:
 
 
 def test_full_prompt_rejects_unknown_language() -> None:
-    with pytest.raises(Exception):
+    from app.errors import UsageError
+
+    with pytest.raises(UsageError):
         full_prompt("translation", "middle", "fr")
 
 
@@ -177,7 +178,7 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
 def test_web_task_start_forwards_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    projects_root, project = make_project(tmp_path)
+    projects_root, _ = make_project(tmp_path)
     calls: list[dict[str, object]] = []
 
     async def fake_translation(
