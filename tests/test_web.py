@@ -785,7 +785,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
     ))
     project_config = (project / "config.toml").read_bytes()
     project_prompt = (
-        project / "prompts" / "translation.middle.txt"
+        project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_bytes()
     config = client.get("/api/v1/global/config").json()["config"]
     config["project"]["target_language"] = "繁體中文"
@@ -799,7 +799,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
     ).status_code == 200
     assert (project / "config.toml").read_bytes() == project_config
     assert (
-        project / "prompts" / "translation.middle.txt"
+        project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_bytes() == project_prompt
 
     created = client.post(
@@ -812,7 +812,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
         "target_language"
     ] == "繁體中文"
     assert (
-        new_project / "prompts" / "translation.middle.txt"
+        new_project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text("utf-8") == "GLOBAL TRANSLATION PROMPT"
 
 
@@ -1178,7 +1178,7 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",
         encoding="utf-8",
@@ -1322,7 +1322,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",
         encoding="utf-8",

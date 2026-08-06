@@ -312,6 +312,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .info-box, .warning-banner { padding: 12px; margin: 18px 0; border: 1px solid var(--info-border); border-radius: 6px; background: var(--info-bg); color: var(--info-text); font-size: 12px; line-height: 1.6; }
 .text-settings { height: 100%; min-height: 0; overflow: auto; padding: 0 30px 30px; background: var(--surface); }
 .stage-select { display: grid; grid-template-columns: 80px 260px; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 13px; font-weight: 650; }
+.prompt-preview { margin-top: 18px; }
+.prompt-preview h3 { margin: 0 0 8px; font-size: 13px; }
+.prompt-preview pre { overflow: auto; padding: 14px; margin: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
 .settings-editor { width: 100%; height: clamp(360px, 52vh, 520px); min-height: 280px; margin-top: 14px; padding: 16px; resize: vertical; font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .config-settings { height: 100%; min-height: 0; overflow: auto; padding: 0 30px 30px; background: var(--surface-soft); }
 .config-heading { position: sticky; top: 0; z-index: 2; margin: 0 -30px 24px; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }

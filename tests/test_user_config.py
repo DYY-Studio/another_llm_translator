@@ -38,8 +38,8 @@ def test_effective_path_prefers_user_copy_and_falls_back_to_builtin(
 
 
 def test_write_user_creates_parent_directories(tmp_path: Path) -> None:
-    target = write_user("prompts/translation.middle.txt")
-    assert target == user_root() / "prompts" / "translation.middle.txt"
+    target = write_user("prompts/translation.zh-CN.middle.txt")
+    assert target == user_root() / "prompts" / "translation.zh-CN.middle.txt"
     assert not target.exists()
     target.write_text("content", encoding="utf-8")
     assert target.read_text(encoding="utf-8") == "content"
@@ -59,10 +59,10 @@ def test_init_project_defaults_to_user_root_and_uses_user_override(
     )
     assert project is not None
     assert project.parent == user_root() / "projects"
-    assert (project / "prompts" / "translation.middle.txt").is_file()
+    assert (project / "prompts" / "translation.zh-CN.middle.txt").is_file()
 
     (user_root() / "prompts").mkdir(parents=True)
-    (user_root() / "prompts" / "translation.middle.txt").write_text(
+    (user_root() / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "USER GLOBAL PROMPT", encoding="utf-8"
     )
     overridden, _ = init_project(
@@ -72,7 +72,7 @@ def test_init_project_defaults_to_user_root_and_uses_user_override(
     )
     assert overridden is not None
     assert (
-        overridden / "prompts" / "translation.middle.txt"
+        overridden / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text(encoding="utf-8") == "USER GLOBAL PROMPT"
 
 
@@ -92,7 +92,7 @@ def test_bundle_hash_tracks_user_root_override_and_sync_propagates(
     before = bundle_hash(app_root)
 
     (user_root() / "prompts").mkdir(parents=True)
-    (user_root() / "prompts" / "translation.middle.txt").write_text(
+    (user_root() / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "USER OVERRIDE", encoding="utf-8"
     )
     assert bundle_hash(app_root) != before
@@ -102,7 +102,7 @@ def test_bundle_hash_tracks_user_root_override_and_sync_propagates(
     )
     assert any("已更新项目模板" in item for item in warnings)
     assert (
-        project / "prompts" / "translation.middle.txt"
+        project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text(encoding="utf-8") == "USER OVERRIDE"
 
 
@@ -115,7 +115,7 @@ def test_web_global_writes_land_in_user_root_and_builtin_stays_read_only(
         projects_root=projects_root,
         app_root=app_root,
     ))
-    builtin_prompt = (app_root / "prompts" / "translation.middle.txt").read_text(
+    builtin_prompt = (app_root / "prompts" / "translation.zh-CN.middle.txt").read_text(
         encoding="utf-8"
     )
 
@@ -127,10 +127,10 @@ def test_web_global_writes_land_in_user_root_and_builtin_stays_read_only(
         "content"
     ] == "USER PROMPT"
     assert (
-        app_root / "prompts" / "translation.middle.txt"
+        app_root / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text(encoding="utf-8") == builtin_prompt
     assert (
-        tmp_path / "user-root" / "prompts" / "translation.middle.txt"
+        tmp_path / "user-root" / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text(encoding="utf-8") == "USER PROMPT"
 
 

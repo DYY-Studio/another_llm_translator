@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
+from .i18n import SUPPORTED_LANGUAGES
 from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
@@ -233,16 +234,29 @@ def classify_stage(
     )
 
 
-def full_prompt(stage: str, middle: str) -> str:
-    common = (
+PROMPT_RULES_VERSION = 2
+
+_COMMON_RULES: dict[str, str] = {
+    "zh-CN": (
         "只处理 user 消息中的待处理内容。reference_context 仅供理解，"
         "不得输出或计入进度。严格使用 JSONL："
         "每个非空物理行只能包含一个紧凑 JSON 对象，不得跨行格式化，"
         "不要使用 Markdown 代码块或解释文字。最后一行只能是"
         '{"type":"end"}。'
-    )
-    stage_rules = {
-        "terminology": (
+    ),
+    "en": (
+        "Process only the pending content in the user message. "
+        "reference_context is provided for understanding only; never output "
+        "it or count it as progress. Strict JSONL: every non-empty physical "
+        "line must contain exactly one compact JSON object, never formatted "
+        "across lines; no Markdown code blocks or explanatory text. The "
+        'final line must be exactly {"type":"end"}.'
+    ),
+}
+
+_STAGE_RULES: dict[str, dict[str, str]] = {
+    "terminology": {
+        "zh-CN": (
             "只从 source_segments[].source 提取术语；reference_context 中的"
             "内容不得单独触发提取。term 记录的 source 必须填写原文中实际"
             "出现的术语文本。"
@@ -252,7 +266,20 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"term","source":"Alice","category":"女性人名",'
             '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
-        "translation": (
+        "en": (
+            "Extract terms only from source_segments[].source; content in "
+            "reference_context must not trigger extraction on its own. The "
+            "term record's source must be the term text as it actually "
+            'appears in the source. Output one type="term" record per term '
+            "with source, category, and description; preferred_translation "
+            "and aliases are optional. Output end directly when there are no "
+            'terms. Record format: {"type":"term","source":"Alice",'
+            '"category":"female person name","description":"character",'
+            '"preferred_translation":"爱丽丝","aliases":[]}.'
+        ),
+    },
+    "translation": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -263,7 +290,24 @@ def full_prompt(stage: str, middle: str) -> str:
             "和完整 translation。记录格式："
             '{"type":"segment","id":"1","translation":"完整译文"}。'
         ),
-        "proofreading": (
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment, '
+            "containing only type, id, and the complete translation. Record "
+            'format: {"type":"segment","id":"1","translation":"complete '
+            'translation"}.'
+        ),
+    },
+    "proofreading": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -280,7 +324,29 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
-        "polishing": (
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment; status '
+            "must be accepted or suggested. accepted means keep the current "
+            "base unconditionally and output only type, id, and status; a "
+            "suggested_text or reason attached to it is ignored. accepted "
+            'record format: {"type":"segment","id":"1","status":"accepted"}. '
+            "suggested must include a non-empty complete suggested_text, "
+            "with reason as a string or null. suggested record format: "
+            '{"type":"segment","id":"1","status":"suggested",'
+            '"suggested_text":"complete suggestion","reason":"reason"}.'
+        ),
+    },
+    "polishing": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -297,16 +363,45 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
-    }
-    if stage not in stage_rules:
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment; status '
+            "must be accepted or suggested. accepted means keep the current "
+            "base unconditionally and output only type, id, and status; a "
+            "suggested_text or reason attached to it is ignored. accepted "
+            'record format: {"type":"segment","id":"1","status":"accepted"}. '
+            "suggested must include a non-empty complete suggested_text, "
+            "with reason as a string or null. suggested record format: "
+            '{"type":"segment","id":"1","status":"suggested",'
+            '"suggested_text":"complete suggestion","reason":"reason"}.'
+        ),
+    },
+}
+
+
+def full_prompt(stage: str, middle: str, language: str = "zh-CN") -> str:
+    if language not in SUPPORTED_LANGUAGES:
+        raise UsageError(f"不支持的 Prompt 语言：{language}")
+    if stage not in _STAGE_RULES:
         raise UsageError(f"阶段没有 LLM Prompt：{stage}")
-    return f"{common}\n\n{stage_rules[stage]}\n\n{middle.strip()}"
+    return (
+        f"{_COMMON_RULES[language]}\n\n"
+        f"{_STAGE_RULES[stage][language]}\n\n{middle.strip()}"
+    )
 
 
 def stage_fingerprint(
     config: dict[str, Any],
     stage: str,
-    prompt: str | None,
+    prompt_languages: dict[str, str] | None,
     *,
     terms_revision: int | None = None,
     apply_semantics: dict[str, Any] | None = None,
@@ -327,7 +422,8 @@ def stage_fingerprint(
             "llm_adapter_hash": config.get("_llm_adapter_hash"),
             "llm_preset": config.get("_llm_preset_id"),
             "llm_preset_hash": config.get("_llm_preset_hash"),
-            "prompt": prompt,
+            "prompt_rules_version": PROMPT_RULES_VERSION,
+            "prompt_languages": prompt_languages or {},
             "temperature": config["llm"][temperature_key],
             "context": config["context"][stage],
             "scheduling_mode": config["execution"]["scheduling_mode"],

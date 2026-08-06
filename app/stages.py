@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import re
@@ -64,7 +65,12 @@ from .execution import (
     stage_result_path,
 )
 from .logging_utils import get_logger
-from .project import load_segments, load_source_files
+from .project import (
+    PROMPT_LANGUAGES,
+    load_segments,
+    load_source_files,
+    prompt_file,
+)
 from .plugins import get_document_adapter
 from .sqlite_storage import (
     append_jsonl,
@@ -75,6 +81,7 @@ from .sqlite_storage import (
     record_header,
     write_json,
 )
+from .i18n import SUPPORTED_LANGUAGES, resolve_language
 
 JAPANESE_RE = re.compile(
     "[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
@@ -841,18 +848,35 @@ def _request_estimate(
     return estimated
 
 
-def _prompt(project: Path, stage: str) -> str:
-    name = {
-        "terminology": "terminology.middle.txt",
-        "translation": "translation.middle.txt",
-        "proofreading": "proofreading.middle.txt",
-        "polishing": "polishing.middle.txt",
-    }[stage]
+def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
+    """Resolve the run prompt language, falling back to zh-CN."""
+    value = requested or resolve_language()
+    if (
+        value in SUPPORTED_LANGUAGES
+        and (project / "prompts" / prompt_file(stage, value)).is_file()
+    ):
+        return value
+    return "zh-CN"
+
+
+def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
+    """Per-language middle content digests; missing languages are omitted."""
+    digests: dict[str, str] = {}
+    for language in PROMPT_LANGUAGES:
+        path = project / "prompts" / prompt_file(stage, language)
+        if path.is_file():
+            digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def _prompt(project: Path, stage: str, language: str | None = None) -> str:
+    language = _prompt_language(project, stage, language)
+    name = prompt_file(stage, language)
     try:
         middle = (project / "prompts" / name).read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
-    return full_prompt(stage, middle)
+    return full_prompt(stage, middle, language)
 
 
 def load_terms(project: Path) -> dict[str, Any] | None:
@@ -1698,6 +1722,7 @@ async def run_terminology(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -1707,8 +1732,11 @@ async def run_terminology(
         project, stage="terminology"
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, "terminology")
-    fingerprint = stage_fingerprint(config, "terminology", prompt)
+    language = _prompt_language(project, "terminology", prompt_language)
+    prompt = _prompt(project, "terminology", language)
+    fingerprint = stage_fingerprint(
+        config, "terminology", prompt_middle_digests(project, "terminology")
+    )
     active_path = project / "terminology" / "active_task.json"
     active = read_json(project, active_path) if record_exists(project, active_path) else None
     published = load_terms(project)
@@ -1833,6 +1861,7 @@ async def run_terminology(
         details={
             "active_task_id": task_id,
             "scope": _scope_record(scope, force_all=scope.force),
+            "prompt_language": language,
         },
         warnings=warnings,
     )
@@ -2435,6 +2464,7 @@ async def run_translation(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -2444,11 +2474,15 @@ async def run_translation(
         project, stage="translation"
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, "translation")
+    language = _prompt_language(project, "translation", prompt_language)
+    prompt = _prompt(project, "translation", language)
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
-        config, "translation", prompt, terms_revision=terms_revision
+        config,
+        "translation",
+        prompt_middle_digests(project, "translation"),
+        terms_revision=terms_revision,
     )
     history = load_stage_history(
         project, "translation"
@@ -2534,6 +2568,7 @@ async def run_translation(
         details={
             "terms_revision": terms_revision,
             "scope": _scope_record(scope),
+            "prompt_language": language,
         },
         warnings=warnings,
     )
@@ -3131,6 +3166,7 @@ async def run_review(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -3142,11 +3178,15 @@ async def run_review(
         project, stage=stage
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, stage)
+    language = _prompt_language(project, stage, prompt_language)
+    prompt = _prompt(project, stage, language)
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
-        config, stage, prompt, terms_revision=terms_revision
+        config,
+        stage,
+        prompt_middle_digests(project, stage),
+        terms_revision=terms_revision,
     )
     selected_segments = select_scope(segments, files, scope)
     bases = _base_results(project, stage)
@@ -3252,6 +3292,7 @@ async def run_review(
         details={
             "terms_revision": terms_revision,
             "scope": _scope_record(scope),
+            "prompt_language": language,
         },
         warnings=warnings,
     )
@@ -3960,6 +4001,7 @@ async def run_all(
     *,
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
 ) -> dict[str, Any]:
     _require_nonempty_segments(load_segments(project))
     stages = ("terminology", "translation", "proofreading", "polishing")
@@ -4002,6 +4044,7 @@ async def run_all(
                 http_client=client_for("terminology"),
                 limiter=limiters[resource_keys["terminology"]],
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                prompt_language=prompt_language,
             )
             summaries.append(term_summary)
             require_success(term_summary)
@@ -4011,6 +4054,7 @@ async def run_all(
             http_client=client_for("translation"),
             limiter=limiters[resource_keys["translation"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(translation)
         require_success(translation)
@@ -4021,6 +4065,7 @@ async def run_all(
             http_client=client_for("proofreading"),
             limiter=limiters[resource_keys["proofreading"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(proofreading)
         require_success(proofreading)
@@ -4031,6 +4076,7 @@ async def run_all(
             http_client=client_for("polishing"),
             limiter=limiters[resource_keys["polishing"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(polishing)
         require_success(polishing)
@@ -4101,7 +4147,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     current_term_fingerprint = stage_fingerprint(
         load_project_config(project, stage="terminology"),
         "terminology",
-        _prompt(project, "terminology"),
+        prompt_middle_digests(project, "terminology"),
     )
     summary["terminology"]["current_fingerprint"] = current_term_fingerprint
     if library:
@@ -4183,7 +4229,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
             current_fingerprint = stage_fingerprint(
                 load_project_config(project, stage=stage),
                 stage,
-                _prompt(project, stage),
+                prompt_middle_digests(project, stage),
                 terms_revision=terms_revision,
             )
         else:

@@ -184,7 +184,7 @@ export default function App() {
     try {
       setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
-        body: JSON.stringify({ stage: runOptions.stage, ...decision }),
+        body: JSON.stringify({ stage: runOptions.stage, language, ...decision }),
       }));
       setRunOptions(null);
     } catch (value) {

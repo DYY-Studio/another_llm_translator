@@ -329,7 +329,7 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
     assert by_source["\u3000"] is True
     assert by_source[" \t"] is True
     assert by_source["  text  "] is False
-    assert (project / "prompts" / "translation.middle.txt").is_file()
+    assert (project / "prompts" / "translation.zh-CN.middle.txt").is_file()
     assert load_config(project / "config.toml")["project"]["target_language"]
 
 
@@ -373,9 +373,9 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    project_prompt = project / "prompts" / "translation.middle.txt"
+    project_prompt = project / "prompts" / "translation.zh-CN.middle.txt"
     project_prompt.write_text("project custom", encoding="utf-8")
-    global_prompt = app_root / "prompts" / "translation.middle.txt"
+    global_prompt = app_root / "prompts" / "translation.zh-CN.middle.txt"
     global_prompt.write_text("global changed", encoding="utf-8")
 
     warnings = sync_global_templates(
@@ -411,7 +411,7 @@ def test_template_sync_interactive_prompt_uses_stderr(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    (app_root / "prompts" / "translation.middle.txt").write_text(
+    (app_root / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "changed", encoding="utf-8"
     )
     monkeypatch.setattr("builtins.input", lambda: "keep")
@@ -457,7 +457,7 @@ def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> Non
     )
     assert project is not None
     before = read_json(project, project / "project.json")["global_bundle_hash_seen"]
-    (app_root / "prompts" / "translation.middle.txt").write_text(
+    (app_root / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "changed", encoding="utf-8"
     )
     warnings = sync_global_templates(

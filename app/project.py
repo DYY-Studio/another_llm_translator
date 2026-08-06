@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 import chardet
 
-from .config import load_config
+from .config import LLM_STAGES, load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .user_config import effective_path, user_root
@@ -38,11 +38,17 @@ APP_ROOT = (
     else Path(sys.prefix)
 )
 PROJECTS_ROOT = user_root() / "projects"
-PROMPT_NAMES = (
-    "terminology.middle.txt",
-    "translation.middle.txt",
-    "proofreading.middle.txt",
-    "polishing.middle.txt",
+PROMPT_LANGUAGES = ("zh-CN", "en")
+
+
+def prompt_file(stage: str, language: str) -> str:
+    return f"{stage}.{language}.middle.txt"
+
+
+PROMPT_NAMES = tuple(
+    prompt_file(stage, language)
+    for stage in LLM_STAGES
+    for language in PROMPT_LANGUAGES
 )
 _TXT_EXTENSIONS = frozenset({".txt", ".text"})
 

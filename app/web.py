@@ -54,15 +54,11 @@ from .stages import (
 )
 from .user_config import effective_path, user_root, write_user
 from .web_tasks import WebTaskManager, task_options
+from .execution import full_prompt
+from .project import PROMPT_LANGUAGES, prompt_file
 
 
 WEB_DIST = Path(__file__).with_name("web_dist")
-PROMPT_FILES = {
-    "terminology": "terminology.middle.txt",
-    "translation": "translation.middle.txt",
-    "proofreading": "proofreading.middle.txt",
-    "polishing": "polishing.middle.txt",
-}
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
     1: "unavailable",
@@ -434,30 +430,72 @@ def create_app(
         atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
 
-    @app.get("/api/v1/global/prompts/{stage}")
-    async def get_global_prompt(stage: str) -> dict[str, str]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+    def prompt_languages_for(root: Path) -> dict[str, list[str]]:
+        """Available prompt languages per stage from an effective view."""
         return {
-            "content": effective_path(
-                f"prompts/{filename}", builtin_root=app_root
-            ).read_text(encoding="utf-8")
+            stage: [
+                language
+                for language in PROMPT_LANGUAGES
+                if (root / "prompts" / prompt_file(stage, language)).is_file()
+            ]
+            for stage in LLM_STAGES
         }
+
+    def validate_language(value: object) -> str:
+        if value not in PROMPT_LANGUAGES:
+            raise UsageError("language 必须是 zh-CN 或 en")
+        return str(value)
+
+    def prompt_view(
+        stage: str,
+        language: str,
+        file_for: Callable[[str], Path],
+        available: list[str],
+    ) -> dict[str, Any]:
+        resolved = (
+            language
+            if language in available and file_for(language).is_file()
+            else "zh-CN"
+        )
+        path = file_for(resolved)
+        content = path.read_text(encoding="utf-8")
+        return {
+            "content": content,
+            "language": resolved,
+            "assembled": full_prompt(stage, content, resolved),
+            "languages": available,
+        }
+
+    def global_prompt_file(stage: str, language: str) -> Path:
+        return effective_path(
+            f"prompts/{prompt_file(stage, language)}", builtin_root=app_root
+        )
+
+    @app.get("/api/v1/global/prompts/{stage}")
+    async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        return prompt_view(
+            stage,
+            language,
+            lambda value: global_prompt_file(stage, value),
+            prompt_languages_for(app_root)[stage],
+        )
 
     @app.put("/api/v1/global/prompts/{stage}")
     async def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 必须是非空字符串")
-        atomic_write_text(write_user(f"prompts/{filename}"), content)
+        atomic_write_text(
+            write_user(f"prompts/{prompt_file(stage, language)}"), content
+        )
         return {"saved": True}
 
     @app.get("/api/v1/global/presets")
@@ -890,31 +928,33 @@ def create_app(
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
-    async def get_prompt(name: str, stage: str) -> dict[str, str]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
-        return {
-            "content": (
-                project(name) / "prompts" / filename
-            ).read_text(encoding="utf-8")
-        }
+    async def get_prompt(name: str, stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        root = project(name)
+        return prompt_view(
+            stage,
+            language,
+            lambda value: root / "prompts" / prompt_file(stage, value),
+            prompt_languages_for(root)[stage],
+        )
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
     async def put_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 不能为空")
         root = project(name)
         with project_write_lock(root):
-            atomic_write_text(root / "prompts" / filename, content)
+            atomic_write_text(
+                root / "prompts" / prompt_file(stage, language), content
+            )
         return {"saved": True}
 
     @app.get("/api/v1/global/adapters")
@@ -1030,6 +1070,11 @@ def create_app(
             scope=scope,
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             run_action=run_action,
+            prompt_language=(
+                validate_language(payload.get("language"))
+                if "language" in payload
+                else None
+            ),
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
