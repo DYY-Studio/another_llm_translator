@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
-import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, pickNativeProject } from "../native";
+import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder } from "../native";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
@@ -583,7 +583,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
           </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           {mode === "open" ? <>
-            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeProject().then((path) => { if (path) setProjectPath(path); }); } else { setDirectoryPickerMode("project"); } }}>{translate("dialog.browse", language)}</button></div></label>
+            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeFolder().then((path) => { if (path) setProjectPath(path); }); } else { setDirectoryPickerMode("project"); } }}>{translate("dialog.browse", language)}</button></div></label>
             <p className="muted">{translate("dialog.openHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
           </> : <>

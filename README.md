@@ -310,12 +310,15 @@ npm run build --prefix web   # 先构建前端到 app/web_dist
 bash scripts/desktop-dev.sh  # 设置环境后 cargo run
 ```
 
-侧车选择器通过 Tauri command 暴露为 `select_file` / `select_folder` /
-`select_project`，前端在 `window.__TAURI__` 可用时改用原生对话框选择输入文件、
-文件夹和项目路径（提交为服务端路径）；普通浏览器和 LAN 客户端继续使用上传与
-服务端目录浏览。环境变量：`MINIMAL_LLM_PYTHON`（默认 `.venv/bin/python`）、
-`MINIMAL_LLM_WEB_PORT`（默认 `8765`）。终端 Ctrl+C 会同时终止应用与 sidecar。
-打包（PyInstaller 侧车、签名、公证、安装包）在 Stage 22 进行。
+侧车选择器通过 Tauri command 暴露为 `select_file` / `select_folder`，前端在
+`window.__TAURI__` 可用时改用原生对话框选择输入文件和文件夹（提交为服务端
+路径）；普通浏览器和 LAN 客户端继续使用上传与服务端目录浏览。桌面模式下
+sidecar 常驻监听 `0.0.0.0`，非回环访问由中间件守卫（未开启共享返回 403，
+开启认证且未登录返回 401）；`server.toml` 的 `lan.bind_address` 在桌面退化为
+接口确认语义，CLI Web 模式仍为真实绑定地址。环境变量：
+`MINIMAL_LLM_PYTHON`（默认 `.venv/bin/python`）、`MINIMAL_LLM_WEB_PORT`
+（默认 `8765`）。终端 Ctrl+C 会同时终止应用与 sidecar。
+打包（PyInstaller 侧车、未签名 ad-hoc 安装包）在 Stage 22 进行。
 
 ## 输入与输出范围
 

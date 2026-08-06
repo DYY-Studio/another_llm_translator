@@ -10,6 +10,7 @@ from typing import Any
 import keyring
 
 from .errors import ConfigError, ExternalError
+from .sqlite_storage import atomic_write_json
 from .user_config import user_root
 
 SERVICE = "minimal-llm-translator"
@@ -27,10 +28,10 @@ def _load_index() -> dict[str, dict[str, int]]:
         return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"无法读取凭据索引 {path}: {exc}") from exc
     if not isinstance(value, dict):
-        return {}
+        raise ConfigError(f"凭据索引格式无效：{path}")
     return {
         str(credential_id): {"updated_at": int(entry["updated_at"])}
         for credential_id, entry in value.items()
@@ -39,11 +40,7 @@ def _load_index() -> dict[str, dict[str, int]]:
 
 
 def _write_index(entries: dict[str, dict[str, int]]) -> None:
-    path = _index_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    atomic_write_json(_index_path(), entries)
 
 
 def credential_summaries() -> list[dict[str, Any]]:

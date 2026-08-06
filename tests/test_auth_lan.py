@@ -58,7 +58,7 @@ def test_loopback_stays_open_when_auth_enabled(fake_keyring: FakeKeyring) -> Non
     config = enable_auth(fake_keyring)
     client = make_client(server_config=config, client=LOOPBACK)
     assert client.get("/api/v1/projects").status_code == 200
-    assert client.get("/api/v1/server/session").json() == {"authed": True}
+    assert client.get("/api/v1/server/status").json()["authed"] is True
 
 
 def test_lan_requires_login_and_validates_credentials(
@@ -72,7 +72,7 @@ def test_lan_requires_login_and_validates_credentials(
     assert protected.json()["code"] == "auth_required"
 
     assert client.get("/api/v1/server/status").status_code == 200
-    assert client.get("/api/v1/server/session").json() == {"authed": False}
+    assert client.get("/api/v1/server/status").json()["authed"] is False
 
     wrong = client.post(
         "/api/v1/auth/login",
@@ -92,7 +92,7 @@ def test_lan_requires_login_and_validates_credentials(
     assert "HttpOnly" in login.headers["set-cookie"]
     assert "SameSite=lax" in login.headers["set-cookie"]
     assert client.get("/api/v1/projects").status_code == 200
-    assert client.get("/api/v1/server/session").json() == {"authed": True}
+    assert client.get("/api/v1/server/status").json()["authed"] is True
 
     assert client.post("/api/v1/auth/logout").status_code == 200
     assert client.get("/api/v1/projects").status_code == 401

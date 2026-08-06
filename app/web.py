@@ -865,15 +865,6 @@ def create_app(
             "loopback": loopback,
         }
 
-    @app.get("/api/v1/server/session")
-    async def server_session(request: Request) -> dict[str, bool]:
-        loopback = _is_loopback(request)
-        return {
-            "authed": loopback
-            or not app.state.server_config["auth"]["required"]
-            or valid_session(request.cookies.get(SESSION_COOKIE))
-        }
-
     @app.get("/api/v1/server/interfaces")
     async def server_interfaces() -> dict[str, Any]:
         return {"interfaces": lan_interfaces()}
