@@ -29,6 +29,7 @@ from .stages import (
     build_term_library_rows,
     load_terms,
     normalize_term,
+    term_normalization,
     validate_translation_text,
 )
 
@@ -230,7 +231,9 @@ class WebStore:
             if record.get("active_task_id") == task_id
         ]
         candidate_sources = {
-            normalize_term(str(term.get("source")))
+            normalize_term(
+                str(term.get("source")), term_normalization(self.config)
+            )
             for record in candidate_records
             for term in record.get("terms", [])
             if isinstance(term, dict) and term.get("source")
@@ -841,10 +844,11 @@ class WebStore:
             return result
 
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
+        spec = term_normalization(self.config)
         source = payload.get("source")
         if not isinstance(source, str) or not source.strip():
             raise UsageError("术语 source 不能为空")
-        normalized = normalize_term(source)
+        normalized = normalize_term(source, spec)
         old_normalized = payload.get("old_normalized")
         if old_normalized is not None and not isinstance(old_normalized, str):
             raise UsageError("old_normalized 类型错误")
@@ -856,7 +860,7 @@ class WebStore:
         aliases = [
             alias.strip()
             for alias in aliases
-            if alias.strip() and normalize_term(alias) != normalized
+            if alias.strip() and normalize_term(alias, spec) != normalized
         ]
         category = self._term_value(payload, "category")
         description = self._term_value(payload, "description")

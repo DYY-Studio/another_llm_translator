@@ -205,16 +205,20 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     if len(cross_boundary_batching) != len(set(cross_boundary_batching)):
         raise ConfigError("chunking.cross_boundary_batching 不能包含重复阶段")
-    # TODO: 主流程完成全面验证后，实现可配置归一化与大小写匹配并补充真实用例。
-    # 当前两项只是明确占位，术语实现固定使用 NFKC、casefold。
-    if not isinstance(config["terminology"]["unicode_normalization"], str):
-        raise ConfigError("terminology.unicode_normalization 必须是字符串")
-    if config["terminology"]["unicode_normalization"] != "NFKC":
-        raise ConfigError("MVP 仅支持 terminology.unicode_normalization = NFKC")
+    normalization = config["terminology"]["unicode_normalization"]
+    if not isinstance(normalization, str) or normalization not in {
+        "",
+        "NFC",
+        "NFD",
+        "NFKC",
+        "NFKD",
+    }:
+        raise ConfigError(
+            "terminology.unicode_normalization 必须是空字符串或 "
+            "NFC、NFD、NFKC、NFKD 之一"
+        )
     if not isinstance(config["terminology"]["case_insensitive"], bool):
         raise ConfigError("terminology.case_insensitive 必须是布尔值")
-    if not config["terminology"]["case_insensitive"]:
-        raise ConfigError("MVP 仅支持 terminology.case_insensitive = true")
     alias_collision = config["terminology"]["alias_primary_collision"]
     if alias_collision not in {"conflict", "merge"}:
         raise ConfigError(

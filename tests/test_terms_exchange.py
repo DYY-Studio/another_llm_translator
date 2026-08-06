@@ -12,6 +12,7 @@ from app.execution import Scope
 from app.main import run
 from app.project import init_project
 from app.stages import (
+    TermNormalization,
     export_terms,
     import_terms,
     load_terms,
@@ -151,6 +152,46 @@ def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
     assert [item["source"] for item in load_terms(restored)["terms"]] == ["Alpha"]
 
 
+def test_import_merge_follows_case_insensitive_setting(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "terms.json"
+    write_exchange(source, [term("Alice"), term("alice")])
+    import_terms(project, source, dry_run=False)
+    assert [item["source"] for item in load_terms(project)["terms"]] == [
+        "Alice",
+        "alice",
+    ]
+
+
+def test_import_merge_follows_unicode_normalization_setting(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "terms.json"
+    write_exchange(source, [term("\uff21\uff22\uff23"), term("ABC")])
+    import_terms(project, source, dry_run=False)
+    assert [item["source"] for item in load_terms(project)["terms"]] == [
+        "ABC",
+        "\uff21\uff22\uff23",
+    ]
+
+
 def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     tmp_path: Path,
 ) -> None:
@@ -205,7 +246,7 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
     assert alpha["conflicts"]["alias_primaries"] == [
         {"alias": "Beta", "primary_source": "Beta", "reason": "policy"}
     ]
-    assert [item["source"] for item in match_terms("Beta", library, 10)] == ["Beta"]
+    assert [item["source"] for item in match_terms("Beta", library, 10, TermNormalization("NFKC", True))] == ["Beta"]
 
 
 def test_alias_primary_merge_absorbs_the_alias_entry(tmp_path: Path) -> None:

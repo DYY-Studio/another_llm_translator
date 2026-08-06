@@ -295,8 +295,8 @@ export interface ProjectConfig {
     previous_segments: number;
   }>;
   terminology: {
-    unicode_normalization: "NFKC";
-    case_insensitive: true;
+    unicode_normalization: "" | "NFC" | "NFD" | "NFKC" | "NFKD";
+    case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
   };

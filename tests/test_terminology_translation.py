@@ -12,6 +12,7 @@ from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import (
+    TermNormalization,
     _restore_leading_whitespace,
     load_terms,
     match_terms,
@@ -171,6 +172,118 @@ async def test_terminology_publishes_and_translation_uses_terms(
 
 
 @pytest.mark.asyncio
+async def test_case_insensitive_false_keeps_case_distinct_terms(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice\nalice")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        records = []
+        for item in payload["source_segments"]:
+            source = item["source"]
+            records.append(
+                {
+                    "type": "term",
+                    "source": source,
+                    "category": "名称",
+                    "description": f"说明-{source}",
+                    "preferred_translation": f"译-{source}",
+                    "aliases": [],
+                }
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["published"] is True
+    library = load_terms(project)
+    assert [item["source"] for item in library["terms"]] == ["Alice", "alice"]
+    spec = TermNormalization("NFKC", False)
+    assert [item["source"] for item in match_terms("Alice walked", library, 10, spec)] == [
+        "Alice"
+    ]
+    assert [item["source"] for item in match_terms("alice walked", library, 10, spec)] == [
+        "alice"
+    ]
+    casefold_spec = TermNormalization("NFKC", True)
+    assert {
+        item["source"] for item in match_terms("ALICE", library, 10, casefold_spec)
+    } == {"Alice", "alice"}
+
+
+@pytest.mark.parametrize(
+    ("normalization", "expected_sources"),
+    [
+        ('"NFKC"', ["ABC"]),
+        ('""', ["ABC", "\uff21\uff22\uff23"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unicode_normalization_setting_controls_scan_dedup(
+    tmp_path: Path,
+    normalization: str,
+    expected_sources: list[str],
+) -> None:
+    project = await create_project(tmp_path, "\uff21\uff22\uff23\nABC")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        re.sub(
+            r'(?m)^unicode_normalization\s*=.*$',
+            f"unicode_normalization = {normalization}",
+            config_path.read_text(encoding="utf-8"),
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        records = [
+            {
+                "type": "term",
+                "source": item["source"],
+                "category": "名称",
+                "description": f"说明-{item['source']}",
+                "preferred_translation": f"译-{item['source']}",
+                "aliases": [],
+            }
+            for item in payload["source_segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["published"] is True
+    assert [
+        item["source"] for item in load_terms(project)["terms"]
+    ] == expected_sources
+
+
+@pytest.mark.asyncio
 async def test_completed_terminology_command_does_not_republish(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "Alice")
     calls = 0
@@ -283,7 +396,9 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
             },
         ]
     }
-    matched = match_terms("Alice Wonderland arrived.", library, 10)
+    matched = match_terms(
+        "Alice Wonderland arrived.", library, 10, TermNormalization("NFKC", True)
+    )
     assert [item["source"] for item in matched] == ["Alice", "Other"]
 
 
