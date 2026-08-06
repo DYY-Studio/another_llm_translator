@@ -3,11 +3,12 @@ import { api } from "../api";
 import { translate, type Language } from "../i18n";
 import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
+import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server";
 
 interface AdapterRow {
   adapter_id: string;
@@ -43,6 +44,7 @@ export function SettingsView({ project, language }: { project: string; language:
           {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
           {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
+          {activeScope === "global" && <button className={section === "server" ? "active" : ""} onClick={() => setSection("server")}>{translate("server.title", language)}</button>}
         </div>
       </nav>
       <div className="settings-content">
@@ -51,6 +53,7 @@ export function SettingsView({ project, language }: { project: string; language:
         {section === "presets" && <PresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings language={language} />}
         {section === "credentials" && <CredentialsSettings language={language} />}
+        {section === "server" && <ServerSettings language={language} onChanged={() => {}} />}
       </div>
     </div>
   );
