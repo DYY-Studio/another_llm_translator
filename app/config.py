@@ -10,6 +10,7 @@ from typing import Any
 from .errors import ConfigError
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
+from .user_config import effective_path
 
 
 APP_ROOT = Path(__file__).parents[1]
@@ -328,24 +329,28 @@ def resolve_project_config(
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
+    root = presets_root or APP_ROOT
     configured_preset_id = _preset_id_for_stage(config, stage)
-    preset_file = preset_path(presets_root or APP_ROOT, configured_preset_id)
+    preset_path(root, configured_preset_id)
+    preset_file = effective_path(
+        f"llm_presets/{configured_preset_id}.json", builtin_root=root
+    )
     preset = load_llm_preset(preset_file)
     if preset.preset_id != configured_preset_id:
         raise ConfigError("LLM Preset 文件中的 preset_id 与项目配置不一致")
     return _resolve_llm_config(
         config,
-        adapter_file=(
-            (presets_root or APP_ROOT)
-            / "llm_adapters"
-            / f"{preset.adapter_id}.json"
+        adapter_file=effective_path(
+            f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
         ),
         preset=preset,
     )
 
 
 def load_global_config(root: Path) -> dict[str, Any]:
-    return resolve_global_config(load_config(root / "config" / "config.toml"), root)
+    return resolve_global_config(
+        load_config(effective_path("config/config.toml", builtin_root=root)), root
+    )
 
 
 def resolve_global_config(
@@ -353,12 +358,19 @@ def resolve_global_config(
 ) -> dict[str, Any]:
     config = deepcopy(config)
     configured_preset_id = _preset_id_for_stage(config, stage)
-    preset = load_llm_preset(preset_path(root, configured_preset_id))
+    preset_path(root, configured_preset_id)
+    preset = load_llm_preset(
+        effective_path(
+            f"llm_presets/{configured_preset_id}.json", builtin_root=root
+        )
+    )
     if preset.preset_id != configured_preset_id:
         raise ConfigError("LLM Preset 文件中的 preset_id 与全局配置不一致")
     return _resolve_llm_config(
         config,
-        adapter_file=root / "llm_adapters" / f"{preset.adapter_id}.json",
+        adapter_file=effective_path(
+            f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
+        ),
         preset=preset,
     )
 
