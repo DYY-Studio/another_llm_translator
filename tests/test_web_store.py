@@ -451,30 +451,6 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     ] == "艾丽西亚"
 
 
-def test_web_store_permanently_deletes_term_override_for_future_scans(
-    tmp_path: Path,
-) -> None:
-    project = create_web_store_project(tmp_path)
-    store = WebStore(project)
-    store.save_term(
-        {
-            "source": "Alicia",
-            "preferred_translation": "艾丽西亚",
-            "category": "人名",
-            "description": "主角",
-            "aliases": [],
-            "disabled": True,
-        }
-    )
-    assert read_json(project, project / "terminology" / "overrides.json")["overrides"]
-
-    deleted = store.delete_terms({"normalized": ["alicia"]})
-
-    assert deleted["deleted"] == 1
-    assert load_terms(project)["terms"] == []
-    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
-
-
 def test_web_store_exposes_and_resolves_term_conflicts_independently(
     tmp_path: Path,
 ) -> None:

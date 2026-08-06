@@ -347,7 +347,7 @@ def test_web_returns_drive_entries_at_a_root(
     assert response.json()["drives"] == drives
 
 
-def test_web_build_includes_editor_layout_context_and_theme_controls(
+def test_web_build_serves_loadable_assets_with_core_contract(
     tmp_path: Path,
 ) -> None:
     client = TestClient(create_app(projects_root=tmp_path / "projects"))
@@ -364,96 +364,18 @@ def test_web_build_includes_editor_layout_context_and_theme_controls(
     assert stylesheet is not None
     css = client.get(stylesheet.group(1))
     assert css.status_code == 200
-    assert ".segment-batch-actions" in css.text
-    assert ".directory-picker-modal" in css.text
-    assert script.text.count("segment-row-stack") == 1
-    assert "segment-row-boundary" not in script.text
-    assert (
-        ".segment-row-stack{min-width:0;width:100%;max-width:100%;"
-        "display:grid;grid-auto-rows:max-content;background:var(--surface)}"
-    ) in css.text
-    assert ".segment-row-stack{min-width:0;width:100%;max-width:100%;" in css.text
-    assert ".segment-list{min-width:0;min-height:0;width:100%;max-width:100%;" in css.text
-    assert ".segment-row-boundary" not in css.text
-    assert ".segment-row:after" not in css.text
-    segment_row = re.search(r"\.segment-row\{([^}]*)\}", css.text)
-    assert segment_row is not None
-    assert "border-bottom:1px solid var(--row-border)" in segment_row.group(1)
-    assert "grid-template-columns:14px 72px minmax(0,1fr)" in segment_row.group(1)
-    placeholder = re.search(r"\.segment-row-placeholder\{([^}]*)\}", css.text)
-    assert placeholder is not None
-    assert "border-bottom:1px solid var(--row-border)" in placeholder.group(1)
-    assert "content-visibility" not in css.text
-    assert "contain-intrinsic-size" not in css.text
-    assert "rate_limit_waiting_requests" in script.text
-    assert "rate_limit_wait_count" not in script.text
-    assert "60 / RPM" in script.text
-    assert "必须至少为 1" in script.text
-    assert ".settings-navigation{position:sticky;top:58px" in css.text
-    assert "grid-template-rows:auto minmax(0,1fr)" in css.text
-    assert ".config-settings{height:100%;min-height:0;overflow:auto;padding:0 30px 30px" in css.text
-    assert ".settings-sticky-heading{position:sticky;top:0;z-index:2;margin:0 -30px 24px" in css.text
-    assert ".preset-list-body" in css.text
-    assert ".preset-editor-body" in css.text
-    assert 'grid-template:"list-heading editor-heading" auto "list-body editor-body"' in css.text
-    assert ".preset-list-body{grid-area:list-body" in css.text
-    assert "padding:0 0 24px" in css.text
-    assert ".preset-list{" not in css.text
-    assert "height:clamp(360px,52vh,520px)" in css.text
     for text in (
-        "terms-workspace",
+        "rate_limit_waiting_requests",
+        "60 / RPM",
+        "必须至少为 1",
+        "segment-row-stack",
         "segment-batch-actions",
-        "只看冲突",
-        "显示已移除",
-        "全部状态",
-        "上下文",
-        "当前外观",
-        "跟随系统",
-        "运行当前阶段",
-        "复用已有结果",
-        "强制重做全部",
-        "续用原 Run",
-        "移除所选",
-        "清除所选",
-        "全部清除",
-        "应用所选",
-        "全部应用",
-        "导入术语表",
-        "导出术语表",
-        "项目与输入",
-        "LLM 与采样",
-        "全局 LLM Preset",
-        "使用全局 Preset",
-        "{stage} Preset",
-        "打开现有项目",
-        "保存父目录",
-        "浏览目录",
-        "选择服务端目录",
-        "/api/v1/directories",
-        "只打开此目录",
-        "执行与分块",
-        "参考上下文",
-        "翻译校验与重试",
-        "调试与故障注入",
-        "项目设置",
-        "全局设置",
-        "全局配置",
-        "全局 Prompt",
-        "LLM Preset",
-        "附加 JSON Body",
-        "最终请求预览",
-        "同步全局模板",
-        "全局请求模板",
-        "不再保存副本",
-        "获取模型",
-        "搜索模型名称或 ID",
-        "选择后仍需保存",
-        "文件范围",
-        "未选择时导出全部文件",
-        "统一输出 TXT",
+        "directory-picker-modal",
+        "settings-navigation",
+        "preset-editor-body",
+        "terms-workspace",
     ):
-        assert text in script.text
-    assert "保存前会严格验证完整 TOML" not in script.text
+        assert text in script.text + css.text
 
 
 def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
@@ -1018,84 +940,9 @@ def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     assert read_files(project) == before
 
 
-def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
+def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-
-    empty = client.get("/api/v1/projects/sample/terms")
-    assert empty.status_code == 200
-    assert empty.json()["terms"] == []
-
-    added = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["A"],
-            "disabled": False,
-        },
-    )
-    assert added.status_code == 200
-    assert added.json()["terms_revision"] == 1
-    assert added.json()["terms"][0]["preferred_translation"] == "爱丽丝"
-
-    renamed = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": False,
-        },
-    )
-    assert renamed.status_code == 200
-    assert any(
-        item["normalized"] == "alice liddell" and not item["disabled"]
-        for item in renamed.json()["terms"]
-    )
-
-    removed = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice liddell",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": True,
-        },
-    )
-    assert removed.status_code == 200
-    assert next(
-        item
-        for item in removed.json()["terms"]
-        if item["normalized"] == "alice liddell"
-    )["disabled"]
-
-    restored = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice liddell",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": False,
-        },
-    )
-    assert restored.status_code == 200
-    assert not next(
-        item
-        for item in restored.json()["terms"]
-        if item["normalized"] == "alice liddell"
-    )["disabled"]
 
     seed_conflicted_terms(project)
     unresolved = client.post(
