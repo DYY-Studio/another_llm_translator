@@ -30,14 +30,24 @@ app = ["web_dist/**"]
 [tool.setuptools.data-files]
 config = ["config/config.toml"]
 prompts = [
-  "prompts/polishing.middle.txt",
-  "prompts/proofreading.middle.txt",
-  "prompts/terminology.middle.txt",
-  "prompts/translation.middle.txt",
+  "prompts/polishing.en.middle.txt",
+  "prompts/polishing.zh-CN.middle.txt",
+  "prompts/proofreading.en.middle.txt",
+  "prompts/proofreading.zh-CN.middle.txt",
+  "prompts/terminology.en.middle.txt",
+  "prompts/terminology.zh-CN.middle.txt",
+  "prompts/translation.en.middle.txt",
+  "prompts/translation.zh-CN.middle.txt",
 ]
 llm_adapters = [
   "llm_adapters/anthropic.json",
   "llm_adapters/google-gemini.json",
   "llm_adapters/openai-compatible.json",
   "llm_adapters/openai-responses.json",
+]
+llm_presets = [
+  "llm_presets/anthropic-claude.json",
+  "llm_presets/default.json",
+  "llm_presets/google-gemini.json",
+  "llm_presets/openai-responses.json",
 ]
