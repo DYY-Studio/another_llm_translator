@@ -1612,6 +1612,47 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 所选或当前过滤范围，缺建议或缺基准时整批拒绝，旧基准必须显式允许。批量
 清除不会改变阶段运行 scope；随后启动仍处理项目内全部 pending/failed。
 
+## 6.5 凭据、局域网共享与桌面壳
+
+### 凭据与 Preset 引用
+
+LLM Preset schema v2 使用显式单凭据引用 `credential: {kind, name}`：
+`environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
+不隐式 fallback。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
+`credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
+Run 快照或阶段指纹。
+
+凭据以用户根 `credentials/index.json` 保存摘要（ID 与更新时间），密钥只存系统
+钥匙串。凭据 API 支持创建、更新、删除和测试，永不回传密钥；Run 和日志只保存
+引用 ID。索引原子写入，损坏时明确报错，不静默回退。测试环境通过 autouse 的
+FakeKeyring 隔离，绝不触碰真实钥匙串。
+
+### 局域网共享与认证
+
+服务器配置保存在用户根 `server.toml`：`lan.enabled`、`lan.bind_address` 与
+`auth.required`、`auth.username`。默认只监听回环。CLI Web 模式省略 `--host` 时
+按 server.toml 绑定（未启用则 `127.0.0.1`）；桌面模式 sidecar 常驻
+`0.0.0.0`，由中间件守卫：非回环客户端在未启用共享时返回 `local_only` 403，
+启用共享且开启认证但未登录时返回 `auth_required` 401。绑定地址必须是本机
+可用的非回环接口地址（`/api/v1/server/interfaces` 枚举）。
+
+开启认证后使用长期用户名与密码，密码存入系统钥匙串；登录成功签发 HttpOnly、
+SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停止共享后全部
+失效，长期账密保留。回环访问始终免认证。停止共享时清除全部会话。公开端点
+仅限 `/api/v1/server/status`、`/api/v1/server/interfaces`、登录/登出与非 `/api/`
+静态资源。留空认证必须显式确认警告：同网段设备拥有完整项目和 LLM 操作权限；
+未认证共享时 Web 常驻显示该警告。首版使用 HTTP，不实现 TLS、多账号、角色或
+密码找回。
+
+### 桌面壳（Tauri）
+
+`src-tauri/` 提供 Tauri 2 桌面开发壳：启动时拉起 Python/FastAPI sidecar，
+对 `/api/v1/server/status` 做健康探测，通过后加载 `http://127.0.0.1:8765`，
+退出时关闭 sidecar。原生文件与文件夹选择器经 `window.__TAURI__` 桥接为
+`select_file` / `select_folder`，把服务端路径随创建/追加请求提交；普通浏览器
+和 LAN 客户端继续使用上传与服务端目录浏览。`MINIMAL_LLM_PYTHON`、
+`MINIMAL_LLM_REPO_ROOT`、`MINIMAL_LLM_WEB_PORT` 仅开发模式生效。
+
 ---
 
 # 7. 核心验收矩阵
