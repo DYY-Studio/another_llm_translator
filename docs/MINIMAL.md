@@ -188,16 +188,29 @@ output/
 
 Run 的配置和 Prompt 快照放在对应 Run 目录。启用调试模式时，该目录额外保存 Chunk、Attempt 和 Payload。
 
-全局模板位于应用目录：
+内置只读资源位于应用目录；用户内容（全局配置修改、自定义 Prompt/Adapter/
+Preset、默认项目和诊断日志）写入平台用户数据根目录，可用
+`MINIMAL_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
+`~/Library/Application Support/minimal-llm-translator`，POSIX 默认
+`~/.local/share/minimal-llm-translator`，Windows 默认
+`%LOCALAPPDATA%\minimal-llm-translator`）。用户根存在同名文件时优先读取：
+config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
 
 ```text
 config/config.toml
-prompts/terminology.middle.txt
-prompts/translation.middle.txt
-prompts/proofreading.middle.txt
-prompts/polishing.middle.txt
+prompts/terminology.zh-CN.middle.txt
+prompts/terminology.en.middle.txt
+prompts/translation.zh-CN.middle.txt
+prompts/translation.en.middle.txt
+prompts/proofreading.zh-CN.middle.txt
+prompts/proofreading.en.middle.txt
+prompts/polishing.zh-CN.middle.txt
+prompts/polishing.en.middle.txt
 llm_adapters/openai-compatible.json
 ```
+
+Web 编辑全局资源只写入用户根；内置资源删除明确失败，编辑内置资源等于在用户根
+写入同名覆盖。默认项目根为 `用户根/projects`，诊断日志位于 `用户根/logs/`。
 
 ## 2.3 初始化与文件发现
 
@@ -221,7 +234,7 @@ python -m app.main files-remove PROJECT FILE_ID...
 规则：
 
 - init 必须在输入和 `--empty` 中恰好选择一种。
-- init 默认写入内置 `projects/`；`--parent-dir` 在已存在、可写的明确父目录下
+- init 默认写入用户根 `projects/`；`--parent-dir` 在已存在、可写的明确父目录下
   创建项目。相对路径按当前工作目录解析，后续命令可直接使用项目绝对路径。
 - 项目目录是自包含边界；选择外部位置不会移动或复制已有项目。
 - 显式文件按参数顺序处理。
@@ -482,7 +495,8 @@ warning
 global_bundle_hash_seen
 ```
 
-Bundle Hash 对全局配置和四个提示词的相对路径及内容计算。它只用于发现新的
+Bundle Hash 对全局配置和全部语言提示词（`prompts/<stage>.<lang>.middle.txt`）
+的有效视图（用户根优先、内置兜底）按稳定相对路径及内容计算。它只用于发现新的
 全局模板，不包含实时 Preset 内容，也不参与阶段结果判断。
 
 项目命令执行前：
@@ -725,12 +739,24 @@ applied 结果保存：
 四个 LLM 阶段使用：
 
 ```text
-代码内固定 Prefix
-+ 项目可编辑的 middle Prompt
-+ 代码内固定 Suffix
+代码内固定 Prefix（按语言）
++ 项目可编辑的 middle Prompt（按语言）
++ 代码内固定 Suffix（按语言）
 ```
 
+固定 Prefix/Suffix 按阶段和语言（`zh-CN`/`en`）在代码内以字典提供；中段 Prompt
+按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
+改版时显式升 `prompt_rules_version`。
+
 固定部分定义角色、输入输出结构、请求内短 ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+
+Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
+`--language`/`MINIMAL_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
+回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
+
+阶段指纹不包含提示词文本；它记录 `prompt_rules_version` 和全部语言中段的哈希，
+因此任一语言的中段变化都会使该阶段既有结果指纹失效，但语言选择本身不产生
+指纹隔离。
 
 四阶段分别读取自己的：
 

@@ -363,12 +363,17 @@ Preset；内联 LLM 连接配置不再支持。
 - 在 macOS 公开 Beta 前完成中文、英文两种真实界面。
 - Web 和桌面语言按浏览器配置保存；CLI 提供明确语言参数并支持系统默认。
 - 前端抽取消息目录、日期数字格式和可访问性文本。
-- Web API 为前端可见错误提供稳定错误代码与参数，同时保留安全 fallback 文本。
-- 项目内容、Prompt、目标语言和模型输出不随 UI 语言改变。
+- Web API 为前端可见错误提供稳定错误代码与参数，同时保留安全 fallback 文本；
+  前端按会话语言把 `{code, params}` 翻译成界面文案，服务端中文文本保留为
+  fallback，EN 会话不再透传中文错误文案。
+- 项目内容、目标语言和模型输出不随 UI 语言改变。
+- Prompt 中段按 `prompts/<stage>.<lang>.middle.txt` 分语言保存；前缀/后缀规则为
+  代码级多语言字典，硬编码规则改版时显式升 `prompt_rules_version`。
+- 提示词语言在 Run 时跟随 UI/CLI 语言，缺失的语言视图回退 `zh-CN`；阶段指纹
+  语言无关（对全语言中段哈希），任一语言变化即触发指纹变化。
 - 不实现远程语言包、自动翻译文案或插件本地化市场。
 - Web 顶栏可切换中文/英文，选择按浏览器保存；CLI 支持 `--language system|zh-CN|en`。
-- 共享 Shell、仪表盘和运行状态使用消息目录；内容、Prompt、目标语言和模型输出
-  不随界面语言改变。
+- 共享 Shell、仪表盘和运行状态使用消息目录；内容、目标语言和模型输出不随界面语言改变。
 
 ## Stage 20.1：跨边界 Chunk 与 Run 诊断指标（已完成）
 
@@ -382,15 +387,20 @@ Preset；内联 LLM 连接配置不再支持。
 - Token 吞吐量同时提供 Input、Output 和 Total 三种指标，仪表盘下拉选择并保存在
   浏览器 `localStorage`；后端在 usage 完整时一次返回三者。
 
-## 发行包资源完整性（未实现）
+## 发行包资源完整性（已实现）
 
-当前发布说明以源码目录运行为准，不把 `pip install .`、wheel 或 sdist 作为支持的
-安装方式。现有 Python 发行配置尚未完整纳入 `llm_presets/*.json`；后续发行阶段需要：
+内置资源（config、Prompts、Adapter、Preset、Web 静态资源）保持只读；用户内容
+（全局配置修改、自定义 Prompt/Adapter/Preset、日志、默认 `projects`）写入平台
+用户数据根目录，可用 `MINIMAL_LLM_USER_ROOT` 环境变量覆盖：
 
-- 将 Preset 及所有运行时必需资源纳入 wheel 和 sdist，并明确安装后的应用根目录。
-- 在全新虚拟环境中验证源码安装、wheel 安装、sdist 安装和两个 console script 入口。
+- wheel 和 sdist 完整纳入 config、全部语言 Prompt、JSON Adapter 和 Preset。
+- 安装后以 `sys.prefix` 为内置应用根；用户根存在同名文件时优先读取（config
+  整文件覆盖，Prompts/Adapter/Preset 按文件或 ID 覆盖）。
+- Web 编辑全局资源只写用户根；内置资源删除明确失败，编辑内置资源 = 用户根
+  同名覆盖。
+- 默认项目根和诊断日志位于用户根；项目删除保护同时覆盖用户根。
+- 在全新虚拟环境中验证源码安装、wheel 安装和两个 console script 入口。
 - 验证内置 Web 静态资源、全局配置、Prompt、JSON Adapter 和 Preset 均可被发现。
-- 在发行包完成前，继续在 README 中只记录源码运行方式，不对 `pip install .` 做兼容承诺。
 
 ## Stage 21：桌面共享运行时、凭据与局域网
 
