@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from app.errors import ConfigError, IncompleteError, ProjectError, StorageError, UsageError
+from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
 from app.documents import publish_document_exports
 from app.execution import stage_result_path
@@ -900,7 +900,6 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    files_path = project / "source" / "files.jsonl"
     file_record = read_files(project)[0]
     file_record["document_adapter_version"] = "future"
     with sqlite3.connect(project / "project.sqlite") as connection:

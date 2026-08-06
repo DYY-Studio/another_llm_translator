@@ -5,8 +5,9 @@ import ctypes
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import uvicorn

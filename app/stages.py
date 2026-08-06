@@ -11,7 +11,7 @@ import sys
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path

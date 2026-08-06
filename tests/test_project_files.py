@@ -146,7 +146,6 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
     source = tmp_path / "old.txt"
     source.write_text("one", encoding="utf-8")
     add_project_files(project, [str(source)])
-    segments_path = project / "source" / "segments.jsonl"
     segments = read_segments(project)
     segments[0].pop("part_id")
     rewrite_segment_payload(project, segments[0])
