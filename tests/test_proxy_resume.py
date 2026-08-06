@@ -83,6 +83,37 @@ def _new_running_run(
     return run_id
 
 
+def _seed_terminology_task(project: Path, task_id: str) -> None:
+    metadata = read_json(project, project / "project.json")
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="old",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            str(metadata["project_id"]),
+            stage="terminology",
+            segment_id="F0001-S000001",
+            status="completed",
+            active_task_id=task_id,
+            stage_fingerprint="old",
+            run_id="OLD",
+            request_id="OLD",
+        ),
+    )
+
+
 def test_resume_flags_only_exist_on_standalone_llm_commands() -> None:
     parser = build_parser()
     for command in ("terminology", "translate", "proofread", "polish"):
@@ -571,35 +602,8 @@ def test_cli_logs_resume_warning_once(
 @pytest.mark.asyncio
 async def test_terminology_resume_keeps_active_task(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "Alice\nBob")
-    metadata = read_json(project, project / "project.json")
     task_id = "TERM-TASK-KEEP"
-    write_json(
-        project,
-        project / "terminology" / "active_task.json",
-        record_header(
-            "terminology_task",
-            str(metadata["project_id"]),
-            record_id=task_id,
-            active_task_id=task_id,
-            status="active",
-            initial_stage_fingerprint="old",
-        ),
-    )
-    append_jsonl(
-        project,
-        project / "terminology" / "scans.jsonl",
-        record_header(
-            "terminology_scan",
-            str(metadata["project_id"]),
-            stage="terminology",
-            segment_id="F0001-S000001",
-            status="completed",
-            active_task_id=task_id,
-            stage_fingerprint="old",
-            run_id="OLD",
-            request_id="OLD",
-        ),
-    )
+    _seed_terminology_task(project, task_id)
     run_id = _new_running_run(
         project, "terminology", active_task_id=task_id
     )
@@ -634,35 +638,7 @@ async def test_terminology_ignores_old_fingerprint_outside_scope(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice\nBob")
-    metadata = read_json(project, project / "project.json")
-    task_id = "TERM-TASK-SCOPE"
-    write_json(
-        project,
-        project / "terminology" / "active_task.json",
-        record_header(
-            "terminology_task",
-            str(metadata["project_id"]),
-            record_id=task_id,
-            active_task_id=task_id,
-            status="active",
-            initial_stage_fingerprint="old",
-        ),
-    )
-    append_jsonl(
-        project,
-        project / "terminology" / "scans.jsonl",
-        record_header(
-            "terminology_scan",
-            str(metadata["project_id"]),
-            stage="terminology",
-            segment_id="F0001-S000001",
-            status="completed",
-            active_task_id=task_id,
-            stage_fingerprint="old",
-            run_id="OLD",
-            request_id="OLD",
-        ),
-    )
+    _seed_terminology_task(project, "TERM-TASK-SCOPE")
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

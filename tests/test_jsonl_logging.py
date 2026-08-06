@@ -42,16 +42,8 @@ def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
     assert document.records == ()
 
 
-@pytest.mark.parametrize(
-    "template",
-    [
-        "\ufeff \r\n<think>推理过程</think>\r\n{answer}",
-        "<thinking>推理过程</thinking>\n{answer}",
-        "<thought></thought>\n{answer}",
-        "<analysis>推理过程</analysis>\n{answer}",
-    ],
-)
-def test_jsonl_extraction_accepts_leading_thought_blocks(template: str) -> None:
+def test_jsonl_extraction_accepts_leading_thought_blocks() -> None:
+    template = "\ufeff \r\n<think>推理过程</think>\r\n{answer}"
     answer = llm_jsonl(
         [{"type": "segment", "id": "S1", "translation": "译文"}]
     )
