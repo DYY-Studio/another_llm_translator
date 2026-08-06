@@ -11,7 +11,7 @@ from app.errors import UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
 from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
-from app.stages import export_project, load_terms, match_terms
+from app.stages import TermNormalization, export_project, load_terms, match_terms
 from tests.test_foundation import make_app_root
 
 
@@ -387,7 +387,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
         }
     )
     assert added["terms_revision"] == 1
-    assert match_terms("Alice arrived", load_terms(project), 10)[0][
+    assert match_terms("Alice arrived", load_terms(project), 10, TermNormalization("NFKC", True))[0][
         "preferred_translation"
     ] == "爱丽丝"
 
@@ -431,7 +431,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     )
     assert disabled["terms_revision"] == 3
     assert load_terms(project)["terms"] == []
-    assert match_terms("Alicia arrived", load_terms(project), 10) == []
+    assert match_terms("Alicia arrived", load_terms(project), 10, TermNormalization("NFKC", True)) == []
 
     restored = store.save_term(
         {
@@ -446,7 +446,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     )
     assert restored["terms_revision"] == 4
     assert restored["terms"][0]["disabled"] is False
-    assert match_terms("Alicia arrived", load_terms(project), 10)[0][
+    assert match_terms("Alicia arrived", load_terms(project), 10, TermNormalization("NFKC", True))[0][
         "preferred_translation"
     ] == "艾丽西亚"
 
@@ -583,3 +583,33 @@ def test_web_store_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) ->
         store.save_term({"source": " ", "aliases": []})
     with pytest.raises(UsageError, match="aliases"):
         store.save_term({"source": "Alice", "aliases": "Alice"})
+
+
+def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+    store = WebStore(project)
+    added = store.save_term(
+        {
+            "old_normalized": None,
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人名",
+            "description": "主角",
+            "aliases": ["alice"],
+            "disabled": False,
+        }
+    )
+    assert added["terms_revision"] == 1
+    assert added["terms"][0]["aliases"] == ["alice"]
+    spec = TermNormalization("NFKC", False)
+    assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]

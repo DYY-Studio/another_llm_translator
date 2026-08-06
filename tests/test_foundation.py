@@ -174,6 +174,71 @@ def test_config_rejects_unknown_alias_primary_collision_policy(
         load_config(config_path)
 
 
+@pytest.mark.parametrize(
+    "normalization",
+    ["", "NFC", "NFD", "NFKC", "NFKD"],
+)
+def test_config_accepts_unicode_normalization_forms(
+    tmp_path: Path, normalization: str
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        re.sub(
+            r'(?m)^unicode_normalization\s*=.*$',
+            f'unicode_normalization = "{normalization}"',
+            config_path.read_text(encoding="utf-8"),
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(config_path)["terminology"]["unicode_normalization"] == (
+        normalization
+    )
+
+
+def test_config_accepts_case_insensitive_false(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(config_path)["terminology"]["case_insensitive"] is False
+
+
+def test_config_rejects_unknown_unicode_normalization_form(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "FOO"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="unicode_normalization 必须是空字符串或"):
+        load_config(config_path)
+
+
+def test_config_rejects_case_insensitive_non_bool(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            'case_insensitive = "yes"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="case_insensitive 必须是布尔值"):
+        load_config(config_path)
+
+
 def test_config_defaults_alias_collision_for_existing_projects(
     tmp_path: Path,
 ) -> None:
