@@ -336,13 +336,13 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 1;
+  schema_version: 2;
   preset_id: string;
   adapter_id: string;
   base_url: string;
   endpoint: string;
   model: string;
-  api_key_env: string;
+  credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
   max_output_tokens: number;
@@ -353,4 +353,14 @@ export interface LLMPreset {
   max_parallel: number;
   request_timeout_seconds: number;
   extra_body: Record<string, unknown>;
+}
+
+export interface LLMCredential {
+  kind: "environment" | "keychain";
+  name: string;
+}
+
+export interface CredentialSummary {
+  id: string;
+  updated_at: number;
 }

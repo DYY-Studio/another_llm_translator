@@ -1,13 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { translate, type Language } from "../i18n";
-import type { LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
+import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials";
 
 interface AdapterRow {
   adapter_id: string;
@@ -42,6 +42,7 @@ export function SettingsView({ project, language }: { project: string; language:
           <button className={section === "prompts" ? "active" : ""} onClick={() => setSection("prompts")}>Prompt</button>
           {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
+          {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
         </div>
       </nav>
       <div className="settings-content">
@@ -49,6 +50,7 @@ export function SettingsView({ project, language }: { project: string; language:
         {section === "prompts" && <PromptSettings project={project} scope={activeScope} language={language} />}
         {section === "presets" && <PresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings language={language} />}
+        {section === "credentials" && <CredentialsSettings language={language} />}
       </div>
     </div>
   );
@@ -330,7 +332,15 @@ function PresetSettings({ language }: { language: Language }) {
               <Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
               <Field label="Base URL"><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
               <Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
-              <Field label={translate("preset.apiKeyEnv", language)}><input value={preset.api_key_env} onChange={(event) => updateConnection((draft) => { draft.api_key_env = event.target.value; })} /></Field>
+              <Field label={translate("preset.credential", language)}>
+                <div className="credential-selector">
+                  <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
+                    <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
+                    <option value="keychain">{translate("preset.credentialKeychain", language)}</option>
+                  </select>
+                  <input value={preset.credential.name} placeholder={preset.credential.kind === "environment" ? "OPENAI_API_KEY" : "openai-main"} onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })} />
+                </div>
+              </Field>
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
@@ -348,6 +358,108 @@ function PresetSettings({ language }: { language: Language }) {
           </>
         )}
       </section>
+    </div>
+  );
+}
+
+function CredentialsSettings({ language }: { language: Language }) {
+  const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
+  const [newId, setNewId] = useState("");
+  const [newSecret, setNewSecret] = useState("");
+  const [editing, setEditing] = useState<CredentialSummary | null>(null);
+  const [editSecret, setEditSecret] = useState("");
+  const [testing, setTesting] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function load() {
+    setCredentials((await api<{ credentials: CredentialSummary[] }>("/api/v1/credentials")).credentials);
+  }
+
+  useEffect(() => { void load().catch((reason) => setError(errorMessage(reason, language))); }, []);
+
+  function reset() {
+    setNewId(""); setNewSecret(""); setEditing(null); setEditSecret(""); setMessage(""); setError("");
+  }
+
+  async function create() {
+    if (!newId || !newSecret) return;
+    try {
+      await api("/api/v1/credentials", { method: "POST", body: JSON.stringify({ id: newId, secret: newSecret }) });
+      setMessage(translate("credentials.created", language, { id: newId }));
+      setNewId(""); setNewSecret("");
+      await load();
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function update() {
+    if (!editing || !editSecret) return;
+    try {
+      await api(`/api/v1/credentials/${editing.id}`, { method: "PUT", body: JSON.stringify({ secret: editSecret }) });
+      setMessage(translate("credentials.updated", language, { id: editing.id }));
+      setEditing(null); setEditSecret("");
+      await load();
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function remove(item: CredentialSummary) {
+    if (!window.confirm(translate("credentials.deleteConfirm", language, { id: item.id }))) return;
+    try {
+      await api(`/api/v1/credentials/${item.id}`, { method: "DELETE" });
+      setMessage(translate("credentials.deleted", language, { id: item.id }));
+      await load();
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function test(item: CredentialSummary) {
+    setTesting(item.id);
+    setMessage(""); setError("");
+    try {
+      await api(`/api/v1/credentials/${item.id}/test`, { method: "POST" });
+      setMessage(translate("credentials.testOk", language, { id: item.id }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setTesting(""); }
+  }
+
+  return (
+    <div className="credentials-layout">
+      <div className="page-heading"><div><h1>{translate("credentials.title", language)}</h1><p>{translate("credentials.subtitle", language)}</p></div></div>
+      {error && <div className="error-banner">{error}</div>}
+      {message && <p className="success-text">{message}</p>}
+      <section className="config-section">
+        <h2>{translate("credentials.new", language)}</h2>
+        <div className="config-grid">
+          <Field label={translate("credentials.id", language)}><input value={newId} onChange={(event) => setNewId(event.target.value)} /></Field>
+          <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
+        </div>
+        <div className="button-group"><button className="primary-button" disabled={!newId || !newSecret} onClick={() => void create()}>{translate("common.save", language)}</button><button className="quiet-button" onClick={reset}>{translate("common.cancel", language)}</button></div>
+      </section>
+      <section className="config-section">
+        <h2>{translate("credentials.list", language)}</h2>
+        {credentials.length === 0 ? <p className="muted">{translate("credentials.empty", language)}</p> : (
+          <ul className="credential-list">
+            {credentials.map((item) => (
+              <li key={item.id}>
+                <div><strong>{item.id}</strong><small>{translate("credentials.updatedAt", language, { time: new Date(item.updated_at * 1000).toLocaleString() })}</small></div>
+                <div className="button-group">
+                  <button className="quiet-button" disabled={testing === item.id} onClick={() => test(item)}>{testing === item.id ? translate("credentials.testing", language) : translate("credentials.test", language)}</button>
+                  <button className="quiet-button" onClick={() => { setEditing(item); setEditSecret(""); setMessage(""); setError(""); }}>{translate("common.edit", language)}</button>
+                  <button className="danger-button" onClick={() => void remove(item)}>{translate("common.delete", language)}</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {editing && (
+        <section className="config-section">
+          <h2>{translate("credentials.edit", language, { id: editing.id })}</h2>
+          <div className="config-grid">
+            <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
+          </div>
+          <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => setEditing(null)}>{translate("common.cancel", language)}</button></div>
+        </section>
+      )}
     </div>
   );
 }

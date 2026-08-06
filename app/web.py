@@ -23,7 +23,13 @@ from .config import (
     resolve_global_config,
     resolve_project_config,
 )
-from .credentials import resolve_api_key
+from .credentials import (
+    credential_summaries,
+    delete_credential,
+    read_credential,
+    resolve_api_key,
+    save_credential,
+)
 from .diagnostics import Diagnostics
 from .web_store import WebStore
 from .errors import AppError, ExternalError, ProjectError, UsageError
@@ -642,6 +648,42 @@ def create_app(
         except ExternalError as exc:
             raise UsageError(str(exc)) from exc
         return {"models": models, "count": len(models)}
+
+    @app.get("/api/v1/credentials")
+    async def list_credentials() -> dict[str, Any]:
+        return {"credentials": credential_summaries()}
+
+    @app.post("/api/v1/credentials")
+    async def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
+        credential_id = payload.get("id")
+        secret = payload.get("secret")
+        if not isinstance(credential_id, str) or not isinstance(secret, str):
+            raise UsageError("凭据 ID 和内容必须是字符串")
+        save_credential(credential_id, secret)
+        return {"saved": True}
+
+    @app.put("/api/v1/credentials/{credential_id}")
+    async def update_credential(
+        credential_id: str, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        secret = payload.get("secret")
+        if not isinstance(secret, str):
+            raise UsageError("凭据内容必须是字符串")
+        if read_credential(credential_id) is None:
+            raise UsageError(f"凭据不存在：{credential_id}")
+        save_credential(credential_id, secret)
+        return {"saved": True}
+
+    @app.delete("/api/v1/credentials/{credential_id}")
+    async def delete_credential_route(credential_id: str) -> dict[str, bool]:
+        delete_credential(credential_id)
+        return {"deleted": True}
+
+    @app.post("/api/v1/credentials/{credential_id}/test")
+    async def test_credential_route(credential_id: str) -> dict[str, Any]:
+        if read_credential(credential_id) is None:
+            raise UsageError(f"凭据不存在：{credential_id}")
+        return {"ok": True}
 
     @app.post("/api/v1/projects")
     async def create_project(

@@ -344,6 +344,13 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .preset-editor-heading { grid-area: editor-heading; min-width: 0; margin: 0; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .preset-editor-body { grid-area: editor-body; min-width: 0; min-height: 0; overflow: auto; padding: 24px 30px 70px; }
 .preset-fields { max-width: 1050px; }
+.credential-selector { min-width: 0; display: grid; grid-template-columns: minmax(140px, .6fr) minmax(0, 1fr); gap: 10px; }
+.credential-layout { max-width: 900px; margin: 0 auto; display: grid; gap: 20px; padding-bottom: 70px; }
+.credential-list { min-width: 0; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.credential-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); flex-wrap: wrap; }
+.credential-list li > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.credential-list small { color: var(--muted); }
+.credential-list .button-group { margin: 0; }
 .preset-extra { grid-column: 1 / -1; }
 .preset-extra textarea { min-height: 180px; }
 .preview-heading { margin-top: 28px; }
