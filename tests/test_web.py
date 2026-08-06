@@ -88,6 +88,20 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert "input" not in payload["params"]
 
 
+def test_web_bundle_translates_error_codes_and_keeps_server_fallback() -> None:
+    assets = list(
+        (Path(__file__).parents[1] / "app" / "web_dist" / "assets").glob(
+            "index-*.js"
+        )
+    )
+    assert assets
+    bundle = "\n".join(path.read_text(encoding="utf-8") for path in assets)
+    assert "Invalid operation" in bundle
+    assert "Invalid request parameters" in bundle
+    assert "只允许本机访问" in bundle
+    assert "请求失败" in bundle
+
+
 def test_web_deletes_project_only_after_confirmation_and_finished_runs(
     tmp_path: Path,
 ) -> None:
