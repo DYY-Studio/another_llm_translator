@@ -195,8 +195,6 @@ export interface TaskOptions {
   completed: number;
   pending: number;
   failed: number;
-  fingerprint_count: number;
-  current_fingerprint: string;
   current_fingerprint_completed: number;
   mismatched_fingerprint_completed: number;
   running_run: {
