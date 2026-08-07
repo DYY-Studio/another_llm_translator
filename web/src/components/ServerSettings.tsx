@@ -120,6 +120,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
               <label className="config-field">{translate("server.interface", language)}
                 <select value={bindAddress} onChange={(event) => setBindAddress(event.target.value)}>
                   <option value="">{translate("server.selectInterface", language)}</option>
+                  {bindAddress && !interfaces.some((item) => item.address === bindAddress) && <option value={bindAddress}>{bindAddress}</option>}
                   {interfaces.map((item) => <option key={item.address} value={item.address}>{item.name} · {item.address}</option>)}
                 </select>
               </label>
@@ -130,7 +131,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
           <section className="config-section">
             <h2>{translate("server.auth", language)}</h2>
             <div className="config-grid">
-              <label className="config-toggle"><span><input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />{translate("server.authRequired", language)}</span><small>{translate("server.authHint", language)}</small></label>
+              <label className="config-toggle grid-span"><span><input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />{translate("server.authRequired", language)}</span><small>{translate("server.authHint", language)}</small></label>
               {required && (
                 <>
                   <label className="config-field">{translate("server.username", language)}<input value={username} autoComplete="off" onChange={(event) => setUsername(event.target.value)} /></label>
