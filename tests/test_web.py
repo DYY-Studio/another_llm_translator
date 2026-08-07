@@ -681,6 +681,8 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     staging = project / "output" / ".staging"
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "temp.txt").write_text("temp", encoding="utf-8")
+    (project / "output" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+    (project / "output" / "translated" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
 
     listing = client.get("/api/v1/projects/sample/exports")
     assert listing.status_code == 200
