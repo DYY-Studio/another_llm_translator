@@ -353,6 +353,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .credential-list small { color: var(--muted); }
 .credential-list .button-group { margin: 0; }
 .preset-extra { grid-column: 1 / -1; }
+.config-toggle.grid-span { grid-column: 1 / -1; }
 .preset-extra textarea { min-height: 180px; }
 .preview-heading { margin-top: 28px; }
 .preset-editor-body .result-box { max-width: 1050px; max-height: 420px; }
