@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hmac
+import io
 import ipaddress
 import json
 import os
@@ -11,6 +12,7 @@ import socket
 import sys
 import tempfile
 import time
+import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,7 +20,7 @@ from typing import Any
 import httpx
 import psutil
 import uvicorn
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -170,6 +172,20 @@ def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
         except ValueError:
             return False
     return False
+
+
+def _resolve_export_file(root: Path, raw: str) -> Path:
+    """Resolve a project-relative output file, rejecting escape and symlinks."""
+    if "\0" in raw:
+        raise UsageError("导出文件路径无效")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise UsageError("导出文件路径必须位于项目 output 目录内")
+    resolved = (root / "output" / relative).resolve()
+    output_root = (root / "output").resolve()
+    if not resolved.is_relative_to(output_root) or not resolved.is_file():
+        raise UsageError("导出文件路径必须位于项目 output 目录内")
+    return resolved
 
 
 def create_app(
@@ -1543,6 +1559,89 @@ def create_app(
                 output_format=str(payload.get("format", "original")),
                 file_ids=file_ids,
             )
+
+    @app.get("/api/v1/projects/{name}/exports")
+    async def exports(name: str) -> dict[str, Any]:
+        root = project(name)
+        output_root = root / "output"
+        files: list[dict[str, Any]] = []
+        if output_root.is_dir():
+            for path in sorted(output_root.rglob("*")):
+                try:
+                    is_symlink = path.is_symlink()
+                    is_file = path.is_file()
+                except OSError:
+                    continue
+                if is_symlink or not is_file:
+                    continue
+                relative = path.relative_to(output_root)
+                if any(part == ".staging" for part in relative.parts):
+                    continue
+                stat = path.stat()
+                files.append(
+                    {
+                        "path": relative.as_posix(),
+                        "size": stat.st_size,
+                        "mtime": int(stat.st_mtime),
+                    }
+                )
+        return {"files": files}
+
+    @app.get("/api/v1/projects/{name}/exports/download")
+    async def download_export(name: str, file: str) -> Response:
+        root = project(name)
+        path = _resolve_export_file(root, file)
+        return Response(
+            content=path.read_bytes(),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{path.name}"'
+                )
+            },
+        )
+
+    @app.get("/api/v1/projects/{name}/exports/download-all")
+    async def download_export_all(
+        name: str, file: list[str] = Query(default=[])
+    ) -> Response:
+        root = project(name)
+        if not file:
+            raise UsageError("至少需要一个导出文件")
+        files = list(dict.fromkeys(file))
+        paths = [_resolve_export_file(root, raw) for raw in files]
+        output_root = (root / "output").resolve()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in paths:
+                archive.write(path, path.relative_to(output_root).as_posix())
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{name}-exports.zip"'
+                )
+            },
+        )
+
+    @app.post("/api/v1/projects/{name}/exports/remove")
+    async def remove_exports(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        files = payload.get("files")
+        if (
+            not isinstance(files, list)
+            or not files
+            or not all(isinstance(value, str) and value for value in files)
+        ):
+            raise UsageError("files 必须是非空字符串数组")
+        root = project(name)
+        paths = [_resolve_export_file(root, raw) for raw in files]
+        with project_write_lock(root):
+            for path in paths:
+                path.unlink()
+        return {"removed": files}
 
     @app.post("/api/v1/projects/{name}/sync-templates")
     async def sync_templates(

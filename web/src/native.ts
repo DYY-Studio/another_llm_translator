@@ -24,3 +24,13 @@ export function pickNativeFile(): Promise<string | null> {
 export function pickNativeFolder(): Promise<string | null> {
   return pick("select_folder");
 }
+
+export function saveExport(
+  path: string,
+  filename: string,
+): Promise<string> {
+  return window.__TAURI__!.core.invoke("save_export", {
+    path,
+    filename,
+  }) as Promise<string>;
+}

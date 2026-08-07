@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -661,6 +663,127 @@ def test_web_export_accepts_explicit_file_range(tmp_path: Path) -> None:
         json={"stage": "translated", "format": "pdf"},
     )
     assert invalid_format.status_code == 400
+
+
+def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    exported = client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "format": "txt", "allow_missing": True},
+    )
+    assert exported.status_code == 200
+    assert exported.json()["written"] == ["output/translated/input.txt"]
+    output_file = project / "output" / "translated" / "input.txt"
+    expected_bytes = output_file.read_bytes()
+
+    staging = project / "output" / ".staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "temp.txt").write_text("temp", encoding="utf-8")
+
+    listing = client.get("/api/v1/projects/sample/exports")
+    assert listing.status_code == 200
+    files = listing.json()["files"]
+    assert len(files) == 1
+    assert files[0]["path"] == "translated/input.txt"
+    assert files[0]["size"] == len(expected_bytes)
+    assert files[0]["mtime"] > 0
+
+    downloaded = client.get(
+        "/api/v1/projects/sample/exports/download",
+        params={"file": "translated/input.txt"},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-disposition"] == (
+        'attachment; filename="input.txt"'
+    )
+    assert downloaded.content == expected_bytes
+
+    bundle = client.get(
+        "/api/v1/projects/sample/exports/download-all",
+        params={"file": ["translated/input.txt"]},
+    )
+    assert bundle.status_code == 200
+    assert bundle.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+        assert archive.namelist() == ["translated/input.txt"]
+        assert archive.read("translated/input.txt") == expected_bytes
+
+    deduped = client.get(
+        "/api/v1/projects/sample/exports/download-all",
+        params={"file": ["translated/input.txt", "translated/input.txt"]},
+    )
+    with zipfile.ZipFile(io.BytesIO(deduped.content)) as archive:
+        assert archive.namelist() == ["translated/input.txt"]
+    assert client.get(
+        "/api/v1/projects/sample/exports/download-all"
+    ).status_code == 400
+
+    removed = client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/input.txt"]},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == ["translated/input.txt"]
+    assert not output_file.exists()
+    assert client.get("/api/v1/projects/sample/exports").json()["files"] == []
+
+    again = client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/input.txt"]},
+    )
+    assert again.status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove", json={"files": []}
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove", json={"files": "input.txt"}
+    ).status_code == 400
+
+
+def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "format": "txt", "allow_missing": True},
+    )
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    for raw in (
+        "../secret.txt",
+        "translated/../secret.txt",
+        "translated/../../secret.txt",
+        str(outside),
+    ):
+        assert client.get(
+            "/api/v1/projects/sample/exports/download",
+            params={"file": raw},
+        ).status_code == 400
+        assert client.get(
+            "/api/v1/projects/sample/exports/download-all",
+            params={"file": [raw]},
+        ).status_code == 400
+        assert client.post(
+            "/api/v1/projects/sample/exports/remove",
+            json={"files": [raw]},
+        ).status_code == 400
+
+    symlink = project / "output" / "translated" / "link.txt"
+    try:
+        symlink.symlink_to(outside)
+    except OSError:
+        return
+    assert client.get(
+        "/api/v1/projects/sample/exports/download",
+        params={"file": "translated/link.txt"},
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/link.txt"]},
+    ).status_code == 400
 
 
 def test_web_creates_empty_project_and_manages_source_files(
