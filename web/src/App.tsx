@@ -71,6 +71,7 @@ export default function App() {
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -210,6 +211,7 @@ export default function App() {
   async function startRun(decision: RunDecision) {
     if (!project || !runOptions) return;
     setRunOptions(null);
+    setStarting(true);
     try {
       setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
@@ -224,6 +226,8 @@ export default function App() {
       } catch {
         setRunOptions(null);
       }
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -303,6 +307,7 @@ export default function App() {
         onCancel={cancelRun}
         canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count)}
         runLoading={runOptionsLoading}
+        starting={starting}
         themeMode={themeMode}
         onTheme={() => setThemeMode((current) => current === "system" ? "light" : current === "light" ? "dark" : "system")}
         language={language}
