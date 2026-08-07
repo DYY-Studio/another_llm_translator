@@ -653,10 +653,13 @@ async def _localized_request_loop(
             str | None,
             int,
             list[dict[str, Any]],
+            list[str],
         ]
-    ] = [(group, initial_parent_request_id, 0, group[:1])]
+    ] = [(group, initial_parent_request_id, 0, group[:1], [])]
     while tasks:
-        items, parent_request_id, format_attempt, anchor = tasks.pop(0)
+        items, parent_request_id, format_attempt, anchor, format_errors = (
+            tasks.pop(0)
+        )
         expected = [str(item["segment_id"]) for item in items]
         payload = payload_builder(items or anchor)
         if not items:
@@ -679,7 +682,12 @@ async def _localized_request_loop(
                 "返回不含所列残留字符的完整修正版译文。"
             )
         if format_attempt:
-            payload["format_correction"] = format_correction
+            correction = format_correction
+            if format_errors:
+                correction = (
+                    f"{correction}\n错误详情：{'；'.join(format_errors[:5])}"
+                )
+            payload["format_correction"] = correction
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -726,7 +734,7 @@ async def _localized_request_loop(
             exhausted.extend(unresolved)
             continue
         if not unresolved:
-            tasks.append(([], request_id, format_attempt + 1, anchor))
+            tasks.append(([], request_id, format_attempt + 1, anchor, parse_errors))
             continue
         unresolved_groups = contiguous_groups(
             (by_id[segment_id] for segment_id in unresolved),
@@ -739,6 +747,7 @@ async def _localized_request_loop(
                 request_id,
                 format_attempt + 1,
                 unresolved_group[:1],
+                parse_errors,
             )
             for unresolved_group in unresolved_groups
         )
@@ -1976,11 +1985,16 @@ async def run_terminology(
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
-                payload["format_correction"] = (
+                correction = (
                     "上一次响应不符合 JSONL 协议。每行只输出一个紧凑 JSON "
                     "对象，不要解释，最后一行必须严格输出 {\"type\":\"end\"}，"
                     "不要输出 {\"type\":\"type\":\"end\"} 或其他字段。"
                 )
+                if parse_errors:
+                    correction = (
+                        f"{correction}\n错误详情：{'；'.join(parse_errors[:5])}"
+                    )
+                payload["format_correction"] = correction
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
