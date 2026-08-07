@@ -91,6 +91,7 @@ export function TermsView({
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
+  const [editorTab, setEditorTab] = useState<"edit" | "hits">("edit");
   const [hits, setHits] = useState<TermHitsResponse | null>(null);
   const [hitsLoading, setHitsLoading] = useState(false);
   const [hitsError, setHitsError] = useState("");
@@ -197,7 +198,7 @@ export function TermsView({
   function loadMoreHits() {
     if (!selected || !hits) return;
     const normalized = selected.normalized;
-    const offset = hits.offset + hits.hits.length;
+    const offset = hits.hits.length;
     setHitsLoading(true);
     const params = new URLSearchParams({
       normalized,
@@ -436,41 +437,14 @@ export function TermsView({
         <div className="page-heading">
           <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
-        <label>{translate("terms.sourceTerm", language)}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
-        <label>{translate("terms.preferredTranslation", language)}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
-        {!!selected?.conflicts.preferred_translations.length && (
-          <ConflictChoices
-            label={translate("terms.conflictTranslations", language)}
-            values={selected.conflicts.preferred_translations}
-            onChoose={(value) => setForm({ ...form, preferredTranslation: value })}
-          />
-        )}
-        <label>{translate("terms.category", language)}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
-        {!!selected?.conflicts.categories.length && (
-          <ConflictChoices
-            label={translate("terms.conflictCategories", language)}
-            values={selected.conflicts.categories}
-            onChoose={(value) => setForm({ ...form, category: value })}
-          />
-        )}
-        {!!selected?.conflicts.alias_primaries.length && (
-          <div className="conflict-box">
-            <strong>{translate("terms.aliasPrimaryConflict", language)}</strong>
-            {selected.conflicts.alias_primaries.map((item) => (
-              <p key={`${item.alias}-${item.primary_source}`}>
-                {item.alias} → {item.primary_source}
-              </p>
-            ))}
+        {selected && (
+          <div className="term-tabs">
+            <button className={editorTab === "edit" ? "active" : ""} onClick={() => setEditorTab("edit")}>{translate("terms.tabEdit", language)}</button>
+            <button className={editorTab === "hits" ? "active" : ""} onClick={() => setEditorTab("hits")}>{translate("terms.tabHits", language, { count: hits ? hits.total : "…" })}</button>
           </div>
         )}
-        <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-        <label>{translate("terms.aliases", language)}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
-        {selected && (
-          <section className="term-hits">
-            <div className="term-hits-heading">
-              <strong>{translate("terms.hits", language)}</strong>
-              {hits && <span>{translate("terms.hitsCount", language, { count: hits.total })}</span>}
-            </div>
+        {selected && editorTab === "hits" ? (
+          <div className="term-tab-panel term-hits-panel">
             {hitsLoading && !hits ? (
               <div className="term-hits-state">{translate("terms.hitsLoading", language)}</div>
             ) : hitsError ? (
@@ -492,24 +466,56 @@ export function TermsView({
                     </button>
                   ))}
                 </div>
-                {hits.offset + hits.hits.length < hits.total && (
-                  <button className="quiet-button" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
+                {hits.hits.length < hits.total && (
+                  <button className="quiet-button term-hits-more" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
                 )}
               </>
             )}
-          </section>
+          </div>
+        ) : (
+          <div className="term-tab-panel term-edit-panel">
+            <label>{translate("terms.sourceTerm", language)}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
+            <label>{translate("terms.preferredTranslation", language)}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
+            {!!selected?.conflicts.preferred_translations.length && (
+              <ConflictChoices
+                label={translate("terms.conflictTranslations", language)}
+                values={selected.conflicts.preferred_translations}
+                onChoose={(value) => setForm({ ...form, preferredTranslation: value })}
+              />
+            )}
+            <label>{translate("terms.category", language)}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
+            {!!selected?.conflicts.categories.length && (
+              <ConflictChoices
+                label={translate("terms.conflictCategories", language)}
+                values={selected.conflicts.categories}
+                onChoose={(value) => setForm({ ...form, category: value })}
+              />
+            )}
+            {!!selected?.conflicts.alias_primaries.length && (
+              <div className="conflict-box">
+                <strong>{translate("terms.aliasPrimaryConflict", language)}</strong>
+                {selected.conflicts.alias_primaries.map((item) => (
+                  <p key={`${item.alias}-${item.primary_source}`}>
+                    {item.alias} → {item.primary_source}
+                  </p>
+                ))}
+              </div>
+            )}
+            <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
+            <label>{translate("terms.aliases", language)}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
+            {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
+            <div className="editor-actions term-actions">
+              {selected?.disabled ? (
+                <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
+              ) : (
+                <>
+                  <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
+                  {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
+                </>
+              )}
+            </div>
+          </div>
         )}
-        {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
-        <div className="editor-actions term-actions">
-          {selected?.disabled ? (
-            <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
-          ) : (
-            <>
-              <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
-              {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
-            </>
-          )}
-        </div>
       </section>
       {removeOpen && (
         <ConfirmDialog
