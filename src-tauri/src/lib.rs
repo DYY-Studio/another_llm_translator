@@ -29,14 +29,14 @@ fn start_sidecar() -> Option<Child> {
     let port = web_port();
     if let Some(executable) = bundled_sidecar() {
         return Command::new(executable)
-            .args(["--host", "0.0.0.0", "--port", &port])
+            .args(["--port", &port])
             .spawn()
             .ok();
     }
     let python =
         std::env::var("MINIMAL_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
     let mut command = Command::new(python);
-    command.args(["-m", "app.web", "--host", "0.0.0.0", "--port", &port]);
+    command.args(["-m", "app.web", "--port", &port]);
     if let Ok(root) = std::env::var("MINIMAL_LLM_REPO_ROOT") {
         command.current_dir(root);
     }

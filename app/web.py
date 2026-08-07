@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hmac
+import ipaddress
 import json
 import os
 import secrets
 import socket
-import struct
 import sys
 import tempfile
 import time
@@ -16,16 +16,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
+import psutil
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-
-try:
-    import fcntl
-except ImportError:  # Windows: LAN interface enumeration lands in a later stage
-    fcntl = None  # type: ignore[assignment]
 
 from .config import (
     LLM_STAGES,
@@ -44,7 +40,6 @@ from .credentials import (
     save_lan_password,
 )
 from .diagnostics import Diagnostics
-from .web_store import WebStore
 from .errors import (
     AppError,
     ExternalError,
@@ -52,7 +47,7 @@ from .errors import (
     ProjectError,
     UsageError,
 )
-from .execution import Scope
+from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .locking import project_write_lock
@@ -62,17 +57,26 @@ from .plugins import (
 )
 from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
+)
+from .project import (
     PROJECTS_ROOT,
+    PROMPT_LANGUAGES,
     add_project_files,
     delete_project,
     init_project,
+    prompt_file,
     remove_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
 )
 from .server_config import load_server_config, save_server_config
-from .sqlite_storage import atomic_write_json, atomic_write_text, database_path, read_json
+from .sqlite_storage import (
+    atomic_write_json,
+    atomic_write_text,
+    database_path,
+    read_json,
+)
 from .stages import (
     export_project,
     export_terms,
@@ -81,10 +85,8 @@ from .stages import (
     run_apply,
 )
 from .user_config import effective_path, user_root, write_user
+from .web_store import WebStore
 from .web_tasks import WebTaskManager, task_options
-from .execution import full_prompt
-from .project import PROMPT_LANGUAGES, prompt_file
-
 
 WEB_DIST = (
     Path(__file__).with_name("web_dist")
@@ -93,7 +95,6 @@ WEB_DIST = (
 )
 SESSION_COOKIE = "minimal_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
-_SIOCGIFADDR = 0xC0206921 if sys.platform == "darwin" else 0x8915
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
     1: "unavailable",
@@ -134,39 +135,41 @@ def _is_loopback(request: Request) -> bool:
 
 
 def lan_interfaces() -> list[dict[str, str]]:
-    """IPv4 addresses of non-loopback interfaces; empty on unsupported hosts."""
-    if fcntl is None:
-        return []
-    interfaces = []
+    """IPv4 addresses and netmasks of up, non-loopback interfaces."""
     try:
-        names = socket.if_nameindex()
+        addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
     except OSError:
         return []
-    for _, name in names:
+    interfaces = []
+    for name, entries in addrs.items():
         if name == "lo" or name.startswith("lo"):
             continue
-        address = _interface_ipv4(name)
-        if address:
-            interfaces.append({"name": name, "address": address})
+        if not stats.get(name) or not stats[name].isup:
+            continue
+        for entry in entries:
+            if entry.family == socket.AF_INET and entry.netmask:
+                interfaces.append(
+                    {"name": name, "address": entry.address, "netmask": entry.netmask}
+                )
+                break
     return interfaces
 
 
-def _interface_ipv4(name: str) -> str | None:
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    except OSError:
-        return None
-    try:
-        packed = fcntl.ioctl(  # type: ignore[union-attr]
-            sock.fileno(),
-            _SIOCGIFADDR,
-            struct.pack("256s", name.encode("utf-8")[:15]),
-        )
-        return socket.inet_ntoa(packed[20:24])
-    except OSError:
-        return None
-    finally:
-        sock.close()
+def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
+    if bind_address == "0.0.0.0":
+        return True
+    for item in lan_interfaces():
+        if item["address"] != bind_address:
+            continue
+        try:
+            network = ipaddress.ip_network(
+                f"{item['address']}/{item['netmask']}", strict=False
+            )
+            return ipaddress.ip_address(client_ip) in network
+        except ValueError:
+            return False
+    return False
 
 
 def create_app(
@@ -347,6 +350,14 @@ def create_app(
             if not config["lan"]["enabled"]:
                 return JSONResponse(
                     {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                )
+            client_ip = request.client.host if request.client else ""
+            if not _client_allowed_on_bind(
+                client_ip, config["lan"]["bind_address"]
+            ):
+                return JSONResponse(
+                    {"error": "客户端不在允许的网段内", "code": "out_of_subnet"},
+                    status_code=403,
                 )
             path = request.url.path
             public = (
@@ -1541,28 +1552,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m app.web",
         description="启动本地 Web 翻译工作台",
     )
-    parser.add_argument(
-        "--host",
-        default="",
-        help="绑定地址；省略时按 server.toml 决定（默认 127.0.0.1）",
-    )
     parser.add_argument("--port", type=int, default=8765)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.host:
-        host = args.host
-    else:
-        config = load_server_config()
-        host = (
-            config["lan"]["bind_address"] if config["lan"]["enabled"] else "127.0.0.1"
-        )
     uvicorn.run(
         "app.web:create_app",
         factory=True,
-        host=host,
+        host="0.0.0.0",
         port=args.port,
     )
 
