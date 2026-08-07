@@ -991,7 +991,10 @@ def latest_stage_summary(
                    agg.last_completed > COALESCE(agg.last_reset, 0) AS completed,
                    agg.last_failed IS NOT NULL
                        AND NOT (agg.last_completed > COALESCE(agg.last_reset, 0)) AS failed,
-                   json_extract(completed.payload_json, '$.stage_fingerprint') AS fingerprint
+                   CASE
+                       WHEN agg.last_completed > COALESCE(agg.last_reset, 0)
+                       THEN json_extract(completed.payload_json, '$.stage_fingerprint')
+                   END AS fingerprint
             FROM (
                 SELECT segment_id,
                        MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
