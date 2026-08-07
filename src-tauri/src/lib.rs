@@ -64,6 +64,62 @@ fn server_ready(port: &str, timeout: Duration) -> bool {
     false
 }
 
+fn http_get(port: &str, path: &str) -> Result<Vec<u8>, String> {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .map_err(|error| format!("无法连接服务：{error}"))?;
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("请求失败：{error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("读取响应失败：{error}"))?;
+    let separator = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "服务响应无效".to_string())?;
+    let headers = String::from_utf8_lossy(&response[..separator]);
+    if !headers.starts_with("HTTP/1.1 200") {
+        let status = headers.lines().next().unwrap_or("").to_string();
+        return Err(format!("下载失败：{status}"));
+    }
+    let mut body = &response[separator + 4..];
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(str::trim)
+                .and_then(|value| value.parse::<usize>().ok())
+        });
+    if let Some(length) = content_length {
+        if body.len() < length {
+            return Err("响应不完整".to_string());
+        }
+        body = &body[..length];
+    }
+    Ok(body.to_vec())
+}
+
+#[tauri::command]
+fn save_export(path: String, filename: String) -> Result<String, String> {
+    let bytes = http_get(&web_port(), &path)?;
+    let destination = rfd::FileDialog::new()
+        .set_file_name(&filename)
+        .save_file();
+    let Some(destination) = destination else {
+        return Ok(String::new());
+    };
+    let mut file = std::fs::File::create(&destination)
+        .map_err(|error| format!("无法创建文件：{error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("写入文件失败：{error}"))?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn select_file() -> Option<String> {
     rfd::FileDialog::new()
@@ -105,7 +161,11 @@ pub fn run() {
                 .build();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![select_file, select_folder])
+        .invoke_handler(tauri::generate_handler![
+            select_file,
+            select_folder,
+            save_export
+        ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")
         .run(|_app_handle, event| {
