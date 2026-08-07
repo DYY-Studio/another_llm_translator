@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 STAGES = frozenset(
     {
@@ -166,6 +166,7 @@ def initialize(project: Path) -> None:
                 CREATE TABLE IF NOT EXISTS segments (
                     segment_id TEXT PRIMARY KEY,
                     file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+                    file_order INTEGER NOT NULL,
                     line_index INTEGER NOT NULL,
                     part_id TEXT NOT NULL,
                     source TEXT NOT NULL,
@@ -175,9 +176,7 @@ def initialize(project: Path) -> None:
                     UNIQUE(file_id, line_index)
                 );
                 CREATE INDEX IF NOT EXISTS segments_file_order
-                    ON segments(file_id, line_index);
-                CREATE INDEX IF NOT EXISTS segments_source_search
-                    ON segments(source);
+                    ON segments(file_order, line_index);
                 CREATE TABLE IF NOT EXISTS adapter_states (
                     file_id TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
                     payload_json TEXT NOT NULL
@@ -235,11 +234,9 @@ def initialize(project: Path) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS run_chunks_run
                     ON run_chunks(run_id, sequence);
-                INSERT INTO schema_meta(key, value)
-                    VALUES ('schema_version', '1')
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
                 """
             )
+            _ensure_schema(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法初始化项目 SQLite：{path}: {exc}") from exc
     finally:
@@ -249,17 +246,70 @@ def initialize(project: Path) -> None:
             pass
 
 
+def _ensure_schema(connection: sqlite3.Connection) -> None:
+    """Ensure the project database matches SCHEMA_VERSION, migrating v1 -> v2."""
+    row = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if row is not None:
+        version = int(row[0])
+        if version == SCHEMA_VERSION:
+            return
+        if version == 1:
+            columns = {
+                str(item["name"])
+                for item in connection.execute("PRAGMA table_info(segments)")
+            }
+            if "file_order" not in columns:
+                connection.execute(
+                    "ALTER TABLE segments ADD COLUMN file_order INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    """
+                    UPDATE segments
+                    SET file_order = (
+                        SELECT file_order FROM files
+                        WHERE files.file_id = segments.file_id
+                    )
+                    """
+                )
+                connection.execute("DROP INDEX IF EXISTS segments_file_order")
+                connection.execute(
+                    "CREATE INDEX segments_file_order ON segments(file_order, line_index)"
+                )
+                connection.execute("DROP INDEX IF EXISTS segments_source_search")
+        else:
+            raise ProjectError(
+                f"不支持的项目 SQLite schema_version：{row[0]}；请重新创建项目"
+            )
+    connection.execute(
+        "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
+
+
+_SUPPORTED_CACHE: set[Path] = set()
+
+
 def ensure_supported(project: Path) -> None:
     path = database_path(project)
+    if path in _SUPPORTED_CACHE:
+        return
     if not path.is_file():
         raise ProjectError(
             f"项目缺少 project.sqlite 或仍使用旧 JSONL 格式：{project}；请重新创建项目"
         )
     try:
         connection = _connect(path)
-        row = connection.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()
+        with connection:
+            if connection.execute(
+                "SELECT 1 FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone() is None:
+                raise ProjectError(
+                    "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
+                )
+            _ensure_schema(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法读取项目 schema：{path}: {exc}") from exc
     finally:
@@ -267,9 +317,7 @@ def ensure_supported(project: Path) -> None:
             connection.close()
         except UnboundLocalError:
             pass
-    if row is None or int(row[0]) != SCHEMA_VERSION:
-        value = row[0] if row is not None else "缺失"
-        raise ProjectError(f"不支持的项目 SQLite schema_version：{value}；请重新创建项目")
+    _SUPPORTED_CACHE.add(path)
 
 
 def _json(value: Any) -> str:
@@ -328,6 +376,9 @@ def replace_source(
     file_values = [dict(item) for item in files]
     segment_values = [dict(item) for item in segments]
     state_values = [dict(item) for item in adapter_states]
+    file_order_by_id = {
+        str(item["file_id"]): int(item["file_order"]) for item in file_values
+    }
     try:
         with connection:
             connection.execute("DELETE FROM segments")
@@ -343,14 +394,15 @@ def replace_source(
             connection.executemany(
                 """
                 INSERT INTO segments(
-                    segment_id, file_id, line_index, part_id, source,
+                    segment_id, file_id, file_order, line_index, part_id, source,
                     is_empty, model_source, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         str(item["segment_id"]),
                         str(item["file_id"]),
+                        file_order_by_id[str(item["file_id"])],
                         int(item["line_index"]),
                         str(item["part_id"]),
                         str(item["source"]),
@@ -394,12 +446,9 @@ def read_segments(project: Path) -> list[dict[str, Any]]:
     try:
         rows = connection.execute(
             """
-            SELECT segments.payload_json
+            SELECT payload_json
             FROM segments
-            ORDER BY (
-                SELECT file_order FROM files
-                WHERE files.file_id = segments.file_id
-            ), segments.line_index
+            ORDER BY file_order, line_index
             """
         ).fetchall()
         return [_load(str(row[0])) for row in rows]
@@ -541,7 +590,9 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
         )
 
 
-def _records(project: Path, kind: str, key: str | None = None) -> list[dict[str, Any]]:
+def _records(
+    project: Path, kind: str, key: str | None = None, *, task_id: str | None = None
+) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
         if kind == "stage":
@@ -550,13 +601,27 @@ def _records(project: Path, kind: str, key: str | None = None) -> list[dict[str,
                 (key,),
             ).fetchall()
         elif kind == "scans":
-            rows = connection.execute(
-                "SELECT payload_json FROM terminology_scans ORDER BY sequence"
-            ).fetchall()
+            if task_id is not None:
+                rows = connection.execute(
+                    "SELECT payload_json FROM terminology_scans "
+                    "WHERE active_task_id = ? ORDER BY sequence",
+                    (task_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload_json FROM terminology_scans ORDER BY sequence"
+                ).fetchall()
         elif kind == "candidates":
-            rows = connection.execute(
-                "SELECT payload_json FROM terminology_candidates ORDER BY sequence"
-            ).fetchall()
+            if task_id is not None:
+                rows = connection.execute(
+                    "SELECT payload_json FROM terminology_candidates "
+                    "WHERE active_task_id = ? ORDER BY sequence",
+                    (task_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload_json FROM terminology_candidates ORDER BY sequence"
+                ).fetchall()
         elif kind == "chunks":
             rows = connection.execute(
                 "SELECT payload_json FROM run_chunks WHERE run_id = ? ORDER BY sequence",
@@ -569,11 +634,13 @@ def _records(project: Path, kind: str, key: str | None = None) -> list[dict[str,
         connection.close()
 
 
-def read_jsonl(project: Path, path: Path) -> list[dict[str, Any]]:
+def read_jsonl(
+    project: Path, path: Path, *, task_id: str | None = None
+) -> list[dict[str, Any]]:
     kind, key = _kind(path, project)
     return [
         _validate_record(item, str(path))
-        for item in _records(project, kind, key)
+        for item in _records(project, kind, key, task_id=task_id)
     ]
 
 
@@ -678,18 +745,38 @@ def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
     return (
         """
         LEFT JOIN (
-            SELECT segment_id, status, payload_json,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY segment_id ORDER BY sequence DESC
-                   ) AS rank
-            FROM stage_results
-            WHERE stage = ?
+            SELECT sr2.segment_id, sr2.status, sr2.payload_json
+            FROM stage_results sr2
+            JOIN (
+                SELECT segment_id, MAX(sequence) AS seq
+                FROM stage_results
+                WHERE stage = ?
+                GROUP BY segment_id
+            ) AS latest ON latest.seq = sr2.sequence
         ) AS latest_stage
           ON latest_stage.segment_id = segments.segment_id
-         AND latest_stage.rank = 1
         """,
         [stage],
     )
+
+
+def _stage_filters(
+    *, status: str | None, search: str | None, stage: str | None
+) -> tuple[str, list[Any], list[str]]:
+    """Build the stage-result join and clauses, or nothing when unfiltered."""
+    if not status and not search:
+        return "", [], []
+    join, params = _stage_cte(stage)
+    clauses = []
+    if search:
+        clauses.append(
+            "(instr(lower(segments.source), lower(?)) > 0 OR "
+            "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
+        )
+        params.extend([search, search])
+    if status:
+        _append_stage_status_filter(clauses, params, status)
+    return join, params, clauses
 
 
 def _append_stage_status_filter(
@@ -720,19 +807,13 @@ def segment_count(
 ) -> int:
     connection = _with_db(project)
     try:
-        join, params = _stage_cte(stage)
-        clauses = ["segments.is_empty = 0"]
+        join, params, stage_clauses = _stage_filters(
+            status=status, search=search, stage=stage
+        )
+        clauses = ["segments.is_empty = 0", *stage_clauses]
         if file_id:
             clauses.append("segments.file_id = ?")
             params.append(file_id)
-        if search:
-            clauses.append(
-                "(instr(lower(segments.source), lower(?)) > 0 OR "
-                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
-            )
-            params.extend([search, search])
-        if status:
-            _append_stage_status_filter(clauses, params, status)
         query = f"SELECT COUNT(*) FROM segments {join} WHERE {' AND '.join(clauses)}"
         return int(connection.execute(query, params).fetchone()[0])
     finally:
@@ -753,29 +834,20 @@ def query_segments(
         raise ProjectError("Segment 窗口参数无效")
     connection = _with_db(project)
     try:
-        join, params = _stage_cte(stage)
-        clauses = ["segments.is_empty = 0"]
+        join, params, stage_clauses = _stage_filters(
+            status=status, search=search, stage=stage
+        )
+        clauses = ["segments.is_empty = 0", *stage_clauses]
         if file_id:
             clauses.append("segments.file_id = ?")
             params.append(file_id)
-        if search:
-            clauses.append(
-                "(instr(lower(segments.source), lower(?)) > 0 OR "
-                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
-            )
-            params.extend([search, search])
-        if status:
-            _append_stage_status_filter(clauses, params, status)
         params.extend([limit, offset])
         query = f"""
             SELECT segments.payload_json
             FROM segments
             {join}
             WHERE {' AND '.join(clauses)}
-            ORDER BY (
-                SELECT file_order FROM files
-                WHERE files.file_id = segments.file_id
-            ), segments.line_index
+            ORDER BY segments.file_order, segments.line_index
             LIMIT ? OFFSET ?
         """
         return [_load(str(row[0])) for row in connection.execute(query, params).fetchall()]
@@ -835,27 +907,18 @@ def segment_ids(
 ) -> list[str]:
     connection = _with_db(project)
     try:
-        join, params = _stage_cte(stage)
-        clauses = ["segments.is_empty = 0"]
+        join, params, stage_clauses = _stage_filters(
+            status=status, search=search, stage=stage
+        )
+        clauses = ["segments.is_empty = 0", *stage_clauses]
         if file_id:
             clauses.append("segments.file_id = ?")
             params.append(file_id)
-        if search:
-            clauses.append(
-                "(instr(lower(segments.source), lower(?)) > 0 OR "
-                "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
-            )
-            params.extend([search, search])
-        if status:
-            _append_stage_status_filter(clauses, params, status)
         query = f"""
             SELECT segments.segment_id
             FROM segments {join}
             WHERE {' AND '.join(clauses)}
-            ORDER BY (
-                SELECT file_order FROM files
-                WHERE files.file_id = segments.file_id
-            ), segments.line_index
+            ORDER BY segments.file_order, segments.line_index
         """
         return [str(row[0]) for row in connection.execute(query, params).fetchall()]
     finally:
@@ -904,5 +967,52 @@ def latest_stage_results(
         ).fetchall()
         values_by_id = [_load(str(row[0])) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
+    finally:
+        connection.close()
+
+
+def latest_stage_summary(
+    project: Path,
+    stage: str,
+    segment_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Per-segment completed/failed classification with the latest completed
+    fingerprint. A reset voids earlier results; failed records do not."""
+    values = list(segment_ids)
+    if not values:
+        return {}
+    placeholders = ",".join("?" for _ in values)
+    params: list[Any] = [stage, *values]
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT agg.segment_id,
+                   agg.last_completed > COALESCE(agg.last_reset, 0) AS completed,
+                   agg.last_failed IS NOT NULL
+                       AND NOT (agg.last_completed > COALESCE(agg.last_reset, 0)) AS failed,
+                   json_extract(completed.payload_json, '$.stage_fingerprint') AS fingerprint
+            FROM (
+                SELECT segment_id,
+                       MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
+                       MAX(CASE WHEN status = 'reset' THEN sequence END) AS last_reset,
+                       MAX(CASE WHEN status = 'failed' THEN sequence END) AS last_failed
+                FROM stage_results
+                WHERE stage = ? AND segment_id IN ({placeholders})
+                GROUP BY segment_id
+            ) AS agg
+            LEFT JOIN stage_results AS completed
+              ON completed.sequence = agg.last_completed
+            """,
+            params,
+        ).fetchall()
+        return {
+            str(row["segment_id"]): {
+                "completed": bool(row["completed"]),
+                "failed": bool(row["failed"]),
+                "stage_fingerprint": row["fingerprint"],
+            }
+            for row in rows
+        }
     finally:
         connection.close()
