@@ -68,6 +68,7 @@ export default function App() {
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState("");
+  const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
   const [runStarting, setRunStarting] = useState(false);
@@ -284,7 +285,12 @@ export default function App() {
     return (
       <LoginView
         language={language}
-        onLoggedIn={() => setServerStatus((current) => current ? { ...current, authed: true } : current)}
+        onLoggedIn={() => {
+          setError("");
+          setWarningDismissed(false);
+          setServerStatus((current) => current ? { ...current, authed: true } : current);
+          void loadProjects().catch((value) => setError(String(value)));
+        }}
       />
     );
   }
@@ -314,8 +320,8 @@ export default function App() {
           return next;
         })}
       >
-        {serverStatus?.lan.enabled && !serverStatus.auth.required && (
-          <div className="warning-banner warning-banner-sticky" role="alert">{translate("server.warningEnabled", language)}</div>
+        {serverStatus?.lan.enabled && !serverStatus.auth.required && !warningDismissed && (
+          <button className="warning-banner warning-banner-sticky" onClick={() => setWarningDismissed(true)}>{translate("server.warningEnabled", language)}</button>
         )}
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
         {content}
