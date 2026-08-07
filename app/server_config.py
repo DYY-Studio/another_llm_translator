@@ -58,11 +58,11 @@ def save_server_config(config: dict[str, Any]) -> None:
     auth = config["auth"]
     lines = [
         "[lan]",
-        f"enabled = {lan['enabled']}",
+        f"enabled = {json.dumps(lan['enabled'])}",
         f"bind_address = {json.dumps(lan['bind_address'])}",
         "",
         "[auth]",
-        f"required = {auth['required']}",
+        f"required = {json.dumps(auth['required'])}",
         f"username = {json.dumps(auth['username'])}",
         "",
     ]
