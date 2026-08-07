@@ -24,6 +24,7 @@ export function AppShell({
   onCancel,
   canRun,
   runLoading,
+  starting,
   themeMode,
   onTheme,
   language,
@@ -39,6 +40,7 @@ export function AppShell({
   onCancel: () => void;
   canRun: boolean;
   runLoading: boolean;
+  starting: boolean;
   themeMode: ThemeMode;
   onTheme: () => void;
   language: Language;
@@ -127,9 +129,9 @@ export function AppShell({
         </nav>
         {canRun && <div className="run-panel">
           {canRun && (
-            <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
-              <span className="run-label-full">{running ? translate("run.buttonRunning", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStart", language)}</span>
-              <span className="run-label-short">{running ? translate("run.buttonRunning", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartShort", language)}</span>
+            <button className="primary-button run-button" disabled={!project || running || starting || runLoading} onClick={onRun}>
+              <span className="run-label-full">{running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStarting", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStart", language)}</span>
+              <span className="run-label-short">{running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStartingShort", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartShort", language)}</span>
             </button>
           )}
         </div>}
@@ -138,8 +140,8 @@ export function AppShell({
         {canRun && (
           <div className="mobile-run-bar">
             {canRun && (
-              <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
-                {running ? translate("run.buttonRunning", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartMobile", language)}
+              <button className="primary-button" disabled={!project || running || starting || runLoading} onClick={onRun}>
+                {running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStarting", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartMobile", language)}
               </button>
             )}
           </div>
