@@ -1577,6 +1577,8 @@ def create_app(
                 relative = path.relative_to(output_root)
                 if any(part == ".staging" for part in relative.parts):
                     continue
+                if path.name == ".DS_Store":
+                    continue
                 stat = path.stat()
                 files.append(
                     {
