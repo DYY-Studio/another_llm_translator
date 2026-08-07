@@ -412,7 +412,10 @@ async def test_old_top_level_json_enters_format_correction(tmp_path: Path) -> No
                 {"segments": [{"id": segment_id, "translation": "old"}]}
             )
         else:
-            assert "format_correction" in payload
+            correction = payload["format_correction"]
+            assert "第 1 行" in correction
+            assert "未知 type" in correction
+            assert "缺少最终 end 记录" in correction
             content = llm_jsonl(
                 [
                     {
@@ -514,6 +517,50 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert not (project / "terminology" / "terms.json").exists()
     manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
     assert manifest["failure_counts"] == {"format_error": 1}
+
+
+@pytest.mark.asyncio
+async def test_terminology_format_retry_carries_parse_error_details(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if calls == 1:
+            content = '{"type":"type":"end"}'
+        else:
+            correction = payload["format_correction"]
+            assert "第 1 行" in correction
+            assert "不是合法 JSON 对象" in correction
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "term",
+                        "source": "Alice",
+                        "category": "人物",
+                        "description": "人物",
+                        "aliases": [],
+                    }
+                ]
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["failed"] == 0
+    assert calls == 2
+    assert read_json(project, project / "terminology" / "terms.json") is not None
 
 
 @pytest.mark.asyncio
