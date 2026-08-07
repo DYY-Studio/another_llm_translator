@@ -606,7 +606,7 @@ export function ExportView({
   }
 
   return (
-    <div className="page narrow-page export-page">
+    <div className={`page narrow-page export-page${tab === "browse" ? " browse-active" : ""}`}>
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
       <div className="dialog-tabs" role="tablist" aria-label={translate("export.title", language)}>
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
@@ -643,7 +643,7 @@ export function ExportView({
           <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
         )}
       </> : <>
-        <div className="export-file-heading browse-toolbar">
+        <div className="export-file-heading">
           <div>
             <strong>{translate("export.outputFiles", language)}</strong>
             <small>{translate("export.outputCount", language, { count: files.length })}</small>
@@ -654,7 +654,7 @@ export function ExportView({
           </div>
         </div>
         <input className="export-filter" value={browseFilter} onChange={(event) => setBrowseFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
-        <div className="file-list export-file-list export-browse-list">
+        <div className="file-list export-browse-list">
           {!files.length && <p className="export-empty">{translate("export.noFiles", language)}</p>}
           {files.length > 0 && !filteredExports.length && <p className="export-empty">{translate("export.noMatch", language)}</p>}
           {filteredExports.map((item) => (
