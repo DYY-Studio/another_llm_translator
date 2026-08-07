@@ -13,19 +13,24 @@ from .errors import UsageError
 from .execution import (
     Scope,
     choose_running_run,
+    classify_stage,
     combine_usage,
     find_running_runs,
+    load_stage_history,
+    stage_fingerprint,
     unavailable_usage,
 )
 from .locking import project_write_lock
+from .project import load_segments
 from .stages import (
-    inspect_full,
+    load_terms,
+    prompt_middle_digests,
     run_all,
     run_review,
     run_terminology,
     run_translation,
 )
-from .sqlite_storage import read_json, utc_now
+from .sqlite_storage import read_json, read_jsonl, record_exists, utc_now
 
 
 WEB_LLM_STAGES = frozenset(
@@ -46,50 +51,167 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _running_run(project: Path, stage: str) -> dict[str, Any] | None:
+    candidates = find_running_runs(project, stage)
+    if not candidates:
+        return None
+    manifest = candidates[0]
+    run_id = str(manifest["run_id"])
+    old_config = load_run_config(project / "runs" / run_id)
+    current_config = load_project_config(project, stage=stage)
+    return {
+        "run_id": run_id,
+        "started_at": manifest.get("started_at"),
+        "scope": manifest.get("scope"),
+        "previous": _endpoint_summary(old_config),
+        "current": _endpoint_summary(current_config),
+    }
+
+
+def _stage_summary(
+    project: Path,
+    stage: str,
+    *,
+    active_segment_ids: set[str],
+    nonempty_count: int,
+    terms_revision: int | None,
+) -> dict[str, Any]:
+    history = load_stage_history(project, stage)
+    active_history = [
+        item
+        for item in history
+        if str(item.get("segment_id")) in active_segment_ids
+    ]
+    completed = classify_stage([], active_history, force=False).latest_completed
+    failed = {
+        str(item["segment_id"])
+        for item in active_history
+        if item.get("status") == "failed"
+        and str(item.get("segment_id")) not in completed
+    }
+    current_fingerprint = stage_fingerprint(
+        load_project_config(project, stage=stage),
+        stage,
+        prompt_middle_digests(project, stage),
+        terms_revision=terms_revision,
+    )
+    return {
+        "completed": len(completed),
+        "failed": len(failed),
+        "pending": nonempty_count - len(completed) - len(failed),
+        "fingerprint_count": len(
+            {
+                str(item["stage_fingerprint"])
+                for item in completed.values()
+                if item.get("stage_fingerprint")
+            }
+        ),
+        "current_fingerprint": current_fingerprint,
+        "current_fingerprint_completed": sum(
+            record.get("stage_fingerprint") == current_fingerprint
+            for record in completed.values()
+        ),
+    }
+
+
+def _terminology_summary(
+    project: Path,
+    *,
+    active_segment_ids: set[str],
+    nonempty_count: int,
+) -> dict[str, Any]:
+    current_fingerprint = stage_fingerprint(
+        load_project_config(project, stage="terminology"),
+        "terminology",
+        prompt_middle_digests(project, "terminology"),
+    )
+    base = {
+        "completed": 0,
+        "failed": 0,
+        "pending": nonempty_count,
+        "fingerprint_count": 0,
+        "current_fingerprint": current_fingerprint,
+        "current_fingerprint_completed": 0,
+    }
+    active_path = project / "terminology" / "active_task.json"
+    if not record_exists(project, active_path):
+        return base
+    active = read_json(project, active_path)
+    if active.get("status") not in {"active", "completed"}:
+        return base
+    scans = [
+        item
+        for item in read_jsonl(project, project / "terminology" / "scans.jsonl")
+        if item.get("active_task_id") == active.get("active_task_id")
+        and str(item.get("segment_id")) in active_segment_ids
+    ]
+    completed = {
+        item["segment_id"] for item in scans if item["status"] == "completed"
+    }
+    failed = {
+        item["segment_id"]
+        for item in scans
+        if item["status"] == "failed" and item["segment_id"] not in completed
+    }
+    return {
+        "completed": len(completed),
+        "failed": len(failed),
+        "pending": nonempty_count - len(completed) - len(failed),
+        "fingerprint_count": len(
+            {
+                str(item["stage_fingerprint"])
+                for item in scans
+                if item.get("stage_fingerprint")
+            }
+        ),
+        "current_fingerprint": current_fingerprint,
+        "current_fingerprint_completed": sum(
+            item.get("status") == "completed"
+            and item.get("stage_fingerprint") == current_fingerprint
+            for item in scans
+        ),
+    }
+
+
 def task_options(project: Path, stage: str) -> dict[str, Any]:
     if stage not in WEB_LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
-    inspection = inspect_full(project, dry_run=True)
-    stage_summary = (
-        inspection["terminology"]
-        if stage == "terminology"
-        else inspection["stages"][stage]
-    )
-    completed = int(stage_summary["completed"])
-    if not int(inspection["segments"]) - int(inspection["empty_segments"]):
+    segments = load_segments(project)
+    nonempty = [item for item in segments if not item["is_empty"]]
+    if not nonempty:
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
-    current_completed = int(stage_summary["current_fingerprint_completed"])
-    candidates = find_running_runs(project, stage)
-    running_run = None
-    if candidates:
-        manifest = candidates[0]
-        run_id = str(manifest["run_id"])
-        old_config = load_run_config(project / "runs" / run_id)
-        current_config = load_project_config(project, stage=stage)
-        running_run = {
-            "run_id": run_id,
-            "started_at": manifest.get("started_at"),
-            "scope": manifest.get("scope"),
-            "previous": _endpoint_summary(old_config),
-            "current": _endpoint_summary(current_config),
-        }
+    active_segment_ids = {str(item["segment_id"]) for item in nonempty}
+    library = load_terms(project)
+    terms_revision = int(library["terms_revision"]) if library else None
+    if stage == "terminology":
+        summary = _terminology_summary(
+            project,
+            active_segment_ids=active_segment_ids,
+            nonempty_count=len(nonempty),
+        )
+    else:
+        summary = _stage_summary(
+            project,
+            stage,
+            active_segment_ids=active_segment_ids,
+            nonempty_count=len(nonempty),
+            terms_revision=terms_revision,
+        )
+    completed = int(summary["completed"])
+    current_completed = int(summary["current_fingerprint_completed"])
     return {
         "stage": stage,
-        "selected": (
-            completed
-            + int(stage_summary["pending"])
-            + int(stage_summary["failed"])
-        ),
+        "selected": completed + int(summary["pending"]) + int(summary["failed"]),
         "completed": completed,
-        "pending": int(stage_summary["pending"]),
-        "failed": int(stage_summary["failed"]),
-        "fingerprint_count": int(stage_summary["fingerprint_count"]),
-        "current_fingerprint": str(stage_summary["current_fingerprint"]),
+        "pending": int(summary["pending"]),
+        "failed": int(summary["failed"]),
+        "fingerprint_count": int(summary["fingerprint_count"]),
+        "current_fingerprint": str(summary["current_fingerprint"]),
         "current_fingerprint_completed": current_completed,
         "mismatched_fingerprint_completed": max(
             0, completed - current_completed
         ),
-        "running_run": running_run,
+        "running_run": _running_run(project, stage),
     }
 
 
