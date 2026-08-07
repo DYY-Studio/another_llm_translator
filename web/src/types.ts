@@ -239,6 +239,22 @@ export interface TermsResponse {
   scan: TerminologyScan;
 }
 
+export interface TermHit {
+  segment_id: string;
+  file_id: string;
+  line_index: number;
+  source: string;
+}
+
+export interface TermHitsResponse {
+  normalized: string;
+  source: string;
+  total: number;
+  offset: number;
+  limit: number;
+  hits: TermHit[];
+}
+
 export interface TerminologyScan {
   active_task_id: string | null;
   status: "none" | "active" | "completed" | "partial_published" | string;

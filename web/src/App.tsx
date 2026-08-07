@@ -63,6 +63,10 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState("");
   const [stage, setStage] = useState<Stage>("overview");
+  const [pendingJump, setPendingJump] = useState<{
+    search: string;
+    segmentId: string;
+  } | null>(null);
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
@@ -259,6 +263,12 @@ export default function App() {
     setStage(target);
   }
 
+  function jumpToSegment(source: string, segmentId: string) {
+    setPendingJump({ search: source, segmentId });
+    setFailureFocus(null);
+    setStage("translation");
+  }
+
   let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
     else if (stage === "settings") content = <SettingsView project={project} language={language} />;
@@ -275,9 +285,9 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} />;
+    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} />;
+      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
   }
 

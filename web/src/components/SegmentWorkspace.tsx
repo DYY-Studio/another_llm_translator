@@ -89,6 +89,8 @@ export function SegmentWorkspace({
   onRefresh,
   focusFailures,
   language,
+  pendingJump,
+  onJumpConsumed,
 }: {
   project: string;
   stage: "translation" | "proofreading" | "polishing";
@@ -96,6 +98,8 @@ export function SegmentWorkspace({
   onRefresh: () => Promise<void>;
   focusFailures?: boolean;
   language: Language;
+  pendingJump?: { search: string; segmentId: string } | null;
+  onJumpConsumed?: () => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
     ["all", "pending", "completed", "warning", "missing-base", "outdated", "accepted", "suggested", "applied", "error"]
@@ -116,6 +120,8 @@ export function SegmentWorkspace({
   const indexInFlightRef = useRef(false);
   const preserveFocusRef = useRef("");
   const restoredScrollTopRef = useRef<number | null>(null);
+  const jumpConsumedRef = useRef(false);
+  const jumpTargetRef = useRef("");
   const pageCacheRef = useRef(new Set<string>());
   const pageRequestsRef = useRef(new Set<string>());
   const pageGenerationRef = useRef(0);
@@ -133,6 +139,22 @@ export function SegmentWorkspace({
   useEffect(() => {
     if (focusFailures) setStatus("error");
   }, [focusFailures]);
+
+  // A term-hit jump arrives with the workspace (fresh mount): apply the
+  // prefilled search and keep the target segment focused once its window
+  // loads. Consumed once per mount so re-renders and later visits never
+  // replay the navigation.
+  useEffect(() => {
+    if (!pendingJump || jumpConsumedRef.current) return;
+    jumpConsumedRef.current = true;
+    jumpTargetRef.current = pendingJump.segmentId;
+    preserveFocusRef.current = pendingJump.segmentId;
+    setFile("all");
+    setStatus("all");
+    setSearch(pendingJump.search);
+    selection.reset(pendingJump.segmentId);
+    onJumpConsumed?.();
+  }, [pendingJump]);
 
   const normalizedSearch = search.trim();
   const query = new URLSearchParams({ stage });
@@ -263,6 +285,20 @@ export function SegmentWorkspace({
     overscan: 8,
   });
   const virtualItems = virtualizer.getVirtualItems();
+
+  // Once the jump query's index has loaded, scroll to and focus the target
+  // segment. The search is prefilled with the term source, so the segment is
+  // normally in the index; if it is not (normalization-only hits), the
+  // prefilled list still narrows the view and the first row stays focused.
+  useEffect(() => {
+    const target = jumpTargetRef.current;
+    if (!target) return;
+    const index = orderedIds.indexOf(target);
+    if (index < 0) return;
+    jumpTargetRef.current = "";
+    selection.reset(target);
+    virtualizer.scrollToIndex(index, { align: "auto" });
+  }, [orderedIds]);
 
   useEffect(() => {
     if (indexInFlightRef.current) return;
