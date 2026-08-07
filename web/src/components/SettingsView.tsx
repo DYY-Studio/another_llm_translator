@@ -425,44 +425,48 @@ function CredentialsSettings({ language }: { language: Language }) {
   }
 
   return (
-    <div className="credentials-layout">
-      <div className="page-heading"><div><h1>{translate("credentials.title", language)}</h1><p>{translate("credentials.subtitle", language)}</p></div></div>
+    <div className="config-settings">
+      <div className="page-heading config-heading settings-action-heading">
+        <div><h1>{translate("credentials.title", language)}</h1><p>{translate("credentials.subtitle", language)}</p></div>
+      </div>
       {error && <div className="error-banner">{error}</div>}
       {message && <p className="success-text">{message}</p>}
-      <section className="config-section">
-        <h2>{translate("credentials.new", language)}</h2>
-        <div className="config-grid">
-          <Field label={translate("credentials.id", language)}><input value={newId} onChange={(event) => setNewId(event.target.value)} /></Field>
-          <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
-        </div>
-        <div className="button-group"><button className="primary-button" disabled={!newId || !newSecret} onClick={() => void create()}>{translate("common.save", language)}</button><button className="quiet-button" onClick={reset}>{translate("common.cancel", language)}</button></div>
-      </section>
-      <section className="config-section">
-        <h2>{translate("credentials.list", language)}</h2>
-        {credentials.length === 0 ? <p className="muted">{translate("credentials.empty", language)}</p> : (
-          <ul className="credential-list">
-            {credentials.map((item) => (
-              <li key={item.id}>
-                <div><strong>{item.id}</strong><small>{translate("credentials.updatedAt", language, { time: new Date(item.updated_at * 1000).toLocaleString() })}</small></div>
-                <div className="button-group">
-                  <button className="quiet-button" disabled={testing === item.id} onClick={() => test(item)}>{testing === item.id ? translate("credentials.testing", language) : translate("credentials.test", language)}</button>
-                  <button className="quiet-button" onClick={() => { setEditing(item); setEditSecret(""); setMessage(""); setError(""); }}>{translate("common.edit", language)}</button>
-                  <button className="danger-button" onClick={() => void remove(item)}>{translate("common.delete", language)}</button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      {editing && (
+      <div className="config-form">
         <section className="config-section">
-          <h2>{translate("credentials.edit", language, { id: editing.id })}</h2>
+          <h2>{translate("credentials.new", language)}</h2>
           <div className="config-grid">
-            <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
+            <Field label={translate("credentials.id", language)}><input value={newId} onChange={(event) => setNewId(event.target.value)} /></Field>
+            <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
           </div>
-          <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => setEditing(null)}>{translate("common.cancel", language)}</button></div>
+          <div className="button-group"><button className="primary-button" disabled={!newId || !newSecret} onClick={() => void create()}>{translate("common.save", language)}</button><button className="quiet-button" onClick={reset}>{translate("common.cancel", language)}</button></div>
         </section>
-      )}
+        <section className="config-section">
+          <h2>{translate("credentials.list", language)}</h2>
+          {credentials.length === 0 ? <p className="muted">{translate("credentials.empty", language)}</p> : (
+            <ul className="credential-list">
+              {credentials.map((item) => (
+                <li key={item.id}>
+                  <div><strong>{item.id}</strong><small>{translate("credentials.updatedAt", language, { time: new Date(item.updated_at * 1000).toLocaleString() })}</small></div>
+                  <div className="button-group">
+                    <button className="quiet-button" disabled={testing === item.id} onClick={() => test(item)}>{testing === item.id ? translate("credentials.testing", language) : translate("credentials.test", language)}</button>
+                    <button className="quiet-button" onClick={() => { setEditing(item); setEditSecret(""); setMessage(""); setError(""); }}>{translate("common.edit", language)}</button>
+                    <button className="danger-button" onClick={() => void remove(item)}>{translate("common.delete", language)}</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        {editing && (
+          <section className="config-section">
+            <h2>{translate("credentials.edit", language, { id: editing.id })}</h2>
+            <div className="config-grid">
+              <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
+            </div>
+            <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => setEditing(null)}>{translate("common.cancel", language)}</button></div>
+          </section>
+        )}
+      </div>
     </div>
   );
 }

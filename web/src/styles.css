@@ -321,6 +321,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .config-heading h1 { margin-top: 0; }
 .config-form { display: grid; gap: 20px; max-width: 1180px; margin: 0 auto; }
 .config-section { min-width: 0; margin: 0; padding: 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.config-section .button-group { margin-top: 18px; }
 .config-section.warning { border-color: var(--warning-border); }
 .config-section legend { padding: 0 8px; color: var(--text); font-size: 16px; font-weight: 700; }
 .config-section > p { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.55; }
@@ -384,8 +385,6 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .login-card { width: min(360px, 100%); display: grid; gap: 16px; padding: 28px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
 .login-card h1 { margin: 0; }
 .login-card p { margin: 0; }
-.server-settings { max-width: 900px; margin: 0 auto; display: grid; gap: 20px; padding-bottom: 70px; }
-.server-settings .button-group { margin-top: 4px; }
 .muted { color: var(--muted); }
 .empty, .empty-page { padding: 30px; color: var(--muted); text-align: center; }
 .empty-page { display: grid; min-height: calc(100vh - 58px); place-items: center; }

@@ -103,40 +103,44 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
   }
 
   return (
-    <div className="server-settings">
-      <div className="page-heading"><div><h1>{translate("server.title", language)}</h1><p>{translate("server.subtitle", language)}</p></div></div>
+    <div className="config-settings">
+      <div className="page-heading config-heading settings-action-heading">
+        <div><h1>{translate("server.title", language)}</h1><p>{translate("server.subtitle", language)}</p></div>
+        <div className="button-group"><button className="primary-button" disabled={saving || (enabled && !bindAddress)} onClick={() => void save()}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button></div>
+      </div>
       {error && <div className="error-banner">{error}</div>}
       {message && <p className="success-text">{message}</p>}
       {status && !status.loopback && <div className="warning-banner">{translate("server.lanViewHint", language)}</div>}
-      <section className="config-section">
-        <h2>{translate("server.sharing", language)}</h2>
-        <div className="config-grid">
-          <label className="config-toggle"><span><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{translate("server.enable", language)}</span><small>{translate("server.enableHint", language)}</small></label>
-          {enabled && (
-            <label className="config-field">{translate("server.interface", language)}
-              <select value={bindAddress} onChange={(event) => setBindAddress(event.target.value)}>
-                <option value="">{translate("server.selectInterface", language)}</option>
-                {interfaces.map((item) => <option key={item.address} value={item.address}>{item.name} · {item.address}</option>)}
-              </select>
-            </label>
-          )}
-        </div>
-      </section>
-      {enabled && (
+      <div className="config-form">
         <section className="config-section">
-          <h2>{translate("server.auth", language)}</h2>
+          <h2>{translate("server.sharing", language)}</h2>
           <div className="config-grid">
-            <label className="config-toggle"><span><input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />{translate("server.authRequired", language)}</span><small>{translate("server.authHint", language)}</small></label>
-            {required && (
-              <>
-                <label className="config-field">{translate("server.username", language)}<input value={username} autoComplete="off" onChange={(event) => setUsername(event.target.value)} /></label>
-                <label className="config-field">{translate("server.password", language)}<input type="password" value={password} autoComplete="new-password" placeholder={translate("server.passwordKeep", language)} onChange={(event) => setPassword(event.target.value)} /></label>
-              </>
+            <label className="config-toggle"><span><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{translate("server.enable", language)}</span><small>{translate("server.enableHint", language)}</small></label>
+            {enabled && (
+              <label className="config-field">{translate("server.interface", language)}
+                <select value={bindAddress} onChange={(event) => setBindAddress(event.target.value)}>
+                  <option value="">{translate("server.selectInterface", language)}</option>
+                  {interfaces.map((item) => <option key={item.address} value={item.address}>{item.name} · {item.address}</option>)}
+                </select>
+              </label>
             )}
           </div>
         </section>
-      )}
-      <div className="button-group"><button className="primary-button" disabled={saving || (enabled && !bindAddress)} onClick={() => void save()}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button></div>
+        {enabled && (
+          <section className="config-section">
+            <h2>{translate("server.auth", language)}</h2>
+            <div className="config-grid">
+              <label className="config-toggle"><span><input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />{translate("server.authRequired", language)}</span><small>{translate("server.authHint", language)}</small></label>
+              {required && (
+                <>
+                  <label className="config-field">{translate("server.username", language)}<input value={username} autoComplete="off" onChange={(event) => setUsername(event.target.value)} /></label>
+                  <label className="config-field">{translate("server.password", language)}<input type="password" value={password} autoComplete="new-password" placeholder={translate("server.passwordKeep", language)} onChange={(event) => setPassword(event.target.value)} /></label>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
     </div>
   );
 }
