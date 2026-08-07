@@ -180,6 +180,10 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    try:
+        projects_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
