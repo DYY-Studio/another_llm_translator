@@ -1,11 +1,22 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
-import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder } from "../native";
+import {
+  nativeBridgeAvailable,
+  pickNativeFile,
+  pickNativeFolder,
+  saveExport,
+} from "../native";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
 
 type InputKind = "file" | "folder";
+
+interface ExportFile {
+  path: string;
+  size: number;
+  mtime: number;
+}
 
 interface AdapterSummary {
   adapter_id: string;
@@ -459,6 +470,16 @@ export function Overview({
   );
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleString();
+}
+
 export function ExportView({
   project,
   overview,
@@ -471,24 +492,104 @@ export function ExportView({
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
-  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [files, setFiles] = useState<ExportFile[]>([]);
+  const [highlighted, setHighlighted] = useState<string[]>([]);
   const selection = useClassicSelection();
   const fileIds = overview.files.map((item) => item.file_id);
-  async function run() {
-    const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
-      method: "POST",
-      body: JSON.stringify({
-        stage,
-        format,
-        bilingual,
-        allow_missing: false,
-        file_ids: selection.selectedKeys.size
-          ? [...selection.selectedKeys]
-          : null,
-      }),
-    });
-    setResult(JSON.stringify(value, null, 2));
+  const native = nativeBridgeAvailable();
+
+  async function refresh() {
+    const value = await api<{ files: ExportFile[] }>(
+      `/api/v1/projects/${project}/exports`,
+    );
+    setFiles(value.files);
   }
+
+  useEffect(() => {
+    void refresh().catch((reason) => setError(String(reason)));
+  }, [project]);
+
+  async function run() {
+    setError(""); setMessage(""); setHighlighted([]);
+    try {
+      const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
+        method: "POST",
+        body: JSON.stringify({
+          stage,
+          format,
+          bilingual,
+          allow_missing: false,
+          file_ids: selection.selectedKeys.size
+            ? [...selection.selectedKeys]
+            : null,
+        }),
+      });
+      await refresh();
+      const written = Array.isArray(value.written)
+        ? value.written.map(String).map((item) => item.replace(/^output\//, ""))
+        : [];
+      setHighlighted(written);
+      if (written.length) {
+        setMessage(translate("export.generated", language, { count: written.length }));
+      }
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  function downloadHref(path: string): string {
+    return `/api/v1/projects/${project}/exports/download?file=${encodeURIComponent(path)}`;
+  }
+
+  async function saveViaNative(url: string, filename: string) {
+    setError("");
+    try {
+      const saved = await saveExport(url, filename);
+      if (saved) setMessage(translate("export.savedTo", language, { path: saved }));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  function download(path: string) {
+    const filename = path.split("/").pop() || "export";
+    if (native) void saveViaNative(downloadHref(path), filename);
+  }
+
+  function downloadAll() {
+    if (!files.length) return;
+    const url = `/api/v1/projects/${project}/exports/download-all?${files
+      .map((item) => `file=${encodeURIComponent(item.path)}`)
+      .join("&")}`;
+    if (!native) {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      return;
+    }
+    void saveViaNative(url, `${project}-exports.zip`);
+  }
+
+  async function removeFile(path: string) {
+    if (!window.confirm(translate("export.deleteConfirm", language, { path }))) {
+      return;
+    }
+    setError(""); setMessage("");
+    try {
+      await api(`/api/v1/projects/${project}/exports/remove`, {
+        method: "POST",
+        body: JSON.stringify({ files: [path] }),
+      });
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   return (
     <div className="page narrow-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
@@ -514,8 +615,31 @@ export function ExportView({
         ))}
       </div>
       <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
-      <button className="primary-button" onClick={run}>{translate("export.generate", language)}</button>
-      {result && <pre className="result-box">{result}</pre>}
+      <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+      <div className="export-file-heading">
+        <div>
+          <strong>{translate("export.outputFiles", language)}</strong>
+          <small>{translate("export.outputCount", language, { count: files.length })}</small>
+        </div>
+        <button className="quiet-button" disabled={!files.length} onClick={downloadAll}>{translate("export.downloadAll", language)}</button>
+      </div>
+      <div className="file-list export-file-list">
+        {!files.length && <p className="export-empty">{translate("export.noFiles", language)}</p>}
+        {files.map((item) => (
+          <div key={item.path} className={`file-row export-row${highlighted.includes(item.path) ? " selected" : ""}`}>
+            <strong>{item.path}</strong>
+            <small>{formatSize(item.size)} · {formatTime(item.mtime)}</small>
+            <span className="export-actions">
+              {native
+                ? <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
+                : <a className="quiet-button" href={downloadHref(item.path)}>{translate("export.download", language)}</a>}
+              <button className="quiet-button" onClick={() => void removeFile(item.path)}>{translate("export.delete", language)}</button>
+            </span>
+          </div>
+        ))}
+      </div>
+      {message && <p className="notice-box">{message}</p>}
+      {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
     </div>
   );
 }
