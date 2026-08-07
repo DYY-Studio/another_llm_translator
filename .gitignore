@@ -42,3 +42,7 @@ playwright-report/
 sidecar-dist/
 build/
 /dist/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+credentials-fixed.png
