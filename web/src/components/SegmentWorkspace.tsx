@@ -119,6 +119,7 @@ export function SegmentWorkspace({
   const indexRequestRef = useRef(0);
   const indexInFlightRef = useRef(false);
   const preserveFocusRef = useRef("");
+  const scrollToFocusRef = useRef(false);
   const restoredScrollTopRef = useRef<number | null>(null);
   const jumpConsumedRef = useRef(false);
   const jumpTargetRef = useRef("");
@@ -198,12 +199,18 @@ export function SegmentWorkspace({
     if (cached) {
       activePageQueryRef.current = pageQueryKey;
       resetPageCache();
-      preserveFocusRef.current = cached.focusedId;
       restoredScrollTopRef.current = cached.scrollTop;
       setOrderedIds(cached.orderedIds);
       setTotal(cached.total);
       setRecords(cached.records);
-      selection.reset(cached.focusedId);
+      // Switching to a previously visited filter set keeps the segment the
+      // user just selected instead of yanking focus to the cached row; the
+      // cached id only applies when the current focus is not in this window.
+      const keep = selection.focusedKey && cached.orderedIds.includes(selection.focusedKey)
+        ? selection.focusedKey
+        : cached.focusedId;
+      preserveFocusRef.current = keep;
+      selection.reset(keep);
     }
   }
 
@@ -211,9 +218,10 @@ export function SegmentWorkspace({
     if (activePageQueryRef.current === pageQueryKey) return;
     activePageQueryRef.current = pageQueryKey;
     resetPageCache();
-    // A term-hit jump keeps its target focus while the jump query loads;
-    // only ordinary filter changes drop the previous focus.
-    if (!jumpTargetRef.current) preserveFocusRef.current = "";
+    // Keep the focused segment across filter changes: reloadIndex restores
+    // its focus when it survives the new filters and falls back to the first
+    // row otherwise. Term-hit jumps keep their explicit target focus.
+    preserveFocusRef.current = selection.focusedKey;
   }, [pageQueryKey, resetPageCache]);
 
   useLayoutEffect(() => {
@@ -232,7 +240,7 @@ export function SegmentWorkspace({
     });
   }, [pageQueryKey, orderedIds, total, records, selection.focusedKey]);
 
-  const reloadIndex = useCallback(async (preserveSegmentId?: string) => {
+  const reloadIndex = useCallback(async (preserveSegmentId?: string, scrollToFocus = false) => {
     const requestId = ++indexRequestRef.current;
     indexInFlightRef.current = true;
     setLoading(true);
@@ -264,6 +272,9 @@ export function SegmentWorkspace({
         setRecords((current) => Object.fromEntries(
           Object.entries(current).filter(([segmentId]) => allowed.has(segmentId)),
         ));
+        // A filter change kept the focus: bring the row back into view once
+        // the new index renders (saves and jumps scroll themselves).
+        if (scrollToFocus && !jumpTargetRef.current) scrollToFocusRef.current = true;
       }
       return index.segment_ids;
     } catch (value) {
@@ -283,7 +294,7 @@ export function SegmentWorkspace({
     }
   }, [project, stage, file, status, normalizedSearch, resetPageCache]);
 
-  useEffect(() => { void reloadIndex(preserveFocusRef.current); }, [reloadIndex]);
+  useEffect(() => { void reloadIndex(preserveFocusRef.current, true); }, [reloadIndex]);
 
   const virtualizer = useVirtualizer({
     count: orderedIds.length,
@@ -293,6 +304,16 @@ export function SegmentWorkspace({
     overscan: 8,
   });
   const virtualItems = virtualizer.getVirtualItems();
+
+  // A filter change kept the focused segment: bring its row back into view
+  // once the new index renders. auto leaves an already-visible row alone,
+  // so saves (which scroll nothing on purpose) are unaffected.
+  useEffect(() => {
+    if (!scrollToFocusRef.current) return;
+    scrollToFocusRef.current = false;
+    const index = orderedIds.indexOf(selection.focusedKey);
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
+  }, [orderedIds, selection.focusedKey]);
 
   // Once the jump query's index has loaded, scroll to and focus the target
   // segment. The search is prefilled with the term source, so the segment is
@@ -414,11 +435,6 @@ export function SegmentWorkspace({
   const before = context?.before ?? [];
   const after = context?.after ?? [];
 
-  function resetFilterSelection() {
-    selection.reset();
-    setBatchMessage("");
-  }
-
   async function save(apply = false) {
     if (!selected) return;
     if (stage === "translation") {
@@ -509,7 +525,7 @@ export function SegmentWorkspace({
         <div className="filters">
           <select value={file} onChange={(event) => {
             setFile(event.target.value);
-            resetFilterSelection();
+            setBatchMessage("");
           }}>
             <option value="all">{translate("workspace.allFiles", language)}</option>
             {overview.files.map((item) => <option value={item.file_id} key={item.file_id}>{item.name}</option>)}
@@ -517,13 +533,13 @@ export function SegmentWorkspace({
           <div className="filter-row">
             <select value={status} onChange={(event) => {
               setStatus(event.target.value);
-              resetFilterSelection();
+              setBatchMessage("");
             }}>
               {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
             <input value={search} onChange={(event) => {
               setSearch(event.target.value);
-              resetFilterSelection();
+              setBatchMessage("");
             }} placeholder={translate("workspace.searchSourceResult", language)} />
           </div>
           <div className="batch-toolbar segment-batch-toolbar">
