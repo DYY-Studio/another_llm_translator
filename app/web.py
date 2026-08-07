@@ -176,7 +176,7 @@ def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
 
 def _resolve_export_file(root: Path, raw: str) -> Path:
     """Resolve a project-relative output file, rejecting escape and symlinks."""
-    if not raw or "\0" in raw:
+    if "\0" in raw:
         raise UsageError("导出文件路径无效")
     relative = Path(raw)
     if relative.is_absolute() or ".." in relative.parts:
@@ -1610,12 +1610,11 @@ def create_app(
             raise UsageError("至少需要一个导出文件")
         files = list(dict.fromkeys(file))
         paths = [_resolve_export_file(root, raw) for raw in files]
+        output_root = (root / "output").resolve()
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in paths:
-                archive.write(
-                    path, path.relative_to(root / "output").as_posix()
-                )
+                archive.write(path, path.relative_to(output_root).as_posix())
         return Response(
             content=buffer.getvalue(),
             media_type="application/zip",

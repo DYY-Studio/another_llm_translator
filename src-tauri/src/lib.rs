@@ -86,22 +86,7 @@ fn http_get(port: &str, path: &str) -> Result<Vec<u8>, String> {
         let status = headers.lines().next().unwrap_or("").to_string();
         return Err(format!("下载失败：{status}"));
     }
-    let mut body = &response[separator + 4..];
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            line.to_ascii_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::trim)
-                .and_then(|value| value.parse::<usize>().ok())
-        });
-    if let Some(length) = content_length {
-        if body.len() < length {
-            return Err("响应不完整".to_string());
-        }
-        body = &body[..length];
-    }
-    Ok(body.to_vec())
+    Ok(response[separator + 4..].to_vec())
 }
 
 #[tauri::command]

@@ -555,7 +555,7 @@ export function ExportView({
 
   function download(path: string) {
     const filename = path.split("/").pop() || "export";
-    if (native) void saveViaNative(downloadHref(path), filename);
+    void saveViaNative(downloadHref(path), filename);
   }
 
   function downloadAll() {
