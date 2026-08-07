@@ -184,9 +184,12 @@ class WebStore:
         base["active_task_id"] = task_id
         scans = [
             record
-            for record in read_jsonl(self.project, self.project / "terminology" / "scans.jsonl")
-            if record.get("active_task_id") == task_id
-            and record.get("segment_id")
+            for record in read_jsonl(
+                self.project,
+                self.project / "terminology" / "scans.jsonl",
+                task_id=task_id,
+            )
+            if record.get("segment_id")
         ]
         latest: dict[str, dict[str, Any]] = {}
         for record in scans:
@@ -217,8 +220,11 @@ class WebStore:
         ]
         candidate_records = [
             record
-            for record in read_jsonl(self.project, self.project / "terminology" / "candidates.jsonl")
-            if record.get("active_task_id") == task_id
+            for record in read_jsonl(
+                self.project,
+                self.project / "terminology" / "candidates.jsonl",
+                task_id=task_id,
+            )
         ]
         candidate_sources = {
             normalize_term(
