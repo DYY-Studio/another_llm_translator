@@ -88,6 +88,26 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert "input" not in payload["params"]
 
 
+def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    assert not projects_root.exists()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    assert projects_root.is_dir()
+    default = str(projects_root.resolve())
+    assert client.get("/api/v1/directories").status_code == 200
+    assert (
+        client.get("/api/v1/directories", params={"path": default}).status_code
+        == 200
+    )
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "empty", "empty": "true", "parent_dir": default},
+    )
+    assert created.status_code == 200
+    assert created.json()["project_selector"] == "empty"
+
+
 def test_web_bundle_translates_error_codes_and_keeps_server_fallback() -> None:
     assets = list(
         (Path(__file__).parents[1] / "app" / "web_dist" / "assets").glob(
