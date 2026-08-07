@@ -13,9 +13,9 @@ from .errors import UsageError
 from .execution import (
     Scope,
     choose_running_run,
-    classify_stage,
     combine_usage,
     find_running_runs,
+    latest_completed_by_segment,
     load_stage_history,
     stage_fingerprint,
     unavailable_usage,
@@ -51,14 +51,15 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _running_run(project: Path, stage: str) -> dict[str, Any] | None:
+def _running_run(
+    project: Path, stage: str, current_config: dict[str, Any]
+) -> dict[str, Any] | None:
     candidates = find_running_runs(project, stage)
     if not candidates:
         return None
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
     old_config = load_run_config(project / "runs" / run_id)
-    current_config = load_project_config(project, stage=stage)
     return {
         "run_id": run_id,
         "started_at": manifest.get("started_at"),
@@ -71,6 +72,7 @@ def _running_run(project: Path, stage: str) -> dict[str, Any] | None:
 def _stage_summary(
     project: Path,
     stage: str,
+    config: dict[str, Any],
     *,
     active_segment_ids: set[str],
     nonempty_count: int,
@@ -82,7 +84,7 @@ def _stage_summary(
         for item in history
         if str(item.get("segment_id")) in active_segment_ids
     ]
-    completed = classify_stage([], active_history, force=False).latest_completed
+    completed = latest_completed_by_segment(active_history)
     failed = {
         str(item["segment_id"])
         for item in active_history
@@ -90,7 +92,7 @@ def _stage_summary(
         and str(item.get("segment_id")) not in completed
     }
     current_fingerprint = stage_fingerprint(
-        load_project_config(project, stage=stage),
+        config,
         stage,
         prompt_middle_digests(project, stage),
         terms_revision=terms_revision,
@@ -99,14 +101,6 @@ def _stage_summary(
         "completed": len(completed),
         "failed": len(failed),
         "pending": nonempty_count - len(completed) - len(failed),
-        "fingerprint_count": len(
-            {
-                str(item["stage_fingerprint"])
-                for item in completed.values()
-                if item.get("stage_fingerprint")
-            }
-        ),
-        "current_fingerprint": current_fingerprint,
         "current_fingerprint_completed": sum(
             record.get("stage_fingerprint") == current_fingerprint
             for record in completed.values()
@@ -116,21 +110,15 @@ def _stage_summary(
 
 def _terminology_summary(
     project: Path,
+    config: dict[str, Any],
     *,
     active_segment_ids: set[str],
     nonempty_count: int,
 ) -> dict[str, Any]:
-    current_fingerprint = stage_fingerprint(
-        load_project_config(project, stage="terminology"),
-        "terminology",
-        prompt_middle_digests(project, "terminology"),
-    )
     base = {
         "completed": 0,
         "failed": 0,
         "pending": nonempty_count,
-        "fingerprint_count": 0,
-        "current_fingerprint": current_fingerprint,
         "current_fingerprint_completed": 0,
     }
     active_path = project / "terminology" / "active_task.json"
@@ -153,18 +141,15 @@ def _terminology_summary(
         for item in scans
         if item["status"] == "failed" and item["segment_id"] not in completed
     }
+    current_fingerprint = stage_fingerprint(
+        config,
+        "terminology",
+        prompt_middle_digests(project, "terminology"),
+    )
     return {
         "completed": len(completed),
         "failed": len(failed),
         "pending": nonempty_count - len(completed) - len(failed),
-        "fingerprint_count": len(
-            {
-                str(item["stage_fingerprint"])
-                for item in scans
-                if item.get("stage_fingerprint")
-            }
-        ),
-        "current_fingerprint": current_fingerprint,
         "current_fingerprint_completed": sum(
             item.get("status") == "completed"
             and item.get("stage_fingerprint") == current_fingerprint
@@ -181,37 +166,39 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
     if not nonempty:
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
     active_segment_ids = {str(item["segment_id"]) for item in nonempty}
-    library = load_terms(project)
-    terms_revision = int(library["terms_revision"]) if library else None
+    config = load_project_config(project, stage=stage)
     if stage == "terminology":
         summary = _terminology_summary(
             project,
+            config,
             active_segment_ids=active_segment_ids,
             nonempty_count=len(nonempty),
         )
     else:
+        library = load_terms(project)
         summary = _stage_summary(
             project,
             stage,
+            config,
             active_segment_ids=active_segment_ids,
             nonempty_count=len(nonempty),
-            terms_revision=terms_revision,
+            terms_revision=(
+                int(library["terms_revision"]) if library else None
+            ),
         )
-    completed = int(summary["completed"])
-    current_completed = int(summary["current_fingerprint_completed"])
+    completed = summary["completed"]
+    current_completed = summary["current_fingerprint_completed"]
     return {
         "stage": stage,
-        "selected": completed + int(summary["pending"]) + int(summary["failed"]),
+        "selected": len(nonempty),
         "completed": completed,
-        "pending": int(summary["pending"]),
-        "failed": int(summary["failed"]),
-        "fingerprint_count": int(summary["fingerprint_count"]),
-        "current_fingerprint": str(summary["current_fingerprint"]),
+        "pending": summary["pending"],
+        "failed": summary["failed"],
         "current_fingerprint_completed": current_completed,
         "mismatched_fingerprint_completed": max(
             0, completed - current_completed
         ),
-        "running_run": _running_run(project, stage),
+        "running_run": _running_run(project, stage, config),
     }
 
 

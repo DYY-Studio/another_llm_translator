@@ -6,13 +6,11 @@ type ResultPolicy = "pending" | "reuse" | "force";
 
 export function RunDialog({
   options,
-  starting,
   onClose,
   onStart,
   language,
 }: {
   options: TaskOptions;
-  starting: boolean;
   onClose: () => void;
   onStart: (decision: RunDecision) => void;
   language: Language;
@@ -130,9 +128,9 @@ export function RunDialog({
         )}
 
         <div className="modal-actions">
-          <button className="quiet-button" disabled={starting} onClick={onClose}>{translate("common.cancel", language)}</button>
-          <button className="primary-button" disabled={!ready || starting} onClick={submit}>
-            {starting ? translate("runDialog.starting", language) : translate("runDialog.run", language)}
+          <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={!ready} onClick={submit}>
+            {translate("runDialog.run", language)}
           </button>
         </div>
       </div>

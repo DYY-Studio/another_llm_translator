@@ -71,7 +71,6 @@ export default function App() {
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
-  const [runStarting, setRunStarting] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -210,7 +209,6 @@ export default function App() {
 
   async function startRun(decision: RunDecision) {
     if (!project || !runOptions) return;
-    setRunStarting(true);
     setRunOptions(null);
     try {
       setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
@@ -226,8 +224,6 @@ export default function App() {
       } catch {
         setRunOptions(null);
       }
-    } finally {
-      setRunStarting(false);
     }
   }
 
@@ -349,7 +345,6 @@ export default function App() {
           key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
           options={runOptions}
           language={language}
-          starting={runStarting}
           onClose={() => setRunOptions(null)}
           onStart={startRun}
         />
