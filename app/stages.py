@@ -1342,8 +1342,11 @@ def _term_exchange_rows(
         task_id = str(active.get("active_task_id", ""))
         records = [
             record
-            for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
-            if record.get("active_task_id") == task_id
+            for record in read_jsonl(
+                project,
+                project / "terminology" / "candidates.jsonl",
+                task_id=task_id,
+            )
         ]
         merged: dict[str, dict[str, Any]] = {}
         for record in records:
@@ -1637,8 +1640,11 @@ def _merge_and_publish_terms(
     previous = load_terms(project)
     candidates = [
         record
-        for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
-        if record.get("active_task_id") == task_id
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            task_id=task_id,
+        )
     ]
     merged: dict[str, dict[str, Any]] = {}
     _seed_published_terms(merged, previous, spec)
@@ -1684,8 +1690,12 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     task_id = str(active.get("active_task_id", ""))
     candidates = [
         record
-        for record in read_jsonl(project, project / "terminology" / "candidates.jsonl")
-        if record.get("active_task_id") == task_id and record.get("terms")
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            task_id=task_id,
+        )
+        if record.get("terms")
     ]
     if not candidates:
         raise UsageError("当前活动扫描没有可发布的候选术语")
@@ -1783,8 +1793,11 @@ async def run_terminology(
         selected = [segment for segment in segments if not segment["is_empty"]]
     scans = [
         record
-        for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
-        if record.get("active_task_id") == task_id
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "scans.jsonl",
+            task_id=task_id,
+        )
     ]
     completed_ids = {
         str(record["segment_id"])
@@ -2203,8 +2216,11 @@ async def run_terminology(
         all_nonempty = [segment for segment in segments if not segment["is_empty"]]
         task_scans = [
             record
-            for record in read_jsonl(project, project / "terminology" / "scans.jsonl")
-            if record.get("active_task_id") == task_id
+            for record in read_jsonl(
+                project,
+                project / "terminology" / "scans.jsonl",
+                task_id=task_id,
+            )
         ]
         task_completed_ids = {
             str(record["segment_id"])
@@ -4159,9 +4175,12 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         if active.get("status") in {"active", "completed"}:
             scans = [
                 item
-                for item in read_jsonl(project, project / "terminology" / "scans.jsonl")
-                if item.get("active_task_id") == active.get("active_task_id")
-                and str(item.get("segment_id")) in active_segment_ids
+                for item in read_jsonl(
+                    project,
+                    project / "terminology" / "scans.jsonl",
+                    task_id=active.get("active_task_id"),
+                )
+                if str(item.get("segment_id")) in active_segment_ids
             ]
             completed = {
                 item["segment_id"] for item in scans if item["status"] == "completed"

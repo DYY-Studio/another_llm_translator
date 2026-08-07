@@ -15,8 +15,6 @@ from .execution import (
     choose_running_run,
     combine_usage,
     find_running_runs,
-    latest_completed_by_segment,
-    load_stage_history,
     stage_fingerprint,
     unavailable_usage,
 )
@@ -30,7 +28,13 @@ from .stages import (
     run_terminology,
     run_translation,
 )
-from .sqlite_storage import read_json, read_jsonl, record_exists, utc_now
+from .sqlite_storage import (
+    latest_stage_summary,
+    read_json,
+    read_jsonl,
+    record_exists,
+    utc_now,
+)
 
 
 WEB_LLM_STAGES = frozenset(
@@ -78,18 +82,12 @@ def _stage_summary(
     nonempty_count: int,
     terms_revision: int | None,
 ) -> dict[str, Any]:
-    history = load_stage_history(project, stage)
-    active_history = [
-        item
-        for item in history
-        if str(item.get("segment_id")) in active_segment_ids
-    ]
-    completed = latest_completed_by_segment(active_history)
+    summary = latest_stage_summary(project, stage, active_segment_ids)
+    completed = {
+        segment_id: item for segment_id, item in summary.items() if item["completed"]
+    }
     failed = {
-        str(item["segment_id"])
-        for item in active_history
-        if item.get("status") == "failed"
-        and str(item.get("segment_id")) not in completed
+        segment_id for segment_id, item in summary.items() if item["failed"]
     }
     current_fingerprint = stage_fingerprint(
         config,
@@ -102,8 +100,8 @@ def _stage_summary(
         "failed": len(failed),
         "pending": nonempty_count - len(completed) - len(failed),
         "current_fingerprint_completed": sum(
-            record.get("stage_fingerprint") == current_fingerprint
-            for record in completed.values()
+            item["stage_fingerprint"] == current_fingerprint
+            for item in completed.values()
         ),
     }
 
@@ -129,9 +127,12 @@ def _terminology_summary(
         return base
     scans = [
         item
-        for item in read_jsonl(project, project / "terminology" / "scans.jsonl")
-        if item.get("active_task_id") == active.get("active_task_id")
-        and str(item.get("segment_id")) in active_segment_ids
+        for item in read_jsonl(
+            project,
+            project / "terminology" / "scans.jsonl",
+            task_id=active.get("active_task_id"),
+        )
+        if str(item.get("segment_id")) in active_segment_ids
     ]
     completed = {
         item["segment_id"] for item in scans if item["status"] == "completed"
