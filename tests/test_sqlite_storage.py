@@ -12,6 +12,7 @@ from app.sqlite_storage import (
     query_segments,
     read_json,
     read_jsonl,
+    read_segment_sources,
     record_header,
 )
 from tests.test_foundation import make_app_root
@@ -163,6 +164,20 @@ def test_latest_stage_summary_preserves_completed_after_failed_and_reset_voids(
         "stage_fingerprint": None,
     }
     assert latest_stage_summary(project, "translation", []) == {}
+
+
+def test_read_segment_sources_excludes_empty_and_preserves_order(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path, "first\n\u3000\nthird")
+    sources = read_segment_sources(project)
+    assert [item["source"] for item in sources] == ["first", "third"]
+    assert [item["segment_id"] for item in sources] == [
+        "F0001-S000001",
+        "F0001-S000003",
+    ]
+    assert sources[0]["line_index"] == 0
+    assert sources[1]["file_id"] == "F0001"
 
 
 def test_read_jsonl_filters_terminology_records_by_task(tmp_path: Path) -> None:

@@ -1177,6 +1177,21 @@ def create_app(
     async def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
+    @app.get("/api/v1/projects/{name}/terms/hits")
+    async def term_hits(name: str, request: Request) -> dict[str, Any]:
+        params = request.query_params
+        normalized = params.get("normalized")
+        if not normalized:
+            raise UsageError("术语命中查询必须提供 normalized")
+        try:
+            offset = int(params.get("offset", "0"))
+            limit = int(params.get("limit", "50"))
+        except ValueError as exc:
+            raise UsageError("术语命中窗口参数必须是整数") from exc
+        return WebStore(project(name)).term_hits(
+            normalized, offset=offset, limit=limit
+        )
+
     @app.post("/api/v1/projects/{name}/terms")
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).save_term(payload)

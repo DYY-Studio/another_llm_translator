@@ -458,6 +458,32 @@ def read_segments(project: Path) -> list[dict[str, Any]]:
         connection.close()
 
 
+def read_segment_sources(project: Path) -> list[dict[str, Any]]:
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            """
+            SELECT segment_id, file_id, line_index, source
+            FROM segments
+            WHERE is_empty = 0
+            ORDER BY file_order, line_index
+            """
+        ).fetchall()
+        return [
+            {
+                "segment_id": str(row[0]),
+                "file_id": str(row[1]),
+                "line_index": int(row[2]),
+                "source": str(row[3]),
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取 Segment 源文本：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def read_adapter_state(project: Path, file_id: str) -> dict[str, Any] | None:
     connection = _with_db(project)
     try:

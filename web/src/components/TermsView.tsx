@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
-import type { Term, TermsResponse } from "../types";
+import type { Term, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
 interface TermForm {
@@ -70,10 +70,12 @@ export function TermsView({
   project,
   focusFailures = false,
   language,
+  onFindSegment,
 }: {
   project: string;
   focusFailures?: boolean;
   language: Language;
+  onFindSegment: (source: string, segmentId: string) => void;
 }) {
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
@@ -89,6 +91,10 @@ export function TermsView({
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
+  const [hits, setHits] = useState<TermHitsResponse | null>(null);
+  const [hitsLoading, setHitsLoading] = useState(false);
+  const [hitsError, setHitsError] = useState("");
+  const hitsRequestRef = useRef(0);
   const termListRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef<number | null>(null);
   const termsRestoredRef = useRef(false);
@@ -157,6 +163,56 @@ export function TermsView({
   useEffect(() => {
     if (focusFailures) setShowScanFailures(true);
   }, [focusFailures]);
+
+  const hitsPageSize = 50;
+  useEffect(() => {
+    const normalized = selected?.normalized ?? "";
+    const requestId = ++hitsRequestRef.current;
+    if (!normalized) {
+      setHits(null);
+      setHitsLoading(false);
+      setHitsError("");
+      return;
+    }
+    setHitsLoading(true);
+    setHitsError("");
+    setHits(null);
+    const params = new URLSearchParams({
+      normalized,
+      offset: "0",
+      limit: String(hitsPageSize),
+    });
+    void api<TermHitsResponse>(`/api/v1/projects/${project}/terms/hits?${params}`)
+      .then((value) => {
+        if (requestId === hitsRequestRef.current) setHits(value);
+      })
+      .catch((error) => {
+        if (requestId === hitsRequestRef.current) setHitsError(String(error));
+      })
+      .finally(() => {
+        if (requestId === hitsRequestRef.current) setHitsLoading(false);
+      });
+  }, [project, selected]);
+
+  function loadMoreHits() {
+    if (!selected || !hits) return;
+    const normalized = selected.normalized;
+    const offset = hits.offset + hits.hits.length;
+    setHitsLoading(true);
+    const params = new URLSearchParams({
+      normalized,
+      offset: String(offset),
+      limit: String(hitsPageSize),
+    });
+    void api<TermHitsResponse>(`/api/v1/projects/${project}/terms/hits?${params}`)
+      .then((value) => setHits((current) => (
+        current && current.normalized === normalized
+          ? { ...value, hits: [...current.hits, ...value.hits] }
+          : current
+      )))
+      .catch((error) => setHitsError(String(error)))
+      .finally(() => setHitsLoading(false));
+  }
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -409,6 +465,40 @@ export function TermsView({
         )}
         <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
         <label>{translate("terms.aliases", language)}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
+        {selected && (
+          <section className="term-hits">
+            <div className="term-hits-heading">
+              <strong>{translate("terms.hits", language)}</strong>
+              {hits && <span>{translate("terms.hitsCount", language, { count: hits.total })}</span>}
+            </div>
+            {hitsLoading && !hits ? (
+              <div className="term-hits-state">{translate("terms.hitsLoading", language)}</div>
+            ) : hitsError ? (
+              <div className="term-hits-state error-text">{hitsError}</div>
+            ) : hits && hits.total === 0 ? (
+              <div className="term-hits-state">{translate("terms.hitsEmpty", language)}</div>
+            ) : hits && (
+              <>
+                <div className="term-hits-list">
+                  {hits.hits.map((item) => (
+                    <button
+                      key={item.segment_id}
+                      className="term-hit-row"
+                      title={translate("terms.hitsJump", language)}
+                      onClick={() => onFindSegment(selected.source, item.segment_id)}
+                    >
+                      <code>{item.segment_id}</code>
+                      <span>{item.source}</span>
+                    </button>
+                  ))}
+                </div>
+                {hits.offset + hits.hits.length < hits.total && (
+                  <button className="quiet-button" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
+                )}
+              </>
+            )}
+          </section>
+        )}
         {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
         <div className="editor-actions term-actions">
           {selected?.disabled ? (
