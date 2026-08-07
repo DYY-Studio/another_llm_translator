@@ -198,7 +198,7 @@ export function TermsView({
   function loadMoreHits() {
     if (!selected || !hits) return;
     const normalized = selected.normalized;
-    const offset = hits.offset + hits.hits.length;
+    const offset = hits.hits.length;
     setHitsLoading(true);
     const params = new URLSearchParams({
       normalized,
@@ -466,7 +466,7 @@ export function TermsView({
                     </button>
                   ))}
                 </div>
-                {hits.offset + hits.hits.length < hits.total && (
+                {hits.hits.length < hits.total && (
                   <button className="quiet-button term-hits-more" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
                 )}
               </>
