@@ -66,6 +66,19 @@ function formFor(term: Term): TermForm {
   };
 }
 
+function matchesFilters(term: Term, query: string, onlyConflicts: boolean, showDisabled: boolean) {
+  const haystack = [
+    term.source,
+    term.preferred_translation,
+    term.category,
+    term.description,
+    ...term.aliases,
+  ].filter(Boolean).join("\n").toLocaleLowerCase();
+  return (!query || haystack.includes(query))
+    && (!onlyConflicts || term.has_conflicts)
+    && (showDisabled || !term.disabled);
+}
+
 export function TermsView({
   project,
   focusFailures = false,
@@ -165,6 +178,14 @@ export function TermsView({
     if (focusFailures) setShowScanFailures(true);
   }, [focusFailures]);
 
+  // After a filter change keeps the focused term visible, make sure its row
+  // stays in view: clearing a filter can move it far down the full list.
+  useEffect(() => {
+    if (!selection.focusedKey) return;
+    termListRef.current?.querySelector(".term-row.focused")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [data, onlyConflicts, search, showDisabled, selection.focusedKey]);
+
   const hitsPageSize = 50;
   useEffect(() => {
     const normalized = selected?.normalized ?? "";
@@ -217,18 +238,9 @@ export function TermsView({
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return (data?.terms ?? []).filter((term) => {
-      const haystack = [
-        term.source,
-        term.preferred_translation,
-        term.category,
-        term.description,
-        ...term.aliases,
-      ].filter(Boolean).join("\n").toLocaleLowerCase();
-      return (!query || haystack.includes(query))
-        && (!onlyConflicts || term.has_conflicts)
-        && (showDisabled || !term.disabled);
-    });
+    return (data?.terms ?? []).filter(
+      (term) => matchesFilters(term, query, onlyConflicts, showDisabled),
+    );
   }, [data, onlyConflicts, search, showDisabled]);
   const visibleKeys = visible.map((term) => term.normalized);
   const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
@@ -240,6 +252,24 @@ export function TermsView({
     selection.reset();
     setForm(emptyForm);
     setMessage("");
+  }
+
+  // Filter changes keep the focused term when it still matches the next
+  // conditions, so clearing a filter returns to the term just selected.
+  function clearSelectionIfFilteredOut(
+    nextSearch: string,
+    nextConflicts: boolean,
+    nextDisabled: boolean,
+  ) {
+    const focused = data?.terms.find(
+      (term) => term.normalized === selection.focusedKey,
+    ) ?? null;
+    if (!focused || !matchesFilters(
+      focused,
+      nextSearch.trim().toLocaleLowerCase(),
+      nextConflicts,
+      nextDisabled,
+    )) resetFilterSelection();
   }
 
   function focusTerm(term: Term) {
@@ -337,8 +367,9 @@ export function TermsView({
             <input
               value={search}
               onChange={(event) => {
-                setSearch(event.target.value);
-                resetFilterSelection();
+                const next = event.target.value;
+                setSearch(next);
+                clearSelectionIfFilteredOut(next, onlyConflicts, showDisabled);
               }}
               placeholder={translate("terms.search", language)}
             />
@@ -350,12 +381,14 @@ export function TermsView({
           <div className="term-secondary">
             <div className="term-filters">
               <label><input type="checkbox" checked={onlyConflicts} onChange={(event) => {
-                setOnlyConflicts(event.target.checked);
-                resetFilterSelection();
+                const next = event.target.checked;
+                setOnlyConflicts(next);
+                clearSelectionIfFilteredOut(search, next, showDisabled);
               }} />{translate("terms.conflictsOnly", language)}</label>
               <label><input type="checkbox" checked={showDisabled} onChange={(event) => {
-                setShowDisabled(event.target.checked);
-                resetFilterSelection();
+                const next = event.target.checked;
+                setShowDisabled(next);
+                clearSelectionIfFilteredOut(search, onlyConflicts, next);
               }} />{translate("terms.showRemoved", language)}</label>
             </div>
             <div className="term-stats">
