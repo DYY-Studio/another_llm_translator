@@ -423,7 +423,7 @@ export function Overview({
       </div>
       <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
-      <div className="file-list">
+      <div className="file-list overview-file-list">
         {value.files.length === 0 && (
           <div className="empty-file-state">
             <strong>{translate("overview.noFiles", language)}</strong>
@@ -496,9 +496,19 @@ export function ExportView({
   const [message, setMessage] = useState("");
   const [files, setFiles] = useState<ExportFile[]>([]);
   const [highlighted, setHighlighted] = useState<string[]>([]);
+  const [tab, setTab] = useState<"export" | "browse">("export");
+  const [selectionFilter, setSelectionFilter] = useState("");
+  const [browseFilter, setBrowseFilter] = useState("");
   const selection = useClassicSelection();
-  const fileIds = overview.files.map((item) => item.file_id);
   const native = nativeBridgeAvailable();
+
+  const filteredSourceFiles = overview.files.filter((item) => (
+    item.name.toLocaleLowerCase().includes(selectionFilter.toLocaleLowerCase().trim())
+  ));
+  const fileIds = filteredSourceFiles.map((item) => item.file_id);
+  const filteredExports = files.filter((item) => (
+    item.path.toLocaleLowerCase().includes(browseFilter.toLocaleLowerCase().trim())
+  ));
 
   async function refresh() {
     const value = await api<{ files: ExportFile[] }>(
@@ -510,6 +520,11 @@ export function ExportView({
   useEffect(() => {
     void refresh().catch((reason) => setError(String(reason)));
   }, [project]);
+
+  function openBrowse() {
+    setTab("browse");
+    void refresh().catch((reason) => setError(String(reason)));
+  }
 
   async function run() {
     setError(""); setMessage(""); setHighlighted([]);
@@ -591,55 +606,71 @@ export function ExportView({
   }
 
   return (
-    <div className="page narrow-page">
+    <div className="page narrow-page export-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
-      <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
-      <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
-      <div className="export-file-heading">
-        <div>
-          <strong>{translate("export.fileScope", language)}</strong>
-          <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
-        </div>
-        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
+      <div className="dialog-tabs" role="tablist" aria-label={translate("export.title", language)}>
+        <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
+        <button className={tab === "browse" ? "active" : ""} onClick={openBrowse}>{translate("export.tabBrowse", language)}</button>
       </div>
-      <div className="file-list export-file-list">
-        {overview.files.map((item) => (
-          <button
-            type="button"
-            key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
-            onClick={(event) => selection.select(item.file_id, fileIds, event)}
-          >
-            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-          </button>
-        ))}
-      </div>
-      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
-      <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
-      <div className="export-file-heading">
-        <div>
-          <strong>{translate("export.outputFiles", language)}</strong>
-          <small>{translate("export.outputCount", language, { count: files.length })}</small>
-        </div>
-        <button className="quiet-button" disabled={!files.length} onClick={downloadAll}>{translate("export.downloadAll", language)}</button>
-      </div>
-      <div className="file-list export-file-list">
-        {!files.length && <p className="export-empty">{translate("export.noFiles", language)}</p>}
-        {files.map((item) => (
-          <div key={item.path} className={`file-row export-row${highlighted.includes(item.path) ? " selected" : ""}`}>
-            <strong>{item.path}</strong>
-            <small>{formatSize(item.size)} · {formatTime(item.mtime)}</small>
-            <span className="export-actions">
-              {native
-                ? <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
-                : <a className="quiet-button" href={downloadHref(item.path)}>{translate("export.download", language)}</a>}
-              <button className="quiet-button" onClick={() => void removeFile(item.path)}>{translate("export.delete", language)}</button>
-            </span>
-          </div>
-        ))}
-      </div>
-      {message && <p className="notice-box">{message}</p>}
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+      {tab === "export" ? <>
+        <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
+        <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
+        <div className="export-file-heading">
+          <div>
+            <strong>{translate("export.fileScope", language)}</strong>
+            <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
+          </div>
+          <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
+        </div>
+        <input className="export-filter" value={selectionFilter} onChange={(event) => setSelectionFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
+        <div className="file-list export-file-list">
+          {!filteredSourceFiles.length && selectionFilter && <p className="export-empty">{translate("export.noMatch", language)}</p>}
+          {filteredSourceFiles.map((item) => (
+            <button
+              type="button"
+              key={item.file_id}
+              className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
+              onClick={(event) => selection.select(item.file_id, fileIds, event)}
+            >
+              <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+            </button>
+          ))}
+        </div>
+        <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
+        <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+        {message && (
+          <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
+        )}
+      </> : <>
+        <div className="export-file-heading browse-toolbar">
+          <div>
+            <strong>{translate("export.outputFiles", language)}</strong>
+            <small>{translate("export.outputCount", language, { count: files.length })}</small>
+          </div>
+          <div className="button-group">
+            <button className="quiet-button" onClick={openBrowse}>{translate("directory.refresh", language)}</button>
+            <button className="quiet-button" disabled={!files.length} onClick={downloadAll}>{translate("export.downloadAll", language)}</button>
+          </div>
+        </div>
+        <input className="export-filter" value={browseFilter} onChange={(event) => setBrowseFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
+        <div className="file-list export-file-list export-browse-list">
+          {!files.length && <p className="export-empty">{translate("export.noFiles", language)}</p>}
+          {files.length > 0 && !filteredExports.length && <p className="export-empty">{translate("export.noMatch", language)}</p>}
+          {filteredExports.map((item) => (
+            <div key={item.path} className={`file-row export-row${highlighted.includes(item.path) ? " selected" : ""}`}>
+              <strong>{item.path}</strong>
+              <small>{formatSize(item.size)} · {formatTime(item.mtime)}</small>
+              <span className="export-actions">
+                {native
+                  ? <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
+                  : <a className="quiet-button" href={downloadHref(item.path)}>{translate("export.download", language)}</a>}
+                <button className="quiet-button" onClick={() => void removeFile(item.path)}>{translate("export.delete", language)}</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      </>}
     </div>
   );
 }
