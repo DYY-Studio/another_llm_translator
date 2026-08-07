@@ -211,12 +211,12 @@ export default function App() {
   async function startRun(decision: RunDecision) {
     if (!project || !runOptions) return;
     setRunStarting(true);
+    setRunOptions(null);
     try {
       setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
         body: JSON.stringify({ stage: runOptions.stage, language, ...decision }),
       }));
-      setRunOptions(null);
     } catch (value) {
       setError(String(value));
       try {
