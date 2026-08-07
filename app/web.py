@@ -93,7 +93,7 @@ WEB_DIST = (
 )
 SESSION_COOKIE = "minimal_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
-_SIOCGIFADDR = 0x8915
+_SIOCGIFADDR = 0xC0206921 if sys.platform == "darwin" else 0x8915
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
     1: "unavailable",
