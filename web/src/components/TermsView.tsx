@@ -67,6 +67,7 @@ function formFor(term: Term): TermForm {
 }
 
 function matchesFilters(term: Term, query: string, onlyConflicts: boolean, showDisabled: boolean) {
+  const normalized = query.trim().toLocaleLowerCase();
   const haystack = [
     term.source,
     term.preferred_translation,
@@ -74,7 +75,7 @@ function matchesFilters(term: Term, query: string, onlyConflicts: boolean, showD
     term.description,
     ...term.aliases,
   ].filter(Boolean).join("\n").toLocaleLowerCase();
-  return (!query || haystack.includes(query))
+  return (!normalized || haystack.includes(normalized))
     && (!onlyConflicts || term.has_conflicts)
     && (showDisabled || !term.disabled);
 }
@@ -187,6 +188,15 @@ export function TermsView({
   }, [data, onlyConflicts, search, showDisabled, selection.focusedKey]);
 
   const hitsPageSize = 50;
+  function hitsUrl(normalized: string, offset: number) {
+    const params = new URLSearchParams({
+      normalized,
+      offset: String(offset),
+      limit: String(hitsPageSize),
+    });
+    return `/api/v1/projects/${project}/terms/hits?${params}`;
+  }
+
   useEffect(() => {
     const normalized = selected?.normalized ?? "";
     const requestId = ++hitsRequestRef.current;
@@ -199,12 +209,7 @@ export function TermsView({
     setHitsLoading(true);
     setHitsError("");
     setHits(null);
-    const params = new URLSearchParams({
-      normalized,
-      offset: "0",
-      limit: String(hitsPageSize),
-    });
-    void api<TermHitsResponse>(`/api/v1/projects/${project}/terms/hits?${params}`)
+    void api<TermHitsResponse>(hitsUrl(normalized, 0))
       .then((value) => {
         if (requestId === hitsRequestRef.current) setHits(value);
       })
@@ -221,12 +226,7 @@ export function TermsView({
     const normalized = selected.normalized;
     const offset = hits.hits.length;
     setHitsLoading(true);
-    const params = new URLSearchParams({
-      normalized,
-      offset: String(offset),
-      limit: String(hitsPageSize),
-    });
-    void api<TermHitsResponse>(`/api/v1/projects/${project}/terms/hits?${params}`)
+    void api<TermHitsResponse>(hitsUrl(normalized, offset))
       .then((value) => setHits((current) => (
         current && current.normalized === normalized
           ? { ...value, hits: [...current.hits, ...value.hits] }
@@ -237,9 +237,8 @@ export function TermsView({
   }
 
   const visible = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
     return (data?.terms ?? []).filter(
-      (term) => matchesFilters(term, query, onlyConflicts, showDisabled),
+      (term) => matchesFilters(term, search, onlyConflicts, showDisabled),
     );
   }, [data, onlyConflicts, search, showDisabled]);
   const visibleKeys = visible.map((term) => term.normalized);
@@ -264,12 +263,9 @@ export function TermsView({
     const focused = data?.terms.find(
       (term) => term.normalized === selection.focusedKey,
     ) ?? null;
-    if (!focused || !matchesFilters(
-      focused,
-      nextSearch.trim().toLocaleLowerCase(),
-      nextConflicts,
-      nextDisabled,
-    )) resetFilterSelection();
+    if (!focused || !matchesFilters(focused, nextSearch, nextConflicts, nextDisabled)) {
+      resetFilterSelection();
+    }
   }
 
   function focusTerm(term: Term) {
@@ -373,10 +369,7 @@ export function TermsView({
               }}
               placeholder={translate("terms.search", language)}
             />
-            <button className="quiet-button" onClick={() => {
-              selection.reset();
-              setForm(emptyForm);
-            }}>{translate("terms.new", language)}</button>
+            <button className="quiet-button" onClick={resetFilterSelection}>{translate("terms.new", language)}</button>
           </div>
           <div className="term-secondary">
             <div className="term-filters">

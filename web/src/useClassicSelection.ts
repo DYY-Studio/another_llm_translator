@@ -6,12 +6,10 @@ export interface SelectionModifiers {
   shiftKey: boolean;
 }
 
-export function useClassicSelection(initialKey = "") {
-  const [focusedKey, setFocusedKey] = useState(initialKey);
-  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
-    () => new Set(initialKey ? [initialKey] : []),
-  );
-  const [anchorKey, setAnchorKey] = useState(initialKey);
+export function useClassicSelection() {
+  const [focusedKey, setFocusedKey] = useState("");
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
+  const [anchorKey, setAnchorKey] = useState("");
 
   function select(
     key: string,

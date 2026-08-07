@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, type Language } from "../i18n";
-import type { ProjectOverview, Segment, SegmentDetail, Stage } from "../types";
+import type { ProjectOverview, Segment, SegmentDetail } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 
 interface WorkspaceCacheEntry {
@@ -54,19 +54,13 @@ export function prefetchWorkspace(project: string) {
   }
 }
 
-function resultFor(segment: Segment, stage: Stage) {
+function resultFor(segment: Segment, stage: "translation" | "proofreading" | "polishing") {
   if (stage === "translation") return segment.translation;
-  if (stage === "proofreading" || stage === "polishing") {
-    return segment.reviews[stage].suggestion;
-  }
-  return null;
+  return segment.reviews[stage].suggestion;
 }
 
-function statusFor(segment: Segment, stage: Stage) {
-  if (
-    (stage === "translation" || stage === "proofreading" || stage === "polishing")
-    && segment.stage_errors?.[stage]
-  ) return "error";
+function statusFor(segment: Segment, stage: "translation" | "proofreading" | "polishing") {
+  if (segment.stage_errors?.[stage]) return "error";
   if (stage === "translation") {
     if (!segment.translation) return "pending";
     return segment.translation.validation_status === "warning" ? "warning" : "completed";
@@ -252,15 +246,9 @@ export function SegmentWorkspace({
       if (requestId !== indexRequestRef.current) return [];
       setOrderedIds(index.segment_ids);
       setTotal(index.total);
-      if (!preserveSegmentId) {
-        resetPageCache();
-        setRecords({});
-        setFocusedDetail(null);
-        selection.reset(index.segment_ids[0] ?? "");
-        listRef.current?.scrollTo({ top: 0 });
-      } else if (!index.segment_ids.includes(preserveSegmentId)) {
-        // A save can move the focused row out of a status filter. In that
-        // case reset only the now-invalid focus; an unchanged row keeps its
+      if (!preserveSegmentId || !index.segment_ids.includes(preserveSegmentId)) {
+        // A save can move the focused row out of a filter set. In that case
+        // reset only the now-invalid focus; an unchanged row keeps its
         // window, selection, and scroll position.
         resetPageCache();
         setRecords({});
@@ -409,7 +397,7 @@ export function SegmentWorkspace({
       })
       .catch((value) => { if (active) setListError(String(value)); });
     return () => { active = false; };
-  }, [project, focusedId, showContext, file, status, normalizedSearch]);
+  }, [project, focusedId, showContext]);
 
   useLayoutEffect(() => {
     if (!selected) return;
