@@ -122,6 +122,7 @@ export function SegmentWorkspace({
   const restoredScrollTopRef = useRef<number | null>(null);
   const jumpConsumedRef = useRef(false);
   const jumpTargetRef = useRef("");
+  const jumpSearchRef = useRef("");
   const pageCacheRef = useRef(new Set<string>());
   const pageRequestsRef = useRef(new Set<string>());
   const pageGenerationRef = useRef(0);
@@ -142,12 +143,18 @@ export function SegmentWorkspace({
 
   // A term-hit jump arrives with the workspace (fresh mount): apply the
   // prefilled search and keep the target segment focused once its window
-  // loads. Consumed once per mount so re-renders and later visits never
-  // replay the navigation.
+  // loads. Cached windows from previous visits are dropped so the cache
+  // restore cannot overwrite the jump focus. Consumed once per mount so
+  // re-renders and later visits never replay the navigation.
   useEffect(() => {
     if (!pendingJump || jumpConsumedRef.current) return;
     jumpConsumedRef.current = true;
     jumpTargetRef.current = pendingJump.segmentId;
+    jumpSearchRef.current = pendingJump.search;
+    const prefix = JSON.stringify([project, stage]);
+    for (const key of [...workspaceCache.keys()]) {
+      if (key.startsWith(prefix)) workspaceCache.delete(key);
+    }
     preserveFocusRef.current = pendingJump.segmentId;
     setFile("all");
     setStatus("all");
@@ -155,7 +162,6 @@ export function SegmentWorkspace({
     selection.reset(pendingJump.segmentId);
     onJumpConsumed?.();
   }, [pendingJump]);
-
   const normalizedSearch = search.trim();
   const query = new URLSearchParams({ stage });
   if (file !== "all") query.set("file_id", file);
@@ -205,7 +211,9 @@ export function SegmentWorkspace({
     if (activePageQueryRef.current === pageQueryKey) return;
     activePageQueryRef.current = pageQueryKey;
     resetPageCache();
-    preserveFocusRef.current = "";
+    // A term-hit jump keeps its target focus while the jump query loads;
+    // only ordinary filter changes drop the previous focus.
+    if (!jumpTargetRef.current) preserveFocusRef.current = "";
   }, [pageQueryKey, resetPageCache]);
 
   useLayoutEffect(() => {
@@ -290,15 +298,20 @@ export function SegmentWorkspace({
   // segment. The search is prefilled with the term source, so the segment is
   // normally in the index; if it is not (normalization-only hits), the
   // prefilled list still narrows the view and the first row stays focused.
+  // Only the jump query's own index may consume the target: an earlier
+  // unfiltered index would consume it and leave later cache restores (which
+  // re-focus the cached row) without a corrective reset.
   useEffect(() => {
     const target = jumpTargetRef.current;
     if (!target) return;
+    if (normalizedSearch !== jumpSearchRef.current) return;
     const index = orderedIds.indexOf(target);
     if (index < 0) return;
     jumpTargetRef.current = "";
+    jumpSearchRef.current = "";
     selection.reset(target);
     virtualizer.scrollToIndex(index, { align: "auto" });
-  }, [orderedIds]);
+  }, [orderedIds, normalizedSearch]);
 
   useEffect(() => {
     if (indexInFlightRef.current) return;
