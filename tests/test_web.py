@@ -1133,6 +1133,210 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
     assert client.get("/api/v1/projects/sample/terms").json()["scan"]["status"] == "partial_published"
 
 
+def _seed_terms(project: Path, terms: list[dict]) -> None:
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-HITS",
+            terms_revision=1,
+            terms=terms,
+        ),
+    )
+
+
+def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path, "Alice walks alone\nBob sleeps\nAlice sings Alice"
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-1",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": "人物",
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    first = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice", "offset": 0, "limit": 1},
+    )
+    assert first.status_code == 200
+    payload = first.json()
+    assert payload["source"] == "Alice"
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == ["F0001-S000001"]
+    assert payload["hits"][0]["source"] == "Alice walks alone"
+
+    second = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice", "offset": 1, "limit": 1},
+    )
+    assert second.status_code == 200
+    assert second.json()["total"] == 2
+    assert [item["segment_id"] for item in second.json()["hits"]] == [
+        "F0001-S000003"
+    ]
+    assert second.json()["hits"][0]["source"] == "Alice sings Alice"
+
+
+def test_web_terms_hits_match_aliases_and_exclude_conflicted_aliases(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path, "A walks\nAli sings\nAlice talks")
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-2",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": ["A", "Ali"],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [
+                        {"alias": "A", "primary_source": "Alpha"}
+                    ],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice"},
+    ).json()
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == [
+        "F0001-S000002",
+        "F0001-S000003",
+    ]
+
+
+def test_web_terms_hits_apply_casefold_and_unicode_normalization(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(
+        tmp_path, "alice writes\nＡｌｉｃｅ speaks\nbob listens"
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-3",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice"},
+    ).json()
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == [
+        "F0001-S000001",
+        "F0001-S000002",
+    ]
+
+
+def test_web_terms_hits_cover_disabled_terms_and_validate_parameters(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path, "Alpha first\nBeta second")
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-4",
+                "source": "Alpha",
+                "normalized": "alpha",
+                "category": None,
+                "description": None,
+                "preferred_translation": "阿尔法",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    write_json(
+        project,
+        project / "terminology" / "overrides.json",
+        record_header(
+            "terminology_overrides",
+            str(read_json(project, project / "project.json")["project_id"]),
+            record_id="OVR-HITS",
+            overrides=[{"normalized": "alpha", "source": "Alpha", "disabled": True}],
+        ),
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    assert (
+        client.get("/api/v1/projects/sample/terms").json()["terms"][0]["disabled"]
+        is True
+    )
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alpha"},
+    )
+    assert payload.status_code == 200
+    assert payload.json()["total"] == 1
+    assert payload.json()["hits"][0]["segment_id"] == "F0001-S000001"
+
+    missing = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "nope"},
+    )
+    assert missing.status_code == 400
+    assert "术语不存在" in missing.json()["error"]
+
+    no_term = client.get("/api/v1/projects/sample/terms/hits")
+    assert no_term.status_code == 400
+
+    invalid = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alpha", "offset": -1},
+    )
+    assert invalid.status_code == 400
+    assert "窗口参数无效" in invalid.json()["error"]
+
+
 def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     store = WebStore(project)

@@ -19,6 +19,7 @@ from .sqlite_storage import (
     query_segments,
     read_json,
     read_jsonl,
+    read_segment_sources,
     record_exists,
     record_header,
     segment_count,
@@ -28,6 +29,7 @@ from .sqlite_storage import (
 from .stages import (
     build_term_library_rows,
     load_terms,
+    match_terms,
     normalize_term,
     prompt_middle_digests,
     term_normalization,
@@ -672,6 +674,43 @@ class WebStore:
             "conflict_count": sum(bool(item["has_conflicts"]) for item in rows),
             "terms": rows,
             "scan": self.terminology_scan(),
+        }
+
+    def term_hits(
+        self,
+        normalized: str,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if offset < 0 or limit < 1 or limit > 500:
+            raise UsageError("术语命中窗口参数无效")
+        term = next(
+            (
+                item
+                for item in self.terms()["terms"]
+                if item["normalized"] == normalized
+            ),
+            None,
+        )
+        if term is None:
+            raise UsageError(f"术语不存在：{normalized}")
+        spec = term_normalization(self.config)
+        library = {"terms": [term]}
+        hits = [
+            segment
+            for segment in read_segment_sources(self.project)
+            if match_terms(
+                segment["source"], library=library, limit=1, spec=spec
+            )
+        ]
+        return {
+            "normalized": normalized,
+            "source": term["source"],
+            "total": len(hits),
+            "offset": offset,
+            "limit": limit,
+            "hits": hits[offset : offset + limit],
         }
 
     @staticmethod
