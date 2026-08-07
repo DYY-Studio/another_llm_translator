@@ -163,6 +163,15 @@ def test_server_config_validation_and_password_flow(
     )
     assert no_password.status_code == 400
 
+    all_interfaces = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": True, "bind_address": "0.0.0.0"},
+            "auth": {"required": False, "username": ""},
+        },
+    )
+    assert all_interfaces.status_code == 200
+
     saved = client.put(
         "/api/v1/server/config",
         json={

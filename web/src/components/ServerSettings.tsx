@@ -120,7 +120,8 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
               <label className="config-field">{translate("server.interface", language)}
                 <select value={bindAddress} onChange={(event) => setBindAddress(event.target.value)}>
                   <option value="">{translate("server.selectInterface", language)}</option>
-                  {bindAddress && !interfaces.some((item) => item.address === bindAddress) && <option value={bindAddress}>{bindAddress}</option>}
+                  <option value="0.0.0.0">0.0.0.0 · {translate("server.allInterfaces", language)}</option>
+                  {bindAddress && !interfaces.some((item) => item.address === bindAddress) && bindAddress !== "0.0.0.0" && <option value={bindAddress}>{bindAddress}</option>}
                   {interfaces.map((item) => <option key={item.address} value={item.address}>{item.name} · {item.address}</option>)}
                 </select>
               </label>
