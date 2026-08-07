@@ -1630,11 +1630,13 @@ FakeKeyring 隔离，绝不触碰真实钥匙串。
 ### 局域网共享与认证
 
 服务器配置保存在用户根 `server.toml`：`lan.enabled`、`lan.bind_address` 与
-`auth.required`、`auth.username`。默认只监听回环。CLI Web 模式省略 `--host` 时
-按 server.toml 绑定（未启用则 `127.0.0.1`）；桌面模式 sidecar 常驻
-`0.0.0.0`，由中间件守卫：非回环客户端在未启用共享时返回 `local_only` 403，
-启用共享且开启认证但未登录时返回 `auth_required` 401。绑定地址必须是本机
-可用的非回环接口地址（`/api/v1/server/interfaces` 枚举）。
+`auth.required`、`auth.username`。默认只允许本机回环访问。CLI 与桌面模式统一
+监听 `0.0.0.0`，由中间件按请求守卫：非回环客户端在未启用共享时返回
+`local_only` 403；启用共享后只放行所选接口网段内的客户端（`0.0.0.0` 表示
+全部网段），网段外返回 `out_of_subnet` 403，本机回环始终可用；启用共享且
+开启认证但未登录时返回 `auth_required` 401。绑定地址必须是本机可用的非回环
+接口地址或 `0.0.0.0`（`/api/v1/server/interfaces` 用 psutil 枚举启用的接口，
+含 netmask），保存后即时生效，无需重启。
 
 开启认证后使用长期用户名与密码，密码存入系统钥匙串；登录成功签发 HttpOnly、
 SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停止共享后全部

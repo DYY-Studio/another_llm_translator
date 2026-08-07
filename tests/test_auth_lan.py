@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.server_config import save_server_config
 from app.credentials import save_lan_password
-from app.user_config import user_root
+from app.server_config import load_server_config, save_server_config
 from app.web import create_app
 from tests.conftest import FakeKeyring
 
 LAN = ("192.168.1.10", 12345)
 LOOPBACK = ("127.0.0.1", 12345)
+
+FIXED_INTERFACES = [
+    {"name": "en0", "address": "192.168.1.5", "netmask": "255.255.255.0"}
+]
+
+
+@pytest.fixture(autouse=True)
+def fixed_interfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.web.lan_interfaces", lambda: FIXED_INTERFACES)
 
 
 def make_client(
@@ -206,3 +215,38 @@ def test_lan_auth_uses_username_from_config(fake_keyring: FakeKeyring) -> None:
         json={"username": "other", "password": "x"},
     )
     assert wrong_user.status_code == 400
+
+
+def test_lan_client_on_selected_subnet_allowed() -> None:
+    client = make_client(server_config=lan_config(), client=("192.168.1.20", 1234))
+    assert client.get("/api/v1/projects").status_code == 200
+
+
+def test_lan_client_outside_selected_subnet_blocked() -> None:
+    client = make_client(server_config=lan_config(), client=("10.0.0.7", 1234))
+    response = client.get("/api/v1/projects")
+    assert response.status_code == 403
+    assert response.json()["code"] == "out_of_subnet"
+
+
+def test_lan_all_interfaces_accepts_any_client() -> None:
+    client = make_client(
+        server_config=lan_config(lan={"bind_address": "0.0.0.0"}),
+        client=("10.0.0.7", 1234),
+    )
+    assert client.get("/api/v1/projects").status_code == 200
+
+
+def test_loopback_allowed_when_interface_selected() -> None:
+    client = make_client(server_config=lan_config(), client=LOOPBACK)
+    assert client.get("/api/v1/projects").status_code == 200
+
+
+def test_server_config_toml_round_trip_preserves_bools() -> None:
+    config = lan_config(auth={"required": True, "username": "me"})
+    save_server_config(config)
+    loaded = load_server_config()
+    assert loaded["lan"]["enabled"] is True
+    assert loaded["lan"]["bind_address"] == "192.168.1.5"
+    assert loaded["auth"]["required"] is True
+    assert loaded["auth"]["username"] == "me"
