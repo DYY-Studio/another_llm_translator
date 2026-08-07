@@ -220,6 +220,7 @@ function PresetSettings({ language }: { language: Language }) {
   const [modelsError, setModelsError] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [keychainCredentials, setKeychainCredentials] = useState<CredentialSummary[]>([]);
 
   async function loadLists(preferred?: string | null) {
     const [presetResponse, adapterResponse] = await Promise.all([
@@ -234,6 +235,11 @@ function PresetSettings({ language }: { language: Language }) {
   }
 
   useEffect(() => { void loadLists().catch((reason) => setError(errorMessage(reason, language))); }, []);
+  useEffect(() => {
+    void api<{ credentials: CredentialSummary[] }>("/api/v1/credentials")
+      .then((value) => setKeychainCredentials(value.credentials))
+      .catch((reason) => setError(errorMessage(reason, language)));
+  }, []);
   useEffect(() => {
     if (!selected) return;
     let active = true;
@@ -341,7 +347,16 @@ function PresetSettings({ language }: { language: Language }) {
                     <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
                     <option value="keychain">{translate("preset.credentialKeychain", language)}</option>
                   </select>
-                  <input value={preset.credential.name} placeholder={preset.credential.kind === "environment" ? "OPENAI_API_KEY" : "openai-main"} onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })} />
+                  {preset.credential.kind === "environment" ? (
+                    <input value={preset.credential.name} placeholder="OPENAI_API_KEY" onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })} />
+                  ) : keychainCredentials.length === 0 && !preset.credential.name ? (
+                    <select value="" disabled aria-label={translate("preset.credentialKeychain", language)}><option value="">{translate("credentials.empty", language)}</option></select>
+                  ) : (
+                    <select value={preset.credential.name} onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })}>
+                      {preset.credential.name && !keychainCredentials.some((item) => item.id === preset.credential.name) && <option value={preset.credential.name}>{preset.credential.name} {translate("preset.credentialCurrent", language)}</option>}
+                      {keychainCredentials.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+                    </select>
+                  )}
                 </div>
               </Field>
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
