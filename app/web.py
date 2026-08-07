@@ -909,7 +909,7 @@ def create_app(
         bind_address = lan.get("bind_address")
         if not isinstance(enabled, bool) or not isinstance(bind_address, str):
             raise UsageError("lan.enabled 必须是布尔值，lan.bind_address 必须是字符串")
-        if bind_address:
+        if bind_address and bind_address != "0.0.0.0":
             addresses = {item["address"] for item in lan_interfaces()}
             if bind_address not in addresses:
                 raise UsageError("lan.bind_address 必须是本机可用的非回环接口地址")
