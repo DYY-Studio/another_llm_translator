@@ -4,6 +4,7 @@ import { api } from "../api";
 import { translate, type Language } from "../i18n";
 import type { ProjectOverview, Segment, SegmentDetail } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
+import { Modal } from "./Modal";
 
 interface WorkspaceCacheEntry {
   orderedIds: string[];
@@ -694,36 +695,34 @@ function BatchActionDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={kind === "apply" ? translate("workspace.batchApply", language) : translate("workspace.batchClear", language)}>
-        <h2>{kind === "apply" ? translate("workspace.batchApplyTitle", language, { stage: reviewLabel }) : translate("workspace.batchClearTitle", language)}</h2>
-        <p>{translate("workspace.batchScopeCount", language, { count })}</p>
-        {kind === "reset" ? (
-          <p>
-            {stage === "translation"
-              ? translate("workspace.batchResetTranslation", language)
-              : translate("workspace.batchResetReview", language, { stage: reviewLabel })}
-          </p>
-        ) : (
-          <>
-            {!!missing && <div className="warning-banner">{translate("workspace.batchMissing", language, { count: missing })}</div>}
-            {!!outdated && (
-              <label className="check-row">
-                <input type="checkbox" checked={allowOutdated} onChange={(event) => setAllowOutdated(event.target.checked)} />
-                {translate("workspace.batchAllowOutdated", language, { count: outdated })}
-              </label>
-            )}
-          </>
-        )}
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>
-          <button className={kind === "reset" ? "danger-button" : "primary-button"} disabled={working || blocked || !count} onClick={confirm}>
-            {kind === "reset" ? translate("workspace.batchConfirmClear", language) : translate("workspace.batchConfirmApply", language)}
-          </button>
-        </div>
+    <Modal ariaLabel={kind === "apply" ? translate("workspace.batchApply", language) : translate("workspace.batchClear", language)}>
+      <h2>{kind === "apply" ? translate("workspace.batchApplyTitle", language, { stage: reviewLabel }) : translate("workspace.batchClearTitle", language)}</h2>
+      <p>{translate("workspace.batchScopeCount", language, { count })}</p>
+      {kind === "reset" ? (
+        <p>
+          {stage === "translation"
+            ? translate("workspace.batchResetTranslation", language)
+            : translate("workspace.batchResetReview", language, { stage: reviewLabel })}
+        </p>
+      ) : (
+        <>
+          {!!missing && <div className="warning-banner">{translate("workspace.batchMissing", language, { count: missing })}</div>}
+          {!!outdated && (
+            <label className="check-row">
+              <input type="checkbox" checked={allowOutdated} onChange={(event) => setAllowOutdated(event.target.checked)} />
+              {translate("workspace.batchAllowOutdated", language, { count: outdated })}
+            </label>
+          )}
+        </>
+      )}
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>
+        <button className={kind === "reset" ? "danger-button" : "primary-button"} disabled={working || blocked || !count} onClick={confirm}>
+          {kind === "reset" ? translate("workspace.batchConfirmClear", language) : translate("workspace.batchConfirmApply", language)}
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
