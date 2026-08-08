@@ -606,7 +606,7 @@ export function ExportView({
   }
 
   return (
-    <div className="page narrow-page export-page">
+    <div className="page export-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
       <div className="dialog-tabs" role="tablist" aria-label={translate("export.title", language)}>
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
