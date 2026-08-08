@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib.metadata import entry_points
+from typing import Any
 
-from .documents import DocumentAdapter, DocumentChoiceOption
-from .errors import ConfigError, UsageError
-
+from .documents import DocumentAdapter, DocumentChoiceOption, normalize_document_output
+from .errors import ConfigError, ProjectError, UsageError
 
 PLUGIN_PROTOCOL_VERSION = 5
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
@@ -154,6 +154,25 @@ def get_document_adapter(adapter_id: str) -> DocumentAdapter:
             if adapter.adapter_id == adapter_id:
                 return adapter
     raise UsageError(f"未安装 Document Adapter：{adapter_id}")
+
+
+def normalize_model_text(
+    files: list[dict[str, Any]],
+    segment: dict[str, Any],
+    text: str,
+    stage: str,
+) -> str:
+    """Normalize model output through the segment's document adapter."""
+    file_id = str(segment["file_id"])
+    file_record = next(
+        (item for item in files if str(item["file_id"]) == file_id), None
+    )
+    if file_record is None:
+        raise ProjectError(f"模型文本引用了未知文件：{file_id}")
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+    return normalize_document_output(
+        adapter, segment=segment, text=text, stage=stage
+    )
 
 
 def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:

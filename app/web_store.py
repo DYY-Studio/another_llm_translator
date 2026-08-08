@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
-from .documents import normalize_document_output
 from .errors import UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
+from .plugins import normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
@@ -92,21 +92,6 @@ class WebStore:
         if segment is None or segment.get("is_empty"):
             raise UsageError(f"未知或空 Segment：{segment_id}")
         return segment
-
-    def _normalize_text(
-        self, segment: dict[str, Any], text: str, stage: str
-    ) -> str:
-        file_record = next(
-            item
-            for item in self.files
-            if str(item["file_id"]) == str(segment["file_id"])
-        )
-        from .plugins import get_document_adapter
-
-        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-        return normalize_document_output(
-            adapter, segment=segment, text=text, stage=stage
-        )
 
     def _base_results(
         self, stage: str, segment_ids_filter: list[str] | None = None
@@ -466,7 +451,7 @@ class WebStore:
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
         segment = self._require_segment(segment_id)
-        text = self._normalize_text(segment, text, "translation")
+        text = normalize_model_text(self.files, segment, text, "translation")
         findings = validate_translation_text(
             text, self.config["validation"]["translation"]
         )
@@ -508,8 +493,11 @@ class WebStore:
         if review_status == "suggested":
             if not isinstance(suggested_text, str) or not suggested_text:
                 raise UsageError("suggested 状态需要非空建议文本")
-            suggested_text = self._normalize_text(
-                self._require_segment(segment_id), suggested_text, str(stage)
+            suggested_text = normalize_model_text(
+                self.files,
+                self._require_segment(segment_id),
+                suggested_text,
+                str(stage),
             )
         else:
             suggested_text = None
