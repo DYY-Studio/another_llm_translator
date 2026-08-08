@@ -21,7 +21,6 @@ playwright-report/
 # Local secrets
 .env
 .env.*
-!.env.example
 
 # Runtime project data
 /projects/
