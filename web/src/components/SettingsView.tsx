@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
@@ -619,5 +619,3 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   }
   return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div><label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label><label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /><div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div></section>;
 }
-
-function errorMessage(reason: unknown, language: Language): string { return reason instanceof Error ? reason.message : translate("common.requestFailed", language); }

@@ -1154,6 +1154,10 @@ export function translateError(
   );
 }
 
+export function errorMessage(reason: unknown, language: Language): string {
+  return reason instanceof Error ? reason.message : translate("common.requestFailed", language);
+}
+
 export function detectLanguage(): Language {
   try {
     const value = window.localStorage.getItem("minimal-llm-translator.language.v1");
