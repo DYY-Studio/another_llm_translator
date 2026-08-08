@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import codecs
 import json
-import sys
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -11,17 +10,9 @@ from typing import Any
 from .errors import ConfigError
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
-from .user_config import effective_path
+from .user_config import APP_ROOT, effective_path
 
-
-_SOURCE_ROOT = Path(__file__).resolve().parents[1]
-APP_ROOT = (
-    _SOURCE_ROOT
-    if (_SOURCE_ROOT / "config" / "config.toml").is_file()
-    else Path(sys.prefix)
-)
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
-
 
 SCHEMA: dict[str, Any] = {
     "project": {"target_language": None, "output_encoding": None},

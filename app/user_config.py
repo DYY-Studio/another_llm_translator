@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
-BUILTIN_ROOT = (
+APP_ROOT = BUILTIN_ROOT = (
     SOURCE_ROOT
     if (SOURCE_ROOT / "config" / "config.toml").is_file()
     else Path(sys.prefix)
