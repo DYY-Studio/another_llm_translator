@@ -18,6 +18,7 @@ from .execution import (
     stage_fingerprint,
     unavailable_usage,
 )
+from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .project import load_segments
 from .stages import (
@@ -40,12 +41,10 @@ from .sqlite_storage import (
 def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
     return {
         "model": str(config["llm"]["model"]),
-        "endpoint": (
-            str(config["llm"]["base_url"]).rstrip("/")
-            + "/"
-            + str(config["llm"]["endpoint"])
-            .replace("${model}", str(config["llm"]["model"]))
-            .lstrip("/")
+        "endpoint": endpoint_url(
+            config["llm"]["base_url"],
+            config["llm"]["endpoint"],
+            model=config["llm"]["model"],
         ),
     }
 

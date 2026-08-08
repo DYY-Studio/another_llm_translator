@@ -51,7 +51,7 @@ from .errors import (
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
-from .llm_preset import LLMPreset, load_llm_preset, preset_path
+from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .logging_utils import get_logger
 from .plugins import (
@@ -825,12 +825,10 @@ def create_app(
             extra_body=preset.definition["extra_body"],
         )
         return {
-            "url": (
-                str(preset.definition["base_url"]).rstrip("/")
-                + "/"
-                + str(preset.definition["endpoint"])
-                .replace("${model}", str(preset.definition["model"]))
-                .lstrip("/")
+            "url": endpoint_url(
+                preset.definition["base_url"],
+                preset.definition["endpoint"],
+                model=preset.definition["model"],
             ),
             "headers": headers,
             "body": body,
@@ -850,10 +848,8 @@ def create_app(
             raise UsageError("该 Adapter 未声明模型发现规格")
         api_key = resolve_api_key(preset.definition["credential"])
         endpoint, headers = adapter.build_models_request(api_key=api_key)
-        url = (
-            str(preset.definition["base_url"]).rstrip("/")
-            + "/"
-            + endpoint.lstrip("/")
+        url = endpoint_url(
+            preset.definition["base_url"], endpoint, model=preset.definition["model"]
         )
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = str(preset.definition["proxy_url"]) or None

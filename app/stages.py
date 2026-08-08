@@ -22,7 +22,6 @@ import httpx
 from .config import load_project_config
 from .documents import (
     DocumentExportJob,
-    normalize_document_output,
     publish_document_exports,
 )
 from .errors import (
@@ -31,7 +30,6 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
-    ProjectError,
     RequestSizeError,
     StorageError,
     UsageError,
@@ -72,7 +70,7 @@ from .project import (
     load_source_files,
     prompt_file,
 )
-from .plugins import get_document_adapter
+from .plugins import get_document_adapter, normalize_model_text
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
@@ -90,24 +88,6 @@ JAPANESE_RE = re.compile(
     "\U0001b130-\U0001b16f\U0001aff0-\U0001afff]"
 )
 KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
-
-
-def _normalize_model_text(
-    files: list[dict[str, Any]],
-    segment: dict[str, Any],
-    text: str,
-    stage: str,
-) -> str:
-    file_id = str(segment["file_id"])
-    file_record = next(
-        (item for item in files if str(item["file_id"]) == file_id), None
-    )
-    if file_record is None:
-        raise ProjectError(f"模型文本引用了未知文件：{file_id}")
-    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-    return normalize_document_output(
-        adapter, segment=segment, text=text, stage=stage
-    )
 
 
 def _project_context(
@@ -2771,7 +2751,7 @@ async def run_translation(
     async def accept_candidate(
         segment_id: str, text: str, request_id: str
     ) -> None:
-        text = _normalize_model_text(
+        text = normalize_model_text(
             files, by_id[segment_id], str(text), "translation"
         )
         original_id = part_original.get(segment_id)
@@ -3459,7 +3439,7 @@ async def run_review(
             if parsed is not None:
                 suggested_text = parsed["suggested_text"]
                 if suggested_text is not None:
-                    suggested_text = _normalize_model_text(
+                    suggested_text = normalize_model_text(
                         files,
                         by_id[segment_id],
                         str(suggested_text),

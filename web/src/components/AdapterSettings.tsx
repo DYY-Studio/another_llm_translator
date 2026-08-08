@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 
 interface AdapterRow {
   adapter_id: string;
@@ -96,5 +96,3 @@ export function AdapterSettings({ language }: { language: Language }) {
     </div>
   );
 }
-
-function errorMessage(reason: unknown, language: Language): string { return reason instanceof Error ? reason.message : translate("common.requestFailed", language); }

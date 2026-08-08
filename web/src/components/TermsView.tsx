@@ -3,6 +3,7 @@ import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
 import type { Term, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
+import { Modal } from "./Modal";
 
 interface TermForm {
   source: string;
@@ -642,16 +643,14 @@ function ConfirmDialog({
 }) {
   const effectiveConfirmLabel = confirmLabel ?? translate("terms.confirmRemoval", language);
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
-        <p>{text}</p>
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
-          <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
-        </div>
+    <Modal ariaLabel={title}>
+      <h2>{title}</h2>
+      <p>{text}</p>
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
+        <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -689,18 +688,16 @@ function TermImportDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.importDialogTitle", language)}>
-        <h2>{translate("terms.importDialogTitle", language)}</h2>
-        <p>{translate("terms.importHint", language)}</p>
-        <label>{translate("terms.termFile", language)}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={saving} onClick={onClose}>{translate("common.cancel", language)}</button>
-          <button className="primary-button" disabled={saving || !file} onClick={submit}>{translate("terms.import", language)}</button>
-        </div>
+    <Modal ariaLabel={translate("terms.importDialogTitle", language)}>
+      <h2>{translate("terms.importDialogTitle", language)}</h2>
+      <p>{translate("terms.importHint", language)}</p>
+      <label>{translate("terms.termFile", language)}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={saving} onClick={onClose}>{translate("common.cancel", language)}</button>
+        <button className="primary-button" disabled={saving || !file} onClick={submit}>{translate("terms.import", language)}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -748,19 +745,17 @@ function TermExportDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.exportDialogTitle", language)}>
-        <h2>{translate("terms.exportDialogTitle", language)}</h2>
-        <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
-        <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
-        <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
-          <button className="primary-button" onClick={download}>{translate("terms.download", language)}</button>
-        </div>
+    <Modal ariaLabel={translate("terms.exportDialogTitle", language)}>
+      <h2>{translate("terms.exportDialogTitle", language)}</h2>
+      <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
+      <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+      <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions">
+        <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+        <button className="primary-button" onClick={download}>{translate("terms.download", language)}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import contextvars
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 LOGGER_NAME = "minimal_llm_translator"
 _HANDLER_MARKER = "_minimal_llm_translator_handler"
+_PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "diagnostics_project", default="-"
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class _StageFormatter(logging.Formatter):
@@ -14,6 +24,31 @@ class _StageFormatter(logging.Formatter):
         if not hasattr(record, "stage"):
             record.stage = "cli"
         return super().format(record)
+
+
+class _ContextFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "stage"):
+            record.stage = "app"
+        record.project = _PROJECT.get()
+        return True
+
+
+class _MemoryHandler(logging.Handler):
+    def __init__(self, sink: Any) -> None:
+        super().__init__(logging.INFO)
+        self.sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.sink.logs.append(
+            {
+                "timestamp": _now(),
+                "level": record.levelname,
+                "project": str(getattr(record, "project", "-")),
+                "stage": str(getattr(record, "stage", "app")),
+                "message": record.getMessage()[:2000],
+            }
+        )
 
 
 def get_logger(stage: str = "cli") -> logging.LoggerAdapter:

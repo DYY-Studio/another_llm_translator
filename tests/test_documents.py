@@ -19,10 +19,11 @@ from app.plugins import (
     get_document_adapter_for_extension,
     get_document_adapter,
     load_plugins,
+    normalize_model_text,
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project
-from app.stages import _normalize_model_text, export_project
+from app.stages import export_project
 from app.sqlite_storage import (
     append_jsonl,
     read_files,
@@ -1239,7 +1240,7 @@ def test_plugin_host_rejects_invalid_choice_option(
 
 def test_normalize_model_text_rejects_unknown_file_reference() -> None:
     with pytest.raises(ProjectError, match="未知文件"):
-        _normalize_model_text(
+        normalize_model_text(
             files=[],
             segment={"file_id": "missing"},
             text="模型输出",

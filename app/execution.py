@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
+from .llm_preset import endpoint_url
 from .credentials import resolve_api_key
 from .i18n import SUPPORTED_LANGUAGES
 from .diagnostics import current_diagnostics
@@ -1377,12 +1378,10 @@ class LLMClient:
             stream=False,
             extra_body=self.config.get("_llm_extra_body"),
         )
-        url = (
-            self.config["llm"]["base_url"].rstrip("/")
-            + "/"
-            + str(self.config["llm"]["endpoint"])
-            .replace("${model}", str(self.config["llm"]["model"]))
-            .lstrip("/")
+        url = endpoint_url(
+            self.config["llm"]["base_url"],
+            self.config["llm"]["endpoint"],
+            model=self.config["llm"]["model"],
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
         diagnostics = current_diagnostics()

@@ -6,30 +6,29 @@ import logging
 import time
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Iterator
 
-from .logging_utils import LOGGER_NAME
+from .logging_utils import (
+    LOGGER_NAME,
+    _ContextFilter,
+    _HANDLER_MARKER,
+    _MemoryHandler,
+    _PROJECT,
+    _now,
+    _remove_handler,
+)
 
 
 _ACTIVE: contextvars.ContextVar[Diagnostics | None] = contextvars.ContextVar(
     "diagnostics", default=None
 )
-_PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "diagnostics_project", default="-"
-)
-_HANDLER_MARKER = "_minimal_llm_translator_handler"
 _LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _REQUEST_LIMIT = 50
 _MESSAGE_LIMIT = 100_000
 _CONTENT_LIMIT = 100_000
 _REASONING_LIMIT = 20_000
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def current_diagnostics() -> Diagnostics | None:
@@ -38,31 +37,6 @@ def current_diagnostics() -> Diagnostics | None:
 
 def _bounded(value: str, limit: int) -> tuple[str, bool]:
     return value[:limit], len(value) > limit
-
-
-class _ContextFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "stage"):
-            record.stage = "app"
-        record.project = _PROJECT.get()
-        return True
-
-
-class _MemoryHandler(logging.Handler):
-    def __init__(self, diagnostics: Diagnostics) -> None:
-        super().__init__(logging.INFO)
-        self.diagnostics = diagnostics
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.diagnostics.logs.append(
-            {
-                "timestamp": _now(),
-                "level": record.levelname,
-                "project": str(getattr(record, "project", "-")),
-                "stage": str(getattr(record, "stage", "app")),
-                "message": record.getMessage()[:2000],
-            }
-        )
 
 
 class Diagnostics:
@@ -88,13 +62,8 @@ class Diagnostics:
         logger = logging.getLogger(LOGGER_NAME)
         logger.setLevel(logging.INFO)
         logger.propagate = False
-        for handler in list(logger.handlers):
-            if getattr(handler, _HANDLER_MARKER, None) in {
-                "web-global",
-                "web-memory",
-            }:
-                logger.removeHandler(handler)
-                handler.close()
+        for kind in ("web-global", "web-memory"):
+            _remove_handler(kind)
         context_filter = _ContextFilter()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         disk = RotatingFileHandler(

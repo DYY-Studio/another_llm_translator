@@ -201,6 +201,16 @@ def parse_adapter_option_args(values: list[str]) -> dict[str, dict[str, str]]:
     return resolved
 
 
+def _resolve_project(args: argparse.Namespace) -> Path:
+    project = resolve_project(args.project)
+    attach_project_log(project)
+    return project
+
+
+def emit_summary(summary: dict[str, Any]) -> None:
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def run(argv: list[str] | None = None) -> int:
     configure_cli_logging()
     logger = get_logger()
@@ -239,12 +249,11 @@ def run(argv: list[str] | None = None) -> int:
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info("command complete command=init")
         return 0
     if args.command == "files-add":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = add_project_files(
                 project,
@@ -259,7 +268,7 @@ def run(argv: list[str] | None = None) -> int:
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=files-add files=%d segments=%d",
             summary["added_files"],
@@ -267,11 +276,10 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "files-remove":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = remove_project_files(project, args.file_ids)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=files-remove files=%d segments=%d",
             summary["removed_files"],
@@ -279,14 +287,13 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "inspect":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
         summary = inspect_full(project, dry_run=args.dry_run)
         summary["warnings"] = warnings
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=inspect files=%d segments=%d",
             summary["files"],
@@ -300,8 +307,7 @@ def run(argv: list[str] | None = None) -> int:
         "polish",
         "run-all",
     }:
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -391,7 +397,7 @@ def run(argv: list[str] | None = None) -> int:
         for warning in summary["warnings"]:
             if warning not in warnings and warning not in run_warnings:
                 logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=%s completed=%s failed=%s pending=%s",
             args.command,
@@ -401,8 +407,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 5 if summary.get("failed") or summary.get("pending") else 0
     if args.command == "apply":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -424,7 +429,7 @@ def run(argv: list[str] | None = None) -> int:
         for warning in summary["warnings"]:
             if warning not in warnings:
                 logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=apply stage=%s completed=%d",
             args.stage,
@@ -432,8 +437,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "export":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -447,7 +451,7 @@ def run(argv: list[str] | None = None) -> int:
                 file_ids=args.file_ids,
             )
         summary["warnings"] = warnings
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=export stage=%s files=%d",
             args.stage,
@@ -455,8 +459,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "terms-import":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         lock = nullcontext() if args.dry_run else project_write_lock(project)
         with lock:
@@ -466,25 +469,23 @@ def run(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
             )
         summary["warnings"] = [*warnings, *summary["warnings"]]
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
     if args.command == "terms-export":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         summary = export_terms(
             project,
             Path(args.output),
             include_disabled=args.include_disabled,
             source=args.source,
         )
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
     if args.command == "terms-publish-partial":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = publish_partial_terms(project)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
 
 

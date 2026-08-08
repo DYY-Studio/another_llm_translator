@@ -16,7 +16,7 @@ import chardet
 from .config import LLM_STAGES, load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
-from .user_config import effective_path, user_root
+from .user_config import APP_ROOT, effective_path, user_root
 from .sqlite_storage import (
     database_path,
     initialize as initialize_project_database,
@@ -31,12 +31,6 @@ from .sqlite_storage import (
     write_json,
 )
 
-_SOURCE_ROOT = Path(__file__).resolve().parents[1]
-APP_ROOT = (
-    _SOURCE_ROOT
-    if (_SOURCE_ROOT / "config" / "config.toml").is_file()
-    else Path(sys.prefix)
-)
 PROJECTS_ROOT = user_root() / "projects"
 PROMPT_LANGUAGES = ("zh-CN", "en")
 
