@@ -606,7 +606,7 @@ export function ExportView({
   }
 
   return (
-    <div className={`page narrow-page export-page${tab === "browse" ? " browse-active" : ""}`}>
+    <div className="page export-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
       <div className="dialog-tabs" role="tablist" aria-label={translate("export.title", language)}>
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
@@ -614,34 +614,40 @@ export function ExportView({
       </div>
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
       {tab === "export" ? <>
-        <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
-        <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
-        <div className="export-file-heading">
-          <div>
-            <strong>{translate("export.fileScope", language)}</strong>
-            <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
+        <div className="export-workspace">
+          <div className="export-form-col">
+            <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
+            <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
+            <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
+            <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+            {message && (
+              <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
+            )}
           </div>
-          <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
+          <div className="export-select-col">
+            <div className="export-file-heading">
+              <div>
+                <strong>{translate("export.fileScope", language)}</strong>
+                <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
+              </div>
+              <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
+            </div>
+            <input className="export-filter" value={selectionFilter} onChange={(event) => setSelectionFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
+            <div className="file-list export-file-list">
+              {!filteredSourceFiles.length && selectionFilter && <p className="export-empty">{translate("export.noMatch", language)}</p>}
+              {filteredSourceFiles.map((item) => (
+                <button
+                  type="button"
+                  key={item.file_id}
+                  className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
+                  onClick={(event) => selection.select(item.file_id, fileIds, event)}
+                >
+                  <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
-        <input className="export-filter" value={selectionFilter} onChange={(event) => setSelectionFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
-        <div className="file-list export-file-list">
-          {!filteredSourceFiles.length && selectionFilter && <p className="export-empty">{translate("export.noMatch", language)}</p>}
-          {filteredSourceFiles.map((item) => (
-            <button
-              type="button"
-              key={item.file_id}
-              className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
-              onClick={(event) => selection.select(item.file_id, fileIds, event)}
-            >
-              <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-            </button>
-          ))}
-        </div>
-        <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
-        <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
-        {message && (
-          <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
-        )}
       </> : <>
         <div className="export-file-heading">
           <div>
