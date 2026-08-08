@@ -761,34 +761,45 @@ class WebStore:
         )
         return self.terms()
 
+    def _terms_edit_prepare(
+        self, payload: dict[str, Any]
+    ) -> tuple[
+        tuple[str, ...],
+        dict[str, Any] | None,
+        dict[str, dict[str, Any]],
+        dict[str, dict[str, Any]],
+    ]:
+        raw_values = payload.get("normalized")
+        if (
+            not isinstance(raw_values, list)
+            or not raw_values
+            or not all(isinstance(value, str) and value for value in raw_values)
+        ):
+            raise UsageError("normalized 必须是非空字符串数组")
+        values = tuple(dict.fromkeys(raw_values))
+        library = load_terms(self.project)
+        current = {
+            str(item["normalized"]): dict(item)
+            for item in (library or {}).get("terms", [])
+        }
+        overrides_path = self.project / "terminology" / "overrides.json"
+        overrides_document = read_json(self.project, overrides_path)
+        overrides = {
+            str(item["normalized"]): dict(item)
+            for item in overrides_document.get("overrides", [])
+        }
+        unknown = [
+            value
+            for value in values
+            if value not in current and value not in overrides
+        ]
+        if unknown:
+            raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+        return values, library, current, overrides
+
     def remove_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
         with project_write_lock(self.project):
-            raw_values = payload.get("normalized")
-            if (
-                not isinstance(raw_values, list)
-                or not raw_values
-                or not all(isinstance(value, str) and value for value in raw_values)
-            ):
-                raise UsageError("normalized 必须是非空字符串数组")
-            values = tuple(dict.fromkeys(raw_values))
-            library = load_terms(self.project)
-            current = {
-                str(item["normalized"]): dict(item)
-                for item in (library or {}).get("terms", [])
-            }
-            overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(self.project, overrides_path)
-            overrides = {
-                str(item["normalized"]): dict(item)
-                for item in overrides_document.get("overrides", [])
-            }
-            unknown = [
-                value
-                for value in values
-                if value not in current and value not in overrides
-            ]
-            if unknown:
-                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            values, library, current, overrides = self._terms_edit_prepare(payload)
             changed = 0
             for normalized in values:
                 override = overrides.get(
@@ -821,32 +832,7 @@ class WebStore:
     def delete_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Remove terms and their disabled overrides so scans may rediscover them."""
         with project_write_lock(self.project):
-            raw_values = payload.get("normalized")
-            if (
-                not isinstance(raw_values, list)
-                or not raw_values
-                or not all(isinstance(value, str) and value for value in raw_values)
-            ):
-                raise UsageError("normalized 必须是非空字符串数组")
-            values = tuple(dict.fromkeys(raw_values))
-            library = load_terms(self.project)
-            current = {
-                str(item["normalized"]): dict(item)
-                for item in (library or {}).get("terms", [])
-            }
-            overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(self.project, overrides_path)
-            overrides = {
-                str(item["normalized"]): dict(item)
-                for item in overrides_document.get("overrides", [])
-            }
-            unknown = [
-                value
-                for value in values
-                if value not in current and value not in overrides
-            ]
-            if unknown:
-                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            values, library, current, overrides = self._terms_edit_prepare(payload)
             deleted = 0
             for normalized in values:
                 existed = normalized in current or normalized in overrides
