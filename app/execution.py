@@ -878,8 +878,6 @@ def _interrupt_run(
     )
     if superseded_by_run_id is not None:
         manifest["superseded_by_run_id"] = superseded_by_run_id
-    if reason == "resume_declined":
-        manifest["resume_declined"] = True
     run_id = str(manifest["run_id"])
     write_json(project, project / "runs" / run_id / "manifest.json", manifest)
 
