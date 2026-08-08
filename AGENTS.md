@@ -7,7 +7,8 @@
 - `config/config.toml`: global configuration template.
 - `prompts/`: global stage prompts.
 - `projects/`: runtime project data; do not commit generated projects.
-- `docs/ROADMAP.md`: authoritative MVP behavior and boundaries.
+- `docs/MINIMAL.md`: authoritative MVP behavior and boundaries; `docs/ROADMAP.md`
+  describes future direction.
 - `src-tauri/`: Tauri 2 desktop shell (sidecar orchestration, native pickers).
 - `packaging/`: PyInstaller spec for the frozen Python/FastAPI sidecar.
 - `scripts/`: dev/build helpers; `sidecar-dist/` and `dist/` are build

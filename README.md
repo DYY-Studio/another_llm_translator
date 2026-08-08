@@ -12,8 +12,8 @@ Another LLM Translator 是一个面向本地使用的、可恢复的 LLM 工程�
 ## 项目状态
 
 - 当前版本：`0.3.0`，对应 MVP 0.3 实现。
-- 当前形态：单机本地 CLI 和 Web Alpha。
-- 当前路线：Stage 1 至 Stage 20 已完成，后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+- 当前形态：CLI、本地 Web 与 macOS Tauri 桌面壳。
+- 当前路线：Stage 1 至 Stage 23.3 已完成，后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 - 当前发布方式：从源码目录运行，或 `pip install .` 后使用两个 console script
   （`minimal-llm-translator`、`minimal-llm-translator-web`）。
 
@@ -403,17 +403,18 @@ projects/<name>/
 
 ## 安全与隐私
 
-- API Key 只从环境变量读取，不进入 URL、请求正文、Run 快照、阶段指纹或普通日志。
+- API Key 只从环境变量或系统钥匙串读取（按 Preset 的显式单凭据引用），不进入
+  URL、请求正文、Run 快照、阶段指纹或普通日志。
 - 普通日志不会保存完整 Prompt、源文、鉴权 Header 或未脱敏 Payload。
 - Debug 模式会额外保存完整请求、响应、Attempt 和 Chunk 信息，其中可能包含 Prompt 与源文。
   处理敏感资料时不要启用 Debug 模式。
-- Web 仅绑定回环地址，并限制 Host 和 Origin。
+- Web 监听 `0.0.0.0`；未开启共享时非回环请求一律 403，并限制 Host 和 Origin。
 - Document Adapter 插件如被安装，会与宿主在同一进程运行，拥有当前进程权限，不提供沙箱。
 
 ## 明确限制
 
-- 不支持远程、多用户、LAN 或公网部署。
-- 不提供 TLS、登录认证、系统钥匙串或桌面应用。
+- 不支持远程、多用户或公网部署。
+- 不提供 TLS、多账号、角色、密码找回或公网访问。
 - 不支持流式 LLM、Python LLM Adapter、自动 Provider 判断或静默 Provider fallback。
 - 不支持 PDF、DOCX、Markdown 等通用文档转换。
 - 不提供自动质量评分或质量保证；模型结果仍需人工审阅。

@@ -152,6 +152,8 @@ chardet
 fastapi
 uvicorn
 python-multipart
+keyring
+psutil
 ```
 
 React/Vite/TypeScript 只用于构建随 Python 包分发的 Web 静态资源。标准库负责
