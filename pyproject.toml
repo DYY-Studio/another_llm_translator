@@ -12,6 +12,8 @@ dependencies = [
   "chardet>=5.2,<6",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "keyring>=25,<26",
+  "psutil>=5.9,<7",
   "python-multipart>=0.0.20,<1",
   "uvicorn>=0.30,<1",
 ]

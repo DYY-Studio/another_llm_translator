@@ -152,6 +152,8 @@ chardet
 fastapi
 uvicorn
 python-multipart
+keyring
+psutil
 ```
 
 React/Vite/TypeScript 只用于构建随 Python 包分发的 Web 静态资源。标准库负责
@@ -659,8 +661,8 @@ Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复�
 
 `terminology`、`translate`、`proofread`、`polish` 独立命令发现同阶段
 `running` Run 时，最新一个是续作候选，更旧者标记为 `interrupted` 和
-`superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选记录
-`resume_declined`，不再询问。非交互运行必须显式使用 `--resume-run` 或
+`superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选标记为
+`interrupted`，不再参与续作候选。非交互运行必须显式使用 `--resume-run` 或
 `--decline-run`。
 
 续作保留旧 Run ID、原始 scope 和术语 `active_task_id`，忽略本次范围参数与

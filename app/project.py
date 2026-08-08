@@ -694,15 +694,14 @@ def _source_records(
     files = read_sqlite_files(project)
     return (
         metadata,
-        _resolve_file_adapters(metadata, files),
+        _resolve_file_adapters(files),
         _load_segment_records(project, include_model_contract=False),
     )
 
 
 def _resolve_file_adapters(
-    metadata: dict[str, Any], files: list[dict[str, Any]]
+    files: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    del metadata
     resolved: list[dict[str, Any]] = []
     for file_record in files:
         item = dict(file_record)
@@ -1089,9 +1088,8 @@ def sync_global_templates(
 
 
 def load_source_files(project: Path) -> list[dict[str, object]]:
-    metadata = read_project_meta(project)
     files = read_sqlite_files(project)
-    return _resolve_file_adapters(metadata, files)
+    return _resolve_file_adapters(files)
 
 
 def load_segments(project: Path) -> list[dict[str, object]]:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import load_project_config, load_run_config
+from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
 from .errors import UsageError
 from .execution import (
@@ -34,11 +34,6 @@ from .sqlite_storage import (
     read_jsonl,
     record_exists,
     utc_now,
-)
-
-
-WEB_LLM_STAGES = frozenset(
-    {"terminology", "translation", "proofreading", "polishing"}
 )
 
 
@@ -160,7 +155,7 @@ def _terminology_summary(
 
 
 def task_options(project: Path, stage: str) -> dict[str, Any]:
-    if stage not in WEB_LLM_STAGES:
+    if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
     segments = load_segments(project)
     nonempty = [item for item in segments if not item["is_empty"]]

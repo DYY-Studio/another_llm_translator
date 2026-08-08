@@ -373,7 +373,6 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
         assert chosen is None
         declined = read_json(project, newer_path)
         assert declined["status"] == "interrupted"
-        assert declined["resume_declined"] is True
         assert "resume_declined_at" not in declined
         assert choose_running_run(
             project,

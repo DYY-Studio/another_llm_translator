@@ -486,8 +486,6 @@ def run(argv: list[str] | None = None) -> int:
             summary = publish_partial_terms(project)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
-    parser.error("unknown command")
-    return 2
 
 
 def main() -> None:
