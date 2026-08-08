@@ -350,21 +350,6 @@ def read_project_meta(project: Path) -> dict[str, Any]:
         connection.close()
 
 
-def write_project_meta(project: Path, value: dict[str, Any]) -> None:
-    connection = _with_db(project)
-    try:
-        with connection:
-            connection.execute("DELETE FROM project_meta")
-            connection.executemany(
-                "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
-                [(key, _json(item)) for key, item in value.items()],
-            )
-    except sqlite3.Error as exc:
-        raise StorageError(f"无法写入项目元数据：{project}: {exc}") from exc
-    finally:
-        connection.close()
-
-
 def replace_source(
     project: Path,
     files: Iterable[dict[str, Any]],
