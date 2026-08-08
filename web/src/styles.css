@@ -657,8 +657,8 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .input-queue-option small { grid-column: 1; }
   .summary-strip div { min-width: 0; flex: 1; }
   .run-counts { grid-template-columns: repeat(2, 1fr); }
-  .export-page { height: auto; display: block; }
-  .export-workspace { grid-template-columns: minmax(0, 1fr); }
+  .export-page { height: auto; }
+  .export-workspace { flex: 0 1 auto; grid-template-columns: minmax(0, 1fr); }
   .export-select-col .export-file-list, .export-browse-list { flex: 0 1 auto; max-height: 46vh; }
   .file-list .export-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; }
   .file-list .export-row small { grid-column: 1; grid-row: 2; text-align: left; white-space: normal; }
