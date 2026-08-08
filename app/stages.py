@@ -1982,6 +1982,7 @@ async def run_terminology(
     ) -> tuple[int, int]:
         unresolved = list(chunk.segments)
         parent_request_id = initial_parent_request_id
+        parse_errors: list[str] = []
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:

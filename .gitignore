@@ -17,6 +17,7 @@ node_modules/
 *.tsbuildinfo
 test-results/
 playwright-report/
+app/web_dist/
 
 # Local secrets
 .env

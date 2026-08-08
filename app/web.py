@@ -53,6 +53,7 @@ from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .locking import project_write_lock
+from .logging_utils import get_logger
 from .plugins import (
     document_adapter_summaries,
     get_document_adapter_for_extension,
@@ -1664,6 +1665,10 @@ def create_app(
 
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
+    else:
+        get_logger().warning(
+            "未找到前端构建产物 %s；请先执行 npm run build --prefix web", web_dist
+        )
     return app
 
 
