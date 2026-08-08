@@ -169,3 +169,12 @@ def _reject_placeholders(value: Any) -> None:
             _reject_placeholders(child)
     elif isinstance(value, str) and "${" in value:
         raise ConfigError("LLM Preset extra_body 不允许模板占位符")
+
+
+def endpoint_url(
+    base_url: str, endpoint: str, model: str | None = None
+) -> str:
+    """Join a preset's base_url and endpoint into a request URL."""
+    if model is not None:
+        endpoint = str(endpoint).replace("${model}", str(model))
+    return str(base_url).rstrip("/") + "/" + str(endpoint).lstrip("/")
