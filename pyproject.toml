@@ -23,7 +23,7 @@ minimal-llm-translator = "app.main:main"
 minimal-llm-translator-web = "app.web:main"
 
 [tool.setuptools]
-packages = ["app", "app.web_dist", "app.web_dist.assets"]
+packages = ["app"]
 include-package-data = true
 
 [tool.setuptools.package-data]
