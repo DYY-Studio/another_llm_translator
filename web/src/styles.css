@@ -226,11 +226,15 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .file-list span { color: var(--muted); }
 .file-list .empty-file-state { grid-template-columns: 1fr; gap: 6px; padding-block: 24px; color: var(--muted); }
 .file-list .empty-file-state strong { color: var(--text); }
-.overview-file-list { max-height: 40vh; overflow: auto; }
+.overview-file-list { max-height: min(55vh, 560px); overflow: auto; }
 .export-filter { width: 100%; }
-.export-page { height: 100%; min-height: 0; box-sizing: border-box; }
-.export-page.browse-active { display: flex; flex-direction: column; }
-.export-browse-list { flex: 1; min-height: 0; overflow: auto; }
+.export-page { height: 100%; min-height: 0; box-sizing: border-box; max-width: 1050px; display: flex; flex-direction: column; }
+.export-page > * { flex-shrink: 0; }
+.export-browse-list { flex: 1 1 0; min-height: 0; overflow: auto; }
+.export-workspace { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; }
+.export-form-col { min-width: 0; display: grid; gap: 18px; align-content: start; }
+.export-select-col { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+.export-select-col .export-file-list { flex: 1 1 0; min-height: 0; max-height: none; }
 .notice-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .export-file-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
 .export-file-heading > div { display: grid; gap: 4px; }
