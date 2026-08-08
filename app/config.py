@@ -319,28 +319,43 @@ def load_project_config(
     )
 
 
-def resolve_project_config(
+def _resolve_config(
     config: dict[str, Any],
+    root: Path,
     *,
-    stage: str | None = None,
-    presets_root: Path | None = None,
+    stage: str | None,
+    error_kind: str,
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    root = presets_root or APP_ROOT
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
-    preset_file = effective_path(
-        f"llm_presets/{configured_preset_id}.json", builtin_root=root
+    preset = load_llm_preset(
+        effective_path(
+            f"llm_presets/{configured_preset_id}.json", builtin_root=root
+        )
     )
-    preset = load_llm_preset(preset_file)
     if preset.preset_id != configured_preset_id:
-        raise ConfigError("LLM Preset 文件中的 preset_id 与项目配置不一致")
+        raise ConfigError(f"LLM Preset 文件中的 preset_id 与{error_kind}不一致")
     return _resolve_llm_config(
         config,
         adapter_file=effective_path(
             f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
         ),
         preset=preset,
+    )
+
+
+def resolve_project_config(
+    config: dict[str, Any],
+    *,
+    stage: str | None = None,
+    presets_root: Path | None = None,
+) -> dict[str, Any]:
+    return _resolve_config(
+        config,
+        presets_root or APP_ROOT,
+        stage=stage,
+        error_kind="项目配置",
     )
 
 
@@ -353,23 +368,7 @@ def load_global_config(root: Path) -> dict[str, Any]:
 def resolve_global_config(
     config: dict[str, Any], root: Path, *, stage: str | None = None
 ) -> dict[str, Any]:
-    config = deepcopy(config)
-    configured_preset_id = _preset_id_for_stage(config, stage)
-    preset_path(root, configured_preset_id)
-    preset = load_llm_preset(
-        effective_path(
-            f"llm_presets/{configured_preset_id}.json", builtin_root=root
-        )
-    )
-    if preset.preset_id != configured_preset_id:
-        raise ConfigError("LLM Preset 文件中的 preset_id 与全局配置不一致")
-    return _resolve_llm_config(
-        config,
-        adapter_file=effective_path(
-            f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
-        ),
-        preset=preset,
-    )
+    return _resolve_config(config, root, stage=stage, error_kind="全局配置")
 
 
 def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
