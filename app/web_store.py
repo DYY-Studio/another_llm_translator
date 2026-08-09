@@ -655,10 +655,29 @@ class WebStore:
                     ),
                 }
             )
+        by_normalized = {item["normalized"]: item for item in rows}
+
+        def group_root(item: dict[str, Any]) -> str:
+            primary = item["group_primary"]
+            return (
+                primary
+                if primary is not None and primary in by_normalized
+                else item["normalized"]
+            )
+
+        group_conflicts: dict[str, bool] = {}
+        for item in rows:
+            root = group_root(item)
+            group_conflicts[root] = group_conflicts.get(root, False) or bool(
+                item["has_conflicts"]
+            )
+
         rows.sort(
             key=lambda item: (
-                not item["has_conflicts"],
+                not group_conflicts[group_root(item)],
                 item["disabled"],
+                group_root(item),
+                item["normalized"] != group_root(item),
                 item["normalized"],
             )
         )
@@ -691,7 +710,12 @@ class WebStore:
         if term is None:
             raise UsageError(f"术语不存在：{normalized}")
         spec = term_normalization(self.config)
-        library = {"terms": [term]}
+        isolated_term = dict(term)
+        isolated_term["group_primary"] = None
+        isolated_conflicts = dict(term.get("conflicts") or {})
+        isolated_conflicts["group_claims"] = []
+        isolated_term["conflicts"] = isolated_conflicts
+        library = {"terms": [isolated_term]}
         hits = [
             segment
             for segment in read_segment_sources(self.project)
