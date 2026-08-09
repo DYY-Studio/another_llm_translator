@@ -7,7 +7,7 @@ from typing import Any
 from .documents import DocumentAdapter, DocumentChoiceOption, normalize_document_output
 from .errors import ConfigError, ProjectError, UsageError
 
-PLUGIN_PROTOCOL_VERSION = 6
+PLUGIN_PROTOCOL_VERSION = 7
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 

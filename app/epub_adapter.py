@@ -5,14 +5,17 @@ import re
 import stat
 import zipfile
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 from xml.parsers import expat
 from xml.etree import ElementTree
+from uuid import UUID, uuid5
 
 from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
-from .errors import IncompleteError, ProjectError, UsageError
+from .errors import IncompleteError, ProjectError, StorageError, UsageError
+from .sqlite_storage import read_json
 
 
 MAX_EPUB_ENTRIES = 10_000
@@ -21,6 +24,8 @@ MAX_EPUB_COMPRESSION_RATIO = 200
 _OPF_NAMESPACE = "http://www.idpf.org/2007/opf"
 _DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 _XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+_PUBLICATION_ID_NAMESPACE = UUID("2e22f6f0-4406-4f02-a9ee-0d4a8a3a4a82")
+_OPF_EVENT_ATTRIBUTE = f"{{{_OPF_NAMESPACE}}}event"
 _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
 _INLINE_TEXT_ELEMENTS = {
     "a",
@@ -208,6 +213,7 @@ class EPUBDocumentAdapter:
         output_text: dict[str, str],
         bilingual: bool,
         output_encoding: str,
+        target_language: str,
         target_language_tag: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]:
@@ -215,6 +221,11 @@ class EPUBDocumentAdapter:
         if not target_language_tag:
             raise IncompleteError(
                 "EPUB 导出需要 project.target_language_tag"
+            )
+        target_language = target_language.strip()
+        if not target_language:
+            raise IncompleteError(
+                "EPUB 导出需要非空 project.target_language"
             )
         if opaque_state is None:
             raise IncompleteError("EPUB 文件缺少 Document Adapter 状态")
@@ -250,7 +261,17 @@ class EPUBDocumentAdapter:
                 target_language_tag,
                 source_languages if bilingual else [],
             )
+            _set_opf_publication_metadata(
+                opf_root,
+                project_id=_project_id(project),
+                file_id=str(file.get("file_id", "")),
+                target_language=target_language,
+                target_language_tag=target_language_tag,
+                bilingual=bilingual,
+                epub_version=epub_version,
+            )
             ElementTree.register_namespace("", _OPF_NAMESPACE)
+            ElementTree.register_namespace("opf", _OPF_NAMESPACE)
             ElementTree.register_namespace("dc", _DC_NAMESPACE)
             changed[opf_path] = ElementTree.tostring(
                 opf_root, encoding="utf-8", xml_declaration=True
@@ -517,6 +538,143 @@ def _set_xhtml_language(
 ) -> None:
     root.set("lang", target_language_tag)
     root.set(f"{{{_XML_NAMESPACE}}}lang", target_language_tag)
+
+
+def _project_id(project: Path) -> str:
+    try:
+        metadata = read_json(project, project / "project.json")
+    except (OSError, ProjectError, StorageError) as exc:
+        raise IncompleteError(f"无法读取 EPUB 所属项目身份：{project}") from exc
+    value = metadata.get("project_id")
+    if not isinstance(value, str) or not value.strip():
+        raise IncompleteError("项目缺少有效 project_id")
+    return value.strip()
+
+
+def _publication_identifier(
+    *,
+    project_id: str,
+    file_id: str,
+    target_language_tag: str,
+    bilingual: bool,
+) -> str:
+    if not file_id:
+        raise IncompleteError("EPUB 文件缺少 file_id")
+    mode = "bilingual" if bilingual else "translated"
+    seed = "\n".join(
+        (project_id, file_id, target_language_tag.casefold(), mode)
+    )
+    return f"urn:uuid:{uuid5(_PUBLICATION_ID_NAMESPACE, seed)}"
+
+
+def _new_xml_id(root: ElementTree.Element) -> str:
+    used = {
+        value
+        for element in root.iter()
+        if (value := element.get("id"))
+    }
+    base = "minimal-translator-publication-id"
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _set_opf_publication_metadata(
+    root: ElementTree.Element,
+    *,
+    project_id: str,
+    file_id: str,
+    target_language: str,
+    target_language_tag: str,
+    bilingual: bool,
+    epub_version: str,
+) -> None:
+    metadata = _opf_metadata(root)
+    title_nodes = [
+        child
+        for child in list(metadata)
+        if _namespace_uri(child.tag) == _DC_NAMESPACE
+        and _local_name(child.tag) == "title"
+    ]
+    if not title_nodes or not (title_nodes[0].text or "").strip():
+        raise IncompleteError("EPUB OPF 缺少有效主标题")
+    suffix = f"（{target_language}"
+    if bilingual:
+        suffix += "·双语"
+    suffix += "）"
+    title_nodes[0].text = f"{title_nodes[0].text.strip()}{suffix}"
+
+    identifier_id = _new_xml_id(root)
+    identifier = ElementTree.Element(f"{{{_DC_NAMESPACE}}}identifier")
+    identifier.set("id", identifier_id)
+    identifier.text = _publication_identifier(
+        project_id=project_id,
+        file_id=file_id,
+        target_language_tag=target_language_tag,
+        bilingual=bilingual,
+    )
+    identifier_indices = [
+        index
+        for index, child in enumerate(list(metadata))
+        if _namespace_uri(child.tag) == _DC_NAMESPACE
+        and _local_name(child.tag) == "identifier"
+    ]
+    insert_at = (max(identifier_indices) + 1) if identifier_indices else 0
+    metadata.insert(insert_at, identifier)
+    root.set("unique-identifier", identifier_id)
+
+    _set_opf_modified(metadata, epub_version, _utc_modified_timestamp())
+
+
+def _utc_modified_timestamp() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _set_opf_modified(
+    metadata: ElementTree.Element, epub_version: str, value: str
+) -> None:
+    if epub_version == "3":
+        nodes = [
+            child
+            for child in list(metadata)
+            if _local_name(child.tag) == "meta"
+            and child.get("property") == "dcterms:modified"
+        ]
+        if nodes:
+            nodes[0].text = value
+            for duplicate in nodes[1:]:
+                metadata.remove(duplicate)
+            return
+        element = ElementTree.Element(f"{{{_OPF_NAMESPACE}}}meta")
+        element.set("property", "dcterms:modified")
+        element.text = value
+        metadata.append(element)
+        return
+
+    nodes = [
+        child
+        for child in list(metadata)
+        if _namespace_uri(child.tag) == _DC_NAMESPACE
+        and _local_name(child.tag) == "date"
+        and child.get(_OPF_EVENT_ATTRIBUTE, "").casefold() == "modification"
+    ]
+    if nodes:
+        nodes[0].text = value
+        for duplicate in nodes[1:]:
+            metadata.remove(duplicate)
+        return
+    element = ElementTree.Element(f"{{{_DC_NAMESPACE}}}date")
+    element.set(_OPF_EVENT_ATTRIBUTE, "modification")
+    element.text = value
+    metadata.append(element)
 
 
 def _opf_path(

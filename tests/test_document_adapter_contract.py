@@ -47,6 +47,7 @@ class RecordDocumentAdapter:
     )
 
     def __init__(self) -> None:
+        self.export_languages: list[str] = []
         self.export_language_tags: list[str] = []
 
     def normalize_model_output(
@@ -149,10 +150,12 @@ class RecordDocumentAdapter:
         output_text: dict[str, str],
         bilingual: bool,
         output_encoding: str,
+        target_language: str,
         target_language_tag: str,
         opaque_state: dict[str, object] | None,
     ) -> list[Path]:
         del project
+        self.export_languages.append(target_language)
         self.export_language_tags.append(target_language_tag)
         if not isinstance(opaque_state, dict):
             raise IncompleteError("Record 文件缺少 Document Adapter 状态")
@@ -404,6 +407,7 @@ def test_contract_translation_uses_model_source_and_normalizes_output(
         project, "translated", bilingual=True, allow_missing=False
     )
     assert bilingual["files"] == 1
+    assert adapter.export_languages == ["简体中文", "简体中文"]
     assert adapter.export_language_tags == ["zh-Hans", "zh-Hans"]
     paired = project / "output" / "bilingual" / "translated" / "book.rec"
     assert paired.read_text(encoding="utf-8-sig") == (
