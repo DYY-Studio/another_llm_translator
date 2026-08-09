@@ -601,8 +601,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .mobile-run-bar .danger-link { margin-left: auto; }
   .workspace { height: auto; display: block; }
   .terms-workspace { height: auto; display: block; }
-  .segment-browser { height: 46vh; border-right: 0; border-bottom: 1px solid var(--border); }
-  .terms-browser { height: 46vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  .segment-browser { height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .terms-browser { height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .segment-list, .term-list { flex: 0 0 clamp(320px, 48svh, 460px); min-height: 320px; }
   .term-editor > .page-heading { padding: 22px 16px 0; }
   .term-tabs { padding: 0 16px; }
   .term-edit-panel { padding: 18px 14px 50px; }
