@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import UsageError
+from app.errors import TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
 from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
@@ -27,6 +27,76 @@ def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "Alice and Alicia")
+    store = WebStore(project)
+    store.save_term(
+        {
+            "source": "Alice",
+            "category": "人物",
+            "description": "main",
+            "preferred_translation": "爱丽丝",
+            "aliases": ["Alicia"],
+        }
+    )
+
+    materialized = store.materialize_term(
+        {"normalized": "alice", "alias": "Alicia"}
+    )
+    alice = next(item for item in materialized["terms"] if item["normalized"] == "alice")
+    alicia = next(item for item in materialized["terms"] if item["normalized"] == "alicia")
+    assert alice["aliases"] == []
+    assert alicia["group_primary"] == "alice"
+    assert alicia["category"] is None
+    assert alicia["preferred_translation"] is None
+
+    switched = store.set_term_primary({"normalized": "alicia", "confirm": True})
+    alice = next(item for item in switched["terms"] if item["normalized"] == "alice")
+    alicia = next(item for item in switched["terms"] if item["normalized"] == "alicia")
+    assert alicia["group_primary"] is None
+    assert alice["group_primary"] == "alicia"
+    with pytest.raises(TermGroupError, match="组主仍有成员"):
+        store.remove_terms({"normalized": ["alicia"]})
+    removed = store.remove_terms({"normalized": ["alice"]})
+    assert removed["removed"] == 1
+
+
+def test_match_terms_counts_a_group_as_one_slot() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "normalized": "alice",
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+            {
+                "source": "Alicia",
+                "normalized": "alicia",
+                "preferred_translation": "艾丽西亚",
+                "aliases": ["Ally"],
+                "group_primary": "alice",
+                "conflicts": {},
+            },
+            {
+                "source": "Bob",
+                "normalized": "bob",
+                "preferred_translation": "鲍勃",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+        ]
+    }
+    matched = match_terms(
+        "Alicia met Bob", library, 1, TermNormalization("NFKC", True)
+    )
+    assert [item["source"] for item in matched] == ["Alice", "Alicia"]
+    assert matched[1]["primary_source"] == "Alice"
 
 
 def seed_conflicted_terms(project: Path) -> None:

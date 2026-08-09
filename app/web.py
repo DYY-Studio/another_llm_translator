@@ -1209,6 +1209,14 @@ def create_app(
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).save_term(payload)
 
+    @app.post("/api/v1/projects/{name}/terms/materialize")
+    async def materialize_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).materialize_term(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/set-primary")
+    async def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).set_term_primary(payload)
+
     @app.post("/api/v1/projects/{name}/terms/remove")
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).remove_terms(payload)
