@@ -198,7 +198,7 @@ def test_config_accepts_selectable_terminology_settings(
             "target_chunk_input_tokens 必须是正整数",
         ),
         (
-            'alias_primary_collision = "conflict"',
+            'alias_primary_collision = "merge"',
             'alias_primary_collision = "guess"',
             "alias_primary_collision 必须是 conflict 或 merge",
         ),
@@ -233,13 +233,13 @@ def test_config_defaults_alias_collision_for_existing_projects(
     config_path = app_root / "config" / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"\n',
+            'alias_primary_collision = "merge"\n',
             "",
         ).replace("cross_boundary_batching = []\n", ""),
         encoding="utf-8",
     )
     assert load_config(config_path)["terminology"]["alias_primary_collision"] == (
-        "conflict"
+        "merge"
     )
     assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
 

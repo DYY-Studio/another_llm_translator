@@ -14,6 +14,14 @@ class UsageError(AppError):
     code = "usage_error"
 
 
+class TermGroupError(UsageError):
+    code = "term_group_error"
+
+    def __init__(self, message: str, *, reason: str, **params: object) -> None:
+        super().__init__(message)
+        self.params = {"reason": reason, **params}
+
+
 class InvalidCredentialsError(UsageError):
     """LAN login rejected; keeps the same safe message on every failure."""
 

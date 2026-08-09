@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
-from .errors import UsageError
+from .errors import TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
 from .plugins import normalize_model_text
@@ -624,6 +624,7 @@ class WebStore:
                 "alias_primaries": list(
                     raw_conflicts.get("alias_primaries", [])
                 ),
+                "group_claims": list(raw_conflicts.get("group_claims", [])),
             }
             disabled = bool(override.get("disabled", False))
             rows.append(
@@ -638,6 +639,11 @@ class WebStore:
                         "preferred_translation", term.get("preferred_translation")
                     ),
                     "aliases": override.get("aliases", term.get("aliases", [])),
+                    "group_primary": (
+                        None
+                        if disabled
+                        else override.get("group_primary", term.get("group_primary"))
+                    ),
                     "disabled": disabled,
                     "conflicts": conflicts,
                     "has_conflicts": not disabled
@@ -645,6 +651,7 @@ class WebStore:
                         conflicts["categories"]
                         or conflicts["preferred_translations"]
                         or conflicts["alias_primaries"]
+                        or conflicts["group_claims"]
                     ),
                 }
             )
@@ -729,11 +736,6 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        write_json(
-            self.project,
-            self.project / "terminology" / "overrides.json",
-            override_record,
-        )
         revision = int(library["terms_revision"]) + 1 if library else 1
         terms = build_term_library_rows(
             self.project,
@@ -753,6 +755,11 @@ class WebStore:
             ),
             terms=terms,
             origin=origin,
+        )
+        write_json(
+            self.project,
+            self.project / "terminology" / "overrides.json",
+            override_record,
         )
         write_json(
             self.project,
@@ -800,6 +807,7 @@ class WebStore:
     def remove_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
         with project_write_lock(self.project):
             values, library, current, overrides = self._terms_edit_prepare(payload)
+            self._reject_group_primary_removal(values, current)
             changed = 0
             for normalized in values:
                 override = overrides.get(
@@ -814,6 +822,7 @@ class WebStore:
                 if override.get("disabled"):
                     continue
                 overrides[normalized] = {**override, "disabled": True}
+                overrides[normalized].pop("group_primary", None)
                 current.pop(normalized, None)
                 changed += 1
             if not changed:
@@ -833,6 +842,7 @@ class WebStore:
         """Remove terms and their disabled overrides so scans may rediscover them."""
         with project_write_lock(self.project):
             values, library, current, overrides = self._terms_edit_prepare(payload)
+            self._reject_group_primary_removal(values, current)
             deleted = 0
             for normalized in values:
                 existed = normalized in current or normalized in overrides
@@ -851,6 +861,187 @@ class WebStore:
             result["deleted"] = deleted
             result["unchanged"] = len(values) - deleted
             return result
+
+    @staticmethod
+    def _reject_group_primary_removal(
+        values: tuple[str, ...], current: dict[str, dict[str, Any]]
+    ) -> None:
+        for normalized in values:
+            members = [
+                key
+                for key, term in current.items()
+                if term.get("group_primary") == normalized
+            ]
+            if members:
+                raise TermGroupError(
+                    "组主仍有成员，不能移除或删除",
+                    reason="primary_has_members",
+                    normalized=normalized,
+                    members=members,
+                )
+
+    def materialize_term(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            normalized = payload.get("normalized")
+            alias = payload.get("alias")
+            if not isinstance(normalized, str) or not normalized:
+                raise UsageError("normalized 必须是非空字符串")
+            if not isinstance(alias, str) or not alias.strip():
+                raise UsageError("alias 必须是非空字符串")
+            spec = term_normalization(self.config)
+            rows = {item["normalized"]: item for item in self.terms()["terms"]}
+            owner = rows.get(normalized)
+            if owner is None or owner["disabled"]:
+                raise UsageError(f"术语不存在或已移除：{normalized}")
+            alias_value = next(
+                (
+                    value
+                    for value in owner["aliases"]
+                    if normalize_term(value, spec) == normalize_term(alias, spec)
+                ),
+                None,
+            )
+            if alias_value is None:
+                raise UsageError("alias 不属于指定术语")
+            target_normalized = normalize_term(alias_value, spec)
+            primary = owner.get("group_primary") or normalized
+            target = rows.get(target_normalized)
+            if target is not None:
+                if target["disabled"]:
+                    raise TermGroupError(
+                        "目标条目已移除，不能加入术语组",
+                        reason="target_disabled",
+                        normalized=target_normalized,
+                    )
+                target_primary = target.get("group_primary") or target_normalized
+                target_has_members = any(
+                    item.get("group_primary") == target_normalized
+                    for item in rows.values()
+                )
+                if target_primary != primary and (
+                    target.get("group_primary") is not None or target_has_members
+                ):
+                    raise TermGroupError(
+                        "目标条目属于其他术语组",
+                        reason="cross_group",
+                        normalized=target_normalized,
+                        group_primary=target_primary,
+                    )
+
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            owner_override = overrides.get(
+                normalized,
+                {"normalized": normalized, "source": owner["source"]},
+            )
+            owner_aliases = [
+                value
+                for value in owner["aliases"]
+                if normalize_term(value, spec) != target_normalized
+            ]
+            overrides[normalized] = {**owner_override, "aliases": owner_aliases}
+            if target is None:
+                target_source = alias_value
+                current[target_normalized] = {
+                    "source": target_source,
+                    "normalized": target_normalized,
+                    "category": None,
+                    "description": "",
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": primary,
+                    "conflicts": {},
+                }
+                overrides[target_normalized] = {
+                    "normalized": target_normalized,
+                    "source": target_source,
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": primary,
+                    "disabled": False,
+                }
+            elif target_primary != primary:
+                current[target_normalized]["group_primary"] = primary
+                target_override = overrides.get(
+                    target_normalized,
+                    {"normalized": target_normalized, "source": target["source"]},
+                )
+                overrides[target_normalized] = {
+                    **target_override,
+                    "group_primary": primary,
+                }
+            result = self._publish_terms(
+                library, current, overrides, origin="web_materialize_term"
+            )
+            result["materialized"] = target_normalized
+            return result
+
+    def set_term_primary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认更换术语组主")
+        with project_write_lock(self.project):
+            normalized = payload.get("normalized")
+            if not isinstance(normalized, str) or not normalized:
+                raise UsageError("normalized 必须是非空字符串")
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            if normalized not in current:
+                raise UsageError(f"术语不存在：{normalized}")
+            component = {normalized}
+            changed = True
+            while changed:
+                changed = False
+                roots = {
+                    current[key].get("group_primary") or key
+                    for key in component
+                }
+                for key, term in current.items():
+                    claims = term.get("conflicts", {}).get("group_claims", [])
+                    related = {
+                        str(value.get("entry")) for value in claims
+                    } | {str(value.get("claimed_by")) for value in claims}
+                    if (
+                        key in roots
+                        or term.get("group_primary") in roots
+                        or component & related
+                    ) and key not in component:
+                        component.add(key)
+                        changed = True
+            if len(component) == 1 and current[normalized].get("group_primary") is None:
+                return self.terms()
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            for key in component:
+                primary = None if key == normalized else normalized
+                current[key]["group_primary"] = primary
+                override = overrides.get(
+                    key,
+                    {"normalized": key, "source": current[key].get("source", key)},
+                )
+                overrides[key] = {**override, "group_primary": primary}
+            return self._publish_terms(
+                library, current, overrides, origin="web_set_term_primary"
+            )
 
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         spec = term_normalization(self.config)
@@ -890,6 +1081,12 @@ class WebStore:
         conflict_source = current.get(str(old_normalized or normalized), {}).get(
             "conflicts", {}
         )
+        original_normalized = str(old_normalized or normalized)
+        existing_group_primary = current.get(original_normalized, {}).get(
+            "group_primary"
+        )
+        if disabled:
+            self._reject_group_primary_removal((original_normalized,), current)
         if (
             not disabled
             and conflict_source.get("categories")
@@ -909,6 +1106,19 @@ class WebStore:
         ):
             raise UsageError(f"normalized source 已存在：{normalized}")
         if old_normalized and old_normalized != normalized:
+            if current.get(old_normalized, {}).get("group_primary") is None:
+                for member_key, member in current.items():
+                    if member.get("group_primary") != old_normalized:
+                        continue
+                    member["group_primary"] = normalized
+                    member_override = overrides.get(
+                        member_key,
+                        {"normalized": member_key, "source": member.get("source", member_key)},
+                    )
+                    overrides[member_key] = {
+                        **member_override,
+                        "group_primary": normalized,
+                    }
             current.pop(old_normalized, None)
             old = overrides.get(old_normalized, {"normalized": old_normalized})
             overrides[old_normalized] = {**old, "disabled": True}
@@ -922,6 +1132,8 @@ class WebStore:
             "aliases": aliases,
             "disabled": disabled,
         }
+        if existing_group_primary is not None and not disabled:
+            override["group_primary"] = existing_group_primary
         overrides[normalized] = override
         if disabled:
             current.pop(normalized, None)
@@ -933,6 +1145,7 @@ class WebStore:
                 "description": description or "",
                 "preferred_translation": preferred,
                 "aliases": sorted(set(aliases)),
+                "group_primary": existing_group_primary,
                 "conflicts": {
                     "categories": [],
                     "preferred_translations": [],
