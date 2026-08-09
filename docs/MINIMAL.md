@@ -374,6 +374,7 @@ Web 不暴露完整 TOML 编辑器，而是读取和提交覆盖下列全部字�
 ```toml
 [project]
 target_language = "简体中文"
+target_language_tag = "zh-Hans"
 output_encoding = "utf-8-sig"
 
 [input]
@@ -1510,9 +1511,17 @@ output/bilingual/polished/
 - 所有 Adapter 先在同一宿主临时目录生成并完成路径校验，再移动到正式目录；
   任一生成或校验失败时不发布输出。
 
+`project.target_language_tag` 是输出文档的可选 BCP 47 语言标签，与供 LLM 使用的
+`target_language` 文本名称分离。宿主在原格式导出时将它传给 Document Adapter；
+具体 Adapter 决定是否应用或在标签为空时拒绝导出。旧项目缺少该字段时按空字符串
+读取，不根据 `target_language` 推断。当前 EPUB Adapter 要求非空，TXT Adapter
+忽略该字段。
+
 TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，并使用
 `project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
-EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
+EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，使用 BCP 47 标签重写
+OPF `dc:language`；双语文件把目标语言放在第一项并保留源语言。已重写的
+spine XHTML 根元素同时更新 `lang` 和 `xml:lang`。除此之外只重写翻译对应的
 XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写入首个槽并清空
 其余槽，保留原内联标签骨架；包含 Ruby 的复合 Segment 可以混合普通槽和 Ruby
 槽，单语移除该 Segment 的全部 Ruby，双语在完整源句末尾追加译文。只有旧的
@@ -1785,6 +1794,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
+- `target_language_tag` 由宿主传给所有 Document Adapter；EPUB 单语以该标签作为
+  唯一 `dc:language`，双语将其列为第一语言，并同步已重写 XHTML 的语言属性。
 - EPUB Ruby 与同一文本流的前后文合为语义 Segment，三种导入模式、纯译文移除
   全部 Ruby 和双语在完整源句末尾追加译文均生效；导入选项只固化在对应 File
   Adapter 状态。

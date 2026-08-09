@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import re
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -15,7 +16,11 @@ from .user_config import APP_ROOT, effective_path
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
 
 SCHEMA: dict[str, Any] = {
-    "project": {"target_language": None, "output_encoding": None},
+    "project": {
+        "target_language": None,
+        "target_language_tag": None,
+        "output_encoding": None,
+    },
     "input": {"encoding_confidence_threshold": None, "fallback_encoding": None},
     "llm": {
         "preset": None,
@@ -71,6 +76,56 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
+_WELL_FORMED_LANGUAGE_TAG = re.compile(
+    r"(?:[A-Za-z]{2,3}(?:-[A-Za-z]{3}){0,3}|[A-Za-z]{4}|[A-Za-z]{5,8})"
+    r"(?:-[A-Za-z]{4})?"
+    r"(?:-(?:[A-Za-z]{2}|[0-9]{3}))?"
+    r"(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*"
+    r"(?:-[A-WY-Za-wy-z](?:-[A-Za-z0-9]{2,8})+)*"
+    r"(?:-x(?:-[A-Za-z0-9]{1,8})+)?$"
+)
+_PRIVATE_USE_LANGUAGE_TAG = re.compile(
+    r"x(?:-[A-Za-z0-9]{1,8})+$"
+)
+_GRANDFATHERED_LANGUAGE_TAGS = frozenset(
+    {
+        "art-lojban",
+        "cel-gaulish",
+        "i-ami",
+        "i-bnn",
+        "i-default",
+        "i-enochian",
+        "i-hak",
+        "i-klingon",
+        "i-lux",
+        "i-mingo",
+        "i-navajo",
+        "i-pwn",
+        "i-tao",
+        "i-tay",
+        "i-tsu",
+        "no-bok",
+        "no-nyn",
+        "sgn-be-fr",
+        "sgn-be-nl",
+        "sgn-ch-de",
+        "zh-guoyu",
+        "zh-hakka",
+        "zh-min",
+        "zh-min-nan",
+        "zh-xiang",
+    }
+)
+
+
+def is_well_formed_language_tag(value: str) -> bool:
+    lowered = value.casefold()
+    return bool(
+        _WELL_FORMED_LANGUAGE_TAG.fullmatch(value)
+        or _PRIVATE_USE_LANGUAGE_TAG.fullmatch(lowered)
+        or lowered in _GRANDFATHERED_LANGUAGE_TAGS
+    )
+
 
 def _reject_unknown(value: dict[str, Any], schema: dict[str, Any], path: str) -> None:
     unknown = set(value) - set(schema)
@@ -94,12 +149,22 @@ def validate_config(config: dict[str, Any]) -> None:
     _reject_unknown(config, SCHEMA, "config")
     for section, key in (
         ("project", "target_language"),
+        ("project", "target_language_tag"),
         ("project", "output_encoding"),
         ("input", "fallback_encoding"),
     ):
         value = config[section][key]
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or (
+            key != "target_language_tag" and not value.strip()
+        ):
             raise ConfigError(f"{section}.{key} 必须是非空字符串")
+    target_language_tag = config["project"]["target_language_tag"]
+    if target_language_tag and not is_well_formed_language_tag(
+        target_language_tag
+    ):
+        raise ConfigError(
+            "project.target_language_tag 必须是格式正确的 BCP 47 语言标签"
+        )
     preset_id = config["llm"]["preset"]
     if not isinstance(preset_id, str) or not preset_id.strip():
         raise ConfigError("llm.preset 必须是非空字符串")
@@ -302,6 +367,9 @@ def load_config(path: Path) -> dict[str, Any]:
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
+    project = config.get("project")
+    if isinstance(project, dict):
+        project.setdefault("target_language_tag", "")
     validate_config(config)
     return config
 

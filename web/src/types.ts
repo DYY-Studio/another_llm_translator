@@ -286,6 +286,7 @@ export type ThemeMode = "system" | "light" | "dark";
 export interface ProjectConfig {
   project: {
     target_language: string;
+    target_language_tag: string;
     output_encoding: string;
   };
   input: {

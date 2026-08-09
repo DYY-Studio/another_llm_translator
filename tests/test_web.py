@@ -849,6 +849,7 @@ def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
     assert response.status_code == 200
     config = response.json()["config"]
     config["project"]["target_language"] = "繁体中文"
+    config["project"]["target_language_tag"] = "zh-Hant"
     config["input"]["encoding_confidence_threshold"] = 0.6
     config["llm"]["temperature_translation"] = 0.25
     config["execution"]["scheduling_mode"] = "parallel"

@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 
 import pytest
 
+from app.config import dump_config, load_config
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
 from app.documents import publish_document_exports
@@ -41,6 +42,7 @@ def make_epub(
     xhtml: bytes | None = None,
     xhtmls: tuple[bytes, ...] | None = None,
     opf_version: str = "3.0",
+    opf_languages: tuple[str, ...] = (),
 ) -> None:
     default_chapter = xhtml or (
         b'<?xml version="1.0" encoding="utf-8"?>'
@@ -65,10 +67,16 @@ def make_epub(
         f'<itemref idref="c{index}"/>'.encode()
         for index in range(1, len(chapters) + 1)
     )
+    languages = b"".join(
+        f'<dc:language>{value}</dc:language>'.encode()
+        for value in opf_languages
+    )
     opf = (
         b'<?xml version="1.0" encoding="utf-8"?>'
         + f'<package xmlns="http://www.idpf.org/2007/opf" version="{opf_version}">'.encode()
-        + b'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Demo</dc:title></metadata>'
+        + b'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Demo</dc:title>'
+        + languages
+        + b"</metadata>"
         + b'<manifest>' + manifest
         + b'<item id="css" href="style.css" media-type="text/css"/>'
         + b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
@@ -161,6 +169,82 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+def test_epub_export_rewrites_language_metadata_and_xhtml_attributes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "language.epub"
+    make_epub(
+        source,
+        opf_languages=("ja", "JA", "en"),
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml" lang="ja" '
+            b'xml:lang="ja"><body><p>Hello world.</p></body></html>'
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="language",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = "zh-Hant"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+        languages = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "language"
+        ]
+        assert languages == ["zh-Hant"]
+        root = ElementTree.fromstring(
+            archive.read("OEBPS/text/ch1.xhtml")
+        )
+        assert root.get("lang") == "zh-Hant"
+        assert root.get("{http://www.w3.org/XML/1998/namespace}lang") == "zh-Hant"
+
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+        languages = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "language"
+        ]
+        assert languages == ["zh-Hant", "ja", "en"]
+        root = ElementTree.fromstring(
+            archive.read("OEBPS/text/ch1.xhtml")
+        )
+        assert root.get("lang") == "zh-Hant"
+
+
+def test_epub_export_requires_language_tag_without_partial_output(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = ""
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+
+    with pytest.raises(IncompleteError, match="target_language_tag"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert not list((project / "output").rglob("*.epub"))
 
 
 def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
@@ -1098,6 +1182,7 @@ def test_document_export_failure_publishes_nothing(tmp_path: Path) -> None:
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
+            target_language_tag="zh-Hans",
         )
     assert not directory.exists()
 
@@ -1118,6 +1203,7 @@ def test_document_export_validates_all_files_before_publish(
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
+            target_language_tag="zh-Hans",
         )
     assert not directory.exists()
 
@@ -1132,14 +1218,15 @@ class FakeEntryPoint:
         return self.descriptor
 
 
+@pytest.mark.parametrize("incompatible_version", [5, PLUGIN_PROTOCOL_VERSION + 1])
 def test_plugin_host_rejects_protocol_and_duplicate_adapter(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, incompatible_version: int
 ) -> None:
     txt_adapter = get_document_adapter("txt")
     incompatible = PluginDescriptor(
         plugin_id="future",
         version="1",
-        protocol_version=PLUGIN_PROTOCOL_VERSION + 1,
+        protocol_version=incompatible_version,
     )
     monkeypatch.setattr(
         "app.plugins.entry_points",

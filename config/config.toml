@@ -6,6 +6,8 @@
 [project]
 # LLM 应生成的目标语言名称；会写入四个阶段的请求和阶段设置指纹。
 target_language = "简体中文"
+# 输出文档使用的 BCP 47 语言标签；Document Adapter 可按需使用。
+target_language_tag = "zh-Hans"
 # TXT 导出的字符编码。默认 utf-8-sig，便于常见 Windows 查看器识别 UTF-8。
 # 导出使用严格编码；目标文本含有该编码无法表示的字符时会明确失败。
 output_encoding = "utf-8-sig"
