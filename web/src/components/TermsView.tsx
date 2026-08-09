@@ -395,11 +395,12 @@ export function TermsView({
       );
       setData(value);
       const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
+      const groupPrimary = termByKey.get(selected.group_primary ?? selected.normalized) ?? selected;
       selection.reset(member?.normalized ?? "");
       setForm(member ? {
         ...formFor(member),
-        category: selected.category ?? "",
-        description: selected.description ?? "",
+        category: groupPrimary.category ?? "",
+        description: groupPrimary.description ?? "",
       } : emptyForm);
       setMessage(translate("terms.materializedUnsaved", language));
     } catch (error) {
