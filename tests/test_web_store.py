@@ -99,6 +99,130 @@ def test_match_terms_counts_a_group_as_one_slot() -> None:
     assert matched[1]["primary_source"] == "Alice"
 
 
+def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> None:
+    project = create_web_store_project(
+        tmp_path,
+        "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
+    )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-MEMBER-HITS",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-PRIMARY",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-MEMBER",
+                    "source": "Alicia",
+                    "normalized": "alicia",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": "艾丽西亚",
+                    "aliases": ["Ally"],
+                    "group_primary": "alice",
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+
+    hits = WebStore(project).term_hits("alicia")
+
+    assert hits["source"] == "Alicia"
+    assert hits["total"] == 3
+    assert [item["source"] for item in hits["hits"]] == [
+        "Alicia walks",
+        "Ally sings",
+        "Alice and Alicia",
+    ]
+
+
+def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-GROUP-ORDER",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-ZETA",
+                    "source": "Zeta",
+                    "normalized": "zeta",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-ALPHA",
+                    "source": "Alpha",
+                    "normalized": "alpha",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": "zeta",
+                    "conflicts": {"categories": ["人物"]},
+                },
+                {
+                    "record_id": "TERM-BETA",
+                    "source": "Beta",
+                    "normalized": "beta",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": "zeta",
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-AARDVARK",
+                    "source": "Aardvark",
+                    "normalized": "aardvark",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+
+    rows = WebStore(project).terms()["terms"]
+
+    assert [item["normalized"] for item in rows] == [
+        "zeta",
+        "alpha",
+        "beta",
+        "aardvark",
+    ]
+
+
 def seed_conflicted_terms(project: Path) -> None:
     project_id = str(read_json(project, project / "project.json")["project_id"])
     terms = [

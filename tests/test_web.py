@@ -1341,6 +1341,56 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     assert second.json()["hits"][0]["source"] == "Alice sings Alice"
 
 
+def test_web_terms_hits_for_group_member_does_not_require_primary(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path,
+        "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-MEMBER",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+            {
+                "record_id": "TERM-H-MEMBER-CHILD",
+                "source": "Alicia",
+                "normalized": "alicia",
+                "category": None,
+                "description": None,
+                "preferred_translation": "艾丽西亚",
+                "aliases": ["Ally"],
+                "group_primary": "alice",
+                "conflicts": {},
+            },
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alicia"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "Alicia"
+    assert payload["total"] == 3
+    assert [item["source"] for item in payload["hits"]] == [
+        "Alicia walks",
+        "Ally sings",
+        "Alice and Alicia",
+    ]
+
+
 def test_web_terms_hits_match_aliases_and_exclude_conflicted_aliases(
     tmp_path: Path,
 ) -> None:
