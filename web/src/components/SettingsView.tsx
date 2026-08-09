@@ -339,7 +339,7 @@ function PresetSettings({ language }: { language: Language }) {
             {message && <p className="success-text">{message}</p>}
             <div className="config-grid preset-fields">
               <Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
-              <Field label="Base URL"><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
+              <Field label="Base URL" help={translate("preset.baseUrlHint", language)}><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
               <Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
               <Field label={translate("preset.credential", language)}>
                 <div className="credential-selector">

@@ -21,7 +21,7 @@
   },
   "response_content_pointer": "/candidates/0/content/parts/-1/text",
   "models": {
-    "endpoint": "/v1beta/models",
+    "endpoint": "/models",
     "response_models_pointer": "/models",
     "response_model_id": "name",
     "response_model_display": "displayName",

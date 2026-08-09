@@ -1364,8 +1364,8 @@ async def test_llm_client_sends_gemini_format_request(tmp_path: Path) -> None:
     current = config()
     _use_adapter(current, "google-gemini")
     current["llm"]["model"] = "gemini-2.5-flash"
-    current["llm"]["base_url"] = "https://example.com"
-    current["llm"]["endpoint"] = "/v1beta/models/${model}:generateContent"
+    current["llm"]["base_url"] = "https://example.com/v1beta"
+    current["llm"]["endpoint"] = "/models/${model}:generateContent"
     sent: dict | None = None
     sent_url = ""
 
@@ -1435,7 +1435,7 @@ async def test_llm_client_sends_openai_responses_format_request(
 ) -> None:
     current = config()
     _use_adapter(current, "openai-responses")
-    current["llm"]["endpoint"] = "/v1/responses"
+    current["llm"]["endpoint"] = "/responses"
     sent: dict | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
