@@ -1127,6 +1127,47 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
 
 
+def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    added = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+    )
+    assert added.status_code == 200
+    materialized = client.post(
+        "/api/v1/projects/sample/terms/materialize",
+        json={"normalized": "alice", "alias": "Alicia"},
+    )
+    assert materialized.status_code == 200
+    assert materialized.json()["materialized"] == "alicia"
+    member = next(
+        item for item in materialized.json()["terms"] if item["normalized"] == "alicia"
+    )
+    assert member["group_primary"] == "alice"
+
+    missing_confirmation = client.post(
+        "/api/v1/projects/sample/terms/set-primary",
+        json={"normalized": "alicia"},
+    )
+    assert missing_confirmation.status_code == 400
+    switched = client.post(
+        "/api/v1/projects/sample/terms/set-primary",
+        json={"normalized": "alicia", "confirm": True},
+    )
+    assert switched.status_code == 200
+    rows = {item["normalized"]: item for item in switched.json()["terms"]}
+    assert rows["alicia"]["group_primary"] is None
+    assert rows["alice"]["group_primary"] == "alicia"
+
+
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
