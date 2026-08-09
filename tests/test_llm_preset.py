@@ -389,6 +389,6 @@ def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> 
     resolved = load_project_config(project, presets_root=app_root)
     assert resolved["llm"]["adapter"] == "google-gemini"
     assert resolved["llm"]["endpoint"] == (
-        "/v1beta/models/${model}:generateContent"
+        "/models/${model}:generateContent"
     )
     assert resolved["_llm_adapter"].messages_format == "gemini"

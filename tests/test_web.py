@@ -1939,7 +1939,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         ],
         "count": 2,
     }
-    assert fake.request_url == "https://draft.example/v2/v1/models"
+    assert fake.request_url == "https://draft.example/v2/models"
     assert fake.request_headers["Authorization"] == "Bearer draft-secret"
     assert fake.kwargs == {
         "timeout": 45.0,

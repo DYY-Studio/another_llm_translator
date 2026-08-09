@@ -54,9 +54,10 @@
 
 ### 请求边界
 
-- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。
+- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。API 版本前缀
+  （如 `/v1`、`/v1beta`）写入 `base_url`，`endpoint` 必须是相对路径。
 - Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
-  `/v1beta/models/${model}:generateContent`），请求时由宿主替换为模型名；
+  `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
 - 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
   重试、取消和日志由宿主负责。
@@ -101,7 +102,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 ```json
 {
   "models": {
-    "endpoint": "/v1/models",
+    "endpoint": "/models",
     "response_models_pointer": "/data",
     "response_model_id": "id",
     "response_model_display": "display_name",
@@ -110,6 +111,8 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 }
 ```
 
+- models 的 `endpoint` 与主请求一样是不含版本前缀的相对路径；版本前缀由
+  Preset `base_url` 提供（如 `https://api.anthropic.com/v1`）。
 - models 请求固定为非流式 GET，URL 由 Preset `base_url` 与 `endpoint`
   组成，Header 复用顶层 `headers` 模板；渲染时只提供 `${api_key}`，
   含其他占位符的 Header 在触发模型发现时明确失败。
@@ -170,7 +173,9 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 三个新定义都只存在于全局目录；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
 `openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
+Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对
+路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
 ## 2. Document Adapter（Beta）
 
