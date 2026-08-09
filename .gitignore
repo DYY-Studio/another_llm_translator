@@ -17,11 +17,11 @@ node_modules/
 *.tsbuildinfo
 test-results/
 playwright-report/
+app/web_dist/
 
 # Local secrets
 .env
 .env.*
-!.env.example
 
 # Runtime project data
 /projects/
@@ -33,3 +33,17 @@ playwright-report/
 .idea/
 .vscode/
 *.swp
+
+# Tauri
+/src-tauri/target/
+/src-tauri/gen
+/src-tauri/permissions/
+
+# PyInstaller sidecar
+sidecar-dist/
+build/
+/dist/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+credentials-fixed.png

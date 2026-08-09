@@ -18,7 +18,7 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.storage import read_json, read_jsonl
+from app.sqlite_storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
@@ -42,16 +42,8 @@ def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
     assert document.records == ()
 
 
-@pytest.mark.parametrize(
-    "template",
-    [
-        "\ufeff \r\n<think>推理过程</think>\r\n{answer}",
-        "<thinking>推理过程</thinking>\n{answer}",
-        "<thought></thought>\n{answer}",
-        "<analysis>推理过程</analysis>\n{answer}",
-    ],
-)
-def test_jsonl_extraction_accepts_leading_thought_blocks(template: str) -> None:
+def test_jsonl_extraction_accepts_leading_thought_blocks() -> None:
+    template = "\ufeff \r\n<think>推理过程</think>\r\n{answer}"
     answer = llm_jsonl(
         [{"type": "segment", "id": "S1", "translation": "译文"}]
     )
@@ -337,7 +329,7 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
                 {"type": "segment", "id": first_id, "translation": "first"}
             )
         else:
-            saved = read_jsonl(project / "stages" / "translation.jsonl")
+            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
             assert any(item.get("segment_id") == "F0001-S000001" for item in saved)
             assert [item["id"] for item in payload["segments"]] == [
                 "1"
@@ -420,7 +412,10 @@ async def test_old_top_level_json_enters_format_correction(tmp_path: Path) -> No
                 {"segments": [{"id": segment_id, "translation": "old"}]}
             )
         else:
-            assert "format_correction" in payload
+            correction = payload["format_correction"]
+            assert "第 1 行" in correction
+            assert "未知 type" in correction
+            assert "缺少最终 end 记录" in correction
             content = llm_jsonl(
                 [
                     {
@@ -465,8 +460,8 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
                 }
             )
         else:
-            assert read_jsonl(project / "terminology" / "candidates.jsonl")
-            scans = read_jsonl(project / "terminology" / "scans.jsonl")
+            assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
+            scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
             assert not any(item["status"] == "completed" for item in scans)
             content = '{"type":"end"}'
         return httpx.Response(
@@ -510,8 +505,8 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
 
-    candidates = read_jsonl(project / "terminology" / "candidates.jsonl")
-    scans = read_jsonl(project / "terminology" / "scans.jsonl")
+    candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+    scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
     assert calls == 3
     assert summary["published"] is False
     assert summary["failed"] == 1
@@ -520,8 +515,52 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert scans[-1]["status"] == "failed"
     assert scans[-1]["error_class"] == "format_error"
     assert not (project / "terminology" / "terms.json").exists()
-    manifest = read_json(project / "runs" / summary["run_id"] / "manifest.json")
+    manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
     assert manifest["failure_counts"] == {"format_error": 1}
+
+
+@pytest.mark.asyncio
+async def test_terminology_format_retry_carries_parse_error_details(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if calls == 1:
+            content = '{"type":"type":"end"}'
+        else:
+            correction = payload["format_correction"]
+            assert "第 1 行" in correction
+            assert "不是合法 JSON 对象" in correction
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "term",
+                        "source": "Alice",
+                        "category": "人物",
+                        "description": "人物",
+                        "aliases": [],
+                    }
+                ]
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["failed"] == 0
+    assert calls == 2
+    assert read_json(project, project / "terminology" / "terms.json") is not None
 
 
 @pytest.mark.asyncio

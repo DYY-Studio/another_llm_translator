@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { Language } from "../i18n";
-import type { Term, TermsResponse } from "../types";
+import { translate, translateError, type Language } from "../i18n";
+import type { Term, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
+import { Modal } from "./Modal";
 
 interface TermForm {
   source: string;
   preferredTranslation: string;
   category: string;
   description: string;
-  aliases: string;
+  aliases: string[];
 }
 
 const emptyForm: TermForm = {
@@ -17,8 +18,44 @@ const emptyForm: TermForm = {
   preferredTranslation: "",
   category: "",
   description: "",
-  aliases: "",
+  aliases: [],
 };
+
+interface TermsCacheEntry {
+  data: TermsResponse;
+  search: string;
+  onlyConflicts: boolean;
+  showDisabled: boolean;
+  focusedKey: string;
+  scrollTop: number;
+}
+
+// Survives tab switches so returning renders the term list instantly. Keyed
+// by project; cleared when the project changes so cached data never leaks
+// across projects.
+const termsCache = new Map<string, TermsCacheEntry>();
+const termsProjectRef = { current: "" };
+
+// Warms the cache when a project is opened so the first visit to the
+// terminology page renders instantly. Best-effort: failures are left to the
+// view, which fetches and surfaces them on visit; the write guard keeps a
+// mounted view's fresher entry (with its filters and scroll state) intact.
+export function prefetchTerms(project: string) {
+  if (termsCache.has(project)) return;
+  void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
+    .then((data) => {
+      if (termsCache.has(project)) return;
+      termsCache.set(project, {
+        data,
+        search: "",
+        onlyConflicts: false,
+        showDisabled: false,
+        focusedKey: "",
+        scrollTop: 0,
+      });
+    })
+    .catch(() => {});
+}
 
 function formFor(term: Term): TermForm {
   return {
@@ -26,20 +63,36 @@ function formFor(term: Term): TermForm {
     preferredTranslation: term.preferred_translation ?? "",
     category: term.category ?? "",
     description: term.description ?? "",
-    aliases: term.aliases.join("\n"),
+    aliases: [...term.aliases],
   };
+}
+
+function matchesFilters(term: Term, primarySource: string, query: string, onlyConflicts: boolean, showDisabled: boolean) {
+  const normalized = query.trim().toLocaleLowerCase();
+  const haystack = [
+    term.source,
+    term.preferred_translation,
+    term.category,
+    term.description,
+    ...term.aliases,
+    primarySource,
+  ].filter(Boolean).join("\n").toLocaleLowerCase();
+  return (!normalized || haystack.includes(normalized))
+    && (!onlyConflicts || term.has_conflicts)
+    && (showDisabled || !term.disabled);
 }
 
 export function TermsView({
   project,
   focusFailures = false,
   language,
+  onFindSegment,
 }: {
   project: string;
   focusFailures?: boolean;
   language: Language;
+  onFindSegment: (source: string, segmentId: string) => void;
 }) {
-  const en = language === "en";
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
@@ -54,40 +107,163 @@ export function TermsView({
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
+  const [editorTab, setEditorTab] = useState<"edit" | "group" | "hits">("edit");
+  const [pendingPrimary, setPendingPrimary] = useState<string | null>(null);
+  const [hits, setHits] = useState<TermHitsResponse | null>(null);
+  const [hitsLoading, setHitsLoading] = useState(false);
+  const [hitsError, setHitsError] = useState("");
+  const hitsRequestRef = useRef(0);
+  const termListRef = useRef<HTMLDivElement>(null);
+  const restoredScrollRef = useRef<number | null>(null);
+  const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
+  const termByKey = useMemo(
+    () => new Map((data?.terms ?? []).map((term) => [term.normalized, term])),
+    [data],
+  );
+  const membersByPrimary = useMemo(() => {
+    const value = new Map<string, Term[]>();
+    for (const term of data?.terms ?? []) {
+      if (!term.group_primary) continue;
+      const members = value.get(term.group_primary) ?? [];
+      members.push(term);
+      value.set(term.group_primary, members);
+    }
+    return value;
+  }, [data]);
+
+  // Restore a cached view synchronously during render so the browser never
+  // paints an empty frame. This runs on the first mount too: prefetchTerms
+  // warms the cache when the project is opened, so entering the terminology
+  // page renders instantly. Switching projects drops every entry except the
+  // current project's (including its prefetched entry), so cached data never
+  // leaks across projects; the load effect refreshes in the background.
+  if (termsProjectRef.current !== project) {
+    termsProjectRef.current = project;
+    for (const key of [...termsCache.keys()]) {
+      if (key !== project) termsCache.delete(key);
+    }
+    setData(null);
+    selection.reset();
+    termsRestoredRef.current = false;
+  }
+  if (!termsRestoredRef.current) {
+    termsRestoredRef.current = true;
+    const cached = termsCache.get(project);
+    if (cached) {
+      setData(cached.data);
+      setSearch(cached.search);
+      setOnlyConflicts(cached.onlyConflicts);
+      setShowDisabled(cached.showDisabled);
+      selection.reset(cached.focusedKey);
+      restoredScrollRef.current = cached.scrollTop;
+    } else {
+      setData(null);
+      selection.reset();
+    }
+  }
 
   useEffect(() => {
-    setData(null);
     setForm(emptyForm);
     setMessage("");
-    selection.reset();
     void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
       .then(setData)
       .catch((error) => setMessage(String(error)));
   }, [project]);
 
   useEffect(() => {
+    if (!data) return;
+    termsCache.set(project, {
+      data,
+      search,
+      onlyConflicts,
+      showDisabled,
+      focusedKey: selection.focusedKey,
+      scrollTop: termListRef.current?.scrollTop ?? 0,
+    });
+  }, [project, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
+
+  useLayoutEffect(() => {
+    if (restoredScrollRef.current === null) return;
+    if (termListRef.current) termListRef.current.scrollTop = restoredScrollRef.current;
+    restoredScrollRef.current = null;
+  });
+
+  useEffect(() => {
     if (focusFailures) setShowScanFailures(true);
   }, [focusFailures]);
 
-  const visible = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
-    return (data?.terms ?? []).filter((term) => {
-      const haystack = [
-        term.source,
-        term.preferred_translation,
-        term.category,
-        term.description,
-        ...term.aliases,
-      ].filter(Boolean).join("\n").toLocaleLowerCase();
-      return (!query || haystack.includes(query))
-        && (!onlyConflicts || term.has_conflicts)
-        && (showDisabled || !term.disabled);
+  // After a filter change keeps the focused term visible, make sure its row
+  // stays in view: clearing a filter can move it far down the full list.
+  useEffect(() => {
+    if (!selection.focusedKey) return;
+    termListRef.current?.querySelector(".term-row.focused")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [data, onlyConflicts, search, showDisabled, selection.focusedKey]);
+
+  const hitsPageSize = 50;
+  function hitsUrl(normalized: string, offset: number) {
+    const params = new URLSearchParams({
+      normalized,
+      offset: String(offset),
+      limit: String(hitsPageSize),
     });
-  }, [data, onlyConflicts, search, showDisabled]);
+    return `/api/v1/projects/${project}/terms/hits?${params}`;
+  }
+
+  useEffect(() => {
+    const normalized = selected?.normalized ?? "";
+    const requestId = ++hitsRequestRef.current;
+    if (!normalized) {
+      setHits(null);
+      setHitsLoading(false);
+      setHitsError("");
+      return;
+    }
+    setHitsLoading(true);
+    setHitsError("");
+    setHits(null);
+    void api<TermHitsResponse>(hitsUrl(normalized, 0))
+      .then((value) => {
+        if (requestId === hitsRequestRef.current) setHits(value);
+      })
+      .catch((error) => {
+        if (requestId === hitsRequestRef.current) setHitsError(String(error));
+      })
+      .finally(() => {
+        if (requestId === hitsRequestRef.current) setHitsLoading(false);
+      });
+  }, [project, selected]);
+
+  function loadMoreHits() {
+    if (!selected || !hits) return;
+    const normalized = selected.normalized;
+    const offset = hits.hits.length;
+    setHitsLoading(true);
+    void api<TermHitsResponse>(hitsUrl(normalized, offset))
+      .then((value) => setHits((current) => (
+        current && current.normalized === normalized
+          ? { ...value, hits: [...current.hits, ...value.hits] }
+          : current
+      )))
+      .catch((error) => setHitsError(String(error)))
+      .finally(() => setHitsLoading(false));
+  }
+
+  const visible = useMemo(() => {
+    return (data?.terms ?? []).filter(
+      (term) => matchesFilters(
+        term,
+        term.group_primary ? termByKey.get(term.group_primary)?.source ?? "" : "",
+        search,
+        onlyConflicts,
+        showDisabled,
+      ),
+    );
+  }, [data, onlyConflicts, search, showDisabled, termByKey]);
   const visibleKeys = visible.map((term) => term.normalized);
   const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
   const selectedActive = visible.filter(
@@ -100,6 +276,27 @@ export function TermsView({
     setMessage("");
   }
 
+  // Filter changes keep the focused term when it still matches the next
+  // conditions, so clearing a filter returns to the term just selected.
+  function clearSelectionIfFilteredOut(
+    nextSearch: string,
+    nextConflicts: boolean,
+    nextDisabled: boolean,
+  ) {
+    const focused = data?.terms.find(
+      (term) => term.normalized === selection.focusedKey,
+    ) ?? null;
+    if (!focused || !matchesFilters(
+      focused,
+      focused.group_primary ? termByKey.get(focused.group_primary)?.source ?? "" : "",
+      nextSearch,
+      nextConflicts,
+      nextDisabled,
+    )) {
+      resetFilterSelection();
+    }
+  }
+
   function focusTerm(term: Term) {
     setForm(formFor(term));
     setMessage("");
@@ -107,7 +304,7 @@ export function TermsView({
 
   async function save(disabled: boolean) {
     if (!form.source.trim()) {
-      setMessage(en ? "Source term is required" : "术语原文不能为空");
+      setMessage(translate("terms.sourceRequired", language));
       return;
     }
     setSaving(true);
@@ -121,7 +318,7 @@ export function TermsView({
           preferred_translation: form.preferredTranslation,
           category: form.category,
           description: form.description,
-          aliases: form.aliases.split("\n").map((item) => item.trim()).filter(Boolean),
+          aliases: form.aliases.map((item) => item.trim()).filter(Boolean),
           disabled,
         }),
       });
@@ -131,7 +328,7 @@ export function TermsView({
       ) ?? null;
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
-      setMessage(disabled ? (en ? "Term removed" : "术语已移除") : selected?.disabled ? (en ? "Term restored" : "术语已恢复") : (en ? "Term saved" : "术语已保存"));
+      setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -154,7 +351,7 @@ export function TermsView({
       setData(value);
       selection.reset();
       setForm(emptyForm);
-      setMessage(en ? `Removed ${value.removed} terms` : `已移除 ${value.removed} 条术语`);
+      setMessage(translate("terms.removedCount", language, { count: value.removed }));
       setRemoveOpen(false);
     } catch (error) {
       setMessage(String(error));
@@ -178,8 +375,55 @@ export function TermsView({
       setData(value);
       selection.reset();
       setForm(emptyForm);
-      setMessage(en ? `Permanently deleted ${value.deleted} terms; future scans can discover them again` : `已彻底删除 ${value.deleted} 条术语；再次扫描可以重新发现`);
+      setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function materializeAlias(alias: string) {
+    if (!selected) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse & { materialized: string }>(
+        `/api/v1/projects/${project}/terms/materialize`,
+        { method: "POST", body: JSON.stringify({ normalized: selected.normalized, alias }) },
+      );
+      setData(value);
+      const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
+      const groupPrimary = termByKey.get(selected.group_primary ?? selected.normalized) ?? selected;
+      selection.reset(member?.normalized ?? "");
+      setForm(member ? {
+        ...formFor(member),
+        category: groupPrimary.category ?? "",
+        description: groupPrimary.description ?? "",
+      } : emptyForm);
+      setMessage(translate("terms.materializedUnsaved", language));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setPrimary() {
+    if (!pendingPrimary) return;
+    setSaving(true);
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/set-primary`,
+        { method: "POST", body: JSON.stringify({ normalized: pendingPrimary, confirm: true }) },
+      );
+      setData(value);
+      selection.reset(pendingPrimary);
+      const primary = value.terms.find((term) => term.normalized === pendingPrimary);
+      setForm(primary ? formFor(primary) : emptyForm);
+      setPendingPrimary(null);
+      setMessage(translate("terms.primaryChanged", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -195,63 +439,63 @@ export function TermsView({
             <input
               value={search}
               onChange={(event) => {
-                setSearch(event.target.value);
-                resetFilterSelection();
+                const next = event.target.value;
+                setSearch(next);
+                clearSelectionIfFilteredOut(next, onlyConflicts, showDisabled);
               }}
-              placeholder={en ? "Search terms" : "搜索术语"}
+              placeholder={translate("terms.search", language)}
             />
-            <button className="quiet-button" onClick={() => {
-              selection.reset();
-              setForm(emptyForm);
-            }}>{en ? "New" : "新增"}</button>
+            <button className="quiet-button" onClick={resetFilterSelection}>{translate("terms.new", language)}</button>
           </div>
           <div className="term-secondary">
             <div className="term-filters">
               <label><input type="checkbox" checked={onlyConflicts} onChange={(event) => {
-                setOnlyConflicts(event.target.checked);
-                resetFilterSelection();
-              }} />{en ? "Conflicts only" : "只看冲突"}</label>
+                const next = event.target.checked;
+                setOnlyConflicts(next);
+                clearSelectionIfFilteredOut(search, next, showDisabled);
+              }} />{translate("terms.conflictsOnly", language)}</label>
               <label><input type="checkbox" checked={showDisabled} onChange={(event) => {
-                setShowDisabled(event.target.checked);
-                resetFilterSelection();
-              }} />{en ? "Show removed" : "显示已移除"}</label>
+                const next = event.target.checked;
+                setShowDisabled(next);
+                clearSelectionIfFilteredOut(search, onlyConflicts, next);
+              }} />{translate("terms.showRemoved", language)}</label>
             </div>
             <div className="term-stats">
-              <span>revision {data?.terms_revision ?? (en ? "none" : "无")}</span>
-              <span>{en ? "Conflicts" : "待裁决"} {data?.conflict_count ?? 0}</span>
+              <span>revision {data?.terms_revision ?? translate("terms.revisionNone", language)}</span>
+              <span>{translate("terms.conflicts", language)} {data?.conflict_count ?? 0}</span>
             </div>
           </div>
           <div className="batch-toolbar segment-batch-toolbar">
-            <span>{en ? `Selected ${selection.selectedKeys.size}` : `已选择 ${selection.selectedKeys.size} 条`}</span>
+            <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
-              <button className="quiet-button" onClick={() => setImportOpen(true)}>{en ? "Import" : "导入"}</button>
-              <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{en ? "Export" : "导出"}</button>
+              <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
+              <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               <button
                 className="danger-button"
                 disabled={!selectedActive.length}
                 onClick={() => setRemoveOpen(true)}
-              >{en ? "Remove selected" : "移除所选"}</button>
+              >{translate("terms.removeSelected", language)}</button>
               <button
                 className="danger-button"
                 disabled={!selectedTerms.length}
                 onClick={() => setDeleteOpen(true)}
-              >{en ? "Delete permanently" : "彻底删除所选"}</button>
+              >{translate("terms.deletePermanently", language)}</button>
             </div>
-            <small className="term-removal-help">{en ? "Remove keeps scan ignore rules; permanent deletion allows rediscovery." : "移除会保留扫描忽略规则；彻底删除后可再次发现。"}</small>
+            <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>
-              <strong>{en ? "Current scan" : "当前扫描"}</strong>
-              <span>{en ? `Done ${data.scan.completed} · Failed ${data.scan.failed} · Pending ${data.scan.pending}` : `已完成 ${data.scan.completed} · 失败 ${data.scan.failed} · 待处理 ${data.scan.pending}`}</span>
-              <span>{en ? `${data.scan.candidate_count} candidates available` : `可用候选 ${data.scan.candidate_count} 条`}</span>
+              <strong>{translate("terms.currentScan", language)}</strong>
+              <span>{translate("terms.scanStatus", language, { done: data.scan.completed, failed: data.scan.failed, pending: data.scan.pending })}</span>
+              <span>{translate("terms.scanCandidates", language, { count: data.scan.candidate_count })}</span>
               {Object.entries(data.scan.failure_counts).map(([key, count]) => <span key={key} className="scan-error-count">{key} {count}</span>)}
             </div>
             <div className="term-scan-actions">
-              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? (en ? "Hide failures" : "收起失败") : (en ? "View failures" : "查看失败")}</button>}
-              {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{en ? "Export current scan" : "导出当前扫描结果"}</button>}
-              {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{en ? "Publish available results" : "发布现有结果"}</button>}
+              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? translate("terms.hideFailures", language) : translate("terms.viewFailures", language)}</button>}
+              {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{translate("terms.exportCurrentScan", language)}</button>}
+              {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{translate("terms.publishAvailable", language)}</button>}
             </div>
             {showScanFailures && data.scan.failed_segments.length > 0 && (
               <div className="term-scan-failures">
@@ -260,84 +504,181 @@ export function TermsView({
                     <code>{item.segment_id}</code><span>{item.error_class} · {item.error_message}</span>
                   </div>
                 ))}
-                {data.scan.failed_segments_truncated && <small>{en ? "Showing the first 200 failures." : "仅显示前 200 条失败记录。"}</small>}
+                {data.scan.failed_segments_truncated && <small>{translate("terms.first200Failures", language)}</small>}
               </div>
             )}
           </div>
         )}
-        <div className="term-list">
+        <div className="term-list" ref={termListRef} onScroll={(event) => {
+          const cached = termsCache.get(project);
+          if (cached) cached.scrollTop = event.currentTarget.scrollTop;
+        }}>
           {visible.map((term) => {
             const selectedRow = selection.selectedKeys.has(term.normalized);
             const focused = selection.focusedKey === term.normalized;
             return (
               <button
                 key={term.normalized}
-                className={`term-row${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
+                className={`term-row${term.group_primary ? " term-member" : ""}${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
                 onClick={(event) => {
                   selection.select(term.normalized, visibleKeys, event);
                   focusTerm(term);
                 }}
               >
                 <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
-                <span><strong>{term.source}</strong><small>{term.preferred_translation || (en ? "No preferred translation" : "尚无推荐译名")}</small></span>
-                <em>{term.has_conflicts ? (en ? "Conflict" : "待裁决") : term.disabled ? (en ? "Removed" : "已移除") : (en ? "Active" : "有效")}</em>
+                <span>
+                  <strong>{term.source}</strong>
+                  <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                  {term.group_primary ? (
+                    <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
+                  ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
+                    <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
+                  ) : null}
+                </span>
+                <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
               </button>
             );
           })}
-          {data && !visible.length && <div className="empty">{en ? "No terms match the current filters" : "当前筛选下没有术语"}</div>}
-          {!data && <div className="empty">{en ? "Loading terms…" : "正在加载术语…"}</div>}
+          {data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
+          {!data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
       </section>
       <section className="term-editor">
         <div className="page-heading">
-          <div><h1>{selected ? (en ? "Edit term" : "编辑术语") : (en ? "New term" : "新增术语")}</h1><p>{en ? "Saving creates a new term revision immediately." : "保存后立即生成新的术语 revision。"}</p></div>
+          <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
-        <label>{en ? "Source term" : "术语原文"}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
-        <label>{en ? "Preferred translation" : "推荐译名"}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
-        {!!selected?.conflicts.preferred_translations.length && (
-          <ConflictChoices
-            label={en ? "Preferred translation conflicts; choose or enter your own" : "推荐译名存在冲突，请选择或自行填写"}
-            values={selected.conflicts.preferred_translations}
-            onChoose={(value) => setForm({ ...form, preferredTranslation: value })}
-          />
-        )}
-        <label>{en ? "Category" : "类别"}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
-        {!!selected?.conflicts.categories.length && (
-          <ConflictChoices
-            label={en ? "Category conflicts; choose or enter your own" : "类别存在冲突，请选择或自行填写"}
-            values={selected.conflicts.categories}
-            onChoose={(value) => setForm({ ...form, category: value })}
-          />
-        )}
-        {!!selected?.conflicts.alias_primaries.length && (
-          <div className="conflict-box">
-            <strong>{en ? "An alias is another term's primary entry; change it before saving" : "别名同时是其他术语的主条目，请修改别名后保存"}</strong>
-            {selected.conflicts.alias_primaries.map((item) => (
-              <p key={`${item.alias}-${item.primary_source}`}>
-                {item.alias} → {item.primary_source}
-              </p>
-            ))}
+        {selected && (
+          <div className="term-tabs">
+            <button className={editorTab === "edit" ? "active" : ""} onClick={() => setEditorTab("edit")}>{translate("terms.tabEdit", language)}</button>
+            <button className={editorTab === "group" ? "active" : ""} onClick={() => setEditorTab("group")}>{translate("terms.tabGroup", language)}</button>
+            <button className={editorTab === "hits" ? "active" : ""} onClick={() => setEditorTab("hits")}>{translate("terms.tabHits", language, { count: hits ? hits.total : "…" })}</button>
           </div>
         )}
-        <label>{en ? "Description" : "说明"}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-        <label>{en ? "Aliases (one per line)" : "别名（每行一个）"}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
-        {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
-        <div className="editor-actions term-actions">
-          {selected?.disabled ? (
-            <button className="primary-button" disabled={saving} onClick={() => save(false)}>{en ? "Restore" : "恢复"}</button>
-          ) : (
-            <>
-              <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{en ? "Save" : "保存"}</button>
-              {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{en ? "Remove" : "移除"}</button>}
-            </>
-          )}
-        </div>
+        {selected && editorTab === "hits" ? (
+          <div className="term-tab-panel term-hits-panel">
+            {hitsLoading && !hits ? (
+              <div className="term-hits-state">{translate("terms.hitsLoading", language)}</div>
+            ) : hitsError ? (
+              <div className="term-hits-state error-text">{hitsError}</div>
+            ) : hits && hits.total === 0 ? (
+              <div className="term-hits-state">{translate("terms.hitsEmpty", language)}</div>
+            ) : hits && (
+              <>
+                <div className="term-hits-list">
+                  {hits.hits.map((item) => (
+                    <button
+                      key={item.segment_id}
+                      className="term-hit-row"
+                      title={translate("terms.hitsJump", language)}
+                      onClick={() => onFindSegment(selected.source, item.segment_id)}
+                    >
+                      <code>{item.segment_id}</code>
+                      <span>{item.source}</span>
+                    </button>
+                  ))}
+                </div>
+                {hits.hits.length < hits.total && (
+                  <button className="quiet-button term-hits-more" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
+                )}
+              </>
+            )}
+          </div>
+        ) : selected && editorTab === "group" ? (
+          <div className="term-tab-panel term-group-panel">
+            {(() => {
+              const primaryKey = selected.group_primary ?? selected.normalized;
+              const primary = termByKey.get(primaryKey) ?? selected;
+              const members = membersByPrimary.get(primaryKey) ?? [];
+              const grouped = members.length > 0 || selected.group_primary !== null || selected.conflicts.group_claims.length > 0;
+              return grouped ? (
+                <>
+                  <div className="term-group-row primary">
+                    <button className="link-button" onClick={() => { selection.reset(primary.normalized); focusTerm(primary); }}>{primary.source}</button>
+                    <span>{primary.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                    <em>{translate("terms.groupPrimary", language)}</em>
+                  </div>
+                  {members.map((member) => (
+                    <div className="term-group-row" key={member.normalized}>
+                      <button className="link-button" onClick={() => { selection.reset(member.normalized); focusTerm(member); }}>{member.source}</button>
+                      <span>{member.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                      <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
+                    </div>
+                  ))}
+                  {!!selected.conflicts.group_claims.length && (
+                    <div className="conflict-box">
+                      <strong>{translate("terms.groupClaims", language)}</strong>
+                      {selected.conflicts.group_claims.map((claim) => (
+                        <p key={`${claim.entry}-${claim.claimed_by}-${claim.alias}`}>{claim.alias} · {claim.claimed_by} → {claim.entry} · {claim.reason}</p>
+                      ))}
+                      <button className="quiet-button" onClick={() => setPendingPrimary(selected.normalized)}>{translate("terms.resolveAsPrimary", language)}</button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="term-hits-state">{translate("terms.groupEmpty", language)}</div>
+              );
+            })()}
+          </div>
+        ) : (
+          <div className="term-tab-panel term-edit-panel">
+            <label>{translate("terms.sourceTerm", language)}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
+            <label>{translate("terms.preferredTranslation", language)}<input value={form.preferredTranslation} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, preferredTranslation: event.target.value })} /></label>
+            {!!selected?.conflicts.preferred_translations.length && (
+              <ConflictChoices
+                label={translate("terms.conflictTranslations", language)}
+                values={selected.conflicts.preferred_translations}
+                onChoose={(value) => setForm({ ...form, preferredTranslation: value })}
+              />
+            )}
+            <label>{translate("terms.category", language)}<input value={form.category} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label>
+            {!!selected?.conflicts.categories.length && (
+              <ConflictChoices
+                label={translate("terms.conflictCategories", language)}
+                values={selected.conflicts.categories}
+                onChoose={(value) => setForm({ ...form, category: value })}
+              />
+            )}
+            {!!selected?.conflicts.alias_primaries.length && (
+              <div className="conflict-box">
+                <strong>{translate("terms.aliasPrimaryConflict", language)}</strong>
+                {selected.conflicts.alias_primaries.map((item) => (
+                  <p key={`${item.alias}-${item.primary_source}`}>
+                    {item.alias} → {item.primary_source}
+                  </p>
+                ))}
+              </div>
+            )}
+            <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
+            <div className="term-alias-editor">
+              <strong>{translate("terms.aliases", language)}</strong>
+              {form.aliases.map((alias, index) => (
+                <div className="term-alias-row" key={index}>
+                  <input value={alias} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: form.aliases.map((value, aliasIndex) => aliasIndex === index ? event.target.value : value) })} />
+                  {selected && <button className="quiet-button" disabled={selected.disabled || saving || !alias.trim()} onClick={() => materializeAlias(alias)}>{translate("terms.materialize", language)}</button>}
+                  <button className="quiet-button" disabled={selected?.disabled} aria-label={translate("terms.removeAlias", language)} onClick={() => setForm({ ...form, aliases: form.aliases.filter((_, aliasIndex) => aliasIndex !== index) })}>×</button>
+                </div>
+              ))}
+              <button className="quiet-button" disabled={selected?.disabled} onClick={() => setForm({ ...form, aliases: [...form.aliases, ""] })}>{translate("terms.addAlias", language)}</button>
+            </div>
+            {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
+            <div className="editor-actions term-actions">
+              {selected?.disabled ? (
+                <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
+              ) : (
+                <>
+                  <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
+                  {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </section>
       {removeOpen && (
         <ConfirmDialog
           language={language}
-          title={en ? "Remove selected terms" : "移除所选术语"}
-          text={en ? `Remove ${selectedActive.length} terms. Future scans will continue to ignore them.` : `将移除 ${selectedActive.length} 条术语。重新扫描不会自动恢复这些术语。`}
+          title={translate("terms.removeTitle", language)}
+          text={translate("terms.removeText", language, { count: selectedActive.length })}
           confirming={saving}
           onCancel={() => setRemoveOpen(false)}
           onConfirm={removeSelected}
@@ -346,12 +687,23 @@ export function TermsView({
       {deleteOpen && (
         <ConfirmDialog
           language={language}
-          title={en ? "Permanently delete selected terms" : "彻底删除所选术语"}
-          text={en ? `Delete ${selectedTerms.length} terms and their scan ignore rules. Future scans can rediscover them. This cannot be undone.` : `将删除 ${selectedTerms.length} 条术语及其扫描忽略规则；再次扫描可以重新发现。该操作不可撤销。`}
-          confirmLabel={en ? "Delete permanently" : "确认彻底删除"}
+          title={translate("terms.deleteTitle", language)}
+          text={translate("terms.deleteText", language, { count: selectedTerms.length })}
+          confirmLabel={translate("terms.confirmDelete", language)}
           confirming={saving}
           onCancel={() => setDeleteOpen(false)}
           onConfirm={deleteSelected}
+        />
+      )}
+      {pendingPrimary && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.setPrimaryTitle", language)}
+          text={translate("terms.setPrimaryText", language, { source: termByKey.get(pendingPrimary)?.source ?? pendingPrimary })}
+          confirmLabel={translate("terms.setPrimary", language)}
+          confirming={saving}
+          onCancel={() => setPendingPrimary(null)}
+          onConfirm={setPrimary}
         />
       )}
       {importOpen && (
@@ -364,7 +716,7 @@ export function TermsView({
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
-            setMessage(en ? "Term list imported" : "术语表已导入");
+            setMessage(translate("terms.imported", language));
           }}
         />
       )}
@@ -386,7 +738,7 @@ export function TermsView({
           onPublished={async () => {
             setPartialOpen(false);
             setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
-            setMessage(en ? "Available scan results published for later stages" : "现有扫描结果已发布并可用于后续阶段");
+            setMessage(translate("terms.published", language));
           }}
         />
       )}
@@ -430,18 +782,16 @@ function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const effectiveConfirmLabel = confirmLabel ?? (language === "en" ? "Confirm removal" : "确认移除");
+  const effectiveConfirmLabel = confirmLabel ?? translate("terms.confirmRemoval", language);
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
-        <p>{text}</p>
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={confirming} onClick={onCancel}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
-        </div>
+    <Modal ariaLabel={title}>
+      <h2>{title}</h2>
+      <p>{text}</p>
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
+        <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -479,18 +829,16 @@ function TermImportDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Import term list" : "导入术语表"}>
-        <h2>{language === "en" ? "Import term list" : "导入术语表"}</h2>
-        <p>{language === "en" ? "JSON or CSV is merged into the scan baseline; absent terms are not deleted." : "JSON 或 CSV 将增量合并到扫描基线；未出现的术语不会删除。"}</p>
-        <label>{language === "en" ? "Term file" : "术语文件"}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={saving} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" disabled={saving || !file} onClick={submit}>{language === "en" ? "Import" : "导入"}</button>
-        </div>
+    <Modal ariaLabel={translate("terms.importDialogTitle", language)}>
+      <h2>{translate("terms.importDialogTitle", language)}</h2>
+      <p>{translate("terms.importHint", language)}</p>
+      <label>{translate("terms.termFile", language)}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={saving} onClick={onClose}>{translate("common.cancel", language)}</button>
+        <button className="primary-button" disabled={saving || !file} onClick={submit}>{translate("terms.import", language)}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -518,8 +866,12 @@ function TermExportDialog({
         `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}&source=${source}`,
       );
       if (!response.ok) {
-        const value = await response.json();
-        throw new Error(value.error || `请求失败：${response.status}`);
+        const value = await response.json().catch(() => null);
+        const code: unknown = value?.code;
+        const localized = typeof code === "string"
+          ? translateError(code, value?.params ?? {})
+          : null;
+        throw new Error(localized || value?.error || translate("export.requestFailedStatus", language, { status: response.status }));
       }
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
@@ -534,19 +886,17 @@ function TermExportDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Export term list" : "导出术语表"}>
-        <h2>{language === "en" ? "Export term list" : "导出术语表"}</h2>
-        <label>{language === "en" ? "Source" : "来源"}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{language === "en" ? "Published terms" : "已发布术语表"}</option>{hasScanned && <option value="scanned">{language === "en" ? "Current scan candidates" : "当前扫描候选"}</option>}</select></label>
-        <label>{language === "en" ? "Format" : "格式"}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
-        <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{language === "en" ? "Include removed terms" : "包含已移除术语"}</label>
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" onClick={download}>{language === "en" ? "Download" : "下载"}</button>
-        </div>
+    <Modal ariaLabel={translate("terms.exportDialogTitle", language)}>
+      <h2>{translate("terms.exportDialogTitle", language)}</h2>
+      <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
+      <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+      <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions">
+        <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+        <button className="primary-button" onClick={download}>{translate("terms.download", language)}</button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -581,13 +931,13 @@ function PartialPublishDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Publish available scan results" : "发布现有扫描结果"}>
-        <h2>{language === "en" ? "Publish available scan results" : "发布现有扫描结果"}</h2>
-        <p>{language === "en" ? `Merge ${count} available candidate terms into the active term list. Incomplete segments remain unscanned and historical candidates are kept.` : `将合并当前可用的 ${count} 条候选术语，立即作为正式术语表使用。未完成 Segment 不会被标记为已扫描；历史候选仍会保留。`}</p>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.publishTitle", language)}>
+        <h2>{translate("terms.publishTitle", language)}</h2>
+        <p>{translate("terms.publishText", language, { count })}</p>
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
-          <button className="quiet-button" disabled={working} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? (language === "en" ? "Publishing…" : "正在发布…") : (language === "en" ? "Publish" : "确认发布")}</button>
+          <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? translate("terms.publishing", language) : translate("terms.publish", language)}</button>
         </div>
       </div>
     </div>

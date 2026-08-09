@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hmac
+import io
+import ipaddress
 import json
 import os
+import secrets
+import socket
+import sys
 import tempfile
+import time
+import zipfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
+import psutil
 import uvicorn
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -22,29 +32,54 @@ from .config import (
     resolve_global_config,
     resolve_project_config,
 )
+from .credentials import (
+    credential_summaries,
+    delete_credential,
+    read_credential,
+    read_lan_password,
+    resolve_api_key,
+    save_credential,
+    save_lan_password,
+)
 from .diagnostics import Diagnostics
-from .web_store import WebStore
-from .errors import AppError, ExternalError, ProjectError, UsageError
-from .execution import Scope
+from .errors import (
+    AppError,
+    ExternalError,
+    InvalidCredentialsError,
+    ProjectError,
+    UsageError,
+)
+from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
-from .llm_preset import LLMPreset, load_llm_preset, preset_path
+from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
+from .logging_utils import get_logger
 from .plugins import (
     document_adapter_summaries,
     get_document_adapter_for_extension,
 )
 from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
+)
+from .project import (
     PROJECTS_ROOT,
+    PROMPT_LANGUAGES,
     add_project_files,
     delete_project,
     init_project,
+    prompt_file,
     remove_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
 )
-from .sqlite_storage import database_path
+from .server_config import load_server_config, save_server_config
+from .sqlite_storage import (
+    atomic_write_json,
+    atomic_write_text,
+    database_path,
+    read_json,
+)
 from .stages import (
     export_project,
     export_terms,
@@ -52,17 +87,17 @@ from .stages import (
     publish_partial_terms,
     run_apply,
 )
-from .storage import atomic_write_json, atomic_write_text, read_json
+from .user_config import effective_path, user_root, write_user
+from .web_store import WebStore
 from .web_tasks import WebTaskManager, task_options
 
-
-WEB_DIST = Path(__file__).with_name("web_dist")
-PROMPT_FILES = {
-    "terminology": "terminology.middle.txt",
-    "translation": "translation.middle.txt",
-    "proofreading": "proofreading.middle.txt",
-    "polishing": "polishing.middle.txt",
-}
+WEB_DIST = (
+    Path(__file__).with_name("web_dist")
+    if Path(__file__).with_name("web_dist").is_dir()
+    else Path(sys.prefix) / "app" / "web_dist"
+)
+SESSION_COOKIE = "minimal_llm_session"
+_SESSION_TTL_SECONDS = 30 * 24 * 3600
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
     1: "unavailable",
@@ -97,24 +132,91 @@ def _windows_drive_entries() -> list[dict[str, Any]]:
     return entries
 
 
+def _is_loopback(request: Request) -> bool:
+    client = request.client.host if request.client else ""
+    return client in {"127.0.0.1", "::1", "localhost", "testclient", "testserver"}
+
+
+def lan_interfaces() -> list[dict[str, str]]:
+    """IPv4 addresses and netmasks of up, non-loopback interfaces."""
+    try:
+        addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
+    except OSError:
+        return []
+    interfaces = []
+    for name, entries in addrs.items():
+        if name == "lo" or name.startswith("lo"):
+            continue
+        if not stats.get(name) or not stats[name].isup:
+            continue
+        for entry in entries:
+            if entry.family == socket.AF_INET and entry.netmask:
+                interfaces.append(
+                    {"name": name, "address": entry.address, "netmask": entry.netmask}
+                )
+                break
+    return interfaces
+
+
+def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
+    if bind_address == "0.0.0.0":
+        return True
+    for item in lan_interfaces():
+        if item["address"] != bind_address:
+            continue
+        try:
+            network = ipaddress.ip_network(
+                f"{item['address']}/{item['netmask']}", strict=False
+            )
+            return ipaddress.ip_address(client_ip) in network
+        except ValueError:
+            return False
+    return False
+
+
+def _resolve_export_file(root: Path, raw: str) -> Path:
+    """Resolve a project-relative output file, rejecting escape and symlinks."""
+    if "\0" in raw:
+        raise UsageError("导出文件路径无效")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise UsageError("导出文件路径必须位于项目 output 目录内")
+    resolved = (root / "output" / relative).resolve()
+    output_root = (root / "output").resolve()
+    if not resolved.is_relative_to(output_root) or not resolved.is_file():
+        raise UsageError("导出文件路径必须位于项目 output 目录内")
+    return resolved
+
+
 def create_app(
     *,
     projects_root: Path = PROJECTS_ROOT,
     web_dist: Path = WEB_DIST,
     app_root: Path = DEFAULT_APP_ROOT,
+    log_path: Path | None = None,
+    server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    try:
+        projects_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
     app = FastAPI(title="Minimal LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
-    app.state.diagnostics = Diagnostics(app_root / "logs" / "app.log")
+    app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
     app.state.tasks = WebTaskManager(app.state.diagnostics)
     app.state.external_projects = set()
+    app.state.server_config = server_config or load_server_config()
+    app.state.sessions: dict[str, float] = {}
 
     async def stage_uploads(
         upload_root: Path,
         uploads: list[UploadFile],
         relative_paths: list[str] | None,
         input_kinds: list[str] | None,
+        server_paths: list[str] | None = None,
+        server_input_kinds: list[str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         paths = (
             relative_paths
@@ -145,6 +247,58 @@ def create_app(
         if any(kind not in {"file", "folder"} for kind in kinds):
             raise UsageError("输入来源类型必须是 file 或 folder")
 
+        server_entries: list[tuple[str, Path]] = []
+        if server_paths is not None:
+            server_kinds = (
+                server_input_kinds
+                if server_input_kinds is not None
+                else ["file"] * len(server_paths)
+            )
+            if len(server_paths) != len(server_kinds):
+                raise UsageError("服务端路径与来源类型数量不一致")
+            if any(kind not in {"file", "folder"} for kind in server_kinds):
+                raise UsageError("输入来源类型必须是 file 或 folder")
+            for raw, kind in zip(server_paths, server_kinds, strict=True):
+                if not isinstance(raw, str) or not raw.strip():
+                    raise UsageError("服务端路径必须是非空字符串")
+                try:
+                    current = Path(raw).resolve(strict=True)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise UsageError(f"路径不存在或无法访问：{raw}: {exc}") from exc
+                if kind == "folder":
+                    if not current.is_dir():
+                        raise UsageError(f"路径不是目录：{raw}")
+                    found: list[tuple[str, Path]] = []
+                    for dirpath, dirnames, filenames in os.walk(
+                        current, followlinks=False
+                    ):
+                        dirnames.sort()
+                        for filename in sorted(filenames):
+                            full = Path(dirpath) / filename
+                            relative = full.relative_to(current).as_posix()
+                            try:
+                                get_document_adapter_for_extension(full.suffix)
+                            except UsageError:
+                                continue
+                            found.append((relative, full))
+                    if not found:
+                        raise UsageError(f"目录中没有受支持的输入文件：{raw}")
+                    server_entries.extend(found)
+                else:
+                    if not current.is_file():
+                        raise UsageError(f"路径不是文件：{raw}")
+                    try:
+                        get_document_adapter_for_extension(current.suffix)
+                    except UsageError:
+                        raise UsageError(f"不支持的输入文件：{raw}") from None
+                    server_entries.append((current.name, current))
+
+        for relative, source in server_entries:
+            key = relative.casefold()
+            if key in seen:
+                raise UsageError(f"输入文件存在重复相对路径：{relative}")
+            seen.add(key)
+
         inputs: list[str] = []
         original_names: list[str] = []
         ignored: list[str] = []
@@ -163,6 +317,12 @@ def create_app(
             target.write_bytes(await upload.read())
             inputs.append(str(target))
             original_names.append(name)
+        for relative, source in server_entries:
+            target = upload_root.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            inputs.append(str(target))
+            original_names.append(relative)
         warnings = []
         if ignored:
             examples = "、".join(ignored[:5])
@@ -192,10 +352,56 @@ def create_app(
                 raise UsageError("Document Adapter 导入选项格式无效")
         return value
 
+    def valid_session(token: str | None) -> bool:
+        if not token:
+            return False
+        expires = app.state.sessions.get(token)
+        if expires is None:
+            return False
+        if expires <= time.time():
+            app.state.sessions.pop(token, None)
+            return False
+        return True
+
     @app.middleware("http")
-    async def local_only(request: Request, call_next: Any) -> Any:
+    async def gate_access(request: Request, call_next: Callable) -> Any:
+        config = app.state.server_config
+        loopback = _is_loopback(request)
+        if not loopback:
+            if not config["lan"]["enabled"]:
+                return JSONResponse(
+                    {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                )
+            client_ip = request.client.host if request.client else ""
+            if not _client_allowed_on_bind(
+                client_ip, config["lan"]["bind_address"]
+            ):
+                return JSONResponse(
+                    {"error": "客户端不在允许的网段内", "code": "out_of_subnet"},
+                    status_code=403,
+                )
+            path = request.url.path
+            public = (
+                path
+                in {
+                    "/api/v1/server/status",
+                    "/api/v1/server/session",
+                    "/api/v1/auth/login",
+                    "/api/v1/auth/logout",
+                }
+                or not path.startswith("/api/")
+            )
+            if (
+                config["auth"]["required"]
+                and not public
+                and not valid_session(request.cookies.get(SESSION_COOKIE))
+            ):
+                return JSONResponse(
+                    {"error": "需要登录", "code": "auth_required"}, status_code=401
+                )
+            return await call_next(request)
         host = request.headers.get("host", "").split(":", 1)[0]
-        if host not in {"127.0.0.1", "localhost", "testserver"}:
+        if host not in {"127.0.0.1", "localhost", "testserver", "testclient"}:
             return JSONResponse(
                 {"error": "只允许本机访问", "code": "local_only"}, status_code=403
             )
@@ -243,6 +449,21 @@ def create_app(
             status_code=400,
         )
 
+    def welcome_seen() -> bool:
+        return (user_root() / ".welcome-seen").is_file()
+
+    def mark_welcome_seen() -> None:
+        (user_root() / ".welcome-seen").write_text("1", encoding="utf-8")
+
+    @app.get("/api/v1/welcome")
+    async def welcome() -> dict[str, Any]:
+        return {"first": not welcome_seen()}
+
+    @app.post("/api/v1/welcome/dismiss")
+    async def dismiss_welcome() -> dict[str, bool]:
+        mark_welcome_seen()
+        return {"ok": True}
+
     def remember_project(path: Path) -> None:
         normalized = path.resolve()
         if normalized.parent == projects_root.resolve():
@@ -285,7 +506,7 @@ def create_app(
             matches = [
                 path
                 for path in project_paths()
-                if str(read_json(path / "project.json")["project_id"]) == name
+                if str(read_json(path, path / "project.json")["project_id"]) == name
             ]
             if len(matches) != 1:
                 raise ProjectError(f"项目不存在或标识冲突：{name}")
@@ -296,7 +517,7 @@ def create_app(
         values = []
         selectors: set[str] = set()
         for item in project_paths():
-            metadata = read_json(item / "project.json")
+            metadata = read_json(item, item / "project.json")
             selector = project_selector(item, metadata)
             if selector in selectors:
                 raise UsageError(f"项目标识冲突：{selector}")
@@ -349,13 +570,22 @@ def create_app(
             raise UsageError(f"无法读取目录：{current}: {exc}") from exc
         directories = []
         for child in children:
-            if child.is_symlink() or not child.is_dir():
+            try:
+                is_symlink = child.is_symlink()
+                is_dir = child.is_dir()
+            except OSError:
                 continue
+            if is_symlink or not is_dir:
+                continue
+            try:
+                is_project = database_path(child).is_file()
+            except OSError:
+                is_project = False
             directories.append(
                 {
                     "name": child.name,
                     "path": str(child),
-                    "is_project": database_path(child).is_file(),
+                    "is_project": is_project,
                 }
             )
         drives = _windows_drive_entries() if current.parent == current else []
@@ -376,7 +606,7 @@ def create_app(
     ) -> LLMPreset:
         if payload.get("preset_id") != preset_id:
             raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
-        presets = app_root / "llm_presets"
+        presets = user_root() / "llm_presets"
         presets.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -391,7 +621,10 @@ def create_app(
         try:
             preset = load_llm_preset(temporary)
             adapter = load_json_adapter(
-                app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+                effective_path(
+                    f"llm_adapters/{preset.adapter_id}.json",
+                    builtin_root=app_root,
+                )
             )
             if adapter.adapter_id != preset.adapter_id:
                 raise UsageError(
@@ -412,7 +645,11 @@ def create_app(
 
     @app.get("/api/v1/global/config")
     async def get_global_config() -> dict[str, Any]:
-        return {"config": load_config(app_root / "config" / "config.toml")}
+        return {
+            "config": load_config(
+                effective_path("config/config.toml", builtin_root=app_root)
+            )
+        }
 
     @app.put("/api/v1/global/config")
     async def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
@@ -423,44 +660,90 @@ def create_app(
         resolve_global_config(config, app_root)
         for stage in LLM_STAGES:
             resolve_global_config(config, app_root, stage=stage)
-        atomic_write_text(app_root / "config" / "config.toml", content)
+        atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
 
-    @app.get("/api/v1/global/prompts/{stage}")
-    async def get_global_prompt(stage: str) -> dict[str, str]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+    def prompt_languages_for(root: Path) -> dict[str, list[str]]:
+        """Available prompt languages per stage from an effective view."""
         return {
-            "content": (app_root / "prompts" / filename).read_text(
-                encoding="utf-8"
-            )
+            stage: [
+                language
+                for language in PROMPT_LANGUAGES
+                if (root / "prompts" / prompt_file(stage, language)).is_file()
+            ]
+            for stage in LLM_STAGES
         }
+
+    def validate_language(value: object) -> str:
+        if value not in PROMPT_LANGUAGES:
+            raise UsageError("language 必须是 zh-CN 或 en")
+        return str(value)
+
+    def prompt_view(
+        stage: str,
+        language: str,
+        file_for: Callable[[str], Path],
+        available: list[str],
+    ) -> dict[str, Any]:
+        resolved = (
+            language
+            if language in available and file_for(language).is_file()
+            else "zh-CN"
+        )
+        path = file_for(resolved)
+        content = path.read_text(encoding="utf-8")
+        return {
+            "content": content,
+            "language": resolved,
+            "assembled": full_prompt(stage, content, resolved),
+            "languages": available,
+        }
+
+    def global_prompt_file(stage: str, language: str) -> Path:
+        return effective_path(
+            f"prompts/{prompt_file(stage, language)}", builtin_root=app_root
+        )
+
+    @app.get("/api/v1/global/prompts/{stage}")
+    async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        return prompt_view(
+            stage,
+            language,
+            lambda value: global_prompt_file(stage, value),
+            prompt_languages_for(app_root)[stage],
+        )
 
     @app.put("/api/v1/global/prompts/{stage}")
     async def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 必须是非空字符串")
-        atomic_write_text(app_root / "prompts" / filename, content)
+        atomic_write_text(
+            write_user(f"prompts/{prompt_file(stage, language)}"), content
+        )
         return {"saved": True}
 
     @app.get("/api/v1/global/presets")
     async def list_global_presets() -> dict[str, Any]:
         selected = str(
-            load_config(app_root / "config" / "config.toml")["llm"].get(
-                "preset", ""
-            )
+            load_config(
+                effective_path("config/config.toml", builtin_root=app_root)
+            )["llm"].get("preset", "")
         )
         values = []
-        for path in sorted((app_root / "llm_presets").glob("*.json")):
+        paths: dict[str, Path] = {}
+        for root in (user_root(), app_root):
+            for path in sorted((root / "llm_presets").glob("*.json")):
+                paths.setdefault(path.stem, path)
+        for path in sorted(paths.values(), key=lambda value: value.stem):
             try:
                 preset = load_llm_preset(path)
                 values.append(
@@ -485,21 +768,28 @@ def create_app(
                 )
         return {"presets": values}
 
+    def preset_file(preset_id: str) -> Path:
+        preset_path(app_root, preset_id)
+        return effective_path(f"llm_presets/{preset_id}.json", builtin_root=app_root)
+
     @app.get("/api/v1/global/presets/{preset_id}")
     async def get_global_preset(preset_id: str) -> dict[str, Any]:
-        return load_llm_preset(preset_path(app_root, preset_id)).definition
+        return load_llm_preset(preset_file(preset_id)).definition
 
     @app.put("/api/v1/global/presets/{preset_id}")
     async def put_global_preset(
         preset_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
-        atomic_write_json(preset_path(app_root, preset_id), payload)
+        atomic_write_json(write_user(f"llm_presets/{preset_id}.json"), payload)
         return {"saved": True, "digest": preset.digest}
 
     @app.delete("/api/v1/global/presets/{preset_id}")
     async def delete_global_preset(preset_id: str) -> dict[str, bool]:
-        config = load_config(app_root / "config" / "config.toml")
+        preset_file(preset_id)
+        config = load_config(
+            effective_path("config/config.toml", builtin_root=app_root)
+        )
         if config["llm"].get("preset") == preset_id:
             raise UsageError("不能删除全局配置正在使用的 LLM Preset")
         for item in projects_root.iterdir() if projects_root.exists() else ():
@@ -508,17 +798,22 @@ def create_app(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
-        path = preset_path(app_root, preset_id)
-        if not path.is_file():
-            raise UsageError(f"LLM Preset 不存在：{preset_id}")
-        path.unlink()
-        return {"deleted": True}
+        user_file = user_root() / "llm_presets" / f"{preset_id}.json"
+        builtin_file = app_root / "llm_presets" / f"{preset_id}.json"
+        if user_file.is_file():
+            user_file.unlink()
+            return {"deleted": True}
+        if builtin_file.is_file():
+            raise UsageError(f"内置 LLM Preset 不能删除：{preset_id}")
+        raise UsageError(f"LLM Preset 不存在：{preset_id}")
 
     @app.get("/api/v1/global/presets/{preset_id}/preview")
     async def preview_global_preset(preset_id: str) -> dict[str, Any]:
-        preset = load_llm_preset(preset_path(app_root, preset_id))
+        preset = load_llm_preset(preset_file(preset_id))
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
+            )
         )
         headers, body = adapter.build_request(
             api_key="***",
@@ -530,12 +825,10 @@ def create_app(
             extra_body=preset.definition["extra_body"],
         )
         return {
-            "url": (
-                str(preset.definition["base_url"]).rstrip("/")
-                + "/"
-                + str(preset.definition["endpoint"])
-                .replace("${model}", str(preset.definition["model"]))
-                .lstrip("/")
+            "url": endpoint_url(
+                preset.definition["base_url"],
+                preset.definition["endpoint"],
+                model=preset.definition["model"],
             ),
             "headers": headers,
             "body": body,
@@ -547,20 +840,16 @@ def create_app(
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{preset.adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
+            )
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_key = os.getenv(str(preset.definition["api_key_env"]))
-        if not api_key:
-            raise UsageError(
-                f"缺少环境变量：{preset.definition['api_key_env']}"
-            )
+        api_key = resolve_api_key(preset.definition["credential"])
         endpoint, headers = adapter.build_models_request(api_key=api_key)
-        url = (
-            str(preset.definition["base_url"]).rstrip("/")
-            + "/"
-            + endpoint.lstrip("/")
+        url = endpoint_url(
+            preset.definition["base_url"], endpoint, model=preset.definition["model"]
         )
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = str(preset.definition["proxy_url"]) or None
@@ -581,6 +870,138 @@ def create_app(
             raise UsageError(str(exc)) from exc
         return {"models": models, "count": len(models)}
 
+    @app.get("/api/v1/credentials")
+    async def list_credentials() -> dict[str, Any]:
+        return {"credentials": credential_summaries()}
+
+    @app.post("/api/v1/credentials")
+    async def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
+        credential_id = payload.get("id")
+        secret = payload.get("secret")
+        if not isinstance(credential_id, str) or not isinstance(secret, str):
+            raise UsageError("凭据 ID 和内容必须是字符串")
+        save_credential(credential_id, secret)
+        return {"saved": True}
+
+    @app.put("/api/v1/credentials/{credential_id}")
+    async def update_credential(
+        credential_id: str, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        secret = payload.get("secret")
+        if not isinstance(secret, str):
+            raise UsageError("凭据内容必须是字符串")
+        if read_credential(credential_id) is None:
+            raise UsageError(f"凭据不存在：{credential_id}")
+        save_credential(credential_id, secret)
+        return {"saved": True}
+
+    @app.delete("/api/v1/credentials/{credential_id}")
+    async def delete_credential_route(credential_id: str) -> dict[str, bool]:
+        delete_credential(credential_id)
+        return {"deleted": True}
+
+    @app.post("/api/v1/credentials/{credential_id}/test")
+    async def test_credential_route(credential_id: str) -> dict[str, Any]:
+        if read_credential(credential_id) is None:
+            raise UsageError(f"凭据不存在：{credential_id}")
+        return {"ok": True}
+
+    @app.get("/api/v1/server/status")
+    async def server_status(request: Request) -> dict[str, Any]:
+        config = app.state.server_config
+        loopback = _is_loopback(request)
+        return {
+            "lan": dict(config["lan"]),
+            "auth": {
+                "required": config["auth"]["required"],
+                "username": config["auth"]["username"],
+            },
+            "authed": loopback
+            or not config["auth"]["required"]
+            or valid_session(request.cookies.get(SESSION_COOKIE)),
+            "loopback": loopback,
+        }
+
+    @app.get("/api/v1/server/interfaces")
+    async def server_interfaces() -> dict[str, Any]:
+        return {"interfaces": lan_interfaces()}
+
+    @app.put("/api/v1/server/config")
+    async def put_server_config(payload: dict[str, Any]) -> dict[str, Any]:
+        config = app.state.server_config
+        lan = payload.get("lan")
+        auth = payload.get("auth")
+        if not isinstance(lan, dict) or not isinstance(auth, dict):
+            raise UsageError("lan 和 auth 必须是对象")
+        enabled = lan.get("enabled")
+        bind_address = lan.get("bind_address")
+        if not isinstance(enabled, bool) or not isinstance(bind_address, str):
+            raise UsageError("lan.enabled 必须是布尔值，lan.bind_address 必须是字符串")
+        if bind_address and bind_address != "0.0.0.0":
+            addresses = {item["address"] for item in lan_interfaces()}
+            if bind_address not in addresses:
+                raise UsageError("lan.bind_address 必须是本机可用的非回环接口地址")
+        required = auth.get("required")
+        username = auth.get("username")
+        if not isinstance(required, bool) or not isinstance(username, str):
+            raise UsageError("auth.required 必须是布尔值，auth.username 必须是字符串")
+        if required and not username.strip():
+            raise UsageError("开启认证时必须设置用户名")
+        password = auth.get("password")
+        if password is not None and not isinstance(password, str):
+            raise UsageError("auth.password 必须是字符串")
+        if required and not password and read_lan_password() is None:
+            raise UsageError("开启认证时必须设置密码")
+        if password:
+            save_lan_password(password)
+        if not enabled:
+            app.state.sessions.clear()
+        config["lan"]["enabled"] = enabled
+        config["lan"]["bind_address"] = bind_address
+        config["auth"]["required"] = required
+        config["auth"]["username"] = username.strip()
+        save_server_config(config)
+        warning = (
+            "同网段设备拥有完整项目和 LLM 操作权限" if enabled and not required else ""
+        )
+        return {"saved": True, "warning": warning}
+
+    @app.post("/api/v1/auth/login")
+    async def auth_login(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        config = app.state.server_config
+        username = payload.get("username")
+        password = payload.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise UsageError("用户名和密码必须是字符串")
+        stored = read_lan_password()
+        if not config["auth"]["required"]:
+            raise UsageError("当前未开启认证")
+        if username != config["auth"]["username"] or not stored:
+            raise InvalidCredentialsError("用户名或密码错误")
+        if not hmac.compare_digest(password.encode(), stored.encode()):
+            raise InvalidCredentialsError("用户名或密码错误")
+        token = secrets.token_urlsafe(32)
+        app.state.sessions[token] = time.time() + _SESSION_TTL_SECONDS
+        response = JSONResponse({"ok": True})
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=_SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/v1/auth/logout")
+    async def auth_logout(request: Request) -> dict[str, bool]:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            app.state.sessions.pop(token, None)
+        return {"logged_out": True}
+
     @app.post("/api/v1/projects")
     async def create_project(
         name: str = Form(...),
@@ -589,13 +1010,20 @@ def create_app(
         files: list[UploadFile] | None = File(None),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        server_paths: list[str] | None = Form(None),
+        server_input_kinds: list[str] | None = Form(None),
         adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
         uploads = files or []
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
             inputs, original_names, upload_warnings = await stage_uploads(
-                upload_root, uploads, relative_paths, input_kinds
+                upload_root,
+                uploads,
+                relative_paths,
+                input_kinds,
+                server_paths,
+                server_input_kinds,
             )
             if empty == bool(inputs):
                 raise UsageError("必须上传输入文件，或显式选择创建空项目")
@@ -620,7 +1048,7 @@ def create_app(
             ]
         assert path is not None
         remember_project(path)
-        metadata = read_json(path / "project.json")
+        metadata = read_json(path, path / "project.json")
         summary["project_path"] = str(path)
         summary["project_selector"] = project_selector(path, metadata)
         summary["external"] = path.parent != projects_root.resolve()
@@ -635,7 +1063,7 @@ def create_app(
         if not candidate.is_absolute():
             raise UsageError("项目路径必须是绝对路径")
         root = resolve_project(str(candidate))
-        metadata = read_json(root / "project.json")
+        metadata = read_json(root, root / "project.json")
         remember_project(root)
         return {
             "selector": project_selector(root, metadata),
@@ -656,7 +1084,7 @@ def create_app(
         with project_write_lock(root):
             result = delete_project(
                 root,
-                protected_roots=(projects_root, app_root),
+                protected_roots=(projects_root, app_root, user_root()),
             )
         app.state.external_projects.discard(root.resolve())
         return result
@@ -691,18 +1119,26 @@ def create_app(
     @app.post("/api/v1/projects/{name}/files")
     async def add_files(
         name: str,
-        files: list[UploadFile] = File(...),
+        files: list[UploadFile] | None = File(None),
         relative_paths: list[str] | None = Form(None),
         input_kinds: list[str] | None = Form(None),
+        server_paths: list[str] | None = Form(None),
+        server_input_kinds: list[str] | None = Form(None),
         adapter_options: str = Form("{}"),
     ) -> dict[str, Any]:
-        if not files:
-            raise UsageError("至少上传一个输入文件")
+        uploads = files or []
+        if not uploads and not server_paths:
+            raise UsageError("至少提供一个输入文件")
         root = project(name)
         with tempfile.TemporaryDirectory(prefix="translator-upload-") as raw:
             upload_root = Path(raw)
             inputs, original_names, upload_warnings = await stage_uploads(
-                upload_root, files, relative_paths, input_kinds
+                upload_root,
+                uploads,
+                relative_paths,
+                input_kinds,
+                server_paths,
+                server_input_kinds,
             )
             if not inputs:
                 raise UsageError("没有受支持的输入文件")
@@ -754,9 +1190,32 @@ def create_app(
     async def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
+    @app.get("/api/v1/projects/{name}/terms/hits")
+    async def term_hits(name: str, request: Request) -> dict[str, Any]:
+        params = request.query_params
+        normalized = params.get("normalized")
+        if not normalized:
+            raise UsageError("术语命中查询必须提供 normalized")
+        try:
+            offset = int(params.get("offset", "0"))
+            limit = int(params.get("limit", "50"))
+        except ValueError as exc:
+            raise UsageError("术语命中窗口参数必须是整数") from exc
+        return WebStore(project(name)).term_hits(
+            normalized, offset=offset, limit=limit
+        )
+
     @app.post("/api/v1/projects/{name}/terms")
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).save_term(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/materialize")
+    async def materialize_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).materialize_term(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/set-primary")
+    async def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).set_term_primary(payload)
 
     @app.post("/api/v1/projects/{name}/terms/remove")
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -864,37 +1323,43 @@ def create_app(
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
-    async def get_prompt(name: str, stage: str) -> dict[str, str]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
-        return {
-            "content": (
-                project(name) / "prompts" / filename
-            ).read_text(encoding="utf-8")
-        }
+    async def get_prompt(name: str, stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        root = project(name)
+        return prompt_view(
+            stage,
+            language,
+            lambda value: root / "prompts" / prompt_file(stage, value),
+            prompt_languages_for(root)[stage],
+        )
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
     async def put_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        try:
-            filename = PROMPT_FILES[stage]
-        except KeyError as exc:
-            raise UsageError(f"未知 Prompt 阶段：{stage}") from exc
+        if stage not in LLM_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 不能为空")
         root = project(name)
         with project_write_lock(root):
-            atomic_write_text(root / "prompts" / filename, content)
+            atomic_write_text(
+                root / "prompts" / prompt_file(stage, language), content
+            )
         return {"saved": True}
 
     @app.get("/api/v1/global/adapters")
     async def list_global_adapters() -> dict[str, Any]:
         adapters = []
-        for path in sorted((app_root / "llm_adapters").glob("*.json")):
+        paths: dict[str, Path] = {}
+        for root in (user_root(), app_root):
+            for path in sorted((root / "llm_adapters").glob("*.json")):
+                paths.setdefault(path.stem, path)
+        for path in sorted(paths.values(), key=lambda value: value.stem):
             try:
                 adapter = load_json_adapter(path)
                 adapters.append(
@@ -918,7 +1383,9 @@ def create_app(
     @app.get("/api/v1/global/adapters/{adapter_id}")
     async def get_global_adapter(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{adapter_id}.json", builtin_root=app_root
+            )
         )
         return adapter.definition
 
@@ -928,10 +1395,12 @@ def create_app(
     ) -> dict[str, Any]:
         if payload.get("adapter_id") != adapter_id:
             raise UsageError("URL 与 Adapter ID 不一致")
+        adapters_dir = user_root() / "llm_adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=app_root / "llm_adapters",
+            dir=adapters_dir,
             prefix=".adapter.",
             suffix=".json",
             delete=False,
@@ -941,9 +1410,7 @@ def create_app(
             temporary = Path(handle.name)
         try:
             adapter = load_json_adapter(temporary)
-            atomic_write_json(
-                app_root / "llm_adapters" / f"{adapter_id}.json", payload
-            )
+            atomic_write_json(write_user(f"llm_adapters/{adapter_id}.json"), payload)
         finally:
             temporary.unlink(missing_ok=True)
         return {"saved": True, "digest": adapter.digest}
@@ -951,7 +1418,9 @@ def create_app(
     @app.get("/api/v1/global/adapters/{adapter_id}/preview")
     async def adapter_preview(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
-            app_root / "llm_adapters" / f"{adapter_id}.json"
+            effective_path(
+                f"llm_adapters/{adapter_id}.json", builtin_root=app_root
+            )
         )
         headers, body = adapter.build_request(
             api_key="***",
@@ -996,6 +1465,11 @@ def create_app(
             scope=scope,
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             run_action=run_action,
+            prompt_language=(
+                validate_language(payload.get("language"))
+                if "language" in payload
+                else None
+            ),
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
@@ -1091,6 +1565,91 @@ def create_app(
                 file_ids=file_ids,
             )
 
+    @app.get("/api/v1/projects/{name}/exports")
+    async def exports(name: str) -> dict[str, Any]:
+        root = project(name)
+        output_root = root / "output"
+        files: list[dict[str, Any]] = []
+        if output_root.is_dir():
+            for path in sorted(output_root.rglob("*")):
+                try:
+                    is_symlink = path.is_symlink()
+                    is_file = path.is_file()
+                except OSError:
+                    continue
+                if is_symlink or not is_file:
+                    continue
+                relative = path.relative_to(output_root)
+                if any(part == ".staging" for part in relative.parts):
+                    continue
+                if path.name == ".DS_Store":
+                    continue
+                stat = path.stat()
+                files.append(
+                    {
+                        "path": relative.as_posix(),
+                        "size": stat.st_size,
+                        "mtime": int(stat.st_mtime),
+                    }
+                )
+        return {"files": files}
+
+    @app.get("/api/v1/projects/{name}/exports/download")
+    async def download_export(name: str, file: str) -> Response:
+        root = project(name)
+        path = _resolve_export_file(root, file)
+        return Response(
+            content=path.read_bytes(),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{path.name}"'
+                )
+            },
+        )
+
+    @app.get("/api/v1/projects/{name}/exports/download-all")
+    async def download_export_all(
+        name: str, file: list[str] = Query(default=[])
+    ) -> Response:
+        root = project(name)
+        if not file:
+            raise UsageError("至少需要一个导出文件")
+        files = list(dict.fromkeys(file))
+        paths = [_resolve_export_file(root, raw) for raw in files]
+        output_root = (root / "output").resolve()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in paths:
+                archive.write(path, path.relative_to(output_root).as_posix())
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{name}-exports.zip"'
+                )
+            },
+        )
+
+    @app.post("/api/v1/projects/{name}/exports/remove")
+    async def remove_exports(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        files = payload.get("files")
+        if (
+            not isinstance(files, list)
+            or not files
+            or not all(isinstance(value, str) and value for value in files)
+        ):
+            raise UsageError("files 必须是非空字符串数组")
+        root = project(name)
+        paths = [_resolve_export_file(root, raw) for raw in files]
+        with project_write_lock(root):
+            for path in paths:
+                path.unlink()
+        return {"removed": files}
+
     @app.post("/api/v1/projects/{name}/sync-templates")
     async def sync_templates(
         name: str, payload: dict[str, Any]
@@ -1110,6 +1669,10 @@ def create_app(
 
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
+    else:
+        get_logger().warning(
+            "未找到前端构建产物 %s；请先执行 npm run build --prefix web", web_dist
+        )
     return app
 
 
@@ -1118,19 +1681,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m app.web",
         description="启动本地 Web 翻译工作台",
     )
-    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.host not in {"127.0.0.1", "localhost"}:
-        raise SystemExit("error: Web Alpha 只允许绑定本机回环地址")
     uvicorn.run(
         "app.web:create_app",
         factory=True,
-        host=args.host,
+        host="0.0.0.0",
         port=args.port,
     )
 

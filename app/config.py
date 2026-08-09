@@ -10,11 +10,9 @@ from typing import Any
 from .errors import ConfigError
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
+from .user_config import APP_ROOT, effective_path
 
-
-APP_ROOT = Path(__file__).parents[1]
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
-
 
 SCHEMA: dict[str, Any] = {
     "project": {"target_language": None, "output_encoding": None},
@@ -34,6 +32,7 @@ SCHEMA: dict[str, Any] = {
     "chunking": {
         "target_chunk_input_tokens": None,
         "allow_split_oversized_segment": None,
+        "cross_boundary_batching": None,
     },
     "context": {
         "translation": {"enabled": None, "previous_segments": None},
@@ -189,16 +188,35 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("retry.max_delay_seconds 不能小于 base_delay_seconds")
     if not isinstance(config["chunking"]["allow_split_oversized_segment"], bool):
         raise ConfigError("chunking.allow_split_oversized_segment 必须是布尔值")
-    # TODO: 主流程完成全面验证后，实现可配置归一化与大小写匹配并补充真实用例。
-    # 当前两项只是明确占位，术语实现固定使用 NFKC、casefold。
-    if not isinstance(config["terminology"]["unicode_normalization"], str):
-        raise ConfigError("terminology.unicode_normalization 必须是字符串")
-    if config["terminology"]["unicode_normalization"] != "NFKC":
-        raise ConfigError("MVP 仅支持 terminology.unicode_normalization = NFKC")
+    cross_boundary_batching = config["chunking"]["cross_boundary_batching"]
+    if not isinstance(cross_boundary_batching, list) or any(
+        not isinstance(stage, str) for stage in cross_boundary_batching
+    ):
+        raise ConfigError(
+            "chunking.cross_boundary_batching 必须是 LLM 阶段名称数组"
+        )
+    unknown_stages = sorted(set(cross_boundary_batching) - set(LLM_STAGES))
+    if unknown_stages:
+        raise ConfigError(
+            "chunking.cross_boundary_batching 包含未知阶段："
+            + ", ".join(unknown_stages)
+        )
+    if len(cross_boundary_batching) != len(set(cross_boundary_batching)):
+        raise ConfigError("chunking.cross_boundary_batching 不能包含重复阶段")
+    normalization = config["terminology"]["unicode_normalization"]
+    if not isinstance(normalization, str) or normalization not in {
+        "",
+        "NFC",
+        "NFD",
+        "NFKC",
+        "NFKD",
+    }:
+        raise ConfigError(
+            "terminology.unicode_normalization 必须是空字符串或 "
+            "NFC、NFD、NFKC、NFKD 之一"
+        )
     if not isinstance(config["terminology"]["case_insensitive"], bool):
         raise ConfigError("terminology.case_insensitive 必须是布尔值")
-    if not config["terminology"]["case_insensitive"]:
-        raise ConfigError("MVP 仅支持 terminology.case_insensitive = true")
     alias_collision = config["terminology"]["alias_primary_collision"]
     if alias_collision not in {"conflict", "merge"}:
         raise ConfigError(
@@ -268,6 +286,8 @@ def _toml_scalar(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
     return str(value)
 
 
@@ -278,7 +298,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
-        terminology.setdefault("alias_primary_collision", "conflict")
+        terminology.setdefault("alias_primary_collision", "merge")
+    chunking = config.get("chunking")
+    if isinstance(chunking, dict):
+        chunking.setdefault("cross_boundary_batching", [])
     validate_config(config)
     return config
 
@@ -296,46 +319,56 @@ def load_project_config(
     )
 
 
+def _resolve_config(
+    config: dict[str, Any],
+    root: Path,
+    *,
+    stage: str | None,
+    error_kind: str,
+) -> dict[str, Any]:
+    config = deepcopy(config)
+    configured_preset_id = _preset_id_for_stage(config, stage)
+    preset_path(root, configured_preset_id)
+    preset = load_llm_preset(
+        effective_path(
+            f"llm_presets/{configured_preset_id}.json", builtin_root=root
+        )
+    )
+    if preset.preset_id != configured_preset_id:
+        raise ConfigError(f"LLM Preset 文件中的 preset_id 与{error_kind}不一致")
+    return _resolve_llm_config(
+        config,
+        adapter_file=effective_path(
+            f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
+        ),
+        preset=preset,
+    )
+
+
 def resolve_project_config(
     config: dict[str, Any],
     *,
     stage: str | None = None,
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
-    config = deepcopy(config)
-    configured_preset_id = _preset_id_for_stage(config, stage)
-    preset_file = preset_path(presets_root or APP_ROOT, configured_preset_id)
-    preset = load_llm_preset(preset_file)
-    if preset.preset_id != configured_preset_id:
-        raise ConfigError("LLM Preset 文件中的 preset_id 与项目配置不一致")
-    return _resolve_llm_config(
+    return _resolve_config(
         config,
-        adapter_file=(
-            (presets_root or APP_ROOT)
-            / "llm_adapters"
-            / f"{preset.adapter_id}.json"
-        ),
-        preset=preset,
+        presets_root or APP_ROOT,
+        stage=stage,
+        error_kind="项目配置",
     )
 
 
 def load_global_config(root: Path) -> dict[str, Any]:
-    return resolve_global_config(load_config(root / "config" / "config.toml"), root)
+    return resolve_global_config(
+        load_config(effective_path("config/config.toml", builtin_root=root)), root
+    )
 
 
 def resolve_global_config(
     config: dict[str, Any], root: Path, *, stage: str | None = None
 ) -> dict[str, Any]:
-    config = deepcopy(config)
-    configured_preset_id = _preset_id_for_stage(config, stage)
-    preset = load_llm_preset(preset_path(root, configured_preset_id))
-    if preset.preset_id != configured_preset_id:
-        raise ConfigError("LLM Preset 文件中的 preset_id 与全局配置不一致")
-    return _resolve_llm_config(
-        config,
-        adapter_file=root / "llm_adapters" / f"{preset.adapter_id}.json",
-        preset=preset,
-    )
+    return _resolve_config(config, root, stage=stage, error_kind="全局配置")
 
 
 def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
@@ -369,7 +402,7 @@ def _resolve_llm_config(
                 "base_url",
                 "endpoint",
                 "model",
-                "api_key_env",
+                "credential",
                 "proxy_url",
                 "context_window_tokens",
                 "max_output_tokens",

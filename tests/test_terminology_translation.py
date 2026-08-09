@@ -12,13 +12,14 @@ from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import (
+    TermNormalization,
     _restore_leading_whitespace,
     load_terms,
     match_terms,
     run_terminology,
     run_translation,
 )
-from app.storage import read_json, read_jsonl
+from app.sqlite_storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_foundation import make_app_root
 
@@ -171,6 +172,118 @@ async def test_terminology_publishes_and_translation_uses_terms(
 
 
 @pytest.mark.asyncio
+async def test_case_insensitive_false_keeps_case_distinct_terms(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice\nalice")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        records = []
+        for item in payload["source_segments"]:
+            source = item["source"]
+            records.append(
+                {
+                    "type": "term",
+                    "source": source,
+                    "category": "名称",
+                    "description": f"说明-{source}",
+                    "preferred_translation": f"译-{source}",
+                    "aliases": [],
+                }
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["published"] is True
+    library = load_terms(project)
+    assert [item["source"] for item in library["terms"]] == ["Alice", "alice"]
+    spec = TermNormalization("NFKC", False)
+    assert [item["source"] for item in match_terms("Alice walked", library, 10, spec)] == [
+        "Alice"
+    ]
+    assert [item["source"] for item in match_terms("alice walked", library, 10, spec)] == [
+        "alice"
+    ]
+    casefold_spec = TermNormalization("NFKC", True)
+    assert {
+        item["source"] for item in match_terms("ALICE", library, 10, casefold_spec)
+    } == {"Alice", "alice"}
+
+
+@pytest.mark.parametrize(
+    ("normalization", "expected_sources"),
+    [
+        ('"NFKC"', ["ABC"]),
+        ('""', ["ABC", "\uff21\uff22\uff23"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unicode_normalization_setting_controls_scan_dedup(
+    tmp_path: Path,
+    normalization: str,
+    expected_sources: list[str],
+) -> None:
+    project = await create_project(tmp_path, "\uff21\uff22\uff23\nABC")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        re.sub(
+            r'(?m)^unicode_normalization\s*=.*$',
+            f"unicode_normalization = {normalization}",
+            config_path.read_text(encoding="utf-8"),
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        records = [
+            {
+                "type": "term",
+                "source": item["source"],
+                "category": "名称",
+                "description": f"说明-{item['source']}",
+                "preferred_translation": f"译-{item['source']}",
+                "aliases": [],
+            }
+            for item in payload["source_segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+    assert summary["published"] is True
+    assert [
+        item["source"] for item in load_terms(project)["terms"]
+    ] == expected_sources
+
+
+@pytest.mark.asyncio
 async def test_completed_terminology_command_does_not_republish(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "Alice")
     calls = 0
@@ -283,7 +396,9 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
             },
         ]
     }
-    matched = match_terms("Alice Wonderland arrived.", library, 10)
+    matched = match_terms(
+        "Alice Wonderland arrived.", library, 10, TermNormalization("NFKC", True)
+    )
     assert [item["source"] for item in matched] == ["Alice", "Other"]
 
 
@@ -377,7 +492,7 @@ async def test_partial_response_context_split_does_not_retry_completed_segment(
     ]
     assert calls[2:]
     assert all(all(segment_id == "1" for segment_id in request) for request in calls[2:])
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     assert [
         record["segment_id"]
         for record in records
@@ -443,7 +558,7 @@ async def test_dynamic_itpm_failure_finalizes_translation_run(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     manifests = [
-        read_json(path)
+        read_json(project, path)
         for path in (project / "runs").glob("*/manifest.json")
     ]
     assert len(manifests) == 1
@@ -533,7 +648,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     ] == [
         ["1", "2", "3"],
     ]
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     assert all(record["validation_status"] == "passed" for record in records)
 
 
@@ -586,7 +701,7 @@ async def test_oversized_segment_is_split_and_saved_once(
     assert summary["completed"] == 1
     assert len(requested_ids) > 1
     assert all(segment_id.isdigit() for segment_id in requested_ids)
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     completed = [record for record in records if record["status"] == "completed"]
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
@@ -643,7 +758,11 @@ async def test_model_context_error_triggers_runtime_segment_split(
     )
     assert completed["F0001-S000001"]["text"] == "abcdefgh"
     run_dir = next((project / "runs").iterdir())
-    attempts = read_jsonl(run_dir / "attempts.jsonl")
+    attempts = [
+        json.loads(line)
+        for line in (run_dir / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert any(item.get("parent_request_id") for item in attempts)
 
 
@@ -701,7 +820,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 1
-    records = read_jsonl(project / "stages" / "translation.jsonl")
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
     completed = [item for item in records if item["status"] == "completed"]
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"

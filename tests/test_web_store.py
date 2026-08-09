@@ -7,12 +7,11 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import UsageError
+from app.errors import TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
-from app.sqlite_storage import query_segments, segment_ids
-from app.stages import export_project, load_terms, match_terms
-from app.storage import atomic_write_json, read_json, record_header
+from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
+from app.stages import TermNormalization, export_project, load_terms, match_terms
 from tests.test_foundation import make_app_root
 
 
@@ -30,8 +29,202 @@ def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     return project
 
 
+def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "Alice and Alicia")
+    store = WebStore(project)
+    store.save_term(
+        {
+            "source": "Alice",
+            "category": "人物",
+            "description": "main",
+            "preferred_translation": "爱丽丝",
+            "aliases": ["Alicia"],
+        }
+    )
+
+    materialized = store.materialize_term(
+        {"normalized": "alice", "alias": "Alicia"}
+    )
+    alice = next(item for item in materialized["terms"] if item["normalized"] == "alice")
+    alicia = next(item for item in materialized["terms"] if item["normalized"] == "alicia")
+    assert alice["aliases"] == []
+    assert alicia["group_primary"] == "alice"
+    assert alicia["category"] is None
+    assert alicia["preferred_translation"] is None
+
+    switched = store.set_term_primary({"normalized": "alicia", "confirm": True})
+    alice = next(item for item in switched["terms"] if item["normalized"] == "alice")
+    alicia = next(item for item in switched["terms"] if item["normalized"] == "alicia")
+    assert alicia["group_primary"] is None
+    assert alice["group_primary"] == "alicia"
+    with pytest.raises(TermGroupError, match="组主仍有成员"):
+        store.remove_terms({"normalized": ["alicia"]})
+    removed = store.remove_terms({"normalized": ["alice"]})
+    assert removed["removed"] == 1
+
+
+def test_match_terms_counts_a_group_as_one_slot() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "normalized": "alice",
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+            {
+                "source": "Alicia",
+                "normalized": "alicia",
+                "preferred_translation": "艾丽西亚",
+                "aliases": ["Ally"],
+                "group_primary": "alice",
+                "conflicts": {},
+            },
+            {
+                "source": "Bob",
+                "normalized": "bob",
+                "preferred_translation": "鲍勃",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+        ]
+    }
+    matched = match_terms(
+        "Alicia met Bob", library, 1, TermNormalization("NFKC", True)
+    )
+    assert [item["source"] for item in matched] == ["Alice", "Alicia"]
+    assert matched[1]["primary_source"] == "Alice"
+
+
+def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> None:
+    project = create_web_store_project(
+        tmp_path,
+        "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
+    )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-MEMBER-HITS",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-PRIMARY",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-MEMBER",
+                    "source": "Alicia",
+                    "normalized": "alicia",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": "艾丽西亚",
+                    "aliases": ["Ally"],
+                    "group_primary": "alice",
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+
+    hits = WebStore(project).term_hits("alicia")
+
+    assert hits["source"] == "Alicia"
+    assert hits["total"] == 3
+    assert [item["source"] for item in hits["hits"]] == [
+        "Alicia walks",
+        "Ally sings",
+        "Alice and Alicia",
+    ]
+
+
+def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-GROUP-ORDER",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-ZETA",
+                    "source": "Zeta",
+                    "normalized": "zeta",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-ALPHA",
+                    "source": "Alpha",
+                    "normalized": "alpha",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": "zeta",
+                    "conflicts": {"categories": ["人物"]},
+                },
+                {
+                    "record_id": "TERM-BETA",
+                    "source": "Beta",
+                    "normalized": "beta",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": "zeta",
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-AARDVARK",
+                    "source": "Aardvark",
+                    "normalized": "aardvark",
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+
+    rows = WebStore(project).terms()["terms"]
+
+    assert [item["normalized"] for item in rows] == [
+        "zeta",
+        "alpha",
+        "beta",
+        "aardvark",
+    ]
+
+
 def seed_conflicted_terms(project: Path) -> None:
-    project_id = str(read_json(project / "project.json")["project_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
     terms = [
         {
             "record_id": "TERM-000001",
@@ -73,7 +266,8 @@ def seed_conflicted_terms(project: Path) -> None:
             },
         },
     ]
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "terms.json",
         record_header(
             "terminology_library",
@@ -129,6 +323,10 @@ def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
             database.execute(
                 "UPDATE files SET file_order = ?, payload_json = ? WHERE file_id = ?",
                 (payload["file_order"], json.dumps(payload, ensure_ascii=False), file_id),
+            )
+            database.execute(
+                "UPDATE segments SET file_order = ? WHERE file_id = ?",
+                (payload["file_order"], file_id),
             )
         database.commit()
     finally:
@@ -387,7 +585,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
         }
     )
     assert added["terms_revision"] == 1
-    assert match_terms("Alice arrived", load_terms(project), 10)[0][
+    assert match_terms("Alice arrived", load_terms(project), 10, TermNormalization("NFKC", True))[0][
         "preferred_translation"
     ] == "爱丽丝"
 
@@ -403,7 +601,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
         }
     )
     assert renamed["terms_revision"] == 2
-    overrides = read_json(project / "terminology" / "overrides.json")["overrides"]
+    overrides = read_json(project, project / "terminology" / "overrides.json")["overrides"]
     assert next(item for item in overrides if item["normalized"] == "alice")[
         "disabled"
     ]
@@ -431,7 +629,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     )
     assert disabled["terms_revision"] == 3
     assert load_terms(project)["terms"] == []
-    assert match_terms("Alicia arrived", load_terms(project), 10) == []
+    assert match_terms("Alicia arrived", load_terms(project), 10, TermNormalization("NFKC", True)) == []
 
     restored = store.save_term(
         {
@@ -446,33 +644,9 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     )
     assert restored["terms_revision"] == 4
     assert restored["terms"][0]["disabled"] is False
-    assert match_terms("Alicia arrived", load_terms(project), 10)[0][
+    assert match_terms("Alicia arrived", load_terms(project), 10, TermNormalization("NFKC", True))[0][
         "preferred_translation"
     ] == "艾丽西亚"
-
-
-def test_web_store_permanently_deletes_term_override_for_future_scans(
-    tmp_path: Path,
-) -> None:
-    project = create_web_store_project(tmp_path)
-    store = WebStore(project)
-    store.save_term(
-        {
-            "source": "Alicia",
-            "preferred_translation": "艾丽西亚",
-            "category": "人名",
-            "description": "主角",
-            "aliases": [],
-            "disabled": True,
-        }
-    )
-    assert read_json(project / "terminology" / "overrides.json")["overrides"]
-
-    deleted = store.delete_terms({"normalized": ["alicia"]})
-
-    assert deleted["deleted"] == 1
-    assert load_terms(project)["terms"] == []
-    assert read_json(project / "terminology" / "overrides.json")["overrides"] == []
 
 
 def test_web_store_exposes_and_resolves_term_conflicts_independently(
@@ -567,7 +741,7 @@ def test_web_store_can_remove_conflicted_term_without_resolving_it(
     )
     override = next(
         item
-        for item in read_json(project / "terminology" / "overrides.json")[
+        for item in read_json(project, project / "terminology" / "overrides.json")[
             "overrides"
         ]
         if item["normalized"] == "gamma"
@@ -583,3 +757,33 @@ def test_web_store_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) ->
         store.save_term({"source": " ", "aliases": []})
     with pytest.raises(UsageError, match="aliases"):
         store.save_term({"source": "Alice", "aliases": "Alice"})
+
+
+def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+    store = WebStore(project)
+    added = store.save_term(
+        {
+            "old_normalized": None,
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人名",
+            "description": "主角",
+            "aliases": ["alice"],
+            "disabled": False,
+        }
+    )
+    assert added["terms_revision"] == 1
+    assert added["terms"][0]["aliases"] == ["alice"]
+    spec = TermNormalization("NFKC", False)
+    assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]

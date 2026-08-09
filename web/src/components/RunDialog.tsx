@@ -1,25 +1,20 @@
 import { useState } from "react";
-import type { Language } from "../i18n";
+import { translate, type Language } from "../i18n";
 import type { RunDecision, TaskOptions } from "../types";
 
 type ResultPolicy = "pending" | "reuse" | "force";
 
 export function RunDialog({
   options,
-  starting,
   onClose,
   onStart,
   language,
 }: {
   options: TaskOptions;
-  starting: boolean;
   onClose: () => void;
   onStart: (decision: RunDecision) => void;
   language: Language;
 }) {
-  const stageLabels = language === "en"
-    ? { terminology: "terms", translation: "translation", proofreading: "proofreading", polishing: "polishing" }
-    : { terminology: "术语", translation: "翻译", proofreading: "校对", polishing: "润色" };
   const [runAction, setRunAction] = useState<"resume" | "decline" | null>(
     options.running_run ? "resume" : null,
   );
@@ -49,27 +44,27 @@ export function RunDialog({
       >
         <div className="page-heading">
           <div>
-            <h2 id="run-dialog-title">{language === "en" ? `Run ${stageLabels[options.stage]} stage` : `运行${stageLabels[options.stage]}阶段`}</h2>
-            <p>{language === "en" ? "Choose how to handle existing results and unfinished Runs." : "确认如何处理已有结果和未完成 Run。"}</p>
+            <h2 id="run-dialog-title">{translate("runDialog.title", language, { stage: translate(`stage.${options.stage}`, language) })}</h2>
+            <p>{translate("runDialog.subtitle", language)}</p>
           </div>
         </div>
         <div className="run-counts">
-          <span><strong>{options.selected}</strong>{language === "en" ? "Total" : "全部"}</span>
-          <span><strong>{options.completed}</strong>{language === "en" ? "Done" : "已完成"}</span>
-          <span><strong>{options.pending}</strong>{language === "en" ? "Pending" : "待处理"}</span>
-          <span><strong>{options.failed}</strong>{language === "en" ? "Failed" : "失败"}</span>
+          <span><strong>{options.selected}</strong>{translate("runDialog.total", language)}</span>
+          <span><strong>{options.completed}</strong>{translate("runDialog.done", language)}</span>
+          <span><strong>{options.pending}</strong>{translate("runDialog.pending", language)}</span>
+          <span><strong>{options.failed}</strong>{translate("runDialog.failed", language)}</span>
         </div>
 
         {options.running_run && (
           <fieldset className="decision-group">
-            <legend>{language === "en" ? "Unfinished Run found" : "发现未完成 Run"}</legend>
+            <legend>{translate("runDialog.unfinishedRun", language)}</legend>
             <label className="radio-option decision-option">
               <input
                 type="radio"
                 checked={runAction === "resume"}
                 onChange={() => setRunAction("resume")}
               />
-              <span><strong>{language === "en" ? "Resume original Run" : "续用原 Run"}</strong><small>{language === "en" ? "Continue unfinished items with the current configuration and Prompt." : "沿用原始范围，以当前配置和 Prompt 继续未完成项。"}</small></span>
+              <span><strong>{translate("runDialog.resumeOriginal", language)}</strong><small>{translate("runDialog.resumeHint", language)}</small></span>
             </label>
             <label className="radio-option decision-option">
               <input
@@ -77,23 +72,23 @@ export function RunDialog({
                 checked={runAction === "decline"}
                 onChange={() => setRunAction("decline")}
               />
-              <span><strong>{language === "en" ? "End original Run and create new" : "结束原 Run 并新建"}</strong><small>{language === "en" ? `Mark ${options.running_run.run_id} as declined.` : `将 ${options.running_run.run_id} 标记为已拒绝续用。`}</small></span>
+              <span><strong>{translate("runDialog.endOriginal", language)}</strong><small>{translate("runDialog.declinedHint", language, { runId: options.running_run.run_id })}</small></span>
             </label>
             <div className="run-details">
-              <span>{language === "en" ? "Original scope: " : "原范围："}<code>{JSON.stringify(options.running_run.scope)}</code></span>
-              <span>{language === "en" ? "Original endpoint: " : "原端点："}{options.running_run.previous.model} · {options.running_run.previous.endpoint}</span>
-              <span>{language === "en" ? "Current endpoint: " : "当前端点："}{options.running_run.current.model} · {options.running_run.current.endpoint}</span>
+              <span>{translate("runDialog.originalScope", language)}<code>{JSON.stringify(options.running_run.scope)}</code></span>
+              <span>{translate("runDialog.originalEndpoint", language)}{options.running_run.previous.model} · {options.running_run.previous.endpoint}</span>
+              <span>{translate("runDialog.currentEndpoint", language)}{options.running_run.current.model} · {options.running_run.current.endpoint}</span>
             </div>
           </fieldset>
         )}
 
         {!resuming && (
           <fieldset className="decision-group">
-            <legend>{language === "en" ? "Existing results" : "已有结果"}</legend>
+            <legend>{translate("runDialog.existingResults", language)}</legend>
             {options.mismatched_fingerprint_completed ? (
               <>
                 <div className="warning-banner run-warning">
-                  {language === "en" ? `${options.mismatched_fingerprint_completed} completed results use a different settings fingerprint; choose reuse or redo.` : `有 ${options.mismatched_fingerprint_completed} 个已完成结果来自不同设置指纹，必须明确复用或重做。`}
+                  {translate("runDialog.mismatchedWarning", language, { count: options.mismatched_fingerprint_completed })}
                 </div>
                 <label className="radio-option decision-option">
                   <input
@@ -101,7 +96,7 @@ export function RunDialog({
                     checked={resultPolicy === "reuse"}
                     onChange={() => setResultPolicy("reuse")}
                   />
-                  <span><strong>{language === "en" ? "Reuse existing results" : "复用已有结果"}</strong><small>{language === "en" ? "Keep completed results from other settings; process pending and failed items only." : "保留不同设置的 completed，只处理待处理和失败项。"}</small></span>
+                  <span><strong>{translate("runDialog.reuseResults", language)}</strong><small>{translate("runDialog.reuseHint", language)}</small></span>
                 </label>
               </>
             ) : (
@@ -111,7 +106,7 @@ export function RunDialog({
                   checked={resultPolicy === "pending"}
                   onChange={() => setResultPolicy("pending")}
                 />
-                <span><strong>{language === "en" ? "Process unfinished items" : "处理未完成项"}</strong><small>{language === "en" ? "Keep completed results; process pending and failed items only." : "保留现有 completed，只处理待处理和失败项。"}</small></span>
+                <span><strong>{translate("runDialog.processUnfinished", language)}</strong><small>{translate("runDialog.processHint", language)}</small></span>
               </label>
             )}
             <label className="radio-option decision-option">
@@ -121,11 +116,11 @@ export function RunDialog({
                 onChange={() => setResultPolicy("force")}
               />
               <span>
-                <strong>{language === "en" ? "Redo everything" : "强制重做全部"}</strong>
+                <strong>{translate("runDialog.redoEverything", language)}</strong>
                 <small>
                   {options.stage === "terminology"
-                    ? (language === "en" ? "Scan all segments again and merge the results into the current term list." : "重新扫描全部 Segment，并将新结果合并到当前术语库。")
-                    : (language === "en" ? `Process all ${options.selected} non-empty segments again.` : `重新处理全部 ${options.selected} 个非空 Segment。`)}
+                    ? translate("runDialog.redoTerminologyHint", language)
+                    : translate("runDialog.redoStageHint", language, { count: options.selected })}
                 </small>
               </span>
             </label>
@@ -133,9 +128,9 @@ export function RunDialog({
         )}
 
         <div className="modal-actions">
-          <button className="quiet-button" disabled={starting} onClick={onClose}>{language === "en" ? "Cancel" : "取消"}</button>
-          <button className="primary-button" disabled={!ready || starting} onClick={submit}>
-            {starting ? (language === "en" ? "Starting…" : "正在启动…") : (language === "en" ? "Run" : "确认运行")}
+          <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={!ready} onClick={submit}>
+            {translate("runDialog.run", language)}
           </button>
         </div>
       </div>

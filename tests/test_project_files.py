@@ -10,7 +10,7 @@ import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, stage_result_path
-from app.main import build_parser
+from app.main import build_parser, parse_adapter_option_args
 from app.project import (
     add_project_files,
     init_project,
@@ -22,12 +22,14 @@ from app.stages import (
     run_apply,
     run_terminology,
 )
-from app.storage import (
+from app.sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
+    read_files,
     read_json,
     read_jsonl,
+    read_segments,
     record_header,
+    write_json,
 )
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
@@ -74,7 +76,7 @@ def test_export_cli_collects_repeated_file_ids() -> None:
     assert args.file_ids == ["F0001", "F0003"]
 
 
-def test_epub_ruby_mode_is_available_for_cli_imports() -> None:
+def test_adapter_options_are_collected_for_cli_imports() -> None:
     init_args = build_parser().parse_args(
         [
             "init",
@@ -83,23 +85,43 @@ def test_epub_ruby_mode_is_available_for_cli_imports() -> None:
             "book",
             "--document-adapter",
             "epub",
-            "--epub-ruby-mode",
-            "parenthetical",
+            "--adapter-option",
+            "epub.ruby_mode=parenthetical",
         ]
     )
     add_args = build_parser().parse_args(
-        ["files-add", "book", "next.epub", "--epub-ruby-mode", "base_only"]
+        [
+            "files-add",
+            "book",
+            "next.epub",
+            "--adapter-option",
+            "epub.ruby_mode=base_only",
+        ]
     )
 
-    assert init_args.epub_ruby_mode == "parenthetical"
-    assert add_args.epub_ruby_mode == "base_only"
+    assert init_args.adapter_options == ["epub.ruby_mode=parenthetical"]
+    assert add_args.adapter_options == ["epub.ruby_mode=base_only"]
+
+
+def test_parse_adapter_option_args_builds_adapter_dict() -> None:
+    assert parse_adapter_option_args(
+        ["record.source_style=marked", "record.line_ending=crlf", "a.b=x"]
+    ) == {
+        "record": {"source_style": "marked", "line_ending": "crlf"},
+        "a": {"b": "x"},
+    }
+    with pytest.raises(UsageError, match="重复"):
+        parse_adapter_option_args(["a.b=1", "a.b=2"])
+    for value in ("a.b", "=x", "a=x", ".b=x", "a.=x", "a.b.c=x"):
+        with pytest.raises(UsageError, match="格式无效"):
+            parse_adapter_option_args([value])
 
 
 def test_empty_project_can_open_inspect_and_add_txt_files(
     tmp_path: Path,
 ) -> None:
     project = init_empty(tmp_path)
-    assert read_jsonl(project / "source" / "files.jsonl") == []
+    assert read_files(project) == []
     assert inspect_full(project)["next_command"].startswith(
         "python -m app.main files-add"
     )
@@ -111,14 +133,12 @@ def test_empty_project_can_open_inspect_and_add_txt_files(
     summary = add_project_files(project, [str(first), str(second)])
 
     assert summary["added_file_ids"] == ["F0001", "F0002"]
-    assert [item["file_id"] for item in read_jsonl(
-        project / "source" / "files.jsonl"
-    )] == ["F0001", "F0002"]
+    assert [item["file_id"] for item in read_files(project)] == ["F0001", "F0002"]
     assert {
         item["part_id"]
-        for item in read_jsonl(project / "source" / "segments.jsonl")
+        for item in read_segments(project)
     } == {"document"}
-    assert read_json(project / "project.json")["next_file_sequence"] == 3
+    assert read_json(project, project / "project.json")["next_file_sequence"] == 3
 
 
 def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
@@ -126,8 +146,7 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
     source = tmp_path / "old.txt"
     source.write_text("one", encoding="utf-8")
     add_project_files(project, [str(source)])
-    segments_path = project / "source" / "segments.jsonl"
-    segments = read_jsonl(segments_path)
+    segments = read_segments(project)
     segments[0].pop("part_id")
     rewrite_segment_payload(project, segments[0])
 
@@ -142,12 +161,13 @@ def test_remove_retains_history_and_readd_does_not_reuse_ids(
     first = tmp_path / "first.txt"
     first.write_text("one", encoding="utf-8")
     add_project_files(project, [str(first)])
-    metadata = read_json(project / "project.json")
-    segment_id = read_jsonl(project / "source" / "segments.jsonl")[0][
+    metadata = read_json(project, project / "project.json")
+    segment_id = read_segments(project)[0][
         "segment_id"
     ]
     history_path = stage_result_path(project, "translation")
     append_jsonl(
+        project,
         history_path,
         record_header(
             "stage_result",
@@ -164,17 +184,17 @@ def test_remove_retains_history_and_readd_does_not_reuse_ids(
             request_id="REQ-OLD",
         ),
     )
-    history_before = read_jsonl(history_path)
+    history_before = read_jsonl(project, history_path)
 
     removed = remove_project_files(project, ["F0001"])
     assert removed["removed_segments"] == 1
-    assert read_jsonl(history_path) == history_before
+    assert read_jsonl(project, history_path) == history_before
     assert inspect_full(project)["stages"]["translation"]["completed"] == 0
 
     add_project_files(project, [str(first)])
-    files = read_jsonl(project / "source" / "files.jsonl")
+    files = read_files(project)
     assert [item["file_id"] for item in files] == ["F0002"]
-    assert read_jsonl(project / "source" / "segments.jsonl")[0][
+    assert read_segments(project)[0][
         "segment_id"
     ].startswith("F0002-")
 
@@ -193,7 +213,7 @@ def test_add_rejects_active_name_collision_and_running_run(
     with pytest.raises(UsageError, match="同名导出路径"):
         add_project_files(project, [str(duplicate)])
 
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     manifest = record_header(
         "run",
         str(metadata["project_id"]),
@@ -203,11 +223,11 @@ def test_add_rejects_active_name_collision_and_running_run(
         status="running",
         started_at="2026-07-31T00:00:00Z",
     )
-    atomic_write_json(project / "runs" / "RUN-ACTIVE" / "manifest.json", manifest)
-    before = read_jsonl(project / "source" / "files.jsonl")
+    write_json(project, project / "runs" / "RUN-ACTIVE" / "manifest.json", manifest)
+    before = read_files(project)
     with pytest.raises(UsageError, match="未完成 Run"):
         remove_project_files(project, ["F0001"])
-    assert read_jsonl(project / "source" / "files.jsonl") == before
+    assert read_files(project) == before
 
 
 def test_epub_file_state_is_removed_and_new_id_is_allocated(
@@ -217,15 +237,15 @@ def test_epub_file_state_is_removed_and_new_id_is_allocated(
     source = tmp_path / "book.epub"
     make_epub(source)
     add_project_files(project, [str(source)])
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
-    assert read_json(state_path)["file_id"] == "F0001"
+    assert read_json(project, state_path)["file_id"] == "F0001"
 
     remove_project_files(project, ["F0001"])
     with pytest.raises(StorageError, match="记录不存在"):
-        read_json(state_path)
+        read_json(project, state_path)
     add_project_files(project, [str(source)])
-    assert read_jsonl(project / "source" / "files.jsonl")[0]["file_id"] == "F0002"
+    assert read_files(project)[0]["file_id"] == "F0002"
 
 
 def test_empty_project_accepts_mixed_txt_and_epub_files(tmp_path: Path) -> None:
@@ -238,11 +258,11 @@ def test_empty_project_accepts_mixed_txt_and_epub_files(tmp_path: Path) -> None:
     summary = add_project_files(project, [str(text), str(epub)])
 
     assert summary["added_files"] == 2
-    files = read_jsonl(project / "source" / "files.jsonl")
+    files = read_files(project)
     assert [item["document_adapter_id"] for item in files] == ["txt", "epub"]
     assert files[0]["document_adapter_state"] is None
-    assert read_json(project / str(files[1]["document_adapter_state"]))["file_id"] == files[1]["file_id"]
-    metadata = read_json(project / "project.json")
+    assert read_json(project, project / str(files[1]["document_adapter_state"]))["file_id"] == files[1]["file_id"]
+    metadata = read_json(project, project / "project.json")
     assert "document_adapter_id" not in metadata
 
 
@@ -253,9 +273,10 @@ def test_mixed_project_exports_original_formats_or_txt(tmp_path: Path) -> None:
     text.write_text("plain text", encoding="utf-8")
     make_epub(epub)
     add_project_files(project, [str(text), str(epub)])
-    metadata = read_json(project / "project.json")
-    for segment in read_jsonl(project / "source" / "segments.jsonl"):
+    metadata = read_json(project, project / "project.json")
+    for segment in read_segments(project):
         append_jsonl(
+            project,
             stage_result_path(project, "translation"),
             record_header(
                 "stage_result",
@@ -312,7 +333,7 @@ def test_auto_import_recurses_all_supported_formats_and_preserves_paths(
 
     summary = add_project_files(project, [str(source_root)], recursive=True)
 
-    files = read_jsonl(project / "source" / "files.jsonl")
+    files = read_files(project)
     assert [item["original_name"] for item in files] == [
         "book.epub",
         "chapters/one.text",
@@ -336,7 +357,7 @@ def test_auto_import_rejects_case_insensitive_effective_path_collision(
 
     with pytest.raises(UsageError, match="重复导出相对路径"):
         add_project_files(project, [str(first), str(second)])
-    assert read_jsonl(project / "source" / "files.jsonl") == []
+    assert read_files(project) == []
 
 
 def test_export_file_filter_limits_result_validation_and_output(
@@ -348,9 +369,10 @@ def test_export_file_filter_limits_result_validation_and_output(
     first.write_text("one", encoding="utf-8")
     second.write_text("two", encoding="utf-8")
     add_project_files(project, [str(first), str(second)])
-    metadata = read_json(project / "project.json")
-    first_segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    metadata = read_json(project, project / "project.json")
+    first_segment = read_segments(project)[0]
     append_jsonl(
+        project,
         stage_result_path(project, "translation"),
         record_header(
             "stage_result",
@@ -490,14 +512,14 @@ def test_add_and_remove_restore_inputs_when_staging_move_fails(
     monkeypatch.setattr("app.project.os.replace", fail_second_add_move)
     with pytest.raises(OSError, match="copy publish failed"):
         add_project_files(project, [str(first), str(second)])
-    assert read_jsonl(project / "source" / "files.jsonl") == []
+    assert read_files(project) == []
     assert not list((project / "input").rglob("F*"))
 
     monkeypatch.setattr("app.project.os.replace", original_replace)
     add_project_files(project, [str(first), str(second)])
     stored = [
         project / "input" / str(item["stored_name"])
-        for item in read_jsonl(project / "source" / "files.jsonl")
+        for item in read_files(project)
     ]
     remove_moves = 0
 
@@ -513,4 +535,4 @@ def test_add_and_remove_restore_inputs_when_staging_move_fails(
     with pytest.raises(OSError, match="remove staging failed"):
         remove_project_files(project, ["F0001", "F0002"])
     assert all(path.is_file() for path in stored)
-    assert len(read_jsonl(project / "source" / "files.jsonl")) == 2
+    assert len(read_files(project)) == 2

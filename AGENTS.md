@@ -7,7 +7,12 @@
 - `config/config.toml`: global configuration template.
 - `prompts/`: global stage prompts.
 - `projects/`: runtime project data; do not commit generated projects.
-- `docs/ROADMAP.md`: authoritative MVP behavior and boundaries.
+- `docs/MINIMAL.md`: authoritative MVP behavior and boundaries; `docs/ROADMAP.md`
+  describes future direction.
+- `src-tauri/`: Tauri 2 desktop shell (sidecar orchestration, native pickers).
+- `packaging/`: PyInstaller spec for the frozen Python/FastAPI sidecar.
+- `scripts/`: dev/build helpers; `sidecar-dist/` and `dist/` are build
+  artifacts and are never committed.
 
 Preserve the File/Segment/Chunk/Run meanings in the specification. Segment is
 the progress unit; Chunk is never durable business state. Avoid speculative
@@ -25,7 +30,8 @@ python -m app.main --help
 ```
 
 Use `python -m app.main init INPUT --name PROJECT` to create a project. Put the
-API key named by `llm.api_key_env` in the environment, never in TOML.
+API key referenced by the Preset `credential` (an `environment` env var or a
+`keychain` entry) in the environment or system keychain, never in TOML.
 
 ## Coding Guidelines
 

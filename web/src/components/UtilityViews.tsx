@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
+import {
+  nativeBridgeAvailable,
+  pickNativeFile,
+  pickNativeFolder,
+  saveExport,
+} from "../native";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview } from "../types";
+import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
 
 type InputKind = "file" | "folder";
+
+interface ExportFile {
+  path: string;
+  size: number;
+  mtime: number;
+}
 
 interface AdapterSummary {
   adapter_id: string;
@@ -27,7 +39,8 @@ interface AdapterSummary {
 type AdapterOptions = Record<string, Record<string, string>>;
 
 interface PendingInput {
-  file: File;
+  file?: File;
+  serverPath?: string;
   path: string;
   kind: InputKind;
   adapterId: string;
@@ -62,17 +75,17 @@ function extensionOf(path: string) {
 }
 
 function driveTypeLabel(type: string, language: Language) {
-  const labels: Record<string, [string, string]> = {
-    unknown: ["未知", "Unknown"],
-    unavailable: ["不可用", "Unavailable"],
-    removable: ["可移动磁盘", "Removable"],
-    fixed: ["本地磁盘", "Fixed"],
-    network: ["网络驱动器", "Network"],
-    cdrom: ["光盘驱动器", "CD/DVD"],
-    ramdisk: ["内存磁盘", "RAM disk"],
+  const labels: Record<string, string> = {
+    unknown: "drive.unknown",
+    unavailable: "drive.unavailable",
+    removable: "drive.removable",
+    fixed: "drive.fixed",
+    network: "drive.network",
+    cdrom: "drive.cdrom",
+    ramdisk: "drive.ramdisk",
   };
-  const label = labels[type] ?? [type, type];
-  return label[language === "en" ? 1 : 0];
+  const key = labels[type] ?? type;
+  return translate(key, language);
 }
 
 function InputQueue({
@@ -130,13 +143,13 @@ function InputQueue({
           ignored.push(relative);
           continue;
         }
-        setMessage(language === "en" ? `Unsupported input file: ${relative}` : `不支持的输入文件：${relative}`);
+        setMessage(translate("inputQueue.unsupported", language, { path: relative }));
         return;
       }
       incoming.push({ file, path: relative, kind, adapterId });
     }
     if (!incoming.length) {
-      setMessage(language === "en" ? "The selected folder has no supported input files" : "所选文件夹中没有受支持的输入文件");
+      setMessage(translate("inputQueue.noSupported", language));
       return;
     }
     const known = new Set(
@@ -146,14 +159,14 @@ function InputQueue({
     for (const item of incoming) {
       const key = item.path.toLocaleLowerCase();
       if (known.has(key)) {
-        setMessage(language === "en" ? `Duplicate input path; this selection was not added: ${item.path}` : `输入路径重名，本次选择未加入：${item.path}`);
+        setMessage(translate("inputQueue.duplicate", language, { path: item.path }));
         return;
       }
       known.add(key);
     }
     onChange([...value, ...incoming]);
     if (ignored.length) {
-      setMessage(language === "en" ? `Ignored ${ignored.length} unsupported files` : `已忽略 ${ignored.length} 个不支持的文件`);
+      setMessage(translate("inputQueue.ignored", language, { count: ignored.length }));
     }
   }
 
@@ -161,10 +174,35 @@ function InputQueue({
     if (ref.current) ref.current.value = "";
   }
 
+  async function addNativeBatch(kind: InputKind) {
+    const picked = kind === "file"
+      ? await pickNativeFile()
+      : await pickNativeFolder();
+    if (!picked) return;
+    setMessage("");
+    const adapterId = extensionOwners.get(extensionOf(picked));
+    if (!adapterId) {
+      setMessage(translate("inputQueue.unsupported", language, { path: picked }));
+      return;
+    }
+    const relative = kind === "file"
+      ? (picked.split(/[\\/]/).pop() ?? picked)
+      : picked;
+    const known = new Set(
+      [...existingPaths, ...value.map((item) => item.path)]
+        .map((path) => path.toLocaleLowerCase()),
+    );
+    if (known.has(relative.toLocaleLowerCase())) {
+      setMessage(translate("inputQueue.duplicate", language, { path: relative }));
+      return;
+    }
+    onChange([...value, { serverPath: picked, path: relative, kind, adapterId }]);
+  }
+
   return (
     <div className="input-queue">
       <div className="input-queue-heading">
-        <div><strong>{language === "en" ? "Input queue" : "待输入列表"}</strong><small>{language === "en" ? "Add files or folders in multiple batches; folder paths stay relative." : "可分多次选择；文件夹导入保留内部相对路径。"}</small></div>
+        <div><strong>{translate("inputQueue.title", language)}</strong><small>{translate("inputQueue.hint", language)}</small></div>
         <div className="button-group">
           <input
             ref={fileRef}
@@ -188,11 +226,11 @@ function InputQueue({
               clearInput(folderRef);
             }}
           />
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => fileRef.current?.click()}>{language === "en" ? "Choose files" : "选择文件"}</button>
-          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || !folderSelectionSupported} onClick={() => folderRef.current?.click()}>{language === "en" ? "Choose folder" : "选择文件夹"}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length} onClick={() => { if (nativeBridgeAvailable()) void addNativeBatch("file"); else fileRef.current?.click(); }}>{translate("inputQueue.chooseFiles", language)}</button>
+          <button type="button" className="quiet-button" disabled={disabled || !adapters.length || (!nativeBridgeAvailable() && !folderSelectionSupported)} onClick={() => { if (nativeBridgeAvailable()) void addNativeBatch("folder"); else folderRef.current?.click(); }}>{translate("inputQueue.chooseFolder", language)}</button>
         </div>
       </div>
-      {!folderSelectionSupported && <small className="muted">{language === "en" ? "This browser cannot select folders; individual files are still available." : "当前浏览器不支持文件夹选择，可继续选择单独文件。"}</small>}
+      {!folderSelectionSupported && <small className="muted">{translate("inputQueue.noFolderSupport", language)}</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
       {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
         ? [...adapter.import_options, ...adapter.run_options].map((option) => (
@@ -211,16 +249,16 @@ function InputQueue({
             >
               {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
             </select>
-            <small>{language === "en" ? "Applies to this import only; re-import existing files after changing it." : "仅用于本次导入；修改既有文件需重新导入。"}</small>
+            <small>{translate("inputQueue.optionHint", language)}</small>
           </label>
         ))
         : [])}
       <div className="input-queue-list">
-        {!value.length && <div className="input-queue-empty">{language === "en" ? "No files selected." : "尚未选择文件。"}</div>}
+        {!value.length && <div className="input-queue-empty">{translate("inputQueue.empty", language)}</div>}
         {value.map((item, index) => (
           <div className="input-queue-row" key={`${item.path}-${index}`}>
-            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? (language === "en" ? "Folder" : "文件夹") : (language === "en" ? "File" : "单独文件")}</small></span>
-            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{language === "en" ? "Remove" : "移除"}</button>
+            <span><strong>{item.path}</strong><small>{item.adapterId.toUpperCase()} · {item.kind === "folder" ? translate("inputQueue.folder", language) : translate("inputQueue.file", language)}</small></span>
+            <button type="button" className="danger-link" disabled={disabled} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>{translate("common.remove", language)}</button>
           </div>
         ))}
       </div>
@@ -228,20 +266,59 @@ function InputQueue({
   );
 }
 
+function ProjectBar({
+  projects,
+  project,
+  onProject,
+  onCreate,
+  language,
+}: {
+  projects: ProjectSummary[];
+  project: string;
+  onProject: (value: string) => void;
+  onCreate: () => void;
+  language: Language;
+}) {
+  return (
+    <div className="overview-project-bar">
+      <select value={project} onChange={(event) => onProject(event.target.value)} aria-label={translate("project.select", language)}>
+        <option value="">{translate("project.select", language)}</option>
+        {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
+      </select>
+      <button className="quiet-button" onClick={onCreate}>{translate("project.create", language)}</button>
+    </div>
+  );
+}
+
 export function Overview({
+  projects,
   project,
   value,
+  onProject,
+  onCreate,
   onFilesChanged,
   onDeleted,
   language,
 }: {
+  projects: ProjectSummary[];
   project: string;
-  value: ProjectOverview;
+  value: ProjectOverview | null;
+  onProject: (value: string) => void;
+  onCreate: () => void;
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
   language: Language;
 }) {
+  if (!value) {
+    return (
+      <div className="page">
+        <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
+        <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
+      </div>
+    );
+  }
   const completed = value.completed_segments;
+  const projectPath = value.path;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -258,7 +335,14 @@ export function Overview({
     try {
       const body = new FormData();
       for (const item of pendingInputs) {
-        body.append("files", item.file, item.file.name);
+        if (item.serverPath) {
+          body.append("server_paths", item.serverPath);
+          body.append("server_input_kinds", item.kind);
+          continue;
+        }
+        if (item.file) {
+          body.append("files", item.file, item.file.name);
+        }
         body.append("relative_paths", item.path);
         body.append("input_kinds", item.kind);
       }
@@ -306,9 +390,9 @@ export function Overview({
         body: JSON.stringify({ confirm: true }),
       });
       setDeleting(false);
-      await onDeleted(value.path);
-    } catch (value) {
-      setError(String(value));
+      await onDeleted(projectPath);
+    } catch (reason) {
+      setError(String(reason));
     } finally {
       setBusy(false);
     }
@@ -316,6 +400,7 @@ export function Overview({
 
   return (
     <div className="page">
+      <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
         <div><h1>{value.name}</h1><p>{value.path}</p></div>
         <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
@@ -326,7 +411,7 @@ export function Overview({
         <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
       </div>
       <div className="section-heading">
-        <div><h2>{translate("overview.fileHeading", language)}</h2><p>{language === "en" ? "Each file keeps its source format." : "每个文件保留其来源格式"}</p></div>
+        <div><h2>{translate("overview.fileHeading", language)}</h2><p>{translate("overview.fileHint", language)}</p></div>
         <div className="section-actions">
           <button className="primary-button" disabled={busy || !pendingInputs.length} onClick={() => void upload()}>
             {translate("overview.add", language)}
@@ -338,7 +423,7 @@ export function Overview({
       </div>
       <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
-      <div className="file-list">
+      <div className="file-list overview-file-list">
         {value.files.length === 0 && (
           <div className="empty-file-state">
             <strong>{translate("overview.noFiles", language)}</strong>
@@ -359,20 +444,20 @@ export function Overview({
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <h2>{language === "en" ? `Remove ${selection.selectedKeys.size} files?` : `移除 ${selection.selectedKeys.size} 个文件？`}</h2>
-            <p>{language === "en" ? "The project copies and active Segments will be removed; historical stage results and existing outputs remain. Re-adding files assigns new File and Segment IDs." : "项目内源文件副本和活动 Segment 将被删除；历史阶段结果与既有输出文件会保留。以后重新添加会分配新的 File 与 Segment ID。"}</p>
+            <h2>{translate("overview.removeFiles", language, { count: selection.selectedKeys.size })}</h2>
+            <p>{translate("overview.removeFilesHint", language)}</p>
             <div className="modal-actions">
-              <button className="quiet-button" onClick={() => setRemoving(false)}>{language === "en" ? "Cancel" : "取消"}</button>
-              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>{language === "en" ? "Remove" : "确认移除"}</button>
+              <button className="quiet-button" onClick={() => setRemoving(false)}>{translate("common.cancel", language)}</button>
+              <button className="danger-button" disabled={busy} onClick={() => void removeSelected()}>{translate("overview.confirmRemove", language)}</button>
             </div>
           </div>
         </div>
       )}
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
-          <div className="modal" role="dialog" aria-modal="true" aria-label={language === "en" ? "Delete project permanently" : "永久删除项目"} onMouseDown={(event) => event.stopPropagation()}>
-            <h2>{language === "en" ? "Delete project permanently?" : "永久删除项目？"}</h2>
-            <p>{language === "en" ? "This deletes the project directory, source files, Runs, term library, and stage results. It cannot be undone; confirm that nothing needs to be kept." : "将删除整个项目目录、源文件、Run、术语库和阶段结果，无法撤销。请确认项目中没有需要保留的数据。"}</p>
+          <div className="modal" role="dialog" aria-modal="true" aria-label={translate("overview.deleteTitle", language)} onMouseDown={(event) => event.stopPropagation()}>
+            <h2>{translate("overview.deleteTitle", language)}?</h2>
+            <p>{translate("overview.deleteHint", language)}</p>
             {error && <p className="error-text">{error}</p>}
             <div className="modal-actions">
               <button className="quiet-button" disabled={busy} onClick={() => setDeleting(false)}>{translate("dialog.cancel", language)}</button>
@@ -383,6 +468,16 @@ export function Overview({
       )}
     </div>
   );
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleString();
 }
 
 export function ExportView({
@@ -397,51 +492,191 @@ export function ExportView({
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
-  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [files, setFiles] = useState<ExportFile[]>([]);
+  const [highlighted, setHighlighted] = useState<string[]>([]);
+  const [tab, setTab] = useState<"export" | "browse">("export");
+  const [selectionFilter, setSelectionFilter] = useState("");
+  const [browseFilter, setBrowseFilter] = useState("");
   const selection = useClassicSelection();
-  const fileIds = overview.files.map((item) => item.file_id);
-  async function run() {
-    const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
-      method: "POST",
-      body: JSON.stringify({
-        stage,
-        format,
-        bilingual,
-        allow_missing: false,
-        file_ids: selection.selectedKeys.size
-          ? [...selection.selectedKeys]
-          : null,
-      }),
-    });
-    setResult(JSON.stringify(value, null, 2));
+  const native = nativeBridgeAvailable();
+
+  const filteredSourceFiles = overview.files.filter((item) => (
+    item.name.toLocaleLowerCase().includes(selectionFilter.toLocaleLowerCase().trim())
+  ));
+  const fileIds = filteredSourceFiles.map((item) => item.file_id);
+  const filteredExports = files.filter((item) => (
+    item.path.toLocaleLowerCase().includes(browseFilter.toLocaleLowerCase().trim())
+  ));
+
+  async function refresh() {
+    const value = await api<{ files: ExportFile[] }>(
+      `/api/v1/projects/${project}/exports`,
+    );
+    setFiles(value.files);
   }
+
+  useEffect(() => {
+    void refresh().catch((reason) => setError(String(reason)));
+  }, [project]);
+
+  function openBrowse() {
+    setTab("browse");
+    void refresh().catch((reason) => setError(String(reason)));
+  }
+
+  async function run() {
+    setError(""); setMessage(""); setHighlighted([]);
+    try {
+      const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
+        method: "POST",
+        body: JSON.stringify({
+          stage,
+          format,
+          bilingual,
+          allow_missing: false,
+          file_ids: selection.selectedKeys.size
+            ? [...selection.selectedKeys]
+            : null,
+        }),
+      });
+      await refresh();
+      const written = Array.isArray(value.written)
+        ? value.written.map(String).map((item) => item.replace(/^output\//, ""))
+        : [];
+      setHighlighted(written);
+      if (written.length) {
+        setMessage(translate("export.generated", language, { count: written.length }));
+      }
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  function downloadHref(path: string): string {
+    return `/api/v1/projects/${project}/exports/download?file=${encodeURIComponent(path)}`;
+  }
+
+  async function saveViaNative(url: string, filename: string) {
+    setError("");
+    try {
+      const saved = await saveExport(url, filename);
+      if (saved) setMessage(translate("export.savedTo", language, { path: saved }));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  function download(path: string) {
+    const filename = path.split("/").pop() || "export";
+    void saveViaNative(downloadHref(path), filename);
+  }
+
+  function downloadAll() {
+    if (!files.length) return;
+    const url = `/api/v1/projects/${project}/exports/download-all?${files
+      .map((item) => `file=${encodeURIComponent(item.path)}`)
+      .join("&")}`;
+    if (!native) {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      return;
+    }
+    void saveViaNative(url, `${project}-exports.zip`);
+  }
+
+  async function removeFile(path: string) {
+    if (!window.confirm(translate("export.deleteConfirm", language, { path }))) {
+      return;
+    }
+    setError(""); setMessage("");
+    try {
+      await api(`/api/v1/projects/${project}/exports/remove`, {
+        method: "POST",
+        body: JSON.stringify({ files: [path] }),
+      });
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   return (
-    <div className="page narrow-page">
+    <div className="page export-page">
       <div className="page-heading"><div><h1>{translate("export.title", language)}</h1><p>{translate("export.description", language)}</p></div></div>
-      <label>{language === "en" ? "Result stage" : "结果阶段"}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{language === "en" ? "Translation" : "翻译"}</option><option value="proofread">{language === "en" ? "Applied proofreading" : "已应用校对"}</option><option value="polished">{language === "en" ? "Applied polishing" : "已应用润色"}</option></select></label>
-      <label>{language === "en" ? "Output format" : "输出格式"}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{language === "en" ? "Keep each file's format" : "保留各文件原格式"}</option><option value="txt">{language === "en" ? "Unified TXT" : "统一输出 TXT"}</option></select></label>
-      <div className="export-file-heading">
-        <div>
-          <strong>{language === "en" ? "File scope" : "文件范围"}</strong>
-          <small>{selection.selectedKeys.size ? (language === "en" ? `${selection.selectedKeys.size} files selected` : `已选择 ${selection.selectedKeys.size} 个文件`) : (language === "en" ? "All files when none are selected" : "未选择时导出全部文件")}</small>
+      <div className="dialog-tabs" role="tablist" aria-label={translate("export.title", language)}>
+        <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
+        <button className={tab === "browse" ? "active" : ""} onClick={openBrowse}>{translate("export.tabBrowse", language)}</button>
+      </div>
+      {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+      {tab === "export" ? <>
+        <div className="export-workspace">
+          <div className="export-form-col">
+            <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
+            <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
+            <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
+            <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+            {message && (
+              <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
+            )}
+          </div>
+          <div className="export-select-col">
+            <div className="export-file-heading">
+              <div>
+                <strong>{translate("export.fileScope", language)}</strong>
+                <small>{selection.selectedKeys.size ? translate("export.selected", language, { count: selection.selectedKeys.size }) : translate("export.allFiles", language)}</small>
+              </div>
+              <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{translate("export.clearSelection", language)}</button>
+            </div>
+            <input className="export-filter" value={selectionFilter} onChange={(event) => setSelectionFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
+            <div className="file-list export-file-list">
+              {!filteredSourceFiles.length && selectionFilter && <p className="export-empty">{translate("export.noMatch", language)}</p>}
+              {filteredSourceFiles.map((item) => (
+                <button
+                  type="button"
+                  key={item.file_id}
+                  className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
+                  onClick={(event) => selection.select(item.file_id, fileIds, event)}
+                >
+                  <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
-        <button className="quiet-button" disabled={!selection.selectedKeys.size} onClick={() => selection.reset()}>{language === "en" ? "Clear selection" : "清除选择"}</button>
-      </div>
-      <div className="file-list export-file-list">
-        {overview.files.map((item) => (
-          <button
-            type="button"
-            key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
-            onClick={(event) => selection.select(item.file_id, fileIds, event)}
-          >
-            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-          </button>
-        ))}
-      </div>
-      <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {language === "en" ? "Generate bilingual output" : "生成双语对照"}</label>
-      <button className="primary-button" onClick={run}>{language === "en" ? "Generate output" : "生成输出"}</button>
-      {result && <pre className="result-box">{result}</pre>}
+      </> : <>
+        <div className="export-file-heading">
+          <div>
+            <strong>{translate("export.outputFiles", language)}</strong>
+            <small>{translate("export.outputCount", language, { count: files.length })}</small>
+          </div>
+          <div className="button-group">
+            <button className="quiet-button" onClick={openBrowse}>{translate("directory.refresh", language)}</button>
+            <button className="quiet-button" disabled={!files.length} onClick={downloadAll}>{translate("export.downloadAll", language)}</button>
+          </div>
+        </div>
+        <input className="export-filter" value={browseFilter} onChange={(event) => setBrowseFilter(event.target.value)} placeholder={translate("export.searchPlaceholder", language)} aria-label={translate("export.searchPlaceholder", language)} />
+        <div className="file-list export-browse-list">
+          {!files.length && <p className="export-empty">{translate("export.noFiles", language)}</p>}
+          {files.length > 0 && !filteredExports.length && <p className="export-empty">{translate("export.noMatch", language)}</p>}
+          {filteredExports.map((item) => (
+            <div key={item.path} className={`file-row export-row${highlighted.includes(item.path) ? " selected" : ""}`}>
+              <strong>{item.path}</strong>
+              <small>{formatSize(item.size)} · {formatTime(item.mtime)}</small>
+              <span className="export-actions">
+                {native
+                  ? <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
+                  : <a className="quiet-button" href={downloadHref(item.path)}>{translate("export.download", language)}</a>}
+                <button className="quiet-button" onClick={() => void removeFile(item.path)}>{translate("export.delete", language)}</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      </>}
     </div>
   );
 }
@@ -469,7 +704,14 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
     body.append("empty", String(pendingInputs.length === 0));
     body.append("parent_dir", parentDir.trim());
     for (const item of pendingInputs) {
-      body.append("files", item.file, item.file.name);
+      if (item.serverPath) {
+        body.append("server_paths", item.serverPath);
+        body.append("server_input_kinds", item.kind);
+        continue;
+      }
+      if (item.file) {
+        body.append("files", item.file, item.file.name);
+      }
       body.append("relative_paths", item.path);
       body.append("input_kinds", item.kind);
     }
@@ -496,18 +738,18 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
     <>
       <div className="modal-backdrop" onMouseDown={onClose}>
         <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="dialog-tabs" role="tablist" aria-label={language === "en" ? "Project actions" : "项目操作"}>
+          <div className="dialog-tabs" role="tablist" aria-label={translate("dialog.projectActions", language)}>
             <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>{translate("dialog.new", language)}</button>
             <button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>{translate("dialog.open", language)}</button>
           </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           {mode === "open" ? <>
-            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => setDirectoryPickerMode("project")}>{translate("dialog.browse", language)}</button></div></label>
-            <p className="muted">{language === "en" ? "Only this directory is opened; parent directories are not scanned." : "只打开此目录，不扫描父目录，也不会移动项目。"}</p>
+            <label>{translate("dialog.projectPath", language)}<div className="path-picker-control"><input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/path/to/project" /><button type="button" className="quiet-button" disabled={!projectPath.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeFolder().then((path) => { if (path) setProjectPath(path); }); } else { setDirectoryPickerMode("project"); } }}>{translate("dialog.browse", language)}</button></div></label>
+            <p className="muted">{translate("dialog.openHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!projectPath.trim()} onClick={open}>{translate("dialog.openProject", language)}</button></div>
           </> : <>
             <label>{translate("dialog.projectName", language)}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-            <label>{translate("dialog.parentDir", language)}<div className="path-picker-control"><input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /><button type="button" className="quiet-button" disabled={!parentDir.trim()} onClick={() => setDirectoryPickerMode("parent")}>{translate("dialog.browse", language)}</button></div></label>
+            <label>{translate("dialog.parentDir", language)}<div className="path-picker-control"><input value={parentDir} onChange={(event) => setParentDir(event.target.value)} /><button type="button" className="quiet-button" disabled={!parentDir.trim()} onClick={() => { if (nativeBridgeAvailable()) { void pickNativeFolder().then((path) => { if (path) setParentDir(path); }); } else { setDirectoryPickerMode("parent"); } }}>{translate("dialog.browse", language)}</button></div></label>
             <InputQueue value={pendingInputs} onChange={setPendingInputs} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
             <p className="muted">{translate("dialog.emptyHint", language)}</p>
             <div className="modal-actions"><button className="quiet-button" onClick={onClose}>{translate("dialog.cancel", language)}</button><button className="primary-button" disabled={!name.trim() || !parentDir.trim()} onClick={submit}>{translate("dialog.createProject", language)}</button></div>

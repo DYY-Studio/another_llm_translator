@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import math
-import os
 import random
 import re
 import shutil
@@ -21,6 +20,9 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
+from .llm_preset import endpoint_url
+from .credentials import resolve_api_key
+from .i18n import SUPPORTED_LANGUAGES
 from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
@@ -33,13 +35,15 @@ from .errors import (
 )
 from .logging_utils import get_logger
 from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
-from .storage import (
+from .sqlite_storage import (
     append_jsonl,
+    append_jsonl_file,
     atomic_write_json,
     read_json,
     read_jsonl,
     record_header,
     utc_now,
+    write_json,
 )
 
 
@@ -159,9 +163,9 @@ def stage_result_path(project: Path, stage: str) -> Path:
 
 
 def load_stage_history(
-    project: Path, stage: str, *, repair_tail: bool = True
+    project: Path, stage: str
 ) -> list[dict[str, Any]]:
-    return read_jsonl(stage_result_path(project, stage), repair_tail=repair_tail)
+    return read_jsonl(project, stage_result_path(project, stage))
 
 
 def latest_completed_by_segment(
@@ -231,16 +235,29 @@ def classify_stage(
     )
 
 
-def full_prompt(stage: str, middle: str) -> str:
-    common = (
+PROMPT_RULES_VERSION = 2
+
+_COMMON_RULES: dict[str, str] = {
+    "zh-CN": (
         "只处理 user 消息中的待处理内容。reference_context 仅供理解，"
         "不得输出或计入进度。严格使用 JSONL："
         "每个非空物理行只能包含一个紧凑 JSON 对象，不得跨行格式化，"
         "不要使用 Markdown 代码块或解释文字。最后一行只能是"
         '{"type":"end"}。'
-    )
-    stage_rules = {
-        "terminology": (
+    ),
+    "en": (
+        "Process only the pending content in the user message. "
+        "reference_context is provided for understanding only; never output "
+        "it or count it as progress. Strict JSONL: every non-empty physical "
+        "line must contain exactly one compact JSON object, never formatted "
+        "across lines; no Markdown code blocks or explanatory text. The "
+        'final line must be exactly {"type":"end"}.'
+    ),
+}
+
+_STAGE_RULES: dict[str, dict[str, str]] = {
+    "terminology": {
+        "zh-CN": (
             "只从 source_segments[].source 提取术语；reference_context 中的"
             "内容不得单独触发提取。term 记录的 source 必须填写原文中实际"
             "出现的术语文本。"
@@ -250,7 +267,20 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"term","source":"Alice","category":"女性人名",'
             '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
-        "translation": (
+        "en": (
+            "Extract terms only from source_segments[].source; content in "
+            "reference_context must not trigger extraction on its own. The "
+            "term record's source must be the term text as it actually "
+            'appears in the source. Output one type="term" record per term '
+            "with source, category, and description; preferred_translation "
+            "and aliases are optional. Output end directly when there are no "
+            'terms. Record format: {"type":"term","source":"Alice",'
+            '"category":"female person name","description":"character",'
+            '"preferred_translation":"爱丽丝","aliases":[]}.'
+        ),
+    },
+    "translation": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -261,7 +291,24 @@ def full_prompt(stage: str, middle: str) -> str:
             "和完整 translation。记录格式："
             '{"type":"segment","id":"1","translation":"完整译文"}。'
         ),
-        "proofreading": (
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment, '
+            "containing only type, id, and the complete translation. Record "
+            'format: {"type":"segment","id":"1","translation":"complete '
+            'translation"}.'
+        ),
+    },
+    "proofreading": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -278,7 +325,29 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
-        "polishing": (
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment; status '
+            "must be accepted or suggested. accepted means keep the current "
+            "base unconditionally and output only type, id, and status; a "
+            "suggested_text or reason attached to it is ignored. accepted "
+            'record format: {"type":"segment","id":"1","status":"accepted"}. '
+            "suggested must include a non-empty complete suggested_text, "
+            "with reason as a string or null. suggested record format: "
+            '{"type":"segment","id":"1","status":"suggested",'
+            '"suggested_text":"complete suggestion","reason":"reason"}.'
+        ),
+    },
+    "polishing": {
+        "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
             "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
@@ -295,16 +364,45 @@ def full_prompt(stage: str, middle: str) -> str:
             '{"type":"segment","id":"1","status":"suggested",'
             '"suggested_text":"完整建议","reason":"原因"}。'
         ),
-    }
-    if stage not in stage_rules:
+        "en": (
+            "Use only the 1-based short IDs from the request; do not invent "
+            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "keep it only when truly necessary; when kept, use the exact "
+            "｜base《reading》 form and you may translate or transliterate "
+            "the reading into letters or annotations suitable for the target "
+            "language; dropping the Ruby is also valid. If the source "
+            "contains controlled format markers like <em1>, keep only the "
+            "existing, paired, correctly nested markers; do not add attrs, "
+            "unknown markers, or HTML; output no other markers when none are "
+            'present. Output one type="segment" record per Segment; status '
+            "must be accepted or suggested. accepted means keep the current "
+            "base unconditionally and output only type, id, and status; a "
+            "suggested_text or reason attached to it is ignored. accepted "
+            'record format: {"type":"segment","id":"1","status":"accepted"}. '
+            "suggested must include a non-empty complete suggested_text, "
+            "with reason as a string or null. suggested record format: "
+            '{"type":"segment","id":"1","status":"suggested",'
+            '"suggested_text":"complete suggestion","reason":"reason"}.'
+        ),
+    },
+}
+
+
+def full_prompt(stage: str, middle: str, language: str = "zh-CN") -> str:
+    if language not in SUPPORTED_LANGUAGES:
+        raise UsageError(f"不支持的 Prompt 语言：{language}")
+    if stage not in _STAGE_RULES:
         raise UsageError(f"阶段没有 LLM Prompt：{stage}")
-    return f"{common}\n\n{stage_rules[stage]}\n\n{middle.strip()}"
+    return (
+        f"{_COMMON_RULES[language]}\n\n"
+        f"{_STAGE_RULES[stage][language]}\n\n{middle.strip()}"
+    )
 
 
 def stage_fingerprint(
     config: dict[str, Any],
     stage: str,
-    prompt: str | None,
+    prompt_languages: dict[str, str] | None,
     *,
     terms_revision: int | None = None,
     apply_semantics: dict[str, Any] | None = None,
@@ -325,7 +423,8 @@ def stage_fingerprint(
             "llm_adapter_hash": config.get("_llm_adapter_hash"),
             "llm_preset": config.get("_llm_preset_id"),
             "llm_preset_hash": config.get("_llm_preset_hash"),
-            "prompt": prompt,
+            "prompt_rules_version": PROMPT_RULES_VERSION,
+            "prompt_languages": prompt_languages or {},
             "temperature": config["llm"][temperature_key],
             "context": config["context"][stage],
             "scheduling_mode": config["execution"]["scheduling_mode"],
@@ -446,9 +545,14 @@ def contiguous_groups(
     segments: Iterable[dict[str, Any]],
     *,
     all_segments: Iterable[dict[str, Any]],
+    cross_boundary: bool = False,
 ) -> list[list[dict[str, Any]]]:
     empty_positions = {
-        (*_segment_part_key(item), int(item["line_index"]))
+        (
+            (str(item["file_id"]), int(item["line_index"]))
+            if cross_boundary
+            else (*_segment_part_key(item), int(item["line_index"]))
+        )
         for item in all_segments
         if item["is_empty"]
     }
@@ -461,14 +565,25 @@ def contiguous_groups(
             groups.append([segment])
             continue
         previous = groups[-1][-1]
+        previous_file = str(previous["file_id"])
+        current_file = str(segment["file_id"])
         same_part = _segment_part_key(previous) == _segment_part_key(segment)
         previous_index = int(previous["line_index"])
         current_index = int(segment["line_index"])
-        part_key = _segment_part_key(segment)
-        gap_is_empty = same_part and current_index > previous_index and all(
-            (*part_key, line_index) in empty_positions
-            for line_index in range(previous_index + 1, current_index)
-        )
+        if cross_boundary:
+            gap_is_empty = current_file != previous_file or (
+                current_index > previous_index
+                and all(
+                    (current_file, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
+            )
+        else:
+            part_key = _segment_part_key(segment)
+            gap_is_empty = same_part and current_index > previous_index and all(
+                (*part_key, line_index) in empty_positions
+                for line_index in range(previous_index + 1, current_index)
+            )
         if gap_is_empty:
             groups[-1].append(segment)
         else:
@@ -480,9 +595,14 @@ def _iter_contiguous_groups(
     segments: Iterable[dict[str, Any]],
     *,
     all_segments: Iterable[dict[str, Any]],
+    cross_boundary: bool = False,
 ) -> Iterable[list[dict[str, Any]]]:
     empty_positions = {
-        (*_segment_part_key(item), int(item["line_index"]))
+        (
+            (str(item["file_id"]), int(item["line_index"]))
+            if cross_boundary
+            else (*_segment_part_key(item), int(item["line_index"]))
+        )
         for item in all_segments
         if item["is_empty"]
     }
@@ -500,15 +620,30 @@ def _iter_contiguous_groups(
             current = [segment]
             continue
         previous = current[-1]
+        previous_file = str(previous["file_id"])
+        current_file = str(segment["file_id"])
         same_part = _segment_part_key(previous) == _segment_part_key(segment)
         previous_index = int(previous["line_index"])
         current_index = int(segment["line_index"])
-        part_key = _segment_part_key(segment)
-        gap_is_empty = same_part and current_index > previous_index and all(
-            (*part_key, line_index) in empty_positions
-            for line_index in range(previous_index + 1, current_index)
-        )
-        if same_part and (current_index == previous_index or gap_is_empty):
+        if cross_boundary:
+            gap_is_empty = current_file != previous_file or (
+                current_index > previous_index
+                and all(
+                    (current_file, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
+            )
+            can_append = gap_is_empty
+        else:
+            part_key = _segment_part_key(segment)
+            gap_is_empty = same_part and current_index > previous_index and all(
+                (*part_key, line_index) in empty_positions
+                for line_index in range(previous_index + 1, current_index)
+            )
+            can_append = same_part and (
+                current_index == previous_index or gap_is_empty
+            )
+        if can_append:
             current.append(segment)
             continue
         yield current
@@ -522,6 +657,7 @@ def iter_chunk_plans(
     *,
     all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
+    stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> Iterable[ChunkPlan]:
@@ -595,8 +731,18 @@ def iter_chunk_plans(
                     estimated_input_tokens=estimated,
                 )
 
-    if config["execution"]["scheduling_mode"] != "ordered_by_file":
-        yield from plan_groups(_iter_contiguous_groups(work, all_segments=all_segments))
+    cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
+    if (
+        config["execution"]["scheduling_mode"] != "ordered_by_file"
+        or cross_boundary
+    ):
+        yield from plan_groups(
+            _iter_contiguous_groups(
+                work,
+                all_segments=all_segments,
+                cross_boundary=cross_boundary,
+            )
+        )
         return
 
     by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -605,7 +751,11 @@ def iter_chunk_plans(
     streams = [
         iter(
             plan_groups(
-                _iter_contiguous_groups(items, all_segments=all_segments)
+                _iter_contiguous_groups(
+                    items,
+                    all_segments=all_segments,
+                    cross_boundary=False,
+                )
             )
         )
         for items in by_file.values()
@@ -626,6 +776,7 @@ def build_chunk_plans(
     *,
     all_segments: Iterable[dict[str, Any]],
     config: dict[str, Any],
+    stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> list[ChunkPlan]:
@@ -634,6 +785,7 @@ def build_chunk_plans(
             work,
             all_segments=all_segments,
             config=config,
+            stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -665,7 +817,7 @@ def create_run(
     reused_count: int,
     details: dict[str, Any] | None = None,
 ) -> tuple[str, Path]:
-    project_metadata = read_json(project / "project.json")
+    project_metadata = read_json(project, project / "project.json")
     suffix = uuid.uuid4().hex[:6].upper()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = f"RUN-{timestamp}-{STAGE_CODES[stage]}-{suffix}"
@@ -694,7 +846,7 @@ def create_run(
     )
     if stage in {"terminology", "translation", "proofreading", "polishing"}:
         manifest["usage_invocation_count"] = 0
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
 
@@ -727,10 +879,8 @@ def _interrupt_run(
     )
     if superseded_by_run_id is not None:
         manifest["superseded_by_run_id"] = superseded_by_run_id
-    if reason == "resume_declined":
-        manifest["resume_declined"] = True
     run_id = str(manifest["run_id"])
-    atomic_write_json(project / "runs" / run_id / "manifest.json", manifest)
+    write_json(project, project / "runs" / run_id / "manifest.json", manifest)
 
 
 def choose_running_run(
@@ -807,7 +957,7 @@ def scope_from_run(
     *,
     dry_run: bool,
 ) -> Scope:
-    manifest = read_json(project / "runs" / run_id / "manifest.json")
+    manifest = read_json(project, project / "runs" / run_id / "manifest.json")
     raw = manifest.get("scope")
     if not isinstance(raw, dict):
         raise StorageError(f"Run 缺少 scope：{run_id}")
@@ -839,7 +989,7 @@ def continue_run(
     reused_count: int,
 ) -> tuple[str, Path]:
     run_dir = project / "runs" / run_id
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     if manifest.get("status") != "running" or manifest.get("stage") != stage:
         raise StorageError(f"Run 不可续用：{run_id}")
     continuations = list(manifest.get("continuations", []))
@@ -869,7 +1019,7 @@ def continue_run(
         }
     )
     manifest["continuations"] = continuations
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir
 
 
@@ -886,6 +1036,7 @@ def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
 
 
 def finalize_run(
+    project: Path,
     run_dir: Path,
     *,
     status: str,
@@ -895,7 +1046,7 @@ def finalize_run(
     usage: dict[str, Any] | None = None,
     failure_counts: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     manifest.update(
         status=status,
         completed_segment_count=completed,
@@ -926,7 +1077,7 @@ def finalize_run(
         manifest["usage_invocation_count"] = (
             invocation_count + 1 if type(invocation_count) is int else 1
         )
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     return usage
 
 
@@ -962,6 +1113,7 @@ def combine_usage(
 
 
 def save_debug_chunks(
+    project: Path,
     run_dir: Path,
     project_id: str,
     run_id: str,
@@ -970,6 +1122,7 @@ def save_debug_chunks(
 ) -> None:
     for chunk in chunks:
         append_jsonl(
+            project,
             run_dir / "chunks.jsonl",
             record_header(
                 "chunk_manifest",
@@ -1168,7 +1321,7 @@ class LLMClient:
                 {"schema_version": 1, "error": error, "http_status": status},
             )
         async with self.log_lock:
-            append_jsonl(
+            append_jsonl_file(
                 self.run_dir / "attempts.jsonl",
                 record_header(
                     "request_attempt",
@@ -1197,11 +1350,7 @@ class LLMClient:
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
-        api_key = os.getenv(str(self.config["llm"]["api_key_env"]))
-        if not api_key:
-            raise ExternalError(
-                f"缺少环境变量：{self.config['llm']['api_key_env']}"
-            )
+        api_key = resolve_api_key(self.config["llm"]["credential"])
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
         configured_output = int(self.config["llm"]["max_output_tokens"])
         available_output = max(
@@ -1229,12 +1378,10 @@ class LLMClient:
             stream=False,
             extra_body=self.config.get("_llm_extra_body"),
         )
-        url = (
-            self.config["llm"]["base_url"].rstrip("/")
-            + "/"
-            + str(self.config["llm"]["endpoint"])
-            .replace("${model}", str(self.config["llm"]["model"]))
-            .lstrip("/")
+        url = endpoint_url(
+            self.config["llm"]["base_url"],
+            self.config["llm"]["endpoint"],
+            model=self.config["llm"]["model"],
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
         diagnostics = current_diagnostics()
@@ -1576,48 +1723,65 @@ async def dispatch_chunks(
         raise ConfigError("max_parallel 必须是正整数")
     if mode == "ordered_by_file":
         iterator = iter(chunks)
-        pending: dict[asyncio.Task[Any], tuple[int, str]] = {}
-        buffered: dict[str, ChunkPlan] = {}
+        pending: dict[asyncio.Task[Any], tuple[int, frozenset[str]]] = {}
+        buffered: list[tuple[int, frozenset[str], ChunkPlan]] = []
         results: dict[int, Any] = {}
         active_files: set[str] = set()
         next_index = 0
-        deferred: ChunkPlan | None = None
+        source_exhausted = False
 
-        def start(chunk: ChunkPlan) -> None:
-            nonlocal next_index
-            file_id = str(chunk.file_id)
+        def file_ids(chunk: ChunkPlan) -> frozenset[str]:
+            ids = frozenset(str(item["file_id"]) for item in chunk.segments)
+            return ids or frozenset({str(chunk.file_id)})
+
+        def start(
+            index: int, file_ids_for_chunk: frozenset[str], chunk: ChunkPlan
+        ) -> None:
             task = asyncio.create_task(worker(chunk))
-            pending[task] = (next_index, file_id)
-            active_files.add(file_id)
-            next_index += 1
+            pending[task] = (index, file_ids_for_chunk)
+            active_files.update(file_ids_for_chunk)
+
+        def start_buffered() -> bool:
+            if len(pending) >= max_parallel:
+                return False
+            reserved: set[str] = set()
+            for index, file_ids_for_chunk, chunk in buffered:
+                if (
+                    file_ids_for_chunk.isdisjoint(active_files)
+                    and file_ids_for_chunk.isdisjoint(reserved)
+                ):
+                    buffered.remove((index, file_ids_for_chunk, chunk))
+                    start(index, file_ids_for_chunk, chunk)
+                    return True
+                reserved.update(file_ids_for_chunk)
+            return False
 
         def fill() -> None:
-            nonlocal deferred
+            nonlocal next_index, source_exhausted
             while len(pending) < max_parallel:
-                inactive = [
+                while start_buffered():
+                    pass
+                if len(pending) >= max_parallel:
+                    return
+                if source_exhausted or len(buffered) >= max_parallel:
+                    return
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    source_exhausted = True
+                    return
+                index = next_index
+                next_index += 1
+                file_ids_for_chunk = file_ids(chunk)
+                reserved = {
                     file_id
-                    for file_id in buffered
-                    if file_id not in active_files
-                ]
-                if inactive:
-                    file_id = inactive[0]
-                    start(buffered.pop(file_id))
+                    for _, buffered_ids, _ in buffered
+                    for file_id in buffered_ids
+                }
+                if file_ids_for_chunk.isdisjoint(active_files | reserved):
+                    start(index, file_ids_for_chunk, chunk)
                     continue
-                chunk = deferred
-                deferred = None
-                if chunk is None:
-                    try:
-                        chunk = next(iterator)
-                    except StopIteration:
-                        return
-                file_id = str(chunk.file_id)
-                if file_id in active_files:
-                    if file_id in buffered:
-                        deferred = chunk
-                        return
-                    buffered[file_id] = chunk
-                    continue
-                start(chunk)
+                buffered.append((index, file_ids_for_chunk, chunk))
 
         fill()
         try:
@@ -1626,8 +1790,8 @@ async def dispatch_chunks(
                     pending, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in done:
-                    index, file_id = pending.pop(task)
-                    active_files.discard(file_id)
+                    index, file_ids_for_chunk = pending.pop(task)
+                    active_files.difference_update(file_ids_for_chunk)
                     results[index] = task.result()
                 fill()
         except BaseException:

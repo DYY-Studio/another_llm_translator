@@ -5,33 +5,35 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
-from .documents import normalize_document_output
-from .errors import UsageError
+from .errors import TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
+from .plugins import normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
+    append_jsonl,
     get_segment,
     latest_stage_results,
+    new_record_id,
     query_segment_neighbors,
     query_segments,
+    read_json,
+    read_jsonl,
+    read_segment_sources,
+    record_exists,
+    record_header,
     segment_count,
     segment_ids,
+    write_json,
 )
 from .stages import (
     build_term_library_rows,
     load_terms,
+    match_terms,
     normalize_term,
+    prompt_middle_digests,
+    term_normalization,
     validate_translation_text,
-)
-from .storage import (
-    append_jsonl,
-    atomic_write_json,
-    logical_record_exists,
-    new_record_id,
-    read_json,
-    read_jsonl,
-    record_header,
 )
 
 REVIEW_STAGES = {"proofreading", "polishing"}
@@ -43,7 +45,7 @@ class WebStore:
     def __init__(self, project: Path):
         self.project = project
         self.config = load_project_config(project)
-        self.metadata = read_json(project / "project.json")
+        self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
 
     @property
@@ -65,17 +67,6 @@ class WebStore:
         library = load_terms(self.project)
         return int(library["terms_revision"]) if library else None
 
-    def _prompt(self, stage: str) -> str:
-        from .execution import full_prompt
-
-        name = {
-            "translation": "translation.middle.txt",
-            "proofreading": "proofreading.middle.txt",
-            "polishing": "polishing.middle.txt",
-        }[stage]
-        middle = (self.project / "prompts" / name).read_text(encoding="utf-8")
-        return full_prompt(stage, middle)
-
     def _fingerprint(self, stage: str) -> str:
         if stage.endswith("_applied"):
             return stage_fingerprint(
@@ -90,7 +81,7 @@ class WebStore:
         return stage_fingerprint(
             self.config,
             stage,
-            self._prompt(stage),
+            prompt_middle_digests(self.project, stage),
             terms_revision=self._terms_revision(),
         )
 
@@ -101,21 +92,6 @@ class WebStore:
         if segment is None or segment.get("is_empty"):
             raise UsageError(f"未知或空 Segment：{segment_id}")
         return segment
-
-    def _normalize_text(
-        self, segment: dict[str, Any], text: str, stage: str
-    ) -> str:
-        file_record = next(
-            item
-            for item in self.files
-            if str(item["file_id"]) == str(segment["file_id"])
-        )
-        from .plugins import get_document_adapter
-
-        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-        return normalize_document_output(
-            adapter, segment=segment, text=text, stage=stage
-        )
 
     def _base_results(
         self, stage: str, segment_ids_filter: list[str] | None = None
@@ -172,7 +148,11 @@ class WebStore:
 
     def terminology_scan(self) -> dict[str, Any]:
         active_path = self.project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = (
+            read_json(self.project, active_path)
+            if record_exists(self.project, active_path)
+            else None
+        )
         base = {
             "active_task_id": None,
             "status": active.get("status", "none") if active else "none",
@@ -191,9 +171,12 @@ class WebStore:
         base["active_task_id"] = task_id
         scans = [
             record
-            for record in read_jsonl(self.project / "terminology" / "scans.jsonl")
-            if record.get("active_task_id") == task_id
-            and record.get("segment_id")
+            for record in read_jsonl(
+                self.project,
+                self.project / "terminology" / "scans.jsonl",
+                task_id=task_id,
+            )
+            if record.get("segment_id")
         ]
         latest: dict[str, dict[str, Any]] = {}
         for record in scans:
@@ -224,11 +207,16 @@ class WebStore:
         ]
         candidate_records = [
             record
-            for record in read_jsonl(self.project / "terminology" / "candidates.jsonl")
-            if record.get("active_task_id") == task_id
+            for record in read_jsonl(
+                self.project,
+                self.project / "terminology" / "candidates.jsonl",
+                task_id=task_id,
+            )
         ]
         candidate_sources = {
-            normalize_term(str(term.get("source")))
+            normalize_term(
+                str(term.get("source")), term_normalization(self.config)
+            )
             for record in candidate_records
             for term in record.get("terms", [])
             if isinstance(term, dict) and term.get("source")
@@ -463,7 +451,7 @@ class WebStore:
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
         segment = self._require_segment(segment_id)
-        text = self._normalize_text(segment, text, "translation")
+        text = normalize_model_text(self.files, segment, text, "translation")
         findings = validate_translation_text(
             text, self.config["validation"]["translation"]
         )
@@ -482,7 +470,7 @@ class WebStore:
             request_id=None,
             origin="web",
         )
-        append_jsonl(stage_result_path(self.project, "translation"), record)
+        append_jsonl(self.project, stage_result_path(self.project, "translation"), record)
         return self._result_view(record) or {}
 
     def save_review(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -505,8 +493,11 @@ class WebStore:
         if review_status == "suggested":
             if not isinstance(suggested_text, str) or not suggested_text:
                 raise UsageError("suggested 状态需要非空建议文本")
-            suggested_text = self._normalize_text(
-                self._require_segment(segment_id), suggested_text, str(stage)
+            suggested_text = normalize_model_text(
+                self.files,
+                self._require_segment(segment_id),
+                suggested_text,
+                str(stage),
             )
         else:
             suggested_text = None
@@ -529,7 +520,7 @@ class WebStore:
             request_id=None,
             origin="web",
         )
-        append_jsonl(stage_result_path(self.project, stage), suggestion)
+        append_jsonl(self.project, stage_result_path(self.project, stage), suggestion)
         applied = None
         if payload.get("apply"):
             text = (
@@ -553,7 +544,7 @@ class WebStore:
                 request_id=None,
                 origin="web",
             )
-            append_jsonl(stage_result_path(self.project, applied_stage), applied)
+            append_jsonl(self.project, stage_result_path(self.project, applied_stage), applied)
         return {
             "suggestion": self._result_view(suggestion),
             "applied": self._result_view(applied),
@@ -586,6 +577,7 @@ class WebStore:
                     if segment_id not in current:
                         continue
                     append_jsonl(
+                        self.project,
                         stage_result_path(self.project, target_stage),
                         record_header(
                             "stage_reset",
@@ -614,7 +606,7 @@ class WebStore:
             str(item["normalized"]): dict(item)
             for item in (library or {}).get("terms", [])
         }
-        overrides_document = read_json(self.project / "terminology" / "overrides.json")
+        overrides_document = read_json(self.project, self.project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
@@ -632,6 +624,7 @@ class WebStore:
                 "alias_primaries": list(
                     raw_conflicts.get("alias_primaries", [])
                 ),
+                "group_claims": list(raw_conflicts.get("group_claims", [])),
             }
             disabled = bool(override.get("disabled", False))
             rows.append(
@@ -646,6 +639,11 @@ class WebStore:
                         "preferred_translation", term.get("preferred_translation")
                     ),
                     "aliases": override.get("aliases", term.get("aliases", [])),
+                    "group_primary": (
+                        None
+                        if disabled
+                        else override.get("group_primary", term.get("group_primary"))
+                    ),
                     "disabled": disabled,
                     "conflicts": conflicts,
                     "has_conflicts": not disabled
@@ -653,13 +651,33 @@ class WebStore:
                         conflicts["categories"]
                         or conflicts["preferred_translations"]
                         or conflicts["alias_primaries"]
+                        or conflicts["group_claims"]
                     ),
                 }
             )
+        by_normalized = {item["normalized"]: item for item in rows}
+
+        def group_root(item: dict[str, Any]) -> str:
+            primary = item["group_primary"]
+            return (
+                primary
+                if primary is not None and primary in by_normalized
+                else item["normalized"]
+            )
+
+        group_conflicts: dict[str, bool] = {}
+        for item in rows:
+            root = group_root(item)
+            group_conflicts[root] = group_conflicts.get(root, False) or bool(
+                item["has_conflicts"]
+            )
+
         rows.sort(
             key=lambda item: (
-                not item["has_conflicts"],
+                not group_conflicts[group_root(item)],
                 item["disabled"],
+                group_root(item),
+                item["normalized"] != group_root(item),
                 item["normalized"],
             )
         )
@@ -670,6 +688,48 @@ class WebStore:
             "conflict_count": sum(bool(item["has_conflicts"]) for item in rows),
             "terms": rows,
             "scan": self.terminology_scan(),
+        }
+
+    def term_hits(
+        self,
+        normalized: str,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if offset < 0 or limit < 1 or limit > 500:
+            raise UsageError("术语命中窗口参数无效")
+        term = next(
+            (
+                item
+                for item in self.terms()["terms"]
+                if item["normalized"] == normalized
+            ),
+            None,
+        )
+        if term is None:
+            raise UsageError(f"术语不存在：{normalized}")
+        spec = term_normalization(self.config)
+        isolated_term = dict(term)
+        isolated_term["group_primary"] = None
+        isolated_conflicts = dict(term.get("conflicts") or {})
+        isolated_conflicts["group_claims"] = []
+        isolated_term["conflicts"] = isolated_conflicts
+        library = {"terms": [isolated_term]}
+        hits = [
+            segment
+            for segment in read_segment_sources(self.project)
+            if match_terms(
+                segment["source"], library=library, limit=1, spec=spec
+            )
+        ]
+        return {
+            "normalized": normalized,
+            "source": term["source"],
+            "total": len(hits),
+            "offset": offset,
+            "limit": limit,
+            "hits": hits[offset : offset + limit],
         }
 
     @staticmethod
@@ -700,10 +760,6 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        atomic_write_json(
-            self.project / "terminology" / "overrides.json",
-            override_record,
-        )
         revision = int(library["terms_revision"]) + 1 if library else 1
         terms = build_term_library_rows(
             self.project,
@@ -724,40 +780,58 @@ class WebStore:
             terms=terms,
             origin=origin,
         )
-        atomic_write_json(
+        write_json(
+            self.project,
+            self.project / "terminology" / "overrides.json",
+            override_record,
+        )
+        write_json(
+            self.project,
             self.project / "terminology" / "terms.json",
             term_record,
         )
         return self.terms()
 
+    def _terms_edit_prepare(
+        self, payload: dict[str, Any]
+    ) -> tuple[
+        tuple[str, ...],
+        dict[str, Any] | None,
+        dict[str, dict[str, Any]],
+        dict[str, dict[str, Any]],
+    ]:
+        raw_values = payload.get("normalized")
+        if (
+            not isinstance(raw_values, list)
+            or not raw_values
+            or not all(isinstance(value, str) and value for value in raw_values)
+        ):
+            raise UsageError("normalized 必须是非空字符串数组")
+        values = tuple(dict.fromkeys(raw_values))
+        library = load_terms(self.project)
+        current = {
+            str(item["normalized"]): dict(item)
+            for item in (library or {}).get("terms", [])
+        }
+        overrides_path = self.project / "terminology" / "overrides.json"
+        overrides_document = read_json(self.project, overrides_path)
+        overrides = {
+            str(item["normalized"]): dict(item)
+            for item in overrides_document.get("overrides", [])
+        }
+        unknown = [
+            value
+            for value in values
+            if value not in current and value not in overrides
+        ]
+        if unknown:
+            raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+        return values, library, current, overrides
+
     def remove_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
         with project_write_lock(self.project):
-            raw_values = payload.get("normalized")
-            if (
-                not isinstance(raw_values, list)
-                or not raw_values
-                or not all(isinstance(value, str) and value for value in raw_values)
-            ):
-                raise UsageError("normalized 必须是非空字符串数组")
-            values = tuple(dict.fromkeys(raw_values))
-            library = load_terms(self.project)
-            current = {
-                str(item["normalized"]): dict(item)
-                for item in (library or {}).get("terms", [])
-            }
-            overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(overrides_path)
-            overrides = {
-                str(item["normalized"]): dict(item)
-                for item in overrides_document.get("overrides", [])
-            }
-            unknown = [
-                value
-                for value in values
-                if value not in current and value not in overrides
-            ]
-            if unknown:
-                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            values, library, current, overrides = self._terms_edit_prepare(payload)
+            self._reject_group_primary_removal(values, current)
             changed = 0
             for normalized in values:
                 override = overrides.get(
@@ -772,6 +846,7 @@ class WebStore:
                 if override.get("disabled"):
                     continue
                 overrides[normalized] = {**override, "disabled": True}
+                overrides[normalized].pop("group_primary", None)
                 current.pop(normalized, None)
                 changed += 1
             if not changed:
@@ -790,32 +865,8 @@ class WebStore:
     def delete_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Remove terms and their disabled overrides so scans may rediscover them."""
         with project_write_lock(self.project):
-            raw_values = payload.get("normalized")
-            if (
-                not isinstance(raw_values, list)
-                or not raw_values
-                or not all(isinstance(value, str) and value for value in raw_values)
-            ):
-                raise UsageError("normalized 必须是非空字符串数组")
-            values = tuple(dict.fromkeys(raw_values))
-            library = load_terms(self.project)
-            current = {
-                str(item["normalized"]): dict(item)
-                for item in (library or {}).get("terms", [])
-            }
-            overrides_path = self.project / "terminology" / "overrides.json"
-            overrides_document = read_json(overrides_path)
-            overrides = {
-                str(item["normalized"]): dict(item)
-                for item in overrides_document.get("overrides", [])
-            }
-            unknown = [
-                value
-                for value in values
-                if value not in current and value not in overrides
-            ]
-            if unknown:
-                raise UsageError(f"未知术语：{', '.join(unknown[:10])}")
+            values, library, current, overrides = self._terms_edit_prepare(payload)
+            self._reject_group_primary_removal(values, current)
             deleted = 0
             for normalized in values:
                 existed = normalized in current or normalized in overrides
@@ -835,11 +886,193 @@ class WebStore:
             result["unchanged"] = len(values) - deleted
             return result
 
+    @staticmethod
+    def _reject_group_primary_removal(
+        values: tuple[str, ...], current: dict[str, dict[str, Any]]
+    ) -> None:
+        for normalized in values:
+            members = [
+                key
+                for key, term in current.items()
+                if term.get("group_primary") == normalized
+            ]
+            if members:
+                raise TermGroupError(
+                    "组主仍有成员，不能移除或删除",
+                    reason="primary_has_members",
+                    normalized=normalized,
+                    members=members,
+                )
+
+    def materialize_term(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            normalized = payload.get("normalized")
+            alias = payload.get("alias")
+            if not isinstance(normalized, str) or not normalized:
+                raise UsageError("normalized 必须是非空字符串")
+            if not isinstance(alias, str) or not alias.strip():
+                raise UsageError("alias 必须是非空字符串")
+            spec = term_normalization(self.config)
+            rows = {item["normalized"]: item for item in self.terms()["terms"]}
+            owner = rows.get(normalized)
+            if owner is None or owner["disabled"]:
+                raise UsageError(f"术语不存在或已移除：{normalized}")
+            alias_value = next(
+                (
+                    value
+                    for value in owner["aliases"]
+                    if normalize_term(value, spec) == normalize_term(alias, spec)
+                ),
+                None,
+            )
+            if alias_value is None:
+                raise UsageError("alias 不属于指定术语")
+            target_normalized = normalize_term(alias_value, spec)
+            primary = owner.get("group_primary") or normalized
+            target = rows.get(target_normalized)
+            if target is not None:
+                if target["disabled"]:
+                    raise TermGroupError(
+                        "目标条目已移除，不能加入术语组",
+                        reason="target_disabled",
+                        normalized=target_normalized,
+                    )
+                target_primary = target.get("group_primary") or target_normalized
+                target_has_members = any(
+                    item.get("group_primary") == target_normalized
+                    for item in rows.values()
+                )
+                if target_primary != primary and (
+                    target.get("group_primary") is not None or target_has_members
+                ):
+                    raise TermGroupError(
+                        "目标条目属于其他术语组",
+                        reason="cross_group",
+                        normalized=target_normalized,
+                        group_primary=target_primary,
+                    )
+
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            owner_override = overrides.get(
+                normalized,
+                {"normalized": normalized, "source": owner["source"]},
+            )
+            owner_aliases = [
+                value
+                for value in owner["aliases"]
+                if normalize_term(value, spec) != target_normalized
+            ]
+            overrides[normalized] = {**owner_override, "aliases": owner_aliases}
+            if target is None:
+                target_source = alias_value
+                current[target_normalized] = {
+                    "source": target_source,
+                    "normalized": target_normalized,
+                    "category": None,
+                    "description": "",
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": primary,
+                    "conflicts": {},
+                }
+                overrides[target_normalized] = {
+                    "normalized": target_normalized,
+                    "source": target_source,
+                    "category": None,
+                    "description": None,
+                    "preferred_translation": None,
+                    "aliases": [],
+                    "group_primary": primary,
+                    "disabled": False,
+                }
+            elif target_primary != primary:
+                current[target_normalized]["group_primary"] = primary
+                target_override = overrides.get(
+                    target_normalized,
+                    {"normalized": target_normalized, "source": target["source"]},
+                )
+                overrides[target_normalized] = {
+                    **target_override,
+                    "group_primary": primary,
+                }
+            result = self._publish_terms(
+                library, current, overrides, origin="web_materialize_term"
+            )
+            result["materialized"] = target_normalized
+            return result
+
+    def set_term_primary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认更换术语组主")
+        with project_write_lock(self.project):
+            normalized = payload.get("normalized")
+            if not isinstance(normalized, str) or not normalized:
+                raise UsageError("normalized 必须是非空字符串")
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            if normalized not in current:
+                raise UsageError(f"术语不存在：{normalized}")
+            component = {normalized}
+            changed = True
+            while changed:
+                changed = False
+                roots = {
+                    current[key].get("group_primary") or key
+                    for key in component
+                }
+                for key, term in current.items():
+                    claims = term.get("conflicts", {}).get("group_claims", [])
+                    related = {
+                        str(value.get("entry")) for value in claims
+                    } | {str(value.get("claimed_by")) for value in claims}
+                    if (
+                        key in roots
+                        or term.get("group_primary") in roots
+                        or component & related
+                    ) and key not in component:
+                        component.add(key)
+                        changed = True
+            if len(component) == 1 and current[normalized].get("group_primary") is None:
+                return self.terms()
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            for key in component:
+                primary = None if key == normalized else normalized
+                current[key]["group_primary"] = primary
+                override = overrides.get(
+                    key,
+                    {"normalized": key, "source": current[key].get("source", key)},
+                )
+                overrides[key] = {**override, "group_primary": primary}
+            return self._publish_terms(
+                library, current, overrides, origin="web_set_term_primary"
+            )
+
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
+        spec = term_normalization(self.config)
         source = payload.get("source")
         if not isinstance(source, str) or not source.strip():
             raise UsageError("术语 source 不能为空")
-        normalized = normalize_term(source)
+        normalized = normalize_term(source, spec)
         old_normalized = payload.get("old_normalized")
         if old_normalized is not None and not isinstance(old_normalized, str):
             raise UsageError("old_normalized 类型错误")
@@ -851,7 +1084,7 @@ class WebStore:
         aliases = [
             alias.strip()
             for alias in aliases
-            if alias.strip() and normalize_term(alias) != normalized
+            if alias.strip() and normalize_term(alias, spec) != normalized
         ]
         category = self._term_value(payload, "category")
         description = self._term_value(payload, "description")
@@ -864,7 +1097,7 @@ class WebStore:
             for item in (library or {}).get("terms", [])
         }
         overrides_path = self.project / "terminology" / "overrides.json"
-        overrides_document = read_json(overrides_path)
+        overrides_document = read_json(self.project, overrides_path)
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
@@ -872,6 +1105,12 @@ class WebStore:
         conflict_source = current.get(str(old_normalized or normalized), {}).get(
             "conflicts", {}
         )
+        original_normalized = str(old_normalized or normalized)
+        existing_group_primary = current.get(original_normalized, {}).get(
+            "group_primary"
+        )
+        if disabled:
+            self._reject_group_primary_removal((original_normalized,), current)
         if (
             not disabled
             and conflict_source.get("categories")
@@ -891,6 +1130,19 @@ class WebStore:
         ):
             raise UsageError(f"normalized source 已存在：{normalized}")
         if old_normalized and old_normalized != normalized:
+            if current.get(old_normalized, {}).get("group_primary") is None:
+                for member_key, member in current.items():
+                    if member.get("group_primary") != old_normalized:
+                        continue
+                    member["group_primary"] = normalized
+                    member_override = overrides.get(
+                        member_key,
+                        {"normalized": member_key, "source": member.get("source", member_key)},
+                    )
+                    overrides[member_key] = {
+                        **member_override,
+                        "group_primary": normalized,
+                    }
             current.pop(old_normalized, None)
             old = overrides.get(old_normalized, {"normalized": old_normalized})
             overrides[old_normalized] = {**old, "disabled": True}
@@ -904,6 +1156,8 @@ class WebStore:
             "aliases": aliases,
             "disabled": disabled,
         }
+        if existing_group_primary is not None and not disabled:
+            override["group_primary"] = existing_group_primary
         overrides[normalized] = override
         if disabled:
             current.pop(normalized, None)
@@ -915,6 +1169,7 @@ class WebStore:
                 "description": description or "",
                 "preferred_translation": preferred,
                 "aliases": sorted(set(aliases)),
+                "group_primary": existing_group_primary,
                 "conflicts": {
                     "categories": [],
                     "preferred_translations": [],

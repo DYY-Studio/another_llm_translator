@@ -12,6 +12,7 @@ from app.execution import Scope
 from app.main import run
 from app.project import init_project
 from app.stages import (
+    TermNormalization,
     export_terms,
     import_terms,
     load_terms,
@@ -19,7 +20,13 @@ from app.stages import (
     publish_partial_terms,
     run_terminology,
 )
-from app.storage import append_jsonl, atomic_write_json, read_json, read_jsonl, record_header
+from app.sqlite_storage import (
+    append_jsonl,
+    read_json,
+    read_jsonl,
+    record_header,
+    write_json,
+)
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 
@@ -64,13 +71,87 @@ def term(source: str, *, aliases: list[str] | None = None, disabled: bool = Fals
     }
 
 
+def test_term_group_exchange_v2_round_trip_and_rejects_dangling_primary(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path, "group-exchange")
+    source = tmp_path / "group-v2.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    term("Alice"),
+                    {**term("Alicia"), "group_primary": "Alice"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, source, dry_run=False)
+    library = load_terms(project)
+    assert library is not None
+    assert next(
+        item for item in library["terms"] if item["source"] == "Alicia"
+    )["group_primary"] == "alice"
+
+    exported = tmp_path / "group-export.json"
+    export_terms(project, exported, include_disabled=False)
+    document = json.loads(exported.read_text(encoding="utf-8-sig"))
+    assert document["schema_version"] == 2
+    assert next(
+        item for item in document["terms"] if item["source"] == "Alicia"
+    )["group_primary"] == "Alice"
+
+    invalid = tmp_path / "dangling.json"
+    invalid.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [{**term("Orphan"), "group_primary": "Missing"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(UsageError, match="组主不存在"):
+        import_terms(project, invalid, dry_run=False)
+
+
+def test_explicit_standalone_group_relation_blocks_automatic_grouping(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path, "locked-group")
+    source = tmp_path / "locked-group.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {**term("Alpha", aliases=["Beta"]), "group_primary": None},
+                    {**term("Beta"), "group_primary": None},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, source, dry_run=False)
+    rows = {item["source"]: item for item in load_terms(project)["terms"]}
+    assert rows["Beta"]["group_primary"] is None
+    assert rows["Beta"]["conflicts"]["group_claims"][0]["reason"] == "group_collision"
+
+
 def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     tmp_path: Path,
 ) -> None:
     project = make_project(tmp_path, "recover")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     task_id = "TERM-TASK-PARTIAL"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -82,6 +163,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "candidates.jsonl",
         record_header(
             "terminology_candidates",
@@ -114,8 +196,8 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     published = publish_partial_terms(project)
     assert published["published"] is True
     assert load_terms(project)["terms"][0]["source"] == "recover"
-    assert read_json(project / "terminology" / "active_task.json")["status"] == "partial_published"
-    assert read_jsonl(project / "terminology" / "candidates.jsonl")
+    assert read_json(project, project / "terminology" / "active_task.json")["status"] == "partial_published"
+    assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
 
 
 def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
@@ -143,6 +225,46 @@ def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
     assert [item["source"] for item in load_terms(restored)["terms"]] == ["Alpha"]
 
 
+def test_import_merge_follows_case_insensitive_setting(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "case_insensitive = true",
+            "case_insensitive = false",
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "terms.json"
+    write_exchange(source, [term("Alice"), term("alice")])
+    import_terms(project, source, dry_run=False)
+    assert [item["source"] for item in load_terms(project)["terms"]] == [
+        "Alice",
+        "alice",
+    ]
+
+
+def test_import_merge_follows_unicode_normalization_setting(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "terms.json"
+    write_exchange(source, [term("\uff21\uff22\uff23"), term("ABC")])
+    import_terms(project, source, dry_run=False)
+    assert [item["source"] for item in load_terms(project)["terms"]] == [
+        "ABC",
+        "\uff21\uff22\uff23",
+    ]
+
+
 def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     tmp_path: Path,
 ) -> None:
@@ -151,7 +273,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(source, [term("Alpha")])
     first = import_terms(project, source, dry_run=False)
     assert first["terms_revision"] == 1
-    before = read_json(project / "terminology" / "terms.json")
+    before = read_json(project, project / "terminology" / "terms.json")
 
     second = import_terms(project, source, dry_run=False)
     assert second["changed"] is False
@@ -161,7 +283,7 @@ def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
     write_exchange(invalid, [{"source": "Broken", "aliases": "wrong"}])
     with pytest.raises(UsageError, match="aliases"):
         import_terms(project, invalid, dry_run=False)
-    assert read_json(project / "terminology" / "terms.json") == before
+    assert read_json(project, project / "terminology" / "terms.json") == before
 
 
 def test_terms_cli_import_dry_run_and_export(
@@ -188,6 +310,14 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
     tmp_path: Path,
 ) -> None:
     project = make_project(tmp_path)
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'alias_primary_collision = "merge"',
+            'alias_primary_collision = "conflict"',
+        ),
+        encoding="utf-8",
+    )
     source = tmp_path / "terms.json"
     write_exchange(source, [term("Alpha", aliases=["Beta"]), term("Beta")])
     import_terms(project, source, dry_run=False)
@@ -197,26 +327,43 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
     assert alpha["conflicts"]["alias_primaries"] == [
         {"alias": "Beta", "primary_source": "Beta", "reason": "policy"}
     ]
-    assert [item["source"] for item in match_terms("Beta", library, 10)] == ["Beta"]
+    matched = match_terms("Beta", library, 10, TermNormalization("NFKC", True))
+    assert [item["source"] for item in matched] == ["Alpha", "Beta"]
+    assert all(item["preferred_translation"] is None for item in matched)
+    assert all(item["group_claims"] for item in matched)
 
 
-def test_alias_primary_merge_absorbs_the_alias_entry(tmp_path: Path) -> None:
-    project = make_project(tmp_path)
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"',
-            'alias_primary_collision = "merge"',
+@pytest.mark.parametrize(
+    ("terms", "expected_aliases"),
+    [
+        ([term("Alpha", aliases=["Beta"]), term("Beta")], {"Beta"}),
+        (
+            [
+                term("Alpha", aliases=["Beta"]),
+                term("Beta", aliases=["Gamma"]),
+                term("Gamma"),
+            ],
+            {"Beta", "Gamma"},
         ),
-        encoding="utf-8",
-    )
+    ],
+)
+def test_alias_primary_merge_preserves_group_members(
+    tmp_path: Path, terms: list[dict], expected_aliases: set[str]
+) -> None:
+    project = make_project(tmp_path)
     source = tmp_path / "terms.json"
-    write_exchange(source, [term("Alpha", aliases=["Beta"]), term("Beta")])
+    write_exchange(source, terms)
     import_terms(project, source, dry_run=False)
     library = load_terms(project)
     assert library is not None
-    assert [item["source"] for item in library["terms"]] == ["Alpha"]
-    assert "Beta" in library["terms"][0]["aliases"]
+    assert [item["source"] for item in library["terms"]] == [
+        item["source"] for item in terms
+    ]
+    rows = {item["source"]: item for item in library["terms"]}
+    assert rows["Alpha"]["group_primary"] is None
+    for source in expected_aliases:
+        assert rows[source]["group_primary"] == "alpha"
+    assert set(rows["Alpha"]["aliases"]) == {"Beta"}
 
 
 @pytest.mark.parametrize(
@@ -259,32 +406,6 @@ def test_alias_primary_ambiguous_graph_requires_manual_conflict(
     assert {collision["reason"] for collision in collisions} == {reason}
 
 
-def test_alias_primary_merge_supports_a_chain(tmp_path: Path) -> None:
-    project = make_project(tmp_path)
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"',
-            'alias_primary_collision = "merge"',
-        ),
-        encoding="utf-8",
-    )
-    source = tmp_path / "terms.json"
-    write_exchange(
-        source,
-        [
-            term("Alpha", aliases=["Beta"]),
-            term("Beta", aliases=["Gamma"]),
-            term("Gamma"),
-        ],
-    )
-    import_terms(project, source, dry_run=False)
-    library = load_terms(project)
-    assert library is not None
-    assert [item["source"] for item in library["terms"]] == ["Alpha"]
-    assert set(library["terms"][0]["aliases"]) == {"Beta", "Gamma"}
-
-
 @pytest.mark.asyncio
 async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> None:
     project = make_project(tmp_path)
@@ -324,6 +445,6 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
             Scope(force=True),
             http_client=client,
         )
-    library = read_json(project / "terminology" / "terms.json")
+    library = read_json(project, project / "terminology" / "terms.json")
     assert library["terms_revision"] == 2
     assert [item["source"] for item in library["terms"]] == ["Alpha", "Beta"]

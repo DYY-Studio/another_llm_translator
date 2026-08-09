@@ -117,6 +117,7 @@ export interface DiagnosticsResponse {
     project: string | null;
     stage: string | null;
     active_requests: number;
+    total_requests: number;
     http_errors: number;
     retry_count: number;
     rate_limit_waiting_requests: number;
@@ -124,6 +125,8 @@ export interface DiagnosticsResponse {
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
+    throughput_input_tokens_per_second: number | null;
+    throughput_output_tokens_per_second: number | null;
     throughput_tokens_per_second: number | null;
   };
   logs: Array<{
@@ -192,8 +195,6 @@ export interface TaskOptions {
   completed: number;
   pending: number;
   failed: number;
-  fingerprint_count: number;
-  current_fingerprint: string;
   current_fingerprint_completed: number;
   mismatched_fingerprint_completed: number;
   running_run: {
@@ -218,6 +219,7 @@ export interface Term {
   description: string | null;
   preferred_translation: string | null;
   aliases: string[];
+  group_primary: string | null;
   disabled: boolean;
   conflicts: {
     categories: string[];
@@ -226,6 +228,12 @@ export interface Term {
       alias: string;
       primary_source: string;
       reason: "policy" | "cycle" | "multiple_owners";
+    }>;
+    group_claims: Array<{
+      entry: string;
+      claimed_by: string;
+      alias: string;
+      reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
     }>;
   };
   has_conflicts: boolean;
@@ -236,6 +244,22 @@ export interface TermsResponse {
   conflict_count: number;
   terms: Term[];
   scan: TerminologyScan;
+}
+
+export interface TermHit {
+  segment_id: string;
+  file_id: string;
+  line_index: number;
+  source: string;
+}
+
+export interface TermHitsResponse {
+  normalized: string;
+  source: string;
+  total: number;
+  offset: number;
+  limit: number;
+  hits: TermHit[];
 }
 
 export interface TerminologyScan {
@@ -285,14 +309,15 @@ export interface ProjectConfig {
   chunking: {
     target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
+    cross_boundary_batching: LLMStage[];
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
     previous_segments: number;
   }>;
   terminology: {
-    unicode_normalization: "NFKC";
-    case_insensitive: true;
+    unicode_normalization: "" | "NFC" | "NFD" | "NFKC" | "NFKD";
+    case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
   };
@@ -332,13 +357,13 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 1;
+  schema_version: 2;
   preset_id: string;
   adapter_id: string;
   base_url: string;
   endpoint: string;
   model: string;
-  api_key_env: string;
+  credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
   max_output_tokens: number;
@@ -349,4 +374,26 @@ export interface LLMPreset {
   max_parallel: number;
   request_timeout_seconds: number;
   extra_body: Record<string, unknown>;
+}
+
+export interface LLMCredential {
+  kind: "environment" | "keychain";
+  name: string;
+}
+
+export interface CredentialSummary {
+  id: string;
+  updated_at: number;
+}
+
+export interface ServerStatus {
+  lan: { enabled: boolean; bind_address: string };
+  auth: { required: boolean; username: string };
+  authed: boolean;
+  loopback: boolean;
+}
+
+export interface InterfaceEntry {
+  name: string;
+  address: string;
 }

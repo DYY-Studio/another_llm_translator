@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,12 @@ from app.project import (
     resolve_project_parent,
     sync_global_templates,
 )
-from app.storage import append_jsonl, read_json, read_jsonl, record_header
+from app.sqlite_storage import (
+    _validate_record,
+    read_files,
+    read_json,
+    read_segments,
+)
 
 
 def make_app_root(tmp_path: Path) -> Path:
@@ -125,48 +129,101 @@ def test_project_parent_rejects_relative_and_unwritable_paths(
         resolve_project_parent(tmp_path)
 
 
-def test_config_rejects_unknown_key(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = config.read_text(encoding="utf-8").replace(
-        'output_encoding = "utf-8-sig"',
-        'output_encoding = "utf-8-sig"\nunknown = true',
-    )
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="未知配置键"):
-        load_config(path)
+CONFIG_TEMPLATE = Path(__file__).parents[1] / "config" / "config.toml"
 
 
-def test_config_rejects_invalid_numeric_types(tmp_path: Path) -> None:
-    config = Path(__file__).parents[1] / "config" / "config.toml"
-    text = re.sub(
-        r"(?m)^target_chunk_input_tokens\s*=.*$",
-        "target_chunk_input_tokens = 1.5",
-        config.read_text(encoding="utf-8"),
-    )
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="target_chunk_input_tokens 必须是正整数"):
-        load_config(path)
-
-
-def test_config_rejects_unknown_alias_primary_collision_policy(
-    tmp_path: Path,
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"',
-            'alias_primary_collision = "guess"',
+@pytest.mark.parametrize(
+    ("old", "new", "key", "expected"),
+    [
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+            "unicode_normalization",
+            "",
         ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFC"',
+            "unicode_normalization",
+            "NFC",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFD"',
+            "unicode_normalization",
+            "NFD",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFKC"',
+            "unicode_normalization",
+            "NFKC",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "NFKD"',
+            "unicode_normalization",
+            "NFKD",
+        ),
+        (
+            "case_insensitive = true",
+            "case_insensitive = false",
+            "case_insensitive",
+            False,
+        ),
+    ],
+)
+def test_config_accepts_selectable_terminology_settings(
+    tmp_path: Path, old: str, new: str, key: str, expected: object
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(old, new),
         encoding="utf-8",
     )
-    with pytest.raises(
-        ConfigError,
-        match="alias_primary_collision 必须是 conflict 或 merge",
-    ):
-        load_config(config_path)
+    assert load_config(path)["terminology"][key] == expected
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            'output_encoding = "utf-8-sig"',
+            'output_encoding = "utf-8-sig"\nunknown = true',
+            "未知配置键",
+        ),
+        (
+            "target_chunk_input_tokens = 11000",
+            "target_chunk_input_tokens = 1.5",
+            "target_chunk_input_tokens 必须是正整数",
+        ),
+        (
+            'alias_primary_collision = "merge"',
+            'alias_primary_collision = "guess"',
+            "alias_primary_collision 必须是 conflict 或 merge",
+        ),
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = "FOO"',
+            "unicode_normalization 必须是空字符串或",
+        ),
+        (
+            "case_insensitive = true",
+            'case_insensitive = "yes"',
+            "case_insensitive 必须是布尔值",
+        ),
+    ],
+)
+def test_config_rejects_invalid_values(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(old, new),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_config_defaults_alias_collision_for_existing_projects(
@@ -176,14 +233,37 @@ def test_config_defaults_alias_collision_for_existing_projects(
     config_path = app_root / "config" / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "conflict"\n',
+            'alias_primary_collision = "merge"\n',
             "",
-        ),
+        ).replace("cross_boundary_batching = []\n", ""),
         encoding="utf-8",
     )
     assert load_config(config_path)["terminology"]["alias_primary_collision"] == (
-        "conflict"
+        "merge"
     )
+    assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('["unknown"]', "未知阶段"),
+        ('["translation", "translation"]', "重复阶段"),
+    ],
+)
+def test_config_rejects_invalid_cross_boundary_batching(
+    tmp_path: Path, value: str, message: str
+) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "cross_boundary_batching = []", f"cross_boundary_batching = {value}"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
@@ -198,6 +278,7 @@ def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "[context.translation]" in text
     assert 'target_language = "简体中文 \\"测试\\""' in text
+    assert "cross_boundary_batching = []" in text
 
 
 def test_decode_gbk_as_gb18030() -> None:
@@ -232,15 +313,15 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
 
     assert project is not None
     assert summary["file_count"] == 3
-    assert read_json(project / "project.json")["name"] == "demo"
-    files = read_jsonl(project / "source" / "files.jsonl")
+    assert read_json(project, project / "project.json")["name"] == "demo"
+    files = read_files(project)
     assert len(files) == 3
     assert [item["original_name"] for item in files] == [
         "2.txt",
         "10.txt",
         "chapter/1.txt",
     ]
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    segments = read_segments(project)
     assert len(segments) == 9
     assert sum(bool(item["is_empty"]) for item in segments) == 4
     by_source = {str(item["source"]): bool(item["is_empty"]) for item in segments}
@@ -248,7 +329,7 @@ def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:
     assert by_source["\u3000"] is True
     assert by_source[" \t"] is True
     assert by_source["  text  "] is False
-    assert (project / "prompts" / "translation.middle.txt").is_file()
+    assert (project / "prompts" / "translation.zh-CN.middle.txt").is_file()
     assert load_config(project / "config.toml")["project"]["target_language"]
 
 
@@ -292,9 +373,9 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    project_prompt = project / "prompts" / "translation.middle.txt"
+    project_prompt = project / "prompts" / "translation.zh-CN.middle.txt"
     project_prompt.write_text("project custom", encoding="utf-8")
-    global_prompt = app_root / "prompts" / "translation.middle.txt"
+    global_prompt = app_root / "prompts" / "translation.zh-CN.middle.txt"
     global_prompt.write_text("global changed", encoding="utf-8")
 
     warnings = sync_global_templates(
@@ -302,7 +383,7 @@ def test_template_sync_keep_and_update(tmp_path: Path) -> None:
     )
     assert "已保留项目模板" in warnings
     assert project_prompt.read_text(encoding="utf-8") == "project custom"
-    assert read_json(project / "project.json")["global_bundle_hash_seen"] == bundle_hash(
+    assert read_json(project, project / "project.json")["global_bundle_hash_seen"] == bundle_hash(
         app_root
     )
 
@@ -330,7 +411,7 @@ def test_template_sync_interactive_prompt_uses_stderr(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    (app_root / "prompts" / "translation.middle.txt").write_text(
+    (app_root / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "changed", encoding="utf-8"
     )
     monkeypatch.setattr("builtins.input", lambda: "keep")
@@ -375,47 +456,17 @@ def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> Non
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    before = read_json(project / "project.json")["global_bundle_hash_seen"]
-    (app_root / "prompts" / "translation.middle.txt").write_text(
+    before = read_json(project, project / "project.json")["global_bundle_hash_seen"]
+    (app_root / "prompts" / "translation.zh-CN.middle.txt").write_text(
         "changed", encoding="utf-8"
     )
     warnings = sync_global_templates(
         project, app_root=app_root, interactive=False
     )
     assert any("非交互环境" in warning for warning in warnings)
-    assert read_json(project / "project.json")["global_bundle_hash_seen"] == before
+    assert read_json(project, project / "project.json")["global_bundle_hash_seen"] == before
 
 
-def test_jsonl_tail_repair(tmp_path: Path) -> None:
-    path = tmp_path / "records.jsonl"
-    append_jsonl(path, record_header("test", "PRJ", value=1))
-    with path.open("ab") as handle:
-        handle.write(b'{"schema_version":1')
-    records = read_jsonl(path)
-    assert [item["value"] for item in records] == [1]
-    assert list(tmp_path.glob("records.jsonl.*.corrupt-tail"))
-    assert json.loads(path.read_text(encoding="utf-8"))
-
-
-def test_jsonl_middle_corruption_stops_without_repair(tmp_path: Path) -> None:
-    path = tmp_path / "records.jsonl"
-    path.write_text(
-        '{"schema_version":1,"value":1}\n'
-        '{"schema_version":\n'
-        '{"schema_version":1,"value":2}\n',
-        encoding="utf-8",
-    )
-    original = path.read_bytes()
-    with pytest.raises(StorageError, match="中间行损坏"):
-        read_jsonl(path)
-    assert path.read_bytes() == original
-
-
-def test_persisted_record_rejects_unsupported_enum(tmp_path: Path) -> None:
-    path = tmp_path / "record.json"
-    path.write_text(
-        '{"schema_version":1,"status":"unknown"}\n',
-        encoding="utf-8",
-    )
+def test_persisted_record_rejects_unsupported_enum() -> None:
     with pytest.raises(StorageError, match="不支持的 status"):
-        read_json(path)
+        _validate_record({"schema_version": 1, "status": "unknown"}, "test")

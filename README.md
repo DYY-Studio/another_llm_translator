@@ -12,13 +12,13 @@ Another LLM Translator 是一个面向本地使用的、可恢复的 LLM 工程�
 ## 项目状态
 
 - 当前版本：`0.3.0`，对应 MVP 0.3 实现。
-- 当前形态：单机本地 CLI 和 Web Alpha。
-- 当前路线：Stage 1 至 Stage 20 已完成，后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
-- 当前发布方式：从源码目录运行。Python wheel/sdist 的完整发行包尚未作为支持的
-  安装方式发布。
+- 当前形态：CLI、本地 Web 与 macOS Tauri 桌面壳。
+- 当前路线：Stage 1 至 Stage 23.3 已完成，后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+- 当前发布方式：从源码目录运行，或 `pip install .` 后使用两个 console script
+  （`minimal-llm-translator`、`minimal-llm-translator-web`）。
 
-本项目不面向远程部署、多人协作、局域网共享或公网服务。Web 默认只监听本机回环
-地址，并拒绝非本机 Host 和跨站 Origin。
+本项目默认不面向远程部署、公网服务。Web 默认只允许本机回环访问，并拒绝非本机
+Host 和跨站 Origin；局域网共享需要用户显式开启接口并可选开启登录认证。
 
 ## 核心流程
 
@@ -65,7 +65,7 @@ LLM 请求、Chunk 和参考上下文不会跨越不同 File 或 EPUB 的不同 
 ## 环境要求
 
 - Python 3.11 或更高版本。
-- Node.js/npm 仅在需要从 Web 源码重新构建前端资源时使用。
+- Node.js/npm 仅在需要构建或重新构建前端资源时使用；发行包已内置构建产物。
 - 可访问所配置 LLM 端点的网络环境。
 
 ## 安装与配置
@@ -93,12 +93,17 @@ python -m pip check
 ### 配置 LLM Preset
 
 项目配置只保存命名 Preset，不保存内联连接配置。全局 Preset 位于
-`llm_presets/<preset_id>.json`，全局配置位于 `config/config.toml`。
+`llm_presets/<preset_id>.json`，全局配置位于 `config/config.toml`。这些内置资源
+只读；用户在 Web 中修改的全局配置、Prompt、Adapter 和 Preset 会写入平台用户数据
+根目录（macOS `~/Library/Application Support/minimal-llm-translator`，可用
+`MINIMAL_LLM_USER_ROOT` 环境变量覆盖），同名文件优先于内置资源读取。
 
 首次使用前至少需要完成以下步骤：
 
 1. 编辑 `llm_presets/default.json`，将示例端点、模型和限流参数改为实际值。
-2. 将 `api_key_env` 指定的环境变量设置为真实 API Key。
+2. 确认 Preset 的 `credential` 引用：`{"kind": "environment", "name": "LLM_API_KEY"}`
+   指定环境变量，或 `{"kind": "keychain", "name": "<凭据 ID>"}` 指向系统钥匙串；
+   两种引用二选一，不隐式回退。然后设置对应的环境变量或写入钥匙串。
 3. 确认 `config/config.toml` 中的 `llm.preset` 指向所选 Preset。
 
 例如，使用 OpenAI-compatible 端点时：
@@ -107,16 +112,17 @@ python -m pip check
 export LLM_API_KEY="your-api-key"
 ```
 
-不要把 API Key 写入 TOML、Preset、Prompt、项目文件、Run 快照或日志。
+不要把 API Key 写入 TOML、Preset、Prompt、项目文件、Run 快照或日志。Preset
+只保存凭据引用，不保存密钥本身。
 
 仓库中的内置 Preset 是可编辑的示例：
 
-| Preset | Adapter | 当前示例密钥环境变量 | 说明 |
+| Preset | Adapter | 当前示例凭据引用 | 说明 |
 | --- | --- | --- | --- |
-| `default` | `openai-compatible` | `LLM_API_KEY` | 默认指向示例端点，必须修改后使用 |
-| `google-gemini` | `google-gemini` | `GEMINI_API_KEY` | Gemini 原生 JSON 端点示例 |
-| `openai-responses` | `openai-responses` | `OPENAI_API_KEY` | OpenAI Responses API 示例 |
-| `anthropic-claude` | `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API 示例 |
+| `default` | `openai-compatible` | `LLM_API_KEY` 环境变量 | 默认指向示例端点，必须修改后使用 |
+| `google-gemini` | `google-gemini` | `GEMINI_API_KEY` 环境变量 | Gemini 原生 JSON 端点示例 |
+| `openai-responses` | `openai-responses` | `OPENAI_API_KEY` 环境变量 | OpenAI Responses API 示例 |
+| `anthropic-claude` | `anthropic` | `ANTHROPIC_API_KEY` 环境变量 | Anthropic Messages API 示例 |
 
 项目可以在 `config.toml` 的 `llm.preset_terminology`、
 `llm.preset_translation`、`llm.preset_proofreading` 和
@@ -159,8 +165,9 @@ python -m app.main export novel --stage polished
 
 ### 创建与管理项目
 
-项目默认创建在 `projects/<name>/`，也可以通过 `--parent-dir` 在明确的父目录创建，或
-直接使用项目绝对路径打开已有项目：
+项目默认创建在用户数据根目录的 `projects/<name>/` 下（可用 `MINIMAL_LLM_USER_ROOT`
+覆盖），也可以通过 `--parent-dir` 在明确的父目录创建，或直接使用项目绝对路径打开
+已有项目：
 
 ```bash
 python -m app.main init novel.txt --name novel
@@ -181,10 +188,12 @@ EPUB 初始化时需要明确指定 Adapter：
 python -m app.main init book.epub \
   --name book \
   --document-adapter epub \
-  --epub-ruby-mode aozora
+  --adapter-option epub.ruby_mode=aozora
 ```
 
-EPUB Ruby 模式包括 `aozora`、`base_only` 和 `parenthetical`。导入选项会固化在该 File
+任意 Document Adapter 的导入与运行选项都通过可重复的
+`--adapter-option ADAPTER.OPTION=VALUE` 传入（如 EPUB Ruby 模式
+`aozora`、`base_only` 和 `parenthetical`）。导入选项会固化在该 File
 的 Adapter 状态中；修改选项需要移除并重新导入文件。
 
 ### 阶段与范围
@@ -220,7 +229,8 @@ python -m app.main translate novel --from-file F0002
 - `--resume-run`、`--decline-run`：在非交互环境中明确处理同阶段未完成 Run。
 
 CLI 默认输出 JSON 摘要，日志写入标准错误和项目 `logs/app.log`。可以使用
-`--language system`、`--language zh-CN` 或 `--language en` 选择界面语言。
+`--language system`、`--language zh-CN` 或 `--language en` 选择界面语言；
+Run 的提示词语言跟随该选择（缺失的语言视图回退 `zh-CN`）。
 
 ### 术语交换
 
@@ -245,11 +255,14 @@ python -m app.main export novel --stage translated --file F0001
 
 `translated`、`proofread` 和 `polished` 分别对应翻译、已应用的校对和已应用的润色结果。
 原格式导出按每个 File 的来源 Adapter 重建；使用 `--format txt` 时统一通过 TXT Adapter 导出。
-当前不支持跨 File 合并或按 Segment 单独导出。
+导出不支持跨 File 合并或按 Segment 单独导出；跨 File 合并只适用于启用配置的 LLM
+Chunk 请求规划。
 
 ## 本地 Web
 
-仓库已包含可运行的 Web 静态资源。如需从前端源码重新构建：
+发行包已内置可运行的 Web 静态资源；从源码运行时需先构建一次前端产物到
+`app/web_dist`（该目录为构建产物，不随仓库提交；缺失时 Web 仅提供 API
+并记录警告）：
 
 ```bash
 cd web
@@ -265,20 +278,71 @@ cd ..
 python -m app.web
 ```
 
-默认访问地址为 `http://127.0.0.1:8765`。也可以通过 `--port` 修改端口，但 `--host` 只接受
-`127.0.0.1` 或 `localhost`。
+默认访问地址为 `http://127.0.0.1:8765`。也可以通过 `--port` 修改端口；服务
+统一监听 `0.0.0.0`，非回环访问由共享配置决定（见下节）。
 
 Web 与 CLI 共用同一项目目录、SQLite 存储、阶段执行、限速、写锁和恢复逻辑。Web 支持：
 
 - 创建、打开、删除项目，以及打开外部绝对路径项目。
 - 上传、追加和移除 TXT/EPUB 文件。
-- 编辑项目配置、项目 Prompt、全局配置、全局 Prompt、LLM Preset 和 JSON Adapter。
+- 编辑项目配置、项目 Prompt、全局配置、全局 Prompt、LLM Preset 和 JSON Adapter；
+  全局编辑写入用户数据根目录，内置资源只读、不可删除，同名用户文件优先。
 - 手动检测模型列表、查看脱敏请求预览和检查诊断信息。
-- 运行、取消和恢复阶段任务。
+- 运行、取消和恢复阶段任务；Run 的提示词语言跟随界面语言，设置页可预览装配后
+  的完整提示词。
 - Segment 审校、批量 apply、单语/双语导出和文件范围选择。
 - 术语搜索、冲突裁决、编辑、移除、彻底删除和 JSON/CSV 交换。
+- 在设置页管理系统钥匙串凭据；LLM Preset 通过 `environment` 或 `keychain`
+  显式单凭据引用获取密钥。
+- 在设置页显式开启指定局域网接口的共享：开启认证后 LAN 客户端需通过登录页和
+  HttpOnly 会话 Cookie 访问，密码存入系统钥匙串，服务重启或停止共享后会话失效、
+  长期账密保留；未开启认证时界面持续警告同网段设备拥有完整操作权限。
 
-Web Alpha 只适合可信的本机用户，不提供登录认证、TLS、局域网共享或公网访问能力。
+Web 默认只允许本机回环访问（未开启共享时非回环一律 403）并限制 Host 和
+Origin，适合可信的本机用户。局域网共享需要显式开启，首版使用 HTTP，不提供
+TLS、多账号、角色、密码找回或公网访问。
+
+## 桌面开发壳（Tauri）
+
+`src-tauri/` 提供 Tauri 2 桌面开发壳：启动时拉起 Python/FastAPI sidecar
+（`python -m app.web`），健康探测通过后打开窗口加载 `http://127.0.0.1:8765`，
+退出时关闭 sidecar。开发运行方式：
+
+```bash
+npm run build --prefix web   # 先构建前端到 app/web_dist
+bash scripts/desktop-dev.sh  # 设置环境后 cargo run
+```
+
+侧车选择器通过 Tauri command 暴露为 `select_file` / `select_folder`，前端在
+`window.__TAURI__` 可用时改用原生对话框选择输入文件和文件夹（提交为服务端
+路径）；普通浏览器和 LAN 客户端继续使用上传与服务端目录浏览。桌面模式下
+Web 统一监听 `0.0.0.0`，非回环访问由中间件守卫：未开启共享返回 403，开启
+共享后仅放行所选接口网段的客户端（`0.0.0.0` 表示全部网段），本机回环始终
+可用；开启认证且未登录返回 401。`server.toml` 的 `lan.bind_address` 为接口
+选择语义，保存后即时生效无需重启。环境变量：
+`MINIMAL_LLM_PYTHON`（默认 `.venv/bin/python`）、`MINIMAL_LLM_WEB_PORT`
+（默认 `8765`）。终端 Ctrl+C 会同时终止应用与 sidecar。
+
+## 打包与安装（macOS）
+
+`scripts/build-app.sh` 一键产出未签名 ad-hoc 应用与 zip：构建前端、用
+PyInstaller 冻结 Python/FastAPI sidecar（内置 config、Prompt、Adapter、
+Preset 与 Web 静态资源），再经 Tauri 打包为 `.app`。产物位于
+`dist/minimal-llm-translator-<版本>-macos-arm64/`：
+
+```bash
+bash scripts/build-app.sh
+```
+
+安装：解压后把 `Minimal LLM Translator.app` 拖入“应用程序”；未签名应用首次
+打开需在“系统设置 → 隐私与安全性”放行（或右键 → 打开）。项目、全局配置、
+凭据索引、`server.toml` 与日志保存在
+`~/Library/Application Support/minimal-llm-translator/`；升级 = 用新版本覆盖
+旧 `.app`，用户数据目录自动保留。卸载直接删除 `.app`，用户数据目录手动清理。
+
+桌面壳优先启动 bundle 内的冻结 sidecar，找不到时才回退
+`python -m app.web` 开发模式。异常退出（强制终止）后 sidecar 可能残留，
+再次启动会复用既有服务继续工作；残留进程需手动结束或重启机器。
 
 ## 输入与输出范围
 
@@ -341,22 +405,23 @@ projects/<name>/
 
 ## 安全与隐私
 
-- API Key 只从环境变量读取，不进入 URL、请求正文、Run 快照、阶段指纹或普通日志。
+- API Key 只从环境变量或系统钥匙串读取（按 Preset 的显式单凭据引用），不进入
+  URL、请求正文、Run 快照、阶段指纹或普通日志。
 - 普通日志不会保存完整 Prompt、源文、鉴权 Header 或未脱敏 Payload。
 - Debug 模式会额外保存完整请求、响应、Attempt 和 Chunk 信息，其中可能包含 Prompt 与源文。
   处理敏感资料时不要启用 Debug 模式。
-- Web 仅绑定回环地址，并限制 Host 和 Origin。
+- Web 监听 `0.0.0.0`；未开启共享时非回环请求一律 403，并限制 Host 和 Origin。
 - Document Adapter 插件如被安装，会与宿主在同一进程运行，拥有当前进程权限，不提供沙箱。
 
 ## 明确限制
 
-- 不支持远程、多用户、LAN 或公网部署。
-- 不提供 TLS、登录认证、系统钥匙串或桌面应用。
+- 不支持远程、多用户或公网部署。
+- 不提供 TLS、多账号、角色、密码找回或公网访问。
 - 不支持流式 LLM、Python LLM Adapter、自动 Provider 判断或静默 Provider fallback。
 - 不支持 PDF、DOCX、Markdown 等通用文档转换。
 - 不提供自动质量评分或质量保证；模型结果仍需人工审阅。
 - 术语冲突需要人工裁决，强制重新扫描不会自动删除未再次发现的术语。
-- 当前以源码目录作为运行边界，发行包资源完整性仍待后续阶段处理。
+- 内置资源保持只读；用户内容写入用户数据根目录，删除内置资源在 Web 中明确失败。
 
 ## 验证与开发
 

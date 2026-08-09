@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .execution import Scope, choose_running_run
-from .errors import AppError
+from .errors import AppError, UsageError
 from .i18n import cli_language
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
@@ -59,9 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="输入输出格式 Adapter ID（默认：txt）",
     )
     init.add_argument(
-        "--epub-ruby-mode",
-        choices=("aozora", "base_only", "parenthetical"),
-        help="EPUB Ruby 导入形式（默认：aozora）",
+        "--adapter-option",
+        dest="adapter_options",
+        action="append",
+        metavar="ADAPTER.OPTION=VALUE",
+        help="Document Adapter 选项；可重复使用",
     )
     init.add_argument("--dry-run", action="store_true")
     init.add_argument(
@@ -78,9 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
     )
     files_add.add_argument(
-        "--epub-ruby-mode",
-        choices=("aozora", "base_only", "parenthetical"),
-        help="EPUB Ruby 导入形式（默认：aozora）",
+        "--adapter-option",
+        dest="adapter_options",
+        action="append",
+        metavar="ADAPTER.OPTION=VALUE",
+        help="Document Adapter 选项；可重复使用",
     )
 
     files_remove = subparsers.add_parser(
@@ -178,6 +182,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_adapter_option_args(values: list[str]) -> dict[str, dict[str, str]]:
+    resolved: dict[str, dict[str, str]] = {}
+    for value in values:
+        key, separator, option_value = value.partition("=")
+        adapter_id, _, option_id = key.partition(".")
+        if (
+            not separator
+            or not adapter_id
+            or not option_id
+            or "." in adapter_id
+            or "." in option_id
+        ):
+            raise UsageError(f"Adapter 选项格式无效：{value}")
+        if option_id in resolved.setdefault(adapter_id, {}):
+            raise UsageError(f"Adapter 选项重复：{value}")
+        resolved[adapter_id][option_id] = option_value
+    return resolved
+
+
+def _resolve_project(args: argparse.Namespace) -> Path:
+    project = resolve_project(args.project)
+    attach_project_log(project)
+    return project
+
+
+def emit_summary(summary: dict[str, Any]) -> None:
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def run(argv: list[str] | None = None) -> int:
     configure_cli_logging()
     logger = get_logger()
@@ -197,8 +230,8 @@ def run(argv: list[str] | None = None) -> int:
             recursive=args.recursive,
             document_adapter_id=args.document_adapter,
             adapter_options=(
-                {"epub": {"ruby_mode": args.epub_ruby_mode}}
-                if args.epub_ruby_mode
+                parse_adapter_option_args(args.adapter_options)
+                if args.adapter_options
                 else None
             ),
             empty=args.empty,
@@ -216,12 +249,11 @@ def run(argv: list[str] | None = None) -> int:
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info("command complete command=init")
         return 0
     if args.command == "files-add":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = add_project_files(
                 project,
@@ -229,14 +261,14 @@ def run(argv: list[str] | None = None) -> int:
                 recursive=args.recursive,
                 document_adapter_id=args.document_adapter,
                 adapter_options=(
-                    {"epub": {"ruby_mode": args.epub_ruby_mode}}
-                    if args.epub_ruby_mode
+                    parse_adapter_option_args(args.adapter_options)
+                    if args.adapter_options
                     else None
                 ),
             )
         for warning in summary.get("warnings", []):
             logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=files-add files=%d segments=%d",
             summary["added_files"],
@@ -244,11 +276,10 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "files-remove":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = remove_project_files(project, args.file_ids)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=files-remove files=%d segments=%d",
             summary["removed_files"],
@@ -256,14 +287,13 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "inspect":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
         summary = inspect_full(project, dry_run=args.dry_run)
         summary["warnings"] = warnings
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=inspect files=%d segments=%d",
             summary["files"],
@@ -277,8 +307,7 @@ def run(argv: list[str] | None = None) -> int:
         "polish",
         "run-all",
     }:
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -368,7 +397,7 @@ def run(argv: list[str] | None = None) -> int:
         for warning in summary["warnings"]:
             if warning not in warnings and warning not in run_warnings:
                 logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=%s completed=%s failed=%s pending=%s",
             args.command,
@@ -378,8 +407,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 5 if summary.get("failed") or summary.get("pending") else 0
     if args.command == "apply":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -401,7 +429,7 @@ def run(argv: list[str] | None = None) -> int:
         for warning in summary["warnings"]:
             if warning not in warnings:
                 logger.warning("%s", warning)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=apply stage=%s completed=%d",
             args.stage,
@@ -409,8 +437,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "export":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project)
         for warning in warnings:
             logger.warning("%s", warning)
@@ -424,7 +451,7 @@ def run(argv: list[str] | None = None) -> int:
                 file_ids=args.file_ids,
             )
         summary["warnings"] = warnings
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         logger.info(
             "command complete command=export stage=%s files=%d",
             args.stage,
@@ -432,8 +459,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "terms-import":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
         lock = nullcontext() if args.dry_run else project_write_lock(project)
         with lock:
@@ -443,28 +469,24 @@ def run(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
             )
         summary["warnings"] = [*warnings, *summary["warnings"]]
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
     if args.command == "terms-export":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         summary = export_terms(
             project,
             Path(args.output),
             include_disabled=args.include_disabled,
             source=args.source,
         )
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
     if args.command == "terms-publish-partial":
-        project = resolve_project(args.project)
-        attach_project_log(project)
+        project = _resolve_project(args)
         with project_write_lock(project):
             summary = publish_partial_terms(project)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        emit_summary(summary)
         return 0
-    parser.error("unknown command")
-    return 2
 
 
 def main() -> None:

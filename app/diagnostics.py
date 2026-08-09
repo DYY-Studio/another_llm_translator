@@ -6,30 +6,29 @@ import logging
 import time
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Iterator
 
-from .logging_utils import LOGGER_NAME
+from .logging_utils import (
+    LOGGER_NAME,
+    _ContextFilter,
+    _HANDLER_MARKER,
+    _MemoryHandler,
+    _PROJECT,
+    _now,
+    _remove_handler,
+)
 
 
 _ACTIVE: contextvars.ContextVar[Diagnostics | None] = contextvars.ContextVar(
     "diagnostics", default=None
 )
-_PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "diagnostics_project", default="-"
-)
-_HANDLER_MARKER = "_minimal_llm_translator_handler"
 _LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _REQUEST_LIMIT = 50
 _MESSAGE_LIMIT = 100_000
 _CONTENT_LIMIT = 100_000
 _REASONING_LIMIT = 20_000
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def current_diagnostics() -> Diagnostics | None:
@@ -40,31 +39,6 @@ def _bounded(value: str, limit: int) -> tuple[str, bool]:
     return value[:limit], len(value) > limit
 
 
-class _ContextFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "stage"):
-            record.stage = "app"
-        record.project = _PROJECT.get()
-        return True
-
-
-class _MemoryHandler(logging.Handler):
-    def __init__(self, diagnostics: Diagnostics) -> None:
-        super().__init__(logging.INFO)
-        self.diagnostics = diagnostics
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.diagnostics.logs.append(
-            {
-                "timestamp": _now(),
-                "level": record.levelname,
-                "project": str(getattr(record, "project", "-")),
-                "stage": str(getattr(record, "stage", "app")),
-                "message": record.getMessage()[:2000],
-            }
-        )
-
-
 class Diagnostics:
     def __init__(self, log_path: Path) -> None:
         self.log_path = log_path
@@ -73,6 +47,7 @@ class Diagnostics:
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -87,13 +62,8 @@ class Diagnostics:
         logger = logging.getLogger(LOGGER_NAME)
         logger.setLevel(logging.INFO)
         logger.propagate = False
-        for handler in list(logger.handlers):
-            if getattr(handler, _HANDLER_MARKER, None) in {
-                "web-global",
-                "web-memory",
-            }:
-                logger.removeHandler(handler)
-                handler.close()
+        for kind in ("web-global", "web-memory"):
+            _remove_handler(kind)
         context_filter = _ContextFilter()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         disk = RotatingFileHandler(
@@ -124,6 +94,7 @@ class Diagnostics:
         self.project = project
         self.stage = stage
         self.active_requests = 0
+        self.total_requests = 0
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
@@ -156,6 +127,7 @@ class Diagnostics:
         max_attempts: int,
         segment_id_map: dict[str, str] | None = None,
     ) -> None:
+        self.total_requests += 1
         normalized_messages = []
         for message in messages:
             content, truncated = _bounded(
@@ -311,21 +283,21 @@ class Diagnostics:
         if self._started_monotonic is not None and self._running:
             elapsed = time.monotonic() - self._started_monotonic
         usage_available = bool(self.usage and self.usage.get("available") is True)
-        throughput = None
+        input_tokens = int(self.usage["input_tokens"]) if usage_available else 0
+        output_tokens = int(self.usage["output_tokens"]) if usage_available else 0
+        throughput_input = None
+        throughput_output = None
+        throughput_total = None
         if usage_available and elapsed > 0:
-            throughput = round(
-                (
-                    int(self.usage["input_tokens"])
-                    + int(self.usage["output_tokens"])
-                )
-                / elapsed,
-                2,
-            )
+            throughput_input = round(input_tokens / elapsed, 2)
+            throughput_output = round(output_tokens / elapsed, 2)
+            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
         return {
             "metrics": {
                 "project": self.project,
                 "stage": self.stage,
                 "active_requests": self.active_requests,
+                "total_requests": self.total_requests,
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
                 "rate_limit_waiting_requests": self.rate_limit_waiting_requests,
@@ -334,14 +306,12 @@ class Diagnostics:
                     if self.latest_latency_seconds is not None
                     else None
                 ),
-                "input_tokens": (
-                    int(self.usage["input_tokens"]) if usage_available else 0
-                ),
-                "output_tokens": (
-                    int(self.usage["output_tokens"]) if usage_available else 0
-                ),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "usage_available": usage_available,
-                "throughput_tokens_per_second": throughput,
+                "throughput_input_tokens_per_second": throughput_input,
+                "throughput_output_tokens_per_second": throughput_output,
+                "throughput_tokens_per_second": throughput_total,
             },
             "logs": logs,
             "requests": [

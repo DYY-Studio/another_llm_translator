@@ -54,9 +54,10 @@
 
 ### 请求边界
 
-- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。
+- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。API 版本前缀
+  （如 `/v1`、`/v1beta`）写入 `base_url`，`endpoint` 必须是相对路径。
 - Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
-  `/v1beta/models/${model}:generateContent`），请求时由宿主替换为模型名；
+  `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
 - 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
   重试、取消和日志由宿主负责。
@@ -101,7 +102,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 ```json
 {
   "models": {
-    "endpoint": "/v1/models",
+    "endpoint": "/models",
     "response_models_pointer": "/data",
     "response_model_id": "id",
     "response_model_display": "display_name",
@@ -110,6 +111,8 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 }
 ```
 
+- models 的 `endpoint` 与主请求一样是不含版本前缀的相对路径；版本前缀由
+  Preset `base_url` 提供（如 `https://api.anthropic.com/v1`）。
 - models 请求固定为非流式 GET，URL 由 Preset `base_url` 与 `endpoint`
   组成，Header 复用顶层 `headers` 模板；渲染时只提供 `${api_key}`，
   含其他占位符的 Header 在触发模型发现时明确失败。
@@ -170,7 +173,9 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 三个新定义都只存在于全局目录；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
 `openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
+Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对
+路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
 ## 2. Document Adapter（Beta）
 
@@ -219,8 +224,32 @@ ID、版本和状态位置；宿主只校验归属、版本和完整性，不解
 
 Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的
 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项
-由 Adapter 固化在 File 的 `opaque_state` 并进入阶段指纹。修改选项不会改写既有
+由 Adapter 固化在 File 的 `opaque_state`。Adapter ID 与版本进入阶段指纹
+（内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有
 Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+
+CLI 的 `init` 与 `files-add` 用可重复的
+`--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如
+`--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名
+`adapter_options` JSON。两者构建同一形状，取值语义统一在宿主
+`validate_document_import_options` 边界校验。
+
+### 契约测试
+
+`tests/test_document_adapter_contract.py` 是外部 Document Adapter 的契约
+基准：它用一个独立的第三方风格 Adapter（`record`，`.rec`）走通全部宿主路径
+——按扩展名与显式 ID 导入、选项校验与透传、`opaque_state` 存储往返、
+`part_id`/`model_source` 落地、翻译时 `normalize_model_output` 应用、双语与
+纯译文导出、运行选项固化生效，以及 Adapter 缺失、版本不匹配、状态损坏、
+能力不足和指纹跟踪。任何标准第三方 Adapter 必须通过该套件的通用路径。
+
+### 版本与升级策略
+
+Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配立即失败。Adapter
+升级或选项变更的方式是移除文件并重新导入：宿主不解释、不迁移 `opaque_state`，
+也不会改写既有 Segment 和阶段结果；指纹变化使旧结果不再复用。兼容范围
+（如 semver 前缀）语义不在当前协议中，等待至少一个真实第二实现出现后由用户
+决策引入；协议版本不匹配的插件直接快速失败。
 
 ### 导出
 

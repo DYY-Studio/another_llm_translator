@@ -51,10 +51,12 @@ MVP 需要回答：
 
 ### File 与文档 part 是内容边界
 
-File 仍是存储、选择和导出的边界；任何 LLM 请求、Chunk 和参考上文都不得跨
-`(file_id, part_id)`。术语库可以在项目级汇总，但单次术语请求仍不得跨文档
-part。TXT 和普通 Adapter 使用 `part_id = "document"`；EPUB 使用每个 spine
-XHTML 的归档路径作为 part。调度仍按 File 进行，不把 EPUB 拆成多个 File。
+File 仍是存储、选择和导出的边界。默认情况下，任何 LLM 请求和 Chunk 都不得跨
+`(file_id, part_id)`；`reference_context` 始终不得跨该边界。项目配置可以按阶段
+启用 `chunking.cross_boundary_batching`，让满足源文顺序规则的 Chunk 和对应 LLM
+请求跨 File 或 part；这不改变 File 的存储、选择、导出和调度身份。术语库可以在
+项目级汇总。TXT 和普通 Adapter 使用 `part_id = "document"`；EPUB 使用每个
+spine XHTML 的归档路径作为 part。调度仍按 File 进行，不把 EPUB 拆成多个 File。
 
 ### Segment 是进度单位
 
@@ -80,11 +82,16 @@ Segment 的精确前缀；正文内部和尾随空白不做本地保护。该行
 
 Chunk 由当前 Run 动态生成，只能包含：
 
-- 同一个 `file_id` 和 `part_id`。
+- 默认只包含同一个 `file_id` 和 `part_id`；阶段启用
+  `cross_boundary_batching` 时，允许按下述规则跨边界。
 - 按 `line_index` 保持顺序的非空 Segment。
 - 当前命令选定范围内仍需处理的 Segment。
 
-两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空 Segment 本身仍不提交 LLM。已完成、筛选范围外、不同 part 或其他不在待处理集合中的非空 Segment 会结束当前 Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
+两个待处理非空 Segment 之间只有一个或多个空 Segment 时可以进入同一 Chunk；空
+Segment 本身仍不提交 LLM。启用跨边界合并后，不同 File 之间的源文顺序边界可直接
+合并；同一 File 跨 part 时，两个 Segment 的 `line_index` 中间区间必须全部是空
+Segment。已完成、筛选范围外或其他不在待处理集合中的非空 Segment 会结束当前
+Chunk。部分响应、格式修正和翻译校验修复也必须使用相同规则重新分组。
 
 Chunk 没有长期业务身份，不能用于判断进度或恢复。只有启用调试模式时才持久化 Chunk Manifest。
 
@@ -145,6 +152,8 @@ chardet
 fastapi
 uvicorn
 python-multipart
+keyring
+psutil
 ```
 
 React/Vite/TypeScript 只用于构建随 Python 包分发的 Web 静态资源。标准库负责
@@ -181,16 +190,29 @@ output/
 
 Run 的配置和 Prompt 快照放在对应 Run 目录。启用调试模式时，该目录额外保存 Chunk、Attempt 和 Payload。
 
-全局模板位于应用目录：
+内置只读资源位于应用目录；用户内容（全局配置修改、自定义 Prompt/Adapter/
+Preset、默认项目和诊断日志）写入平台用户数据根目录，可用
+`MINIMAL_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
+`~/Library/Application Support/minimal-llm-translator`，POSIX 默认
+`~/.local/share/minimal-llm-translator`，Windows 默认
+`%LOCALAPPDATA%\minimal-llm-translator`）。用户根存在同名文件时优先读取：
+config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
 
 ```text
 config/config.toml
-prompts/terminology.middle.txt
-prompts/translation.middle.txt
-prompts/proofreading.middle.txt
-prompts/polishing.middle.txt
+prompts/terminology.zh-CN.middle.txt
+prompts/terminology.en.middle.txt
+prompts/translation.zh-CN.middle.txt
+prompts/translation.en.middle.txt
+prompts/proofreading.zh-CN.middle.txt
+prompts/proofreading.en.middle.txt
+prompts/polishing.zh-CN.middle.txt
+prompts/polishing.en.middle.txt
 llm_adapters/openai-compatible.json
 ```
+
+Web 编辑全局资源只写入用户根；内置资源删除明确失败，编辑内置资源等于在用户根
+写入同名覆盖。默认项目根为 `用户根/projects`，诊断日志位于 `用户根/logs/`。
 
 ## 2.3 初始化与文件发现
 
@@ -201,20 +223,20 @@ TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。
 python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
-python -m app.main init BOOK.epub --document-adapter epub --epub-ruby-mode aozora --name PROJECT_NAME
+python -m app.main init BOOK.epub --document-adapter epub --adapter-option epub.ruby_mode=aozora --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
 python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
-python -m app.main files-add PROJECT BOOK.epub --epub-ruby-mode base_only
+python -m app.main files-add PROJECT BOOK.epub --adapter-option epub.ruby_mode=base_only
 python -m app.main files-remove PROJECT FILE_ID...
 ```
 
 规则：
 
 - init 必须在输入和 `--empty` 中恰好选择一种。
-- init 默认写入内置 `projects/`；`--parent-dir` 在已存在、可写的明确父目录下
+- init 默认写入用户根 `projects/`；`--parent-dir` 在已存在、可写的明确父目录下
   创建项目。相对路径按当前工作目录解析，后续命令可直接使用项目绝对路径。
 - 项目目录是自包含边界；选择外部位置不会移动或复制已有项目。
 - 显式文件按参数顺序处理。
@@ -397,7 +419,7 @@ previous_segments = 3
 unicode_normalization = "NFKC"
 case_insensitive = true
 max_terms_per_segment = 100
-alias_primary_collision = "conflict"
+alias_primary_collision = "merge"
 
 [validation.translation]
 japanese_kana = false
@@ -421,9 +443,14 @@ inject_invalid_json_every = 0
 inject_missing_segment_every = 0
 ```
 
-`unicode_normalization` 和 `case_insensitive` 当前尚未实现为可变行为，只是后续
-能力占位。术语实现固定使用 `NFKC` 和 `casefold`，因此现阶段只接受上述值。
-待核心主流程完成全面验证后，再基于真实用例实现其他取值并补充测试。
+`terminology.unicode_normalization` 接受 `""`（关闭）或 `NFC`、`NFD`、`NFKC`、
+`NFKD`，作用于术语主名称、别名与匹配文本的归一化。`terminology.case_insensitive`
+为 `false` 时不做 casefold，按原始大小写匹配。两项设置共同决定扫描候选去重、
+导入合并、alias 冲突判定与翻译时匹配；关闭归一化后仍保留首尾空白裁剪。
+已发布术语库中的 `normalized` 键是持久化标识，配置变更后不做迁移：旧术语与
+override 继续按原键生效，新配置只影响之后的扫描、导入与匹配。术语阶段指纹包含
+全部术语配置，变更后重新扫描会自然产生新 revision；翻译、校对、润色阶段不记录
+术语配置到指纹，复用旧 Run 的翻译结果不会重新匹配。
 
 Preset 中的 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示
 禁用 RPM 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标
@@ -470,7 +497,8 @@ warning
 global_bundle_hash_seen
 ```
 
-Bundle Hash 对全局配置和四个提示词的相对路径及内容计算。它只用于发现新的
+Bundle Hash 对全局配置和全部语言提示词（`prompts/<stage>.<lang>.middle.txt`）
+的有效视图（用户根优先、内置兜底）按稳定相对路径及内容计算。它只用于发现新的
 全局模板，不包含实时 Preset 内容，也不参与阶段结果判断。
 
 项目命令执行前：
@@ -633,8 +661,8 @@ Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复�
 
 `terminology`、`translate`、`proofread`、`polish` 独立命令发现同阶段
 `running` Run 时，最新一个是续作候选，更旧者标记为 `interrupted` 和
-`superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选记录
-`resume_declined`，不再询问。非交互运行必须显式使用 `--resume-run` 或
+`superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选标记为
+`interrupted`，不再参与续作候选。非交互运行必须显式使用 `--resume-run` 或
 `--decline-run`。
 
 续作保留旧 Run ID、原始 scope 和术语 `active_task_id`，忽略本次范围参数与
@@ -713,12 +741,24 @@ applied 结果保存：
 四个 LLM 阶段使用：
 
 ```text
-代码内固定 Prefix
-+ 项目可编辑的 middle Prompt
-+ 代码内固定 Suffix
+代码内固定 Prefix（按语言）
++ 项目可编辑的 middle Prompt（按语言）
++ 代码内固定 Suffix（按语言）
 ```
 
+固定 Prefix/Suffix 按阶段和语言（`zh-CN`/`en`）在代码内以字典提供；中段 Prompt
+按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
+改版时显式升 `prompt_rules_version`。
+
 固定部分定义角色、输入输出结构、请求内短 ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+
+Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
+`--language`/`MINIMAL_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
+回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
+
+阶段指纹不包含提示词文本；它记录 `prompt_rules_version` 和全部语言中段的哈希，
+因此任一语言的中段变化都会使该阶段既有结果指纹失效，但语言选择本身不产生
+指纹隔离。
 
 四阶段分别读取自己的：
 
@@ -727,12 +767,12 @@ enabled = true
 previous_segments = 3
 ```
 
-数量表示当前 `(file_id, part_id)` 中、当前 Chunk 首个 Segment 之前最近的非空
-Segment 数。
+数量表示当前 Chunk 首个 Segment 所在 `(file_id, part_id)` 中、该 Segment 之前
+最近的非空 Segment 数。跨边界 Chunk 的后续 Segment 不会改变这份上文的边界。
 
 规则：
 
-- 上文不得跨 `file_id` 或 `part_id`。
+- 上文不得跨 Chunk 首个 Segment 的 `file_id` 或 `part_id`。
 - 一个 Chunk 共享一份 `reference_context`。
 - `reference_context` 只携带理解所需的源文和可用目标文本，不携带 Segment ID。
 - 上文不属于本次进度范围，不要求 LLM 输出。
@@ -746,7 +786,8 @@ Segment 数。
 
 `ordered_by_file`：
 
-- 同一 `(file_id, part_id)` 内 Chunk 顺序执行。
+- 默认同一 `(file_id, part_id)` 内 Chunk 顺序执行；启用跨边界合并时，调度器按
+  每个 Chunk 包含的全部 File 保持这些 File 的 Chunk 不重叠。
 - 不同文件可并发。
 - 翻译、校对和润色上文可包含此前已有的阶段文本。
 
@@ -836,11 +877,15 @@ override 规则写入 SQLite 中的普通术语库，不添加 partial 标记，
 该操作只把当前活动扫描标记为 `partial_published`，保留 scans、candidates 和历史
 Run；下一次扫描创建新的活动任务，不删除旧记录。
 
-归一化：
+归一化按 `terminology.unicode_normalization`（`""` 表示跳过）和
+`terminology.case_insensitive` 进行：
 
 ```python
-normalized = unicodedata.normalize("NFKC", value)
-normalized = normalized.casefold().strip()
+if unicode_normalization:
+    value = unicodedata.normalize(unicode_normalization, value)
+if case_insensitive:
+    value = value.casefold()
+normalized = value.strip()
 ```
 
 候选以 normalized source 去重：
@@ -852,10 +897,16 @@ normalized = normalized.casefold().strip()
 alias 与另一条术语的主 source 相同时，由
 `terminology.alias_primary_collision` 决定：
 
-- `conflict`（默认）：保留两条主术语并标记冲突；碰撞 alias 不参与注入。
-- `merge`：声明 alias 的术语吸收另一条主术语；元数据不一致继续进入冲突。
+- `conflict`：保留两条主术语并记录 `group_claims`，争议文本只注入上下文，
+  不注入任何争用方的推荐译名。
+- `merge`（默认）：保留双方为独立条目，将被声明条目的 `group_primary` 指向
+  声明者所在组的主条目；类别、说明、译名和普通 aliases 不跨条目合并。
 
-循环 alias 或多个术语争用同一主条目无法安全自动合并，始终进入人工冲突。
+循环 alias、多个术语争用同一主条目或连接两个既有组无法安全自动组化，始终
+进入人工冲突。每个成员直接指向存在且启用的组主；悬空、链式和循环指针快速失败。
+
+人工换主在单次项目写锁内重写全组。组主仍有成员时不能移除或永久删除；成员
+移除时同时脱组。将 alias 物化为成员时不复制主条目的译名、类别或说明。
 
 人工 override 以 normalized source 定位：
 
@@ -866,6 +917,7 @@ alias 与另一条术语的主 source 相同时，由
   "preferred_translation": "爱丽丝",
   "description": "人工确认",
   "aliases": ["Alice"],
+  "group_primary": null,
   "disabled": false
 }
 ```
@@ -877,10 +929,13 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 ### 术语交换
 
 `terms-import` 和 `terms-export` 只接受 `.json`、`.csv`。JSON 顶层固定为
-`schema_version = 1`、`record_type = "terminology_exchange"` 和 `terms`。
+`record_type = "terminology_exchange"` 和 `terms`。当前导出
+`schema_version = 2`；继续读取 v1，且 v1 条目一律按独立主条目处理。
 术语字段为 source、preferred_translation、category、description、aliases、
-disabled，以及类别和推荐译名冲突候选。CSV 使用同一字段集合，数组字段保存为
-JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
+disabled、可选的 `group_primary`，以及类别和推荐译名冲突候选。交换格式中的
+`group_primary` 是组主 source，导入后按目标项目规则归一化。CSV 导出包含同名列；
+导入只接受旧版或新版完整表头。数组字段保存为 JSON 数组字符串，导出编码为带
+BOM 的 UTF-8。
 
 导入在完整校验后按 normalized source 合并到自动扫描基线；文件缺项不删除
 现有术语，人工 override 始终优先。`disabled = true` 是显式人工移除；
@@ -897,7 +952,10 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 2. alias 命中。
 3. 更长的词优先。
 4. 有推荐译名者优先。
-5. 每个 Segment 最多 `max_terms_per_segment`。
+5. 每个 Segment 最多 `max_terms_per_segment` 个术语组。
+
+命中成员时注入组主和实际命中的成员，成员额外携带 `primary_source`。截断先按组
+执行再展开，因此不会拆散组；同组多个成员命中时组主只出现一次。
 
 不持久化 occurrence 文件或逐 Segment 术语 Hash。每次构建翻译请求时重新确定匹配术语。
 
@@ -964,7 +1022,8 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 修复流程：
 
 1. 汇总当前轮校验失败 Segment。
-2. 同一 `file_id + part_id` 内按源文顺序分组；中间只有空行时仍可组成一个修复 Chunk。
+2. 按当前阶段的 Chunk 边界配置分组；默认限制在同一 `file_id + part_id`，启用
+   跨边界合并时遵守不同 File 直连、同 File 跨 part 中间区间全为空的规则。
 3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
@@ -1467,7 +1526,8 @@ python -m app.main export PROJECT --stage translated --file F0001 --file F0003
 
 除各 File 来源格式和 TXT 外，不提供任意格式转换。
 文件范围同时适用于原格式和 TXT；只校验所选 File 的阶段结果。宿主保持
-`file_order`，不提供按 Segment 导出或跨 File 合并。
+`file_order`，不提供按 Segment 导出或跨 File 合并；跨 File 合并只属于启用配置的
+LLM Chunk 请求规划。
 
 `--allow-missing` 回退：
 
@@ -1567,6 +1627,49 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 所选或当前过滤范围，缺建议或缺基准时整批拒绝，旧基准必须显式允许。批量
 清除不会改变阶段运行 scope；随后启动仍处理项目内全部 pending/failed。
 
+## 6.5 凭据、局域网共享与桌面壳
+
+### 凭据与 Preset 引用
+
+LLM Preset schema v2 使用显式单凭据引用 `credential: {kind, name}`：
+`environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
+不隐式 fallback。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
+`credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
+Run 快照或阶段指纹。
+
+凭据以用户根 `credentials/index.json` 保存摘要（ID 与更新时间），密钥只存系统
+钥匙串。凭据 API 支持创建、更新、删除和测试，永不回传密钥；Run 和日志只保存
+引用 ID。索引原子写入，损坏时明确报错，不静默回退。测试环境通过 autouse 的
+FakeKeyring 隔离，绝不触碰真实钥匙串。
+
+### 局域网共享与认证
+
+服务器配置保存在用户根 `server.toml`：`lan.enabled`、`lan.bind_address` 与
+`auth.required`、`auth.username`。默认只允许本机回环访问。CLI 与桌面模式统一
+监听 `0.0.0.0`，由中间件按请求守卫：非回环客户端在未启用共享时返回
+`local_only` 403；启用共享后只放行所选接口网段内的客户端（`0.0.0.0` 表示
+全部网段），网段外返回 `out_of_subnet` 403，本机回环始终可用；启用共享且
+开启认证但未登录时返回 `auth_required` 401。绑定地址必须是本机可用的非回环
+接口地址或 `0.0.0.0`（`/api/v1/server/interfaces` 用 psutil 枚举启用的接口，
+含 netmask），保存后即时生效，无需重启。
+
+开启认证后使用长期用户名与密码，密码存入系统钥匙串；登录成功签发 HttpOnly、
+SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停止共享后全部
+失效，长期账密保留。回环访问始终免认证。停止共享时清除全部会话。公开端点
+仅限 `/api/v1/server/status`、`/api/v1/server/interfaces`、登录/登出与非 `/api/`
+静态资源。留空认证必须显式确认警告：同网段设备拥有完整项目和 LLM 操作权限；
+未认证共享时 Web 常驻显示该警告。首版使用 HTTP，不实现 TLS、多账号、角色或
+密码找回。
+
+### 桌面壳（Tauri）
+
+`src-tauri/` 提供 Tauri 2 桌面开发壳：启动时拉起 Python/FastAPI sidecar，
+对 `/api/v1/server/status` 做健康探测，通过后加载 `http://127.0.0.1:8765`，
+退出时关闭 sidecar。原生文件与文件夹选择器经 `window.__TAURI__` 桥接为
+`select_file` / `select_folder`，把服务端路径随创建/追加请求提交；普通浏览器
+和 LAN 客户端继续使用上传与服务端目录浏览。`MINIMAL_LLM_PYTHON`、
+`MINIMAL_LLM_REPO_ROOT`、`MINIMAL_LLM_WEB_PORT` 仅开发模式生效。
+
 ---
 
 # 7. 核心验收矩阵
@@ -1596,7 +1699,8 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 四阶段上文数量分别生效且不跨 `file_id` 或 `part_id`。
+- 四阶段上文数量分别生效且不跨当前 Chunk 首 Segment 的 `file_id` 或 `part_id`；
+  `cross_boundary_batching` 只改变允许合并的请求 Segment 边界。
 - 术语上文只含源文，不计入扫描进度。
 - ordered_by_file 和 parallel 的上文内容符合定义。
 - 术语按 normalized source 合并，override 和 disabled 生效。
@@ -1614,7 +1718,9 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 验收：
 
-- 每个 Chunk 只含同文件、保持源文顺序的待处理非空 Segment。
+- 默认每个 Chunk 只含同文件同 part、保持源文顺序的待处理非空 Segment；启用
+  `cross_boundary_batching` 的阶段还覆盖跨 File 直连和同 File 跨 part 的空区间
+  规则。
 - Chunk 可以跨空行，但不能跨已完成、范围外或其他未处理的非空 Segment。
 - 部分响应保存中间 Segment 后，其两侧未决项重新拆成独立 Chunk。
 - 修改 Chunk 大小、并发、限流或调度后不丢失 Segment 进度。

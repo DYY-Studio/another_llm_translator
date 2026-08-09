@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from app.errors import ConfigError, IncompleteError, ProjectError, StorageError, UsageError
+from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
 from app.documents import publish_document_exports
 from app.execution import stage_result_path
@@ -19,11 +19,19 @@ from app.plugins import (
     get_document_adapter_for_extension,
     get_document_adapter,
     load_plugins,
+    normalize_model_text,
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project
 from app.stages import export_project
-from app.storage import atomic_write_json, append_jsonl, read_json, read_jsonl, record_header
+from app.sqlite_storage import (
+    append_jsonl,
+    read_files,
+    read_json,
+    read_segments,
+    record_header,
+    write_json,
+)
 from tests.test_foundation import make_app_root
 
 
@@ -97,10 +105,11 @@ def init_epub(tmp_path: Path) -> Path:
 
 
 def add_translations(project: Path) -> list[dict[str, object]]:
-    metadata = read_json(project / "project.json")
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    metadata = read_json(project, project / "project.json")
+    segments = read_segments(project)
     for segment in segments:
         append_jsonl(
+            project,
             stage_result_path(project, "translation"),
             record_header(
                 "stage_result",
@@ -124,7 +133,7 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    file_record = read_files(project)[0]
     assert file_record["document_adapter_id"] == "epub"
     assert file_record["document_adapter_state"]
     segments = add_translations(project)
@@ -176,8 +185,8 @@ def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    files = read_jsonl(project / "source" / "files.jsonl")
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    files = read_files(project)
+    segments = read_segments(project)
 
     assert len(files) == 1
     assert [item["source"] for item in segments] == [
@@ -303,7 +312,7 @@ def test_epub_markers_persist_model_source_and_strip_valid_output(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    segments = read_segments(project)
     assert segments[0]["source"] == "A B C"
     assert segments[0]["model_source"] == (
         "A <em1><strong2>B</strong2></em1> C"
@@ -426,12 +435,13 @@ def test_epub_mixed_ruby_export_removes_all_ruby_and_preserves_inline_attrs(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    segments = read_segments(project)
     assert [item["source"] for item in segments] == [
         "前中｜漢《かん》後尾｜字《じ》終"
     ]
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     append_jsonl(
+        project,
         stage_result_path(project, "translation"),
         record_header(
             "stage_result",
@@ -513,12 +523,12 @@ def test_epub_mixed_ruby_locator_corruption_fails_explicitly(
     )
     assert project is not None
     add_translations(project)
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
-    state = read_json(state_path)
+    state = read_json(project, state_path)
     ruby_slot = state["state"]["locators"][0]["slot"]["slots"][1]
     ruby_slot[field] = [99] if field == "path" else "不一致"
-    atomic_write_json(state_path, state)
+    write_json(project, state_path, state)
 
     with pytest.raises(IncompleteError, match="结构|tail|原文不一致"):
         export_project(project, "translated", bilingual=False, allow_missing=False)
@@ -544,11 +554,11 @@ def test_epub_composite_locator_corruption_fails_explicitly(
     )
     assert project is not None
     add_translations(project)
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
-    state = read_json(state_path)
+    state = read_json(project, state_path)
     state["state"]["locators"][0]["slot"]["slots"][0]["path"] = [99]
-    atomic_write_json(state_path, state)
+    write_json(project, state_path, state)
 
     with pytest.raises(IncompleteError, match="结构"):
         export_project(project, "translated", bilingual=False, allow_missing=False)
@@ -607,11 +617,12 @@ def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    metadata = read_json(project / "project.json")
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    metadata = read_json(project, project / "project.json")
+    segments = read_segments(project)
     targets = ["他は汉字を読む。", "特别だ。"]
     for segment, target in zip(segments, targets, strict=True):
         append_jsonl(
+            project,
             stage_result_path(project, "translation"),
             record_header(
                 "stage_result",
@@ -664,14 +675,15 @@ def test_epub_aozora_output_restores_only_explicit_ruby(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    metadata = read_json(project / "project.json")
-    segments = read_jsonl(project / "source" / "segments.jsonl")
+    metadata = read_json(project, project / "project.json")
+    segments = read_segments(project)
     targets = [
         "他｜漢字《hànzì》と｜特別《tèbié》。",
         "特別だ。",
     ]
     for segment, target in zip(segments, targets, strict=True):
         append_jsonl(
+            project,
             stage_result_path(project, "translation"),
             record_header(
                 "stage_result",
@@ -743,9 +755,10 @@ def test_epub_aozora_output_can_add_ruby_to_plain_segment(tmp_path: Path) -> Non
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    metadata = read_json(project / "project.json")
-    segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    metadata = read_json(project, project / "project.json")
+    segment = read_segments(project)[0]
     append_jsonl(
+        project,
         stage_result_path(project, "translation"),
         record_header(
             "stage_result",
@@ -808,9 +821,10 @@ def test_epub_aozora_invalid_markers_remain_plain_text(
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    metadata = read_json(project / "project.json")
-    segment = read_jsonl(project / "source" / "segments.jsonl")[0]
+    metadata = read_json(project, project / "project.json")
+    segment = read_segments(project)[0]
     append_jsonl(
+        project,
         stage_result_path(project, "translation"),
         record_header(
             "stage_result",
@@ -872,9 +886,9 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
+    file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
-    atomic_write_json(state_path, {"schema_version": 1, "state": []})
+    write_json(project, state_path, {"schema_version": 1, "state": []})
     with pytest.raises(IncompleteError, match="状态损坏"):
         export_project(
             project, "translated", bilingual=False, allow_missing=True
@@ -887,8 +901,7 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
     tmp_path: Path,
 ) -> None:
     project = init_epub(tmp_path)
-    files_path = project / "source" / "files.jsonl"
-    file_record = read_jsonl(files_path)[0]
+    file_record = read_files(project)[0]
     file_record["document_adapter_version"] = "future"
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
@@ -1223,3 +1236,13 @@ def test_plugin_host_rejects_invalid_choice_option(
     )
     with pytest.raises(ConfigError, match="导入选项声明无效"):
         load_plugins()
+
+
+def test_normalize_model_text_rejects_unknown_file_reference() -> None:
+    with pytest.raises(ProjectError, match="未知文件"):
+        normalize_model_text(
+            files=[],
+            segment={"file_id": "missing"},
+            text="模型输出",
+            stage="translation",
+        )

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ProjectSummary, Stage, TaskState, ThemeMode } from "../types";
+import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { translate } from "../i18n";
@@ -15,36 +15,32 @@ const items: Array<{ id: Stage; key: string }> = [
 ];
 
 export function AppShell({
-  projects,
   project,
   stage,
   task,
-  onProject,
   onStage,
   onShowFailures,
-  onCreate,
   onRun,
   onCancel,
   canRun,
   runLoading,
+  starting,
   themeMode,
   onTheme,
   language,
   onLanguage,
   children,
 }: {
-  projects: ProjectSummary[];
   project: string;
   stage: Stage;
   task: TaskState | null;
-  onProject: (value: string) => void;
   onStage: (value: Stage) => void;
   onShowFailures: () => void;
-  onCreate: () => void;
   onRun: () => void;
   onCancel: () => void;
   canRun: boolean;
   runLoading: boolean;
+  starting: boolean;
   themeMode: ThemeMode;
   onTheme: () => void;
   language: Language;
@@ -86,11 +82,6 @@ export function AppShell({
     <div className={`app${task ? " has-run-status" : ""}`}>
       <header className="topbar">
         <div className="brand">{translate("brand", language)}</div>
-        <select value={project} onChange={(event) => onProject(event.target.value)}>
-          <option value="">{translate("project.select", language)}</option>
-          {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
-        </select>
-        <button className="quiet-button create-button" onClick={onCreate}>{translate("project.create", language)}</button>
         <div className="topbar-spacer" />
         <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
           {themeIcon}
@@ -101,24 +92,24 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" aria-label={language === "en" ? "Global task status" : "全局任务状态"}>
+        <section className="global-run-status" aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
           </div>
           <div className="run-progress">
             <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
-            <div className="progress-track" role="progressbar" aria-label={language === "en" ? "Task progress" : "任务进度"} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+            <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
               <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
               <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
             </div>
           </div>
           <div className="run-tokens">
             {task.usage.available ? (
-              <><span>{language === "en" ? "Input" : "输入"} {task.usage.input_tokens} Tokens</span><span>{language === "en" ? "Output" : "输出"} {task.usage.output_tokens} Tokens</span></>
+              <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>
             ) : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
-          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{language === "en" ? `View ${failed} failed segments` : `查看 ${failed} 个失败 Segment`}</button>}
+          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
           {task.error && <span className="error-text run-error">{task.error}</span>}
           {running && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
         </section>
@@ -138,8 +129,9 @@ export function AppShell({
         </nav>
         {canRun && <div className="run-panel">
           {canRun && (
-            <button className="primary-button run-button" disabled={!project || running || runLoading} onClick={onRun}>
-              {running ? (language === "en" ? "Running" : "正在执行") : runLoading ? (language === "en" ? "Checking" : "正在检查") : (language === "en" ? "Run current stage" : "开始当前阶段")}
+            <button className="primary-button run-button" disabled={!project || running || starting || runLoading} onClick={onRun}>
+              <span className="run-label-full">{running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStarting", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStart", language)}</span>
+              <span className="run-label-short">{running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStartingShort", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartShort", language)}</span>
             </button>
           )}
         </div>}
@@ -148,8 +140,8 @@ export function AppShell({
         {canRun && (
           <div className="mobile-run-bar">
             {canRun && (
-              <button className="primary-button" disabled={!project || running || runLoading} onClick={onRun}>
-                {running ? (language === "en" ? "Running" : "正在执行") : runLoading ? (language === "en" ? "Checking" : "正在检查") : (language === "en" ? "Run current stage" : "运行当前阶段")}
+              <button className="primary-button" disabled={!project || running || starting || runLoading} onClick={onRun}>
+                {running ? translate("run.buttonRunning", language) : starting ? translate("run.buttonStarting", language) : runLoading ? translate("run.buttonChecking", language) : translate("run.buttonStartMobile", language)}
               </button>
             )}
           </div>

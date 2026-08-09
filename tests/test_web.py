@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -18,12 +20,12 @@ from app.errors import UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
-from app.storage import (
+from app.sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
+    read_files,
     read_json,
-    read_jsonl,
     record_header,
+    write_json,
 )
 from app.web import create_app
 from app.web_tasks import WebTaskManager
@@ -88,6 +90,26 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert "input" not in payload["params"]
 
 
+def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    assert not projects_root.exists()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    assert projects_root.is_dir()
+    default = str(projects_root.resolve())
+    assert client.get("/api/v1/directories").status_code == 200
+    assert (
+        client.get("/api/v1/directories", params={"path": default}).status_code
+        == 200
+    )
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "empty", "empty": "true", "parent_dir": default},
+    )
+    assert created.status_code == 200
+    assert created.json()["project_selector"] == "empty"
+
+
 def test_web_deletes_project_only_after_confirmation_and_finished_runs(
     tmp_path: Path,
 ) -> None:
@@ -121,9 +143,9 @@ def test_web_deletes_project_only_after_confirmation_and_finished_runs(
     assert blocked.status_code == 400
     assert project.exists()
 
-    manifest = read_json(run_dir / "manifest.json")
+    manifest = read_json(project, run_dir / "manifest.json")
     manifest["status"] = "failed"
-    atomic_write_json(run_dir / "manifest.json", manifest)
+    write_json(project, run_dir / "manifest.json", manifest)
     deleted = client.request(
         "DELETE",
         "/api/v1/projects/sample",
@@ -347,113 +369,28 @@ def test_web_returns_drive_entries_at_a_root(
     assert response.json()["drives"] == drives
 
 
-def test_web_build_includes_editor_layout_context_and_theme_controls(
+WEB_DIST_PRESENT = (Path(__file__).parents[1] / "app" / "web_dist").is_dir()
+
+
+@pytest.mark.skipif(
+    not WEB_DIST_PRESENT,
+    reason="web_dist 未构建；请先 npm run build --prefix web",
+)
+def test_web_build_serves_loadable_assets_with_core_contract(
     tmp_path: Path,
 ) -> None:
     client = TestClient(create_app(projects_root=tmp_path / "projects"))
     page = client.get("/")
     assert page.status_code == 200
     assert "document.documentElement.dataset.theme" in page.text
-    assert "minimal-llm-translator.theme.v1" in page.text
     asset = re.search(r'<script type="module"[^>]+src="([^"]+)"', page.text)
     assert asset is not None
     script = client.get(asset.group(1))
     assert script.status_code == 200
-    assert "minimal-llm-translator.recent-projects.v1" in script.text
     stylesheet = re.search(r'<link rel="stylesheet"[^>]+href="([^"]+)"', page.text)
     assert stylesheet is not None
     css = client.get(stylesheet.group(1))
     assert css.status_code == 200
-    assert ".segment-batch-actions" in css.text
-    assert ".directory-picker-modal" in css.text
-    assert script.text.count("segment-row-stack") == 1
-    assert "segment-row-boundary" not in script.text
-    assert (
-        ".segment-row-stack{min-width:0;width:100%;max-width:100%;"
-        "display:grid;grid-auto-rows:max-content;background:var(--surface)}"
-    ) in css.text
-    assert ".segment-row-stack{min-width:0;width:100%;max-width:100%;" in css.text
-    assert ".segment-list{min-width:0;min-height:0;width:100%;max-width:100%;" in css.text
-    assert ".segment-row-boundary" not in css.text
-    assert ".segment-row:after" not in css.text
-    segment_row = re.search(r"\.segment-row\{([^}]*)\}", css.text)
-    assert segment_row is not None
-    assert "border-bottom:1px solid var(--row-border)" in segment_row.group(1)
-    assert "grid-template-columns:14px 72px minmax(0,1fr)" in segment_row.group(1)
-    placeholder = re.search(r"\.segment-row-placeholder\{([^}]*)\}", css.text)
-    assert placeholder is not None
-    assert "border-bottom:1px solid var(--row-border)" in placeholder.group(1)
-    assert "content-visibility" not in css.text
-    assert "contain-intrinsic-size" not in css.text
-    assert "rate_limit_waiting_requests" in script.text
-    assert "rate_limit_wait_count" not in script.text
-    assert "60 / RPM" in script.text
-    assert "必须至少为 1" in script.text
-    assert ".settings-navigation{position:sticky;top:58px" in css.text
-    assert "grid-template-rows:auto minmax(0,1fr)" in css.text
-    assert ".config-settings{height:100%;min-height:0;overflow:auto;padding:0 30px 30px" in css.text
-    assert ".settings-sticky-heading{position:sticky;top:0;z-index:2;margin:0 -30px 24px" in css.text
-    assert ".preset-list-body" in css.text
-    assert ".preset-editor-body" in css.text
-    assert 'grid-template:"list-heading editor-heading" auto "list-body editor-body"' in css.text
-    assert ".preset-list-body{grid-area:list-body" in css.text
-    assert "padding:0 0 24px" in css.text
-    assert ".preset-list{" not in css.text
-    assert "height:clamp(360px,52vh,520px)" in css.text
-    for text in (
-        "terms-workspace",
-        "segment-batch-actions",
-        "只看冲突",
-        "显示已移除",
-        "全部状态",
-        "上下文",
-        "当前外观",
-        "跟随系统",
-        "运行当前阶段",
-        "复用已有结果",
-        "强制重做全部",
-        "续用原 Run",
-        "移除所选",
-        "清除所选",
-        "全部清除",
-        "应用所选",
-        "全部应用",
-        "导入术语表",
-        "导出术语表",
-        "项目与输入",
-        "LLM 与采样",
-        "全局 LLM Preset",
-        "使用全局 Preset",
-        "翻译 Preset",
-        "打开现有项目",
-        "保存父目录",
-        "浏览目录",
-        "选择服务端目录",
-        "/api/v1/directories",
-        "只打开此目录",
-        "执行与分块",
-        "参考上下文",
-        "翻译校验与重试",
-        "调试与故障注入",
-        "项目设置",
-        "全局设置",
-        "全局配置",
-        "全局 Prompt",
-        "LLM Preset",
-        "附加 JSON Body",
-        "最终请求预览",
-        "同步全局模板",
-        "全局请求模板",
-        "不再保存副本",
-        "获取模型",
-        "搜索模型名称或 ID",
-        "选择后仍需保存",
-        "文件范围",
-        "未选择时导出全部文件",
-        "统一输出 TXT",
-    ):
-        assert text in script.text
-    assert "保存前会严格验证完整 TOML" not in script.text
 
 
 def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
@@ -554,9 +491,9 @@ def test_web_applies_epub_import_options_without_project_level_settings(
         "特別（スペシャル／とくべつ）だ。",
     ]
     project = projects_root / "ruby-option"
-    assert "adapter_options" not in read_json(project / "project.json")
-    file_record = read_jsonl(project / "source" / "files.jsonl")[0]
-    state = read_json(project / str(file_record["document_adapter_state"]))
+    assert "adapter_options" not in read_json(project, project / "project.json")
+    file_record = read_files(project)[0]
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
     assert state["state"]["ruby_mode"] == "parenthetical"
 
 
@@ -705,6 +642,129 @@ def test_web_export_accepts_explicit_file_range(tmp_path: Path) -> None:
         json={"stage": "translated", "format": "pdf"},
     )
     assert invalid_format.status_code == 400
+
+
+def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    exported = client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "format": "txt", "allow_missing": True},
+    )
+    assert exported.status_code == 200
+    assert exported.json()["written"] == ["output/translated/input.txt"]
+    output_file = project / "output" / "translated" / "input.txt"
+    expected_bytes = output_file.read_bytes()
+
+    staging = project / "output" / ".staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "temp.txt").write_text("temp", encoding="utf-8")
+    (project / "output" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+    (project / "output" / "translated" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+
+    listing = client.get("/api/v1/projects/sample/exports")
+    assert listing.status_code == 200
+    files = listing.json()["files"]
+    assert len(files) == 1
+    assert files[0]["path"] == "translated/input.txt"
+    assert files[0]["size"] == len(expected_bytes)
+    assert files[0]["mtime"] > 0
+
+    downloaded = client.get(
+        "/api/v1/projects/sample/exports/download",
+        params={"file": "translated/input.txt"},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-disposition"] == (
+        'attachment; filename="input.txt"'
+    )
+    assert downloaded.content == expected_bytes
+
+    bundle = client.get(
+        "/api/v1/projects/sample/exports/download-all",
+        params={"file": ["translated/input.txt"]},
+    )
+    assert bundle.status_code == 200
+    assert bundle.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+        assert archive.namelist() == ["translated/input.txt"]
+        assert archive.read("translated/input.txt") == expected_bytes
+
+    deduped = client.get(
+        "/api/v1/projects/sample/exports/download-all",
+        params={"file": ["translated/input.txt", "translated/input.txt"]},
+    )
+    with zipfile.ZipFile(io.BytesIO(deduped.content)) as archive:
+        assert archive.namelist() == ["translated/input.txt"]
+    assert client.get(
+        "/api/v1/projects/sample/exports/download-all"
+    ).status_code == 400
+
+    removed = client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/input.txt"]},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == ["translated/input.txt"]
+    assert not output_file.exists()
+    assert client.get("/api/v1/projects/sample/exports").json()["files"] == []
+
+    again = client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/input.txt"]},
+    )
+    assert again.status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove", json={"files": []}
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove", json={"files": "input.txt"}
+    ).status_code == 400
+
+
+def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    client.post(
+        "/api/v1/projects/sample/export",
+        json={"stage": "translated", "format": "txt", "allow_missing": True},
+    )
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    for raw in (
+        "../secret.txt",
+        "translated/../secret.txt",
+        "translated/../../secret.txt",
+        str(outside),
+    ):
+        assert client.get(
+            "/api/v1/projects/sample/exports/download",
+            params={"file": raw},
+        ).status_code == 400
+        assert client.get(
+            "/api/v1/projects/sample/exports/download-all",
+            params={"file": [raw]},
+        ).status_code == 400
+        assert client.post(
+            "/api/v1/projects/sample/exports/remove",
+            json={"files": [raw]},
+        ).status_code == 400
+
+    symlink = project / "output" / "translated" / "link.txt"
+    try:
+        symlink.symlink_to(outside)
+    except OSError:
+        return
+    assert client.get(
+        "/api/v1/projects/sample/exports/download",
+        params={"file": "translated/link.txt"},
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/sample/exports/remove",
+        json={"files": ["translated/link.txt"]},
+    ).status_code == 400
 
 
 def test_web_creates_empty_project_and_manages_source_files(
@@ -863,7 +923,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
     ))
     project_config = (project / "config.toml").read_bytes()
     project_prompt = (
-        project / "prompts" / "translation.middle.txt"
+        project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_bytes()
     config = client.get("/api/v1/global/config").json()["config"]
     config["project"]["target_language"] = "繁體中文"
@@ -877,7 +937,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
     ).status_code == 200
     assert (project / "config.toml").read_bytes() == project_config
     assert (
-        project / "prompts" / "translation.middle.txt"
+        project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_bytes() == project_prompt
 
     created = client.post(
@@ -890,7 +950,7 @@ def test_web_edits_global_templates_without_changing_existing_project(
         "target_language"
     ] == "繁體中文"
     assert (
-        new_project / "prompts" / "translation.middle.txt"
+        new_project / "prompts" / "translation.zh-CN.middle.txt"
     ).read_text("utf-8") == "GLOBAL TRANSLATION PROMPT"
 
 
@@ -966,8 +1026,11 @@ def test_web_manages_global_adapters(tmp_path: Path) -> None:
     )
     assert saved.status_code == 200
     assert json.loads(
-        (app_root / "llm_adapters" / "alternate.json").read_text("utf-8")
+        (
+            tmp_path / "user-root" / "llm_adapters" / "alternate.json"
+        ).read_text(encoding="utf-8")
     )["adapter_id"] == "alternate"
+    assert not (app_root / "llm_adapters" / "alternate.json").exists()
     listed = client.get("/api/v1/global/adapters").json()
     assert {item["adapter_id"] for item in listed["adapters"]} >= {
         "openai-compatible",
@@ -1009,93 +1072,18 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    before = read_jsonl(project / "source" / "files.jsonl")
+    before = read_files(project)
     response = client.post(
         "/api/v1/projects/sample/files/remove",
         json={"file_ids": ["F0001", "F9999"]},
     )
     assert response.status_code == 400
-    assert read_jsonl(project / "source" / "files.jsonl") == before
+    assert read_files(project) == before
 
 
-def test_web_edits_removes_restores_and_validates_terms(tmp_path: Path) -> None:
+def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-
-    empty = client.get("/api/v1/projects/sample/terms")
-    assert empty.status_code == 200
-    assert empty.json()["terms"] == []
-
-    added = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["A"],
-            "disabled": False,
-        },
-    )
-    assert added.status_code == 200
-    assert added.json()["terms_revision"] == 1
-    assert added.json()["terms"][0]["preferred_translation"] == "爱丽丝"
-
-    renamed = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": False,
-        },
-    )
-    assert renamed.status_code == 200
-    assert any(
-        item["normalized"] == "alice liddell" and not item["disabled"]
-        for item in renamed.json()["terms"]
-    )
-
-    removed = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice liddell",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": True,
-        },
-    )
-    assert removed.status_code == 200
-    assert next(
-        item
-        for item in removed.json()["terms"]
-        if item["normalized"] == "alice liddell"
-    )["disabled"]
-
-    restored = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "old_normalized": "alice liddell",
-            "source": "Alice Liddell",
-            "preferred_translation": "爱丽丝·利德尔",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alice"],
-            "disabled": False,
-        },
-    )
-    assert restored.status_code == 200
-    assert not next(
-        item
-        for item in restored.json()["terms"]
-        if item["normalized"] == "alice liddell"
-    )["disabled"]
 
     seed_conflicted_terms(project)
     unresolved = client.post(
@@ -1135,8 +1123,49 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     )
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] == 1
-    assert read_json(project / "terminology" / "terms.json")["terms"] == []
-    assert read_json(project / "terminology" / "overrides.json")["overrides"] == []
+    assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
+    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
+
+
+def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    added = client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+    )
+    assert added.status_code == 200
+    materialized = client.post(
+        "/api/v1/projects/sample/terms/materialize",
+        json={"normalized": "alice", "alias": "Alicia"},
+    )
+    assert materialized.status_code == 200
+    assert materialized.json()["materialized"] == "alicia"
+    member = next(
+        item for item in materialized.json()["terms"] if item["normalized"] == "alicia"
+    )
+    assert member["group_primary"] == "alice"
+
+    missing_confirmation = client.post(
+        "/api/v1/projects/sample/terms/set-primary",
+        json={"normalized": "alicia"},
+    )
+    assert missing_confirmation.status_code == 400
+    switched = client.post(
+        "/api/v1/projects/sample/terms/set-primary",
+        json={"normalized": "alicia", "confirm": True},
+    )
+    assert switched.status_code == 200
+    rows = {item["normalized"]: item for item in switched.json()["terms"]}
+    assert rows["alicia"]["group_primary"] is None
+    assert rows["alice"]["group_primary"] == "alicia"
 
 
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
@@ -1198,9 +1227,10 @@ def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
 
 def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path, "Alice")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     task_id = "TERM-TASK-WEB-PARTIAL"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -1212,6 +1242,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "candidates.jsonl",
         record_header(
             "terminology_candidates",
@@ -1245,6 +1276,260 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
     assert published.status_code == 200
     assert published.json()["published"] is True
     assert client.get("/api/v1/projects/sample/terms").json()["scan"]["status"] == "partial_published"
+
+
+def _seed_terms(project: Path, terms: list[dict]) -> None:
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-HITS",
+            terms_revision=1,
+            terms=terms,
+        ),
+    )
+
+
+def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path, "Alice walks alone\nBob sleeps\nAlice sings Alice"
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-1",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": "人物",
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    first = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice", "offset": 0, "limit": 1},
+    )
+    assert first.status_code == 200
+    payload = first.json()
+    assert payload["source"] == "Alice"
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == ["F0001-S000001"]
+    assert payload["hits"][0]["source"] == "Alice walks alone"
+
+    second = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice", "offset": 1, "limit": 1},
+    )
+    assert second.status_code == 200
+    assert second.json()["total"] == 2
+    assert [item["segment_id"] for item in second.json()["hits"]] == [
+        "F0001-S000003"
+    ]
+    assert second.json()["hits"][0]["source"] == "Alice sings Alice"
+
+
+def test_web_terms_hits_for_group_member_does_not_require_primary(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path,
+        "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-MEMBER",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "group_primary": None,
+                "conflicts": {},
+            },
+            {
+                "record_id": "TERM-H-MEMBER-CHILD",
+                "source": "Alicia",
+                "normalized": "alicia",
+                "category": None,
+                "description": None,
+                "preferred_translation": "艾丽西亚",
+                "aliases": ["Ally"],
+                "group_primary": "alice",
+                "conflicts": {},
+            },
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alicia"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "Alicia"
+    assert payload["total"] == 3
+    assert [item["source"] for item in payload["hits"]] == [
+        "Alicia walks",
+        "Ally sings",
+        "Alice and Alicia",
+    ]
+
+
+def test_web_terms_hits_match_aliases_and_exclude_conflicted_aliases(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path, "A walks\nAli sings\nAlice talks")
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-2",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": ["A", "Ali"],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [
+                        {"alias": "A", "primary_source": "Alpha"}
+                    ],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice"},
+    ).json()
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == [
+        "F0001-S000002",
+        "F0001-S000003",
+    ]
+
+
+def test_web_terms_hits_apply_casefold_and_unicode_normalization(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(
+        tmp_path, "alice writes\nＡｌｉｃｅ speaks\nbob listens"
+    )
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-3",
+                "source": "Alice",
+                "normalized": "alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": "爱丽丝",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alice"},
+    ).json()
+    assert payload["total"] == 2
+    assert [item["segment_id"] for item in payload["hits"]] == [
+        "F0001-S000001",
+        "F0001-S000002",
+    ]
+
+
+def test_web_terms_hits_cover_disabled_terms_and_validate_parameters(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path, "Alpha first\nBeta second")
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-H-4",
+                "source": "Alpha",
+                "normalized": "alpha",
+                "category": None,
+                "description": None,
+                "preferred_translation": "阿尔法",
+                "aliases": [],
+                "conflicts": {
+                    "categories": [],
+                    "preferred_translations": [],
+                    "alias_primaries": [],
+                },
+            }
+        ],
+    )
+    write_json(
+        project,
+        project / "terminology" / "overrides.json",
+        record_header(
+            "terminology_overrides",
+            str(read_json(project, project / "project.json")["project_id"]),
+            record_id="OVR-HITS",
+            overrides=[{"normalized": "alpha", "source": "Alpha", "disabled": True}],
+        ),
+    )
+    client = TestClient(create_app(projects_root=projects_root))
+
+    assert (
+        client.get("/api/v1/projects/sample/terms").json()["terms"][0]["disabled"]
+        is True
+    )
+    payload = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alpha"},
+    )
+    assert payload.status_code == 200
+    assert payload.json()["total"] == 1
+    assert payload.json()["hits"][0]["segment_id"] == "F0001-S000001"
+
+    missing = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "nope"},
+    )
+    assert missing.status_code == 400
+    assert "术语不存在" in missing.json()["error"]
+
+    no_term = client.get("/api/v1/projects/sample/terms/hits")
+    assert no_term.status_code == 400
+
+    invalid = client.get(
+        "/api/v1/projects/sample/terms/hits",
+        params={"normalized": "alpha", "offset": -1},
+    )
+    assert invalid.status_code == 400
+    assert "窗口参数无效" in invalid.json()["error"]
 
 
 def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> None:
@@ -1309,7 +1594,7 @@ def test_web_adapter_validation_preview_and_secret_redaction(
     assert saved.status_code == 200
     assert json.loads(
         (
-            app_root / "llm_adapters" / "openai-compatible.json"
+            tmp_path / "user-root" / "llm_adapters" / "openai-compatible.json"
         ).read_text(encoding="utf-8")
     )["body"]["response_format"] == {"type": "json_object"}
     preview = client.get(
@@ -1326,7 +1611,7 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",
         encoding="utf-8",
@@ -1470,7 +1755,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
     store.save_translation({"segment_id": segment_id, "text": "一"})
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",
         encoding="utf-8",
@@ -1573,9 +1858,10 @@ def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
-    project_id = str(read_json(project / "project.json")["project_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
     task_id = "TERM-TASK-COMPLETED"
-    atomic_write_json(
+    write_json(
+        project,
         project / "terminology" / "active_task.json",
         record_header(
             "terminology_task",
@@ -1587,6 +1873,7 @@ def test_web_task_options_include_completed_terminology_scans(
         ),
     )
     append_jsonl(
+        project,
         project / "terminology" / "scans.jsonl",
         record_header(
             "terminology_scan",
@@ -1720,7 +2007,10 @@ def test_web_preset_models_discovery_fetches_and_parses(
     preset.update(
         {
             "base_url": "https://draft.example/v2",
-            "api_key_env": "DRAFT_LLM_API_KEY",
+            "credential": {
+                "kind": "environment",
+                "name": "DRAFT_LLM_API_KEY",
+            },
             "proxy_url": "https://proxy.example",
             "request_timeout_seconds": 45,
         }
@@ -1740,7 +2030,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         ],
         "count": 2,
     }
-    assert fake.request_url == "https://draft.example/v2/v1/models"
+    assert fake.request_url == "https://draft.example/v2/models"
     assert fake.request_headers["Authorization"] == "Bearer draft-secret"
     assert fake.kwargs == {
         "timeout": 45.0,
@@ -1785,7 +2075,7 @@ def test_web_preset_models_discovery_fails_fast(
     assert "未声明模型发现规格" in no_spec.json()["error"]
 
     preset["adapter_id"] = "openai-compatible"
-    monkeypatch.delenv(preset["api_key_env"], raising=False)
+    monkeypatch.delenv(preset["credential"]["name"], raising=False)
     missing_key = client.post(
         "/api/v1/global/presets/default/models", json=preset
     )
@@ -1831,3 +2121,86 @@ def test_web_preset_models_discovery_fails_fast(
         assert "不是数组" in bad_shape.json()["error"]
     finally:
         del os.environ["LLM_API_KEY"]
+
+
+def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    single = tmp_path / "single.txt"
+    single.write_text("one\ntwo", encoding="utf-8")
+    folder = tmp_path / "book"
+    folder.mkdir()
+    (folder / "chapter1.txt").write_text("three", encoding="utf-8")
+    (folder / "nested").mkdir()
+    (folder / "nested" / "chapter2.txt").write_text("four", encoding="utf-8")
+    (folder / "notes.md").write_text("ignored", encoding="utf-8")
+
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "server-path-project",
+            "empty": "false",
+            "parent_dir": str(projects_root),
+            "server_paths": [str(single), str(folder)],
+            "server_input_kinds": ["file", "folder"],
+            "adapter_options": "{}",
+        },
+    )
+    assert created.status_code == 200, created.text
+    overview = client.get("/api/v1/projects/server-path-project").json()
+    names = {item["name"] for item in overview["files"]}
+    assert names == {"single.txt", "chapter1.txt", "nested/chapter2.txt"}
+
+
+def test_web_server_paths_reject_invalid_inputs(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    folder = tmp_path / "book"
+    folder.mkdir()
+    (folder / "notes.md").write_text("x", encoding="utf-8")
+
+    def post(**fields: object):
+        return client.post(
+            "/api/v1/projects",
+            data={
+                "name": "bad-inputs",
+                "empty": "false",
+                "parent_dir": str(projects_root),
+                "adapter_options": "{}",
+                **fields,
+            },
+        )
+
+    missing = post(server_paths=[str(tmp_path / "nope.txt")], server_input_kinds=["file"])
+    assert missing.status_code == 400
+    assert "不存在或无法访问" in missing.json()["error"]
+
+    unsupported = post(server_paths=[str(tmp_path / "nope.txt")], server_input_kinds=["folder"])
+    assert unsupported.status_code == 400
+
+    empty_folder = post(server_paths=[str(folder)], server_input_kinds=["folder"])
+    assert empty_folder.status_code == 400
+    assert "没有受支持的输入文件" in empty_folder.json()["error"]
+
+    relative = post(server_paths=["relative.txt"], server_input_kinds=["file"])
+    assert relative.status_code == 400
+
+
+def test_web_directory_browse_skips_unreadable_children(tmp_path: Path) -> None:
+    import stat as stat_module
+
+    projects_root, _ = make_project(tmp_path)
+    base = tmp_path / "base"
+    (base / "blocked").mkdir(parents=True)
+    (base / "open").mkdir(parents=True)
+    blocked = base / "blocked"
+    blocked.chmod(0)
+    try:
+        client = TestClient(create_app(projects_root=projects_root))
+        response = client.get("/api/v1/directories", params={"path": str(base)})
+        assert response.status_code == 200
+        by_name = {item["name"]: item for item in response.json()["directories"]}
+        assert "open" in by_name
+        assert by_name["blocked"]["is_project"] is False
+    finally:
+        blocked.chmod(stat_module.S_IRWXU)

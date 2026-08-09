@@ -48,6 +48,9 @@ target_chunk_input_tokens = 11000
 # 单个 Segment 超过输入硬限制时，是否允许内部切分并在完成后重新合并。
 # false 表示不切分，直接将该 Segment 记录为 failed。
 allow_split_oversized_segment = true
+# 允许指定阶段把按源文顺序相邻的跨 File 或 EPUB spine part Segment
+# 放入同一 Chunk；空数组表示保持 File/part 边界。
+cross_boundary_batching = []
 
 [context.translation]
 # 是否为翻译请求附带同一文件内的前文 Segment。
@@ -75,15 +78,15 @@ enabled = true
 previous_segments = 3
 
 [terminology]
-# 尚未实现为可变行为：主流程完成全面验证后再实现并补充真实用例。
-# 当前术语主名称、别名和匹配文本固定使用 NFKC。
+# 术语主名称、别名和匹配文本的 Unicode 归一化形式："" 表示关闭，或 NFC、NFD、NFKC、NFKD。
+# 影响扫描去重、导入合并与翻译时匹配；已发布术语的 normalized 键不做迁移。
 unicode_normalization = "NFKC"
-# 尚未实现为可变行为：当前固定执行 casefold，仅支持 true。
+# 是否忽略大小写匹配（casefold）；关闭后按原始大小写匹配。
 case_insensitive = true
-# 每个 Segment 最多向 LLM 注入多少条确定性匹配到的术语。
+# 每个 Segment 最多向 LLM 注入多少个确定性匹配到的术语组；组主和命中成员不会被拆散。
 max_terms_per_segment = 100
-# alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性合并。
-alias_primary_collision = "conflict"
+# alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性组化。
+alias_primary_collision = "merge"
 
 [validation.translation]
 # 是否检查翻译结果中残留的日语平假名、片假名及相关 Kana Unicode 区块。

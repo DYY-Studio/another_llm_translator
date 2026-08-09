@@ -13,40 +13,36 @@ from typing import Any, Iterable
 
 import chardet
 
-from .config import load_config
+from .config import LLM_STAGES, load_config
 from .documents import DocumentAdapter, DocumentImport, ImportedFile
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
-from .storage import (
-    atomic_write_json,
-    new_record_id,
-    read_json,
-    record_header,
-    utc_now,
-)
+from .user_config import APP_ROOT, effective_path, user_root
 from .sqlite_storage import (
     database_path,
     initialize as initialize_project_database,
+    new_record_id,
     read_adapter_state,
     read_files as read_sqlite_files,
     read_project_meta,
     read_segments as read_sqlite_segments,
+    record_header,
     replace_source,
+    utc_now,
+    write_json,
 )
 
-_SOURCE_ROOT = Path(__file__).resolve().parents[1]
-APP_ROOT = (
-    _SOURCE_ROOT
-    if (_SOURCE_ROOT / "config" / "config.toml").is_file()
-    else Path(sys.prefix)
-)
-GLOBAL_CONFIG = APP_ROOT / "config" / "config.toml"
-GLOBAL_PROMPTS = APP_ROOT / "prompts"
-PROJECTS_ROOT = APP_ROOT / "projects"
-PROMPT_NAMES = (
-    "terminology.middle.txt",
-    "translation.middle.txt",
-    "proofreading.middle.txt",
-    "polishing.middle.txt",
+PROJECTS_ROOT = user_root() / "projects"
+PROMPT_LANGUAGES = ("zh-CN", "en")
+
+
+def prompt_file(stage: str, language: str) -> str:
+    return f"{stage}.{language}.middle.txt"
+
+
+PROMPT_NAMES = tuple(
+    prompt_file(stage, language)
+    for stage in LLM_STAGES
+    for language in PROMPT_LANGUAGES
 )
 _TXT_EXTENSIONS = frozenset({".txt", ".text"})
 
@@ -444,29 +440,42 @@ class TXTDocumentAdapter:
         return [relative]
 
 
+BUNDLE_FILES = (Path("config.toml"),) + tuple(
+    Path("prompts") / name for name in PROMPT_NAMES
+)
+
+
+def _bundle_source(app_root: Path) -> dict[Path, Path]:
+    sources: dict[Path, Path] = {}
+    for relative in BUNDLE_FILES:
+        global_relative = (
+            Path("config") / "config.toml"
+            if relative == Path("config.toml")
+            else relative
+        )
+        sources[relative] = effective_path(global_relative, builtin_root=app_root)
+    return sources
+
+
 def bundle_hash(app_root: Path = APP_ROOT) -> str:
-    paths = [app_root / "config" / "config.toml"] + [
-        app_root / "prompts" / name for name in PROMPT_NAMES
-    ]
     digest = hashlib.sha256()
-    for path in paths:
-        if not path.is_file():
-            raise ConfigError(f"全局模板缺失：{path}")
-        relative = path.relative_to(app_root).as_posix().encode()
-        payload = path.read_bytes()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
+    for relative, source in _bundle_source(app_root).items():
+        if not source.is_file():
+            raise ConfigError(f"全局模板缺失：{relative}")
+        rel = relative.as_posix().encode()
+        payload = source.read_bytes()
+        digest.update(len(rel).to_bytes(4, "big"))
+        digest.update(rel)
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return f"sha256:{digest.hexdigest()}"
 
 
 def _copy_bundle(source_root: Path, target: Path) -> None:
-    shutil.copy2(source_root / "config" / "config.toml", target / "config.toml")
-    prompt_target = target / "prompts"
-    prompt_target.mkdir(parents=True, exist_ok=True)
-    for name in PROMPT_NAMES:
-        shutil.copy2(source_root / "prompts" / name, prompt_target / name)
+    for relative, source in _bundle_source(source_root).items():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def init_project(
@@ -492,8 +501,8 @@ def init_project(
         raise UsageError("项目名不能为空，也不能包含路径分隔符")
     if empty == bool(inputs):
         raise UsageError("必须提供输入文件，或显式使用 --empty 创建空项目")
-    projects_root = projects_root or app_root / "projects"
-    global_config = load_config(app_root / "config" / "config.toml")
+    projects_root = projects_root or user_root() / "projects"
+    global_config = load_config(effective_path("config/config.toml", builtin_root=app_root))
     global_hash = bundle_hash(app_root)
     imports: list[tuple[DocumentAdapter, ImportedFile]] = []
     warnings: list[str] = []
@@ -635,8 +644,6 @@ def init_project(
             metadata,
             adapter_state_records,
         )
-        from .sqlite_storage import write_json
-
         write_json(
             temp,
             temp / "terminology" / "overrides.json",
@@ -681,15 +688,14 @@ def _source_records(
     files = read_sqlite_files(project)
     return (
         metadata,
-        _resolve_file_adapters(metadata, files),
+        _resolve_file_adapters(files),
         _load_segment_records(project, include_model_contract=False),
     )
 
 
 def _resolve_file_adapters(
-    metadata: dict[str, Any], files: list[dict[str, Any]]
+    files: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    del metadata
     resolved: list[dict[str, Any]] = []
     for file_record in files:
         item = dict(file_record)
@@ -966,7 +972,11 @@ def delete_project(
     root = project.resolve()
     if not database_path(root).is_file():
         raise ProjectError(f"项目不存在或无效：{project}")
-    protected = {PROJECTS_ROOT.resolve(), APP_ROOT.resolve()}
+    protected = {
+        PROJECTS_ROOT.resolve(),
+        APP_ROOT.resolve(),
+        user_root().resolve(),
+    }
     protected.update(Path(value).resolve() for value in protected_roots)
     if root in protected or root.parent == root:
         raise ProjectError("不能删除项目根目录")
@@ -1023,22 +1033,14 @@ def sync_global_templates(
 ) -> list[str]:
     metadata = read_project_meta(project)
     try:
-        load_config(app_root / "config" / "config.toml")
+        load_config(effective_path("config/config.toml", builtin_root=app_root))
         current_hash = bundle_hash(app_root)
     except ConfigError as exc:
         return [f"全局模板无效，继续使用项目副本：{exc}"]
     if metadata.get("global_bundle_hash_seen") == current_hash:
         return []
-    bundle_files = [Path("config.toml")] + [
-        Path("prompts") / name for name in PROMPT_NAMES
-    ]
     changed = []
-    for relative in bundle_files:
-        global_path = (
-            app_root / "config" / "config.toml"
-            if relative == Path("config.toml")
-            else app_root / relative
-        )
+    for relative, global_path in _bundle_source(app_root).items():
         project_path = project / relative
         if (
             not project_path.is_file()
@@ -1064,7 +1066,7 @@ def sync_global_templates(
     if choice not in {"update", "keep"}:
         raise UsageError("模板选择必须是 update 或 keep")
     if choice == "update":
-        load_config(app_root / "config" / "config.toml")
+        load_config(effective_path("config/config.toml", builtin_root=app_root))
         timestamp = utc_now().replace(":", "").replace("-", "")
         backup = project / "snapshots" / "template_updates" / timestamp
         backup.mkdir(parents=True, exist_ok=False)
@@ -1075,28 +1077,22 @@ def sync_global_templates(
     else:
         warnings.append("已保留项目模板")
     metadata["global_bundle_hash_seen"] = current_hash
-    atomic_write_json(project / "project.json", metadata)
+    write_json(project, project / "project.json", metadata)
     return warnings
 
 
-def load_source_files(
-    project: Path, *, repair_tail: bool = True
-) -> list[dict[str, object]]:
-    metadata = read_project_meta(project)
+def load_source_files(project: Path) -> list[dict[str, object]]:
     files = read_sqlite_files(project)
-    return _resolve_file_adapters(metadata, files)
+    return _resolve_file_adapters(files)
 
 
-def load_segments(
-    project: Path, *, repair_tail: bool = True
-) -> list[dict[str, object]]:
-    return _load_segment_records(project, repair_tail=repair_tail)
+def load_segments(project: Path) -> list[dict[str, object]]:
+    return _load_segment_records(project)
 
 
 def _load_segment_records(
     project: Path,
     *,
-    repair_tail: bool = True,
     include_model_contract: bool = True,
 ) -> list[dict[str, object]]:
     segments = read_sqlite_segments(project)

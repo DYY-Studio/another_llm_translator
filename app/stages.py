@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import re
@@ -10,9 +11,9 @@ import sys
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AsyncExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,6 @@ import httpx
 from .config import load_project_config
 from .documents import (
     DocumentExportJob,
-    normalize_document_output,
     publish_document_exports,
 )
 from .errors import (
@@ -64,18 +64,23 @@ from .execution import (
     stage_result_path,
 )
 from .logging_utils import get_logger
-from .project import load_segments, load_source_files
-from .plugins import get_document_adapter
-from .storage import (
+from .project import (
+    PROMPT_LANGUAGES,
+    load_segments,
+    load_source_files,
+    prompt_file,
+)
+from .plugins import get_document_adapter, normalize_model_text
+from .sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
     atomic_write_text,
-    logical_record_exists,
-    new_record_id,
     read_json,
     read_jsonl,
+    record_exists,
     record_header,
+    write_json,
 )
+from .i18n import SUPPORTED_LANGUAGES, resolve_language
 
 JAPANESE_RE = re.compile(
     "[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
@@ -85,26 +90,8 @@ JAPANESE_RE = re.compile(
 KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
 
 
-def _normalize_model_text(
-    files: list[dict[str, Any]],
-    segment: dict[str, Any],
-    text: str,
-    stage: str,
-) -> str:
-    file_id = str(segment["file_id"])
-    file_record = next(
-        (item for item in files if str(item["file_id"]) == file_id), None
-    )
-    if file_record is None:
-        raise ProjectError(f"模型文本引用了未知文件：{file_id}")
-    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-    return normalize_document_output(
-        adapter, segment=segment, text=text, stage=stage
-    )
-
-
 def _project_context(
-    project: Path, *, dry_run: bool, stage: str | None = None
+    project: Path, *, stage: str | None = None
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -112,9 +99,9 @@ def _project_context(
     list[dict[str, Any]],
 ]:
     config = load_project_config(project, stage=stage)
-    metadata = read_json(project / "project.json")
-    files = load_source_files(project, repair_tail=not dry_run)
-    segments = load_segments(project, repair_tail=not dry_run)
+    metadata = read_json(project, project / "project.json")
+    files = load_source_files(project)
+    segments = load_segments(project)
     adapter_options: dict[str, dict[str, Any]] = {}
     adapters: dict[str, dict[str, str]] = {}
     for file_record in files:
@@ -125,7 +112,7 @@ def _project_context(
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
             continue
-        state = read_json(project / state_path)
+        state = read_json(project, project / state_path)
         adapter_options[str(file_record["file_id"])] = {
             key: state[key]
             for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
@@ -173,6 +160,7 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
 
 
 def _finalize_planning_failure(
+    project: Path,
     run_dir: Path | None,
     *,
     requested_count: int,
@@ -183,6 +171,7 @@ def _finalize_planning_failure(
     if run_dir is None:
         return
     finalize_run(
+        project,
         run_dir,
         status="failed",
         completed=reused_count,
@@ -194,6 +183,555 @@ def _finalize_planning_failure(
 
 def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
+
+
+def _resume_scope(
+    project: Path, scope: Scope, resume_run_id: str | None
+) -> tuple[Scope, bool]:
+    if resume_run_id is None:
+        return scope, False
+    resumed_scope = scope_from_run(project, resume_run_id, dry_run=scope.dry_run)
+    resume_arguments_ignored = (
+        scope.from_file,
+        scope.only_file,
+        scope.only_segment,
+        scope.force,
+    ) != (
+        resumed_scope.from_file,
+        resumed_scope.only_file,
+        resumed_scope.only_segment,
+        resumed_scope.force,
+    )
+    return resumed_scope, resume_arguments_ignored
+
+
+def _assemble_warnings(
+    *,
+    stage: str,
+    resume_run_id: str | None,
+    resume_arguments_ignored: bool,
+    resume_message: str,
+    config: dict[str, Any],
+    fingerprint: str,
+    existing_fingerprints: set[str] | frozenset[str],
+    reusable_count: int,
+    force: bool,
+    reuse_allowed: bool,
+    dry_run: bool,
+    extra: list[str],
+) -> list[str]:
+    warnings: list[str] = []
+    if resume_run_id is not None:
+        warnings.append(resume_message)
+        if resume_arguments_ignored:
+            warnings.append("续作已忽略本次命令的范围参数或 --force")
+    configured_output_warning = _configured_output_warning(config)
+    if configured_output_warning:
+        warnings.append(configured_output_warning)
+    warnings.extend(extra)
+    fingerprint_warning = _confirm_fingerprint_reuse(
+        stage,
+        existing_fingerprints,
+        fingerprint,
+        reusable_count,
+        force=force,
+        resume_run_id=resume_run_id,
+        reuse_allowed=reuse_allowed,
+        dry_run=dry_run,
+    )
+    if fingerprint_warning:
+        warnings.append(fingerprint_warning)
+    return warnings
+
+
+def _create_or_continue_run(
+    project: Path,
+    stage: str,
+    *,
+    scope: Scope,
+    config: dict[str, Any],
+    fingerprint: str,
+    prompt: str,
+    resume_run_id: str | None,
+    selected_count: int,
+    requested_count: int,
+    reused_count: int,
+    details: dict[str, Any] | None,
+    warnings: list[str],
+) -> tuple[str | None, Path | None, Callable[[BaseException], None]]:
+    run_id: str | None = None
+    run_dir: Path | None = None
+    if not scope.dry_run:
+        if resume_run_id is not None:
+            run_id, run_dir = continue_run(
+                project,
+                resume_run_id,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                scope=scope,
+                selected_count=selected_count,
+                requested_count=requested_count,
+                reused_count=reused_count,
+            )
+        else:
+            run_id, run_dir = create_run(
+                project,
+                config=config,
+                stage=stage,
+                fingerprint=fingerprint,
+                prompt=prompt,
+                selected_count=selected_count,
+                requested_count=requested_count,
+                reused_count=reused_count,
+                details=details,
+            )
+
+    def fail_planning(error: BaseException) -> None:
+        _finalize_planning_failure(
+            project,
+            run_dir,
+            requested_count=requested_count,
+            reused_count=reused_count,
+            warnings=warnings,
+            error=error,
+        )
+
+    return run_id, run_dir, fail_planning
+
+
+@dataclass
+class _Preflight:
+    request_segments: list[dict[str, Any]]
+    part_original: dict[str, str]
+    original_parts: dict[str, list[str]]
+    preflight_failed: list[dict[str, Any]]
+
+
+def _split_oversized_preflight(
+    work: Iterable[dict[str, Any]],
+    *,
+    stage: str,
+    config: dict[str, Any],
+    segments: list[dict[str, Any]],
+    prompt: str,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    fail_planning: Callable[[BaseException], None],
+    make_probe: Callable[[dict[str, Any], Any], dict[str, Any]],
+    split_part: Callable[[Any], list[Any]],
+    accept_part: Callable[[dict[str, Any], str, Any], dict[str, Any]],
+    initial_part: Callable[[dict[str, Any]], Any] | None = None,
+    cleanup_probe: Callable[[str], None] | None = None,
+) -> _Preflight:
+    request_segments: list[dict[str, Any]] = []
+    part_original: dict[str, str] = {}
+    original_parts: dict[str, list[str]] = {}
+    preflight_failed: list[dict[str, Any]] = []
+    for segment in work:
+        try:
+            build_chunk_plans(
+                [segment],
+                all_segments=segments,
+                config=config,
+                stage=stage,
+                prompt=prompt,
+                payload_builder=payload_builder,
+            )
+            request_segments.append(segment)
+            continue
+        except RequestSizeError as exc:
+            if exc.reason != "context":
+                fail_planning(exc)
+                raise
+            if not config["chunking"]["allow_split_oversized_segment"]:
+                preflight_failed.append(segment)
+                continue
+        pending_parts: list[Any] = [
+            initial_part(segment) if initial_part is not None else str(segment["source"])
+        ]
+        accepted_parts: list[Any] = []
+        while pending_parts:
+            part = pending_parts.pop(0)
+            probe = make_probe(segment, part)
+            try:
+                build_chunk_plans(
+                    [probe],
+                    all_segments=segments,
+                    config=config,
+                    stage=stage,
+                    prompt=prompt,
+                    payload_builder=payload_builder,
+                )
+                accepted_parts.append(part)
+            except RequestSizeError as exc:
+                if exc.reason != "context":
+                    fail_planning(exc)
+                    raise
+                try:
+                    children = split_part(part)
+                except ConfigError as split_error:
+                    fail_planning(split_error)
+                    raise
+                pending_parts[0:0] = children
+            finally:
+                if cleanup_probe is not None:
+                    cleanup_probe(f"{segment['segment_id']}-PROBE")
+        part_ids: list[str] = []
+        for index, part in enumerate(accepted_parts, start=1):
+            part_id = f"{segment['segment_id']}-P{index:03d}"
+            request_segments.append(accept_part(segment, part_id, part))
+            part_original[part_id] = str(segment["segment_id"])
+            part_ids.append(part_id)
+        original_parts[str(segment["segment_id"])] = part_ids
+    return _Preflight(
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+    )
+
+
+@dataclass
+class StageRunState:
+    project: Path
+    stage: str
+    config: dict[str, Any]
+    metadata: dict[str, Any]
+    segments: list[dict[str, Any]]
+    prompt: str
+    fingerprint: str
+    resume_run_id: str | None
+    warnings: list[str]
+    run_id: str
+    run_dir: Path
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None
+    llm: LLMClient | None = None
+
+
+async def _execute_stage_run(
+    state: StageRunState,
+    *,
+    request_segments: list[dict[str, Any]],
+    part_original: dict[str, str],
+    original_parts: dict[str, list[str]],
+    preflight_failed: list[dict[str, Any]],
+    limiter: SlidingWindowLimiter | None,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    process_once: Callable[..., Awaitable[None]],
+    record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    before_finalize: Callable[[], Awaitable[None]],
+    completed_count: Callable[[], int],
+    failed_count: Callable[[], int],
+    exception_completed: Callable[[], int],
+    exception_failed: Callable[[], int],
+    failure_counts: Counter[str],
+    http_client: httpx.AsyncClient | None = None,
+    runtime_parts_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    logger = get_logger(state.stage)
+    logger.info("run start run=%s", state.run_id)
+    planned = iter_chunk_plans(
+        request_segments,
+        all_segments=state.segments,
+        config=state.config,
+        stage=state.stage,
+        prompt=state.prompt,
+        payload_builder=payload_builder,
+    )
+    chunks = materialize_chunk_stream(state.run_id, state.stage, planned)
+    if state.config["debug"]["enabled"]:
+        planned_chunks = chunks
+
+        def debug_chunks() -> Iterable[ChunkPlan]:
+            for chunk in planned_chunks:
+                save_debug_chunks(
+                    state.project,
+                    state.run_dir,
+                    str(state.metadata["project_id"]),
+                    state.run_id,
+                    state.stage,
+                    [chunk],
+                )
+                yield chunk
+
+        chunks = debug_chunks()
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            state.config["execution"]["requests_per_minute"],
+            state.config["execution"]["input_tokens_per_minute"],
+        )
+
+    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
+        if chunk.chunk_id is not None:
+            return chunk
+        materialized = replace(
+            chunk,
+            chunk_id=f"CHK-{state.run_id}-R-{uuid.uuid4().hex[:10].upper()}",
+        )
+        if state.config["debug"]["enabled"]:
+            save_debug_chunks(
+                state.project,
+                state.run_dir,
+                str(state.metadata["project_id"]),
+                state.run_id,
+                state.stage,
+                [materialized],
+            )
+        return materialized
+
+    async def process(
+        chunk: ChunkPlan,
+        split_parent_request_id: str | None = None,
+    ) -> None:
+        chunk = ensure_runtime_chunk(chunk)
+        try:
+            await process_once(chunk, split_parent_request_id)
+            return
+        except ContextLengthError as exc:
+            logger.warning(
+                "context split parent_request=%s segments=%d",
+                exc.request_id,
+                len(chunk.segments),
+            )
+            requested_ids = (
+                set(exc.segment_ids) if exc.segment_ids is not None else None
+            )
+            items = [
+                item
+                for item in chunk.segments
+                if requested_ids is None
+                or str(item["segment_id"]) in requested_ids
+            ]
+            if not items:
+                return
+            if len(items) > 1:
+                midpoint = len(items) // 2
+                groups = (items[:midpoint], items[midpoint:])
+            elif (
+                state.config["chunking"]["allow_split_oversized_segment"]
+                and len(str(items[0]["source"])) > 1
+            ):
+                groups = tuple(
+                    [part]
+                    for part in _replace_with_runtime_parts(
+                        items[0],
+                        part_original=part_original,
+                        original_parts=original_parts,
+                        **(runtime_parts_kwargs or {}),
+                    )
+                )
+            else:
+                groups = ()
+            if not groups:
+                await record_context_failure(items)
+                return
+            for group in groups:
+                await process(
+                    ChunkPlan(
+                        file_id=str(group[0]["file_id"]),
+                        segments=tuple(group),
+                        payload={},
+                        estimated_input_tokens=0,
+                    ),
+                    exc.request_id,
+                )
+
+    usage: dict[str, Any] | None = None
+    try:
+        async with LLMClient(
+            state.config,
+            limiter,
+            run_dir=state.run_dir,
+            project_id=str(state.metadata["project_id"]),
+            run_id=state.run_id,
+            stage=state.stage,
+            client=http_client,
+            on_usage=state.on_usage,
+        ) as llm:
+            state.llm = llm
+            await record_preflight_failure(preflight_failed)
+            await dispatch_chunks(
+                chunks,
+                process,
+                mode=state.config["execution"]["scheduling_mode"],
+                max_parallel=state.config["execution"]["max_parallel"],
+            )
+            await before_finalize()
+        _extend_unique(state.warnings, llm.warnings)
+        usage = llm.usage_summary()
+    except asyncio.CancelledError:
+        usage = llm.usage_summary()
+        finalize_run(
+            state.project,
+            state.run_dir,
+            status="interrupted",
+            completed=exception_completed(),
+            failed=0,
+            warnings=[*state.warnings, "任务已由用户取消"],
+            usage=usage,
+            failure_counts=dict(failure_counts),
+        )
+        raise
+    except (FatalExternalError, ConfigError) as exc:
+        if isinstance(exc, FatalExternalError):
+            usage = llm.usage_summary()
+        finalize_run(
+            state.project,
+            state.run_dir,
+            status="failed",
+            completed=exception_completed(),
+            failed=exception_failed(),
+            warnings=state.warnings,
+            usage=usage,
+            failure_counts=dict(failure_counts),
+        )
+        logger.error(
+            "run failed run=%s error_type=%s",
+            state.run_id,
+            type(exc).__name__,
+        )
+        raise
+    return finalize_run(
+        state.project,
+        state.run_dir,
+        status="completed" if failed_count() == 0 else "failed",
+        completed=completed_count(),
+        failed=failed_count(),
+        warnings=state.warnings,
+        usage=usage,
+        failure_counts=dict(failure_counts),
+    )
+
+
+async def _localized_request_loop(
+    group: list[dict[str, Any]],
+    *,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt: str,
+    config: dict[str, Any],
+    llm: LLMClient,
+    stage: str,
+    accept: Callable[[str, str, Any], Awaitable[None]],
+    save_error: Callable[[list[str], str, str], Awaitable[None]],
+    parse: Callable[
+        [str, dict[str, str]],
+        tuple[dict[str, Any], list[str], list[str], bool],
+    ],
+    format_correction: str,
+    by_id: dict[str, dict[str, Any]],
+    segments: list[dict[str, Any]],
+    logger: Any,
+    initial_parent_request_id: str | None = None,
+    repair_candidates: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    exhausted: list[str] = []
+    tasks: list[
+        tuple[
+            list[dict[str, Any]],
+            str | None,
+            int,
+            list[dict[str, Any]],
+            list[str],
+        ]
+    ] = [(group, initial_parent_request_id, 0, group[:1], [])]
+    while tasks:
+        items, parent_request_id, format_attempt, anchor, format_errors = (
+            tasks.pop(0)
+        )
+        expected = [str(item["segment_id"]) for item in items]
+        payload = payload_builder(items or anchor)
+        if not items:
+            payload["segments"] = []
+        if repair_candidates is not None:
+            payload["segments"] = [
+                {
+                    "id": item["segment_id"],
+                    "source": segment_model_source(item),
+                    "failed_candidate": repair_candidates[
+                        str(item["segment_id"])
+                    ]["candidate"],
+                    "validation_matches": repair_candidates[
+                        str(item["segment_id"])
+                    ]["findings"],
+                }
+                for item in items
+            ]
+            payload["validation_repair"] = (
+                "返回不含所列残留字符的完整修正版译文。"
+            )
+        if format_attempt:
+            correction = format_correction
+            if format_errors:
+                correction = (
+                    f"{correction}\n错误详情：{'；'.join(format_errors[:5])}"
+                )
+            payload["format_correction"] = correction
+        payload, id_map = localize_request_ids(payload, items)
+        messages = render_messages(prompt, payload)
+        request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+        estimated = _request_estimate(messages, config, request_id)
+        try:
+            response, _ = await llm.chat(
+                messages=messages,
+                temperature=config["llm"][f"temperature_{stage}"],
+                estimated_input_tokens=estimated,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                segment_id_map=id_map,
+            )
+            valid, unresolved, parse_errors, response_complete = parse(
+                response.content, id_map
+            )
+        except FatalExternalError:
+            raise
+        except ContextLengthError as exc:
+            if exc.segment_ids is None:
+                exc.segment_ids = tuple(expected)
+            raise
+        except ExternalError as exc:
+            await save_error(expected, request_id, str(exc))
+            continue
+        for segment_id, value in valid.items():
+            try:
+                await accept(segment_id, request_id, value)
+            except IncompleteError as exc:
+                parse_errors.append(str(exc))
+                if segment_id not in unresolved:
+                    unresolved.append(segment_id)
+                continue
+        if response_complete and not unresolved:
+            continue
+        logger.warning(
+            "format correction request=%s attempt=%d unresolved=%d errors=%d",
+            request_id,
+            format_attempt + 1,
+            len(unresolved),
+            len(parse_errors),
+        )
+        if format_attempt >= config["retry"]["format_max_attempts"]:
+            exhausted.extend(unresolved)
+            continue
+        if not unresolved:
+            tasks.append(([], request_id, format_attempt + 1, anchor, parse_errors))
+            continue
+        unresolved_groups = contiguous_groups(
+            (by_id[segment_id] for segment_id in unresolved),
+            all_segments=segments,
+            cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
+        )
+        tasks.extend(
+            (
+                unresolved_group,
+                request_id,
+                format_attempt + 1,
+                unresolved_group[:1],
+                parse_errors,
+            )
+            for unresolved_group in unresolved_groups
+        )
+    return list(dict.fromkeys(exhausted))
 
 
 def _restore_leading_whitespace(source: str, text: str) -> str:
@@ -300,27 +838,62 @@ def _request_estimate(
     return estimated
 
 
-def _prompt(project: Path, stage: str) -> str:
-    name = {
-        "terminology": "terminology.middle.txt",
-        "translation": "translation.middle.txt",
-        "proofreading": "proofreading.middle.txt",
-        "polishing": "polishing.middle.txt",
-    }[stage]
+def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
+    """Resolve the run prompt language, falling back to zh-CN."""
+    value = requested or resolve_language()
+    if (
+        value in SUPPORTED_LANGUAGES
+        and (project / "prompts" / prompt_file(stage, value)).is_file()
+    ):
+        return value
+    return "zh-CN"
+
+
+def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
+    """Per-language middle content digests; missing languages are omitted."""
+    digests: dict[str, str] = {}
+    for language in PROMPT_LANGUAGES:
+        path = project / "prompts" / prompt_file(stage, language)
+        if path.is_file():
+            digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def _prompt(project: Path, stage: str, language: str | None = None) -> str:
+    language = _prompt_language(project, stage, language)
+    name = prompt_file(stage, language)
     try:
         middle = (project / "prompts" / name).read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
-    return full_prompt(stage, middle)
+    return full_prompt(stage, middle, language)
 
 
 def load_terms(project: Path) -> dict[str, Any] | None:
     path = project / "terminology" / "terms.json"
-    return read_json(path) if logical_record_exists(path) else None
+    return read_json(project, path) if record_exists(project, path) else None
 
 
-def normalize_term(value: str) -> str:
-    return unicodedata.normalize("NFKC", value).casefold().strip()
+@dataclass(frozen=True)
+class TermNormalization:
+    form: str | None
+    casefold: bool
+
+
+def term_normalization(config: dict[str, Any]) -> TermNormalization:
+    terminology = config["terminology"]
+    return TermNormalization(
+        form=terminology["unicode_normalization"] or None,
+        casefold=terminology["case_insensitive"],
+    )
+
+
+def normalize_term(value: str, spec: TermNormalization) -> str:
+    if spec.form:
+        value = unicodedata.normalize(spec.form, value)
+    if spec.casefold:
+        value = value.casefold()
+    return value.strip()
 
 
 def _term_bucket() -> dict[str, Any]:
@@ -331,6 +904,10 @@ def _term_bucket() -> dict[str, Any]:
         "translations": [],
         "aliases": [],
         "alias_conflicts": [],
+        "group_primary": None,
+        "group_primary_set": False,
+        "group_primary_locked": False,
+        "group_claims": [],
         "canonical_source": None,
     }
 
@@ -338,8 +915,9 @@ def _term_bucket() -> dict[str, Any]:
 def _add_term_candidate(
     merged: dict[str, dict[str, Any]],
     candidate: dict[str, Any],
+    spec: TermNormalization,
 ) -> None:
-    normalized = normalize_term(str(candidate["source"]))
+    normalized = normalize_term(str(candidate["source"]), spec)
     current = merged.setdefault(normalized, _term_bucket())
     current["sources"].append(str(candidate["source"]))
     category = candidate.get("category")
@@ -366,17 +944,29 @@ def _add_term_candidate(
     current["aliases"].extend(
         str(alias) for alias in candidate.get("aliases", []) if alias
     )
+    if candidate.get("_group_primary_set", "group_primary" in candidate):
+        group_primary = candidate.get("group_primary")
+        if group_primary is not None:
+            group_primary = str(group_primary)
+        if current["group_primary_set"] and current["group_primary"] != group_primary:
+            raise UsageError(f"同一术语存在冲突的组主关系：{candidate['source']}")
+        current["group_primary"] = group_primary
+        current["group_primary_set"] = True
+        current["group_primary_locked"] = current["group_primary_locked"] or bool(
+            candidate.get("_group_primary_locked", False)
+        )
 
 
 def _seed_published_terms(
     merged: dict[str, dict[str, Any]],
     library: dict[str, Any] | None,
+    spec: TermNormalization,
 ) -> None:
     for term in (library or {}).get("terms", []):
-        _add_term_candidate(merged, term)
+        _add_term_candidate(merged, term, spec)
         description = term.get("description")
         if description and "；" in str(description):
-            current = merged[normalize_term(str(term["source"]))]
+            current = merged[normalize_term(str(term["source"]), spec)]
             current["descriptions"].remove(str(description))
             current["descriptions"].extend(
                 part for part in str(description).split("；") if part
@@ -403,13 +993,43 @@ def _apply_term_overrides(
                 current[target_key] = [override[source_key]]
         if "aliases" in override:
             current["aliases"] = list(override.get("aliases") or [])
+        if "group_primary" in override:
+            group_primary = override.get("group_primary")
+            current["group_primary"] = (
+                str(group_primary) if group_primary is not None else None
+            )
+            current["group_primary_set"] = True
+            current["group_primary_locked"] = True
 
 
 def _alias_primary_collisions(
     merged: dict[str, dict[str, Any]],
     *,
     policy: str,
+    spec: TermNormalization,
 ) -> None:
+    def add_claim(
+        entry: str, claimed_by: str, alias: str, reason: str
+    ) -> None:
+        claim = {
+            "entry": entry,
+            "claimed_by": claimed_by,
+            "alias": alias,
+            "reason": reason,
+        }
+        for normalized in {entry, claimed_by}:
+            if normalized in merged and claim not in merged[normalized]["group_claims"]:
+                merged[normalized]["group_claims"].append(claim)
+
+    for normalized, item in merged.items():
+        primary = item["group_primary"]
+        if primary is None:
+            continue
+        if primary == normalized or primary not in merged:
+            raise UsageError(f"术语组主指针无效：{normalized} -> {primary}")
+        if merged[primary]["group_primary"] is not None:
+            raise UsageError(f"术语组主必须直接指向主条目：{normalized} -> {primary}")
+
     primary_sources = {
         normalized: sorted(
             set(item["sources"]), key=lambda text: (len(text), text)
@@ -420,7 +1040,7 @@ def _alias_primary_collisions(
     claims: dict[str, list[tuple[str, str]]] = {}
     for owner, item in merged.items():
         for alias in sorted(set(item["aliases"])):
-            target = normalize_term(alias)
+            target = normalize_term(alias, spec)
             if target in merged and target != owner:
                 claims.setdefault(target, []).append((owner, alias))
     if not claims:
@@ -445,49 +1065,33 @@ def _alias_primary_collisions(
     unsafe_targets = {
         target for target, owners in claims.items() if len({o for o, _ in owners}) > 1
     } | cycle_nodes
-    if policy == "merge":
-        roots: dict[str, str] = {}
-        for node in merged:
-            current = node
-            path: set[str] = set()
-            while (
-                current in parent
-                and current not in unsafe_targets
-                and parent[current] not in unsafe_targets
-                and current not in path
-            ):
-                path.add(current)
-                current = parent[current]
-            roots[node] = current
-        for node, root in list(roots.items()):
-            if node == root or node not in merged or root not in merged:
-                continue
-            target = merged[node]
-            owner = merged[root]
-            if owner["canonical_source"] is None and owner["sources"]:
-                owner["canonical_source"] = sorted(
-                    set(owner["sources"]), key=lambda text: (len(text), text)
-                )[0]
-            owner["categories"].extend(target["categories"])
-            owner["descriptions"].extend(target["descriptions"])
-            owner["translations"].extend(target["translations"])
-            owner["aliases"].extend(target["aliases"])
-            owner["aliases"].extend(target["sources"])
-            merged.pop(node)
-
     for target, owners in claims.items():
-        if policy == "merge" and target not in unsafe_targets:
-            continue
-        reason = (
-            "multiple_owners"
-            if len({owner for owner, _ in owners}) > 1
-            else "cycle"
-            if target in cycle_nodes
-            else "policy"
-        )
         for owner, alias in owners:
-            if owner not in merged:
+            owner_root = merged[owner]["group_primary"] or owner
+            target_root = merged[target]["group_primary"] or target
+            if owner_root == target_root:
                 continue
+            reason = (
+                "multiple_owners"
+                if len({value[0] for value in owners}) > 1
+                else "cycle"
+                if target in cycle_nodes or owner in cycle_nodes
+                else "policy"
+                if policy == "conflict"
+                else "group_collision"
+                if merged[target]["group_primary"] is not None
+                or merged[target]["group_primary_locked"]
+                or any(
+                    value["group_primary"] == target
+                    for value in merged.values()
+                )
+                else ""
+            )
+            if not reason and target not in unsafe_targets:
+                merged[target]["group_primary"] = owner_root
+                continue
+            reason = reason or "group_collision"
+            add_claim(target, owner, alias, reason)
             merged[owner]["alias_conflicts"].append(
                 {
                     "alias": alias,
@@ -496,13 +1100,21 @@ def _alias_primary_collisions(
                 }
             )
 
+    for normalized, item in merged.items():
+        primary = item["group_primary"]
+        if primary is not None and (
+            primary not in merged or merged[primary]["group_primary"] is not None
+        ):
+            raise UsageError(f"术语组关系无法规范化：{normalized} -> {primary}")
+
 
 def _build_term_rows(
     merged: dict[str, dict[str, Any]],
     *,
     alias_policy: str,
+    spec: TermNormalization,
 ) -> list[dict[str, Any]]:
-    _alias_primary_collisions(merged, policy=alias_policy)
+    _alias_primary_collisions(merged, policy=alias_policy, spec=spec)
     terms: list[dict[str, Any]] = []
     for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
         categories = sorted(set(item["categories"]))
@@ -513,7 +1125,7 @@ def _build_term_rows(
             {
                 alias
                 for alias in item["aliases"]
-                if normalize_term(alias) != normalized
+                if normalize_term(alias, spec) != normalized
             }
         )
         terms.append(
@@ -528,6 +1140,7 @@ def _build_term_rows(
                     translations[0] if len(translations) == 1 else None
                 ),
                 "aliases": aliases,
+                "group_primary": item["group_primary"],
                 "conflicts": {
                     "categories": categories if len(categories) > 1 else [],
                     "preferred_translations": (
@@ -538,6 +1151,15 @@ def _build_term_rows(
                         key=lambda value: (
                             value["alias"],
                             value["primary_source"],
+                            value["reason"],
+                        ),
+                    ),
+                    "group_claims": sorted(
+                        item["group_claims"],
+                        key=lambda value: (
+                            value["entry"],
+                            value["claimed_by"],
+                            value["alias"],
                             value["reason"],
                         ),
                     ),
@@ -552,13 +1174,15 @@ def build_term_library_rows(
     base_terms: list[dict[str, Any]],
     overrides: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, {"terms": base_terms})
-    _apply_term_overrides(merged, overrides)
     config = load_project_config(project)
+    spec = term_normalization(config)
+    merged: dict[str, dict[str, Any]] = {}
+    _seed_published_terms(merged, {"terms": base_terms}, spec)
+    _apply_term_overrides(merged, overrides)
     return _build_term_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
+        spec=spec,
     )
 
 
@@ -571,10 +1195,15 @@ TERM_CSV_FIELDS = (
     "disabled",
     "category_conflicts_json",
     "preferred_translation_conflicts_json",
+    "group_primary",
 )
 
+LEGACY_TERM_CSV_FIELDS = TERM_CSV_FIELDS[:-1]
 
-def _exchange_term(value: Any, location: str) -> dict[str, Any]:
+
+def _exchange_term(
+    value: Any, location: str, spec: TermNormalization
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise UsageError(f"术语必须是对象：{location}")
     allowed = {
@@ -585,6 +1214,7 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
         "aliases",
         "disabled",
         "conflicts",
+        "group_primary",
     }
     unknown = set(value) - allowed
     if unknown:
@@ -606,6 +1236,11 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
     disabled = value.get("disabled", False)
     if not isinstance(disabled, bool):
         raise UsageError(f"术语 disabled 必须是布尔值：{location}")
+    group_primary = value.get("group_primary")
+    if group_primary is not None and (
+        not isinstance(group_primary, str) or not group_primary.strip()
+    ):
+        raise UsageError(f"术语 group_primary 必须是非空字符串或 null：{location}")
     conflicts = value.get("conflicts", {})
     if not isinstance(conflicts, dict):
         raise UsageError(f"术语 conflicts 必须是对象：{location}")
@@ -639,9 +1274,14 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
             alias.strip()
             for alias in aliases
             if alias.strip()
-            and normalize_term(alias) != normalize_term(source)
+            and normalize_term(alias, spec) != normalize_term(source, spec)
         ],
         "disabled": disabled,
+        "group_primary": (
+            normalize_term(group_primary, spec) if group_primary is not None else None
+        ),
+        "_group_primary_set": "group_primary" in value,
+        "_group_primary_locked": "group_primary" in value,
         "conflicts": {
             "categories": [
                 candidate.strip()
@@ -657,7 +1297,9 @@ def _exchange_term(value: Any, location: str) -> dict[str, Any]:
     }
 
 
-def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
+def _load_term_exchange(
+    path: Path, spec: TermNormalization
+) -> list[dict[str, Any]]:
     suffix = path.suffix.casefold()
     try:
         content = path.read_text(encoding="utf-8-sig")
@@ -673,24 +1315,31 @@ def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
         if set(document) != {"schema_version", "record_type", "terms"}:
             raise UsageError("术语 JSON 必须只包含 schema_version、record_type、terms")
         if (
-            document.get("schema_version") != 1
+            document.get("schema_version") not in {1, 2}
             or document.get("record_type") != "terminology_exchange"
         ):
             raise UsageError("不支持的术语交换格式版本")
         values = document.get("terms")
         if not isinstance(values, list):
             raise UsageError("术语 JSON 的 terms 必须是数组")
-        return [
-            _exchange_term(value, f"terms[{index}]")
+        rows = [
+            _exchange_term(value, f"terms[{index}]", spec)
             for index, value in enumerate(values)
         ]
+        if document.get("schema_version") == 1:
+            for row in rows:
+                row["group_primary"] = None
+                row["_group_primary_set"] = False
+                row["_group_primary_locked"] = False
+        return rows
     if suffix != ".csv":
         raise UsageError("术语文件扩展名必须是 .json 或 .csv")
     try:
         reader = csv.DictReader(io.StringIO(content))
-        if tuple(reader.fieldnames or ()) != TERM_CSV_FIELDS:
+        fields = tuple(reader.fieldnames or ())
+        if fields not in {TERM_CSV_FIELDS, LEGACY_TERM_CSV_FIELDS}:
             raise UsageError(
-                "术语 CSV 表头必须是：" + ",".join(TERM_CSV_FIELDS)
+                "术语 CSV 表头必须是旧版或新版完整表头"
             )
         values = []
         for index, row in enumerate(reader, start=2):
@@ -716,14 +1365,23 @@ def _load_term_exchange(path: Path) -> list[dict[str, Any]]:
                         "description": row["description"] or "",
                         "aliases": aliases,
                         "disabled": disabled_text == "true",
+                        "group_primary": (
+                            row.get("group_primary") or None
+                            if fields == TERM_CSV_FIELDS
+                            else None
+                        ),
                         "conflicts": {
                             "categories": category_conflicts,
                             "preferred_translations": preferred_conflicts,
                         },
                     },
                     f"第 {index} 行",
+                    spec,
                 )
             )
+            if fields == LEGACY_TERM_CSV_FIELDS:
+                values[-1]["_group_primary_set"] = False
+                values[-1]["_group_primary_locked"] = False
         return values
     except csv.Error as exc:
         raise UsageError(f"术语 CSV 无效：{path}: {exc}") from exc
@@ -738,34 +1396,40 @@ def _term_exchange_rows(
     if source not in {"published", "scanned"}:
         raise UsageError("术语导出 source 必须是 published 或 scanned")
     if source == "scanned":
+        config = load_project_config(project)
+        spec = term_normalization(config)
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = read_json(project, active_path) if record_exists(project, active_path) else None
         if not active or active.get("status") != "active":
             return []
         task_id = str(active.get("active_task_id", ""))
         records = [
             record
-            for record in read_jsonl(project / "terminology" / "candidates.jsonl")
-            if record.get("active_task_id") == task_id
+            for record in read_jsonl(
+                project,
+                project / "terminology" / "candidates.jsonl",
+                task_id=task_id,
+            )
         ]
         merged: dict[str, dict[str, Any]] = {}
         for record in records:
             for candidate in record.get("terms", []):
                 if isinstance(candidate, dict):
-                    _add_term_candidate(merged, candidate)
-        overrides_document = read_json(project / "terminology" / "overrides.json")
+                    _add_term_candidate(merged, candidate, spec)
+        overrides_document = read_json(project, project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
             for item in overrides_document.get("overrides", [])
         }
         _apply_term_overrides(merged, overrides)
-        alias_policy = str(
-            load_project_config(project)["terminology"]["alias_primary_collision"]
-        )
-        candidates = _build_term_rows(merged, alias_policy=alias_policy)
+        alias_policy = str(config["terminology"]["alias_primary_collision"])
+        candidates = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
+        source_by_normalized = {
+            str(term["normalized"]): str(term["source"]) for term in candidates
+        }
         rows: list[dict[str, Any]] = []
         for term in candidates:
-            normalized = normalize_term(str(term["source"]))
+            normalized = normalize_term(str(term["source"]), spec)
             override = overrides.get(normalized, {})
             disabled = bool(override.get("disabled", False))
             if disabled and not include_disabled:
@@ -780,6 +1444,11 @@ def _term_exchange_rows(
                     "description": override.get("description", term.get("description", "")),
                     "aliases": list(override.get("aliases", term.get("aliases", []))),
                     "disabled": disabled,
+                    "group_primary": (
+                        source_by_normalized.get(str(term.get("group_primary")))
+                        if term.get("group_primary") is not None
+                        else None
+                    ),
                     "conflicts": {
                         "categories": list(term.get("conflicts", {}).get("categories", [])),
                         "preferred_translations": list(
@@ -794,12 +1463,18 @@ def _term_exchange_rows(
         str(item["normalized"]): dict(item)
         for item in (library or {}).get("terms", [])
     }
-    overrides_document = read_json(project / "terminology" / "overrides.json")
+    overrides_document = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): dict(item)
         for item in overrides_document.get("overrides", [])
     }
     rows: list[dict[str, Any]] = []
+    source_by_normalized = {
+        normalized: str(
+            overrides.get(normalized, {}).get("source", term.get("source", normalized))
+        )
+        for normalized, term in current.items()
+    }
     for normalized in sorted(set(current) | set(overrides)):
         term = current.get(normalized, {})
         override = overrides.get(normalized, {})
@@ -819,6 +1494,11 @@ def _term_exchange_rows(
                 ),
                 "aliases": list(override.get("aliases", term.get("aliases", []))),
                 "disabled": disabled,
+                "group_primary": (
+                    source_by_normalized.get(str(term.get("group_primary")))
+                    if term.get("group_primary") is not None
+                    else None
+                ),
                 "conflicts": {
                     "categories": list(conflicts.get("categories", [])),
                     "preferred_translations": list(
@@ -847,7 +1527,7 @@ def export_terms(
             output,
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "record_type": "terminology_exchange",
                     "terms": rows,
                 },
@@ -881,6 +1561,7 @@ def export_terms(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
+                    "group_primary": row.get("group_primary") or "",
                 }
             )
         atomic_write_text(output, "\ufeff" + buffer.getvalue())
@@ -901,22 +1582,35 @@ def import_terms(
     *,
     dry_run: bool,
 ) -> dict[str, Any]:
-    imported = _load_term_exchange(input_path)
+    config = load_project_config(project)
+    spec = term_normalization(config)
+    imported = _load_term_exchange(input_path, spec)
     disabled_by_normalized: dict[str, bool] = {}
     merged_import: dict[str, dict[str, Any]] = {}
     for item in imported:
-        normalized = normalize_term(item["source"])
+        normalized = normalize_term(item["source"], spec)
         previous_disabled = disabled_by_normalized.setdefault(
             normalized, item["disabled"]
         )
         if previous_disabled != item["disabled"]:
             raise UsageError(f"同一 normalized 术语的 disabled 冲突：{item['source']}")
         if not item["disabled"]:
-            _add_term_candidate(merged_import, item)
+            _add_term_candidate(merged_import, item, spec)
 
     library = load_terms(project)
+    available = {
+        str(item.get("normalized"))
+        for item in (library or {}).get("terms", [])
+        if item.get("normalized")
+    } | set(merged_import)
+    for normalized, item in merged_import.items():
+        primary = item["group_primary"]
+        if primary is not None and primary not in available:
+            raise UsageError(
+                f"导入术语组主不存在：{normalized} -> {primary}"
+            )
     merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, library)
+    _seed_published_terms(merged, library, spec)
     for normalized, item in merged_import.items():
         target = merged.setdefault(normalized, _term_bucket())
         for key in (
@@ -927,9 +1621,18 @@ def import_terms(
             "aliases",
         ):
             target[key].extend(item[key])
+        if item["group_primary_set"]:
+            if (
+                target["group_primary_set"]
+                and target["group_primary"] != item["group_primary"]
+            ):
+                raise UsageError(f"导入术语组关系与现有关系冲突：{normalized}")
+            target["group_primary"] = item["group_primary"]
+            target["group_primary_set"] = True
+            target["group_primary_locked"] = item["group_primary_locked"]
 
     overrides_path = project / "terminology" / "overrides.json"
-    overrides_document = read_json(overrides_path)
+    overrides_document = read_json(project, overrides_path)
     original_overrides = [
         dict(item) for item in overrides_document.get("overrides", [])
     ]
@@ -939,7 +1642,7 @@ def import_terms(
     for item in imported:
         if not item["disabled"]:
             continue
-        normalized = normalize_term(item["source"])
+        normalized = normalize_term(item["source"], spec)
         current = overrides.get(normalized, {"normalized": normalized})
         overrides[normalized] = {
             **current,
@@ -947,10 +1650,10 @@ def import_terms(
             "disabled": True,
         }
     _apply_term_overrides(merged, overrides)
-    config = load_project_config(project)
     terms = _build_term_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
+        spec=spec,
     )
     overrides_list = [overrides[key] for key in sorted(overrides)]
     existing_terms = list((library or {}).get("terms", []))
@@ -971,14 +1674,14 @@ def import_terms(
         return summary
     override_record = record_header(
         "terminology_overrides",
-        str(read_json(project / "project.json")["project_id"]),
+        str(read_json(project, project / "project.json")["project_id"]),
         record_id="TERMINOLOGY-OVERRIDES",
         overrides=overrides_list,
         origin="terms_import",
     )
     library_record = record_header(
         "terminology_library",
-        str(read_json(project / "project.json")["project_id"]),
+        str(read_json(project, project / "project.json")["project_id"]),
         record_id=f"TERMS-{next_revision}",
         terms_revision=next_revision,
         published_run_id=library.get("published_run_id") if library else None,
@@ -986,8 +1689,8 @@ def import_terms(
         terms=terms,
         origin="terms_import",
     )
-    atomic_write_json(overrides_path, override_record)
-    atomic_write_json(project / "terminology" / "terms.json", library_record)
+    write_json(project, overrides_path, override_record)
+    write_json(project, project / "terminology" / "terms.json", library_record)
     return summary
 
 
@@ -1035,27 +1738,30 @@ def _merge_and_publish_terms(
     published_run_id: str,
     active_status: str = "completed",
 ) -> dict[str, Any]:
+    config = load_project_config(project)
+    spec = term_normalization(config)
     previous = load_terms(project)
     candidates = [
         record
-        for record in read_jsonl(project / "terminology" / "candidates.jsonl")
-        if record.get("active_task_id") == task_id
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            task_id=task_id,
+        )
     ]
     merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, previous)
+    _seed_published_terms(merged, previous, spec)
     for record in candidates:
         for candidate in record.get("terms", []):
-            _add_term_candidate(merged, candidate)
+            _add_term_candidate(merged, candidate, spec)
 
-    overrides_data = read_json(project / "terminology" / "overrides.json")
+    overrides_data = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): item for item in overrides_data.get("overrides", [])
     }
     _apply_term_overrides(merged, overrides)
-    alias_policy = str(
-        load_project_config(project)["terminology"]["alias_primary_collision"]
-    )
-    terms = _build_term_rows(merged, alias_policy=alias_policy)
+    alias_policy = str(config["terminology"]["alias_primary_collision"])
+    terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
     revision = int(previous["terms_revision"]) + 1 if previous else 1
     library = record_header(
         "terminology_library",
@@ -1066,11 +1772,11 @@ def _merge_and_publish_terms(
         active_task_id=task_id,
         terms=terms,
     )
-    atomic_write_json(project / "terminology" / "terms.json", library)
-    active = read_json(project / "terminology" / "active_task.json")
+    write_json(project, project / "terminology" / "terms.json", library)
+    active = read_json(project, project / "terminology" / "active_task.json")
     active["status"] = active_status
     active["terms_revision"] = revision
-    atomic_write_json(project / "terminology" / "active_task.json", active)
+    write_json(project, project / "terminology" / "active_task.json", active)
     return library
 
 
@@ -1079,26 +1785,32 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     if find_running_runs(project, "terminology"):
         raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
     active_path = project / "terminology" / "active_task.json"
-    if not logical_record_exists(active_path):
+    if not record_exists(project, active_path):
         raise UsageError("当前没有可发布的活动术语扫描")
-    active = read_json(active_path)
+    active = read_json(project, active_path)
     if active.get("status") != "active":
         raise UsageError("当前没有可发布的活动术语扫描")
     task_id = str(active.get("active_task_id", ""))
     candidates = [
         record
-        for record in read_jsonl(project / "terminology" / "candidates.jsonl")
-        if record.get("active_task_id") == task_id and record.get("terms")
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            task_id=task_id,
+        )
+        if record.get("terms")
     ]
     if not candidates:
         raise UsageError("当前活动扫描没有可发布的候选术语")
+    config = load_project_config(project)
+    spec = term_normalization(config)
     candidate_sources = {
-        normalize_term(str(term.get("source")))
+        normalize_term(str(term.get("source")), spec)
         for record in candidates
         for term in record.get("terms", [])
         if isinstance(term, dict) and term.get("source")
     }
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     published_run_id = str(candidates[-1].get("run_id") or task_id)
     library = _merge_and_publish_terms(
         project,
@@ -1124,39 +1836,27 @@ async def run_terminology(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage="terminology"
+        project, stage="terminology"
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, "terminology")
-    fingerprint = stage_fingerprint(config, "terminology", prompt)
+    language = _prompt_language(project, "terminology", prompt_language)
+    prompt = _prompt(project, "terminology", language)
+    fingerprint = stage_fingerprint(
+        config, "terminology", prompt_middle_digests(project, "terminology")
+    )
     active_path = project / "terminology" / "active_task.json"
-    active = read_json(active_path) if logical_record_exists(active_path) else None
+    active = read_json(project, active_path) if record_exists(project, active_path) else None
     published = load_terms(project)
 
     resume_manifest = (
-        read_json(project / "runs" / resume_run_id / "manifest.json")
+        read_json(project, project / "runs" / resume_run_id / "manifest.json")
         if resume_run_id is not None
         else None
     )
@@ -1184,7 +1884,7 @@ async def run_terminology(
             initial_stage_fingerprint=fingerprint,
         )
         if not scope.dry_run:
-            atomic_write_json(active_path, active)
+            write_json(project, active_path, active)
     elif active and active.get("status") == "active":
         task_id = str(active["active_task_id"])
     else:
@@ -1197,10 +1897,10 @@ async def run_terminology(
     scans = [
         record
         for record in read_jsonl(
+            project,
             project / "terminology" / "scans.jsonl",
-            repair_tail=not scope.dry_run,
+            task_id=task_id,
         )
-        if record.get("active_task_id") == task_id
     ]
     completed_ids = {
         str(record["segment_id"])
@@ -1224,31 +1924,24 @@ async def run_terminology(
         and str(record.get("segment_id")) in selected_ids
         and record.get("stage_fingerprint")
     }
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
+    warnings = _assemble_warnings(
+        stage="terminology",
+        resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
             f"续用 Run {resume_run_id} 的原始范围和术语任务；"
             "本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        "terminology",
-        existing_fingerprints,
-        fingerprint,
-        len(selected_ids & completed_ids),
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=existing_fingerprints,
+        reusable_count=len(selected_ids & completed_ids),
         force=scope.force,
-        resume_run_id=resume_run_id,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=[],
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
-
     context_config = config["context"]["terminology"]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1271,112 +1964,56 @@ async def run_terminology(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage="terminology",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selected),
-                requested_count=len(work),
-                reused_count=len(selected) - len(work),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage="terminology",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selected),
-                requested_count=len(work),
-                reused_count=len(selected) - len(work),
-                details={
-                    "active_task_id": task_id,
-                    "scope": _scope_record(scope, force_all=scope.force),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        "terminology",
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selected),
+        requested_count=len(work),
+        reused_count=len(selected) - len(work),
+        details={
+            "active_task_id": task_id,
+            "scope": _scope_record(scope, force_all=scope.force),
+            "prompt_language": language,
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            run_dir,
-            requested_count=len(work),
-            reused_count=len(selected) - len(work),
-            warnings=warnings,
-            error=error,
-        )
-
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        sources = [str(segment["source"])]
-        accepted_sources: list[str] = []
-        while sources:
-            source_part = sources.pop(0)
-            probe = {
-                **segment,
-                "segment_id": f"{segment['segment_id']}-PROBE",
-                "source": source_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_sources.append(source_part)
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left, right = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                sources[0:0] = [left, right]
-        part_ids: list[str] = []
-        for index, source_part in enumerate(accepted_sources, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            request_segments.append(
-                {**segment, "segment_id": part_id, "source": source_part}
-            )
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+    preflight = _split_oversized_preflight(
+        work,
+        stage="terminology",
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=lambda segment, part: {
+            **segment,
+            "segment_id": f"{segment['segment_id']}-PROBE",
+            "source": part,
+        },
+        split_part=lambda part: list(_split_source_once(part)),
+        accept_part=lambda segment, part_id, part: {
+            **segment,
+            "segment_id": part_id,
+            "source": part,
+        },
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
+            stage="terminology",
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -1402,38 +2039,25 @@ async def run_terminology(
         }
 
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, "terminology", planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    "terminology",
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     write_lock = asyncio.Lock()
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
     failure_counts: Counter[str] = Counter()
     completed_original_ids: set[str] = set()
+    state = StageRunState(
+        project=project,
+        stage="terminology",
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -1446,42 +2070,31 @@ async def run_terminology(
 
     report_progress()
 
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                "terminology",
-                [materialized],
-            )
-        return materialized
-
     async def process_once(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> tuple[int, int]:
         unresolved = list(chunk.segments)
         parent_request_id = initial_parent_request_id
+        parse_errors: list[str] = []
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
-                payload["format_correction"] = (
+                correction = (
                     "上一次响应不符合 JSONL 协议。每行只输出一个紧凑 JSON "
                     "对象，不要解释，最后一行必须严格输出 {\"type\":\"end\"}，"
                     "不要输出 {\"type\":\"type\":\"end\"} 或其他字段。"
                 )
+                if parse_errors:
+                    correction = (
+                        f"{correction}\n错误详情：{'；'.join(parse_errors[:5])}"
+                    )
+                payload["format_correction"] = correction
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
-                response, _ = await llm.chat(
+                response, _ = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1511,6 +2124,7 @@ async def run_terminology(
                         failure_counts["external_error"] += 1
                         report_progress()
                         append_jsonl(
+                            project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
                                 "terminology_scan",
@@ -1539,6 +2153,7 @@ async def run_terminology(
             async with write_lock:
                 if terms:
                     append_jsonl(
+                        project,
                         project / "terminology" / "candidates.jsonl",
                         record_header(
                             "terminology_candidates",
@@ -1577,6 +2192,7 @@ async def run_terminology(
                         failure_counts["format_error"] += 1
                         report_progress()
                         append_jsonl(
+                            project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
                                 "terminology_scan",
@@ -1617,6 +2233,7 @@ async def run_terminology(
                         completed_originals.append(original_id)
                 for segment_id in completed_originals:
                     append_jsonl(
+                        project,
                         project / "terminology" / "scans.jsonl",
                         record_header(
                             "terminology_scan",
@@ -1640,205 +2257,131 @@ async def run_terminology(
             return len(completed_originals), 0
         return 0, len(unresolved)
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
-    ) -> tuple[int, int]:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            return await process_once(chunk, split_parent_request_id)
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
-            )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return 0, 0
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                original_id = part_original.get(
-                    str(items[0]["segment_id"]), str(items[0]["segment_id"])
-                )
-                async with write_lock:
-                    if original_id not in failed_originals:
-                        failed_originals.add(original_id)
-                        failure_counts["context_error"] += 1
-                        report_progress()
-                        append_jsonl(
-                            project / "terminology" / "scans.jsonl",
-                            record_header(
-                                "terminology_scan",
-                                str(metadata["project_id"]),
-                                stage="terminology",
-                                segment_id=original_id,
-                                status="failed",
-                                run_id=run_id,
-                                request_id=None,
-                                active_task_id=task_id,
-                                stage_fingerprint=fingerprint,
-                                error_class="context_error",
-                                error_message="模型报告上下文过长",
-                            ),
-                        )
-                return 0, 1
-            values = [
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
-                for group in groups
-            ]
-            return sum(item[0] for item in values), sum(item[1] for item in values)
-
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage="terminology",
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            async with write_lock:
-                for segment in preflight_failed:
-                    segment_id = str(segment["segment_id"])
-                    failed_originals.add(segment_id)
-                    failure_counts["context_error"] += 1
-                    report_progress()
-                    append_jsonl(
-                        project / "terminology" / "scans.jsonl",
-                        record_header(
-                            "terminology_scan",
-                            str(metadata["project_id"]),
-                            stage="terminology",
-                            segment_id=segment_id,
-                            status="failed",
-                            run_id=run_id,
-                            request_id=None,
-                            active_task_id=task_id,
-                            stage_fingerprint=fingerprint,
-                            error_class="context_error",
-                            error_message=(
-                                "单 Segment 超过模型限制且内部拆分已关闭"
-                            ),
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
+    ) -> None:
+        async with write_lock:
+            for segment in failed:
+                segment_id = str(segment["segment_id"])
+                if segment_id in failed_originals:
+                    continue
+                failed_originals.add(segment_id)
+                failure_counts["context_error"] += 1
+                report_progress()
+                append_jsonl(
+                    project,
+                    project / "terminology" / "scans.jsonl",
+                    record_header(
+                        "terminology_scan",
+                        str(metadata["project_id"]),
+                        stage="terminology",
+                        segment_id=segment_id,
+                        status="failed",
+                        run_id=run_id,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        error_class="context_error",
+                        error_message=(
+                            "单 Segment 超过模型限制且内部拆分已关闭"
                         ),
-                    )
-            results = await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="interrupted",
-            completed=(len(selected) - len(work)) if resume_run_id else 0,
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="failed",
-            completed=(len(selected) - len(work)) if resume_run_id else 0,
-            failed=len(work),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s error_type=%s",
-            run_id,
-            type(exc).__name__,
-        )
-        raise
+                    ),
+                )
 
-    completed = sum(value[0] for value in results)
-    failed = len(failed_originals)
-    all_nonempty = [segment for segment in segments if not segment["is_empty"]]
-    task_scans = [
-        record
-        for record in read_jsonl(project / "terminology" / "scans.jsonl")
-        if record.get("active_task_id") == task_id
-    ]
-    task_completed_ids = {
-        str(record["segment_id"])
-        for record in task_scans
-        if record.get("status") == "completed"
-    }
-    published_now = False
-    if active and active.get("status") == "active" and all(
-        str(segment["segment_id"]) in task_completed_ids for segment in all_nonempty
-    ):
-        published = _merge_and_publish_terms(
-            project,
-            task_id=task_id,
-            project_id=str(metadata["project_id"]),
-            published_run_id=run_id,
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        original_id = part_original.get(
+            str(items[0]["segment_id"]), str(items[0]["segment_id"])
         )
-        published_now = True
-    usage = finalize_run(
-        run_dir,
-        status="completed" if failed == 0 else "failed",
-        completed=(
-            sum(
+        async with write_lock:
+            if original_id not in failed_originals:
+                failed_originals.add(original_id)
+                failure_counts["context_error"] += 1
+                report_progress()
+                append_jsonl(
+                    project,
+                    project / "terminology" / "scans.jsonl",
+                    record_header(
+                        "terminology_scan",
+                        str(metadata["project_id"]),
+                        stage="terminology",
+                        segment_id=original_id,
+                        status="failed",
+                        run_id=run_id,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        error_class="context_error",
+                        error_message="模型报告上下文过长",
+                    ),
+                )
+
+    published_now = False
+    task_completed_ids: set[str] = set()
+
+    async def before_finalize() -> None:
+        nonlocal published, published_now, task_completed_ids
+        all_nonempty = [segment for segment in segments if not segment["is_empty"]]
+        task_scans = [
+            record
+            for record in read_jsonl(
+                project,
+                project / "terminology" / "scans.jsonl",
+                task_id=task_id,
+            )
+        ]
+        task_completed_ids = {
+            str(record["segment_id"])
+            for record in task_scans
+            if record.get("status") == "completed"
+        }
+        if active and active.get("status") == "active" and all(
+            str(segment["segment_id"]) in task_completed_ids for segment in all_nonempty
+        ):
+            published = _merge_and_publish_terms(
+                project,
+                task_id=task_id,
+                project_id=str(metadata["project_id"]),
+                published_run_id=run_id,
+            )
+            published_now = True
+
+    def completed_count() -> int:
+        if resume_run_id:
+            return sum(
                 str(segment["segment_id"]) in task_completed_ids
                 for segment in selected
             )
-            if resume_run_id
-            else completed
+        return len(completed_original_ids)
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_originals),
+        exception_completed=lambda: (
+            (len(selected) - len(work)) if resume_run_id else 0
         ),
-        failed=failed,
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        exception_failed=lambda: len(work),
+        failure_counts=failure_counts,
+        http_client=http_client,
     )
+    failed = len(failed_originals)
+    all_nonempty = [segment for segment in segments if not segment["is_empty"]]
     logger.info(
         "run complete run=%s completed=%d failed=%d pending=%d",
         run_id,
-        completed,
+        len(completed_original_ids),
         failed,
         len(all_nonempty) - len(task_completed_ids),
     )
@@ -1846,7 +2389,7 @@ async def run_terminology(
         "stage": "terminology",
         "run_id": run_id,
         "active_task_id": task_id,
-        "completed": completed,
+        "completed": len(completed_original_ids),
         "reused": len(selected) - len(work),
         "failed": failed,
         "failure_counts": dict(failure_counts),
@@ -1858,21 +2401,117 @@ async def run_terminology(
     }
 
 
-def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list[dict]:
+def match_terms(
+    source: str,
+    library: dict[str, Any] | None,
+    limit: int,
+    spec: TermNormalization,
+) -> list[dict]:
     if library is None:
         return []
-    normalized_source = normalize_term(source)
-    matched: list[tuple[int, int, int, dict[str, Any]]] = []
-    for term in library.get("terms", []):
-        main_name = normalize_term(str(term.get("source", "")))
+    normalized_source = normalize_term(source, spec)
+    terms = list(library.get("terms", []))
+    by_normalized = {
+        str(term.get("normalized") or normalize_term(str(term.get("source", "")), spec)): term
+        for term in terms
+    }
+    claims: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for term in terms:
+        for claim in term.get("conflicts", {}).get("group_claims", []):
+            key = (
+                str(claim.get("entry", "")),
+                str(claim.get("claimed_by", "")),
+                str(claim.get("alias", "")),
+                str(claim.get("reason", "")),
+            )
+            claims[key] = dict(claim)
+
+    bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
+    disputed: set[str] = set()
+    for claim in claims.values():
+        alias_name = normalize_term(str(claim.get("alias", "")), spec)
+        if not alias_name or alias_name not in normalized_source:
+            continue
+        related_keys = {str(claim["entry"]), str(claim["claimed_by"])}
+        related_claims: list[dict[str, Any]] = []
+        changed = True
+        while changed:
+            changed = False
+            for value in claims.values():
+                endpoints = {
+                    str(value.get("entry")), str(value.get("claimed_by"))
+                }
+                if not endpoints & related_keys or value in related_claims:
+                    continue
+                related_claims.append(value)
+                before = len(related_keys)
+                related_keys.update(endpoints)
+                changed = changed or len(related_keys) != before
+        disputed.update(related_keys)
+        related_terms = [
+            by_normalized[key] for key in sorted(related_keys) if key in by_normalized
+        ]
+        payload = []
+        for term in related_terms:
+            term_normalized = str(
+                term.get("normalized")
+                or normalize_term(str(term.get("source", "")), spec)
+            )
+            disputed_names = {
+                normalize_term(str(value.get("alias", "")), spec)
+                for value in related_claims
+                if term_normalized
+                in {str(value.get("entry")), str(value.get("claimed_by"))}
+            }
+            safe_names = [
+                normalize_term(str(term.get("source", "")), spec),
+                *(
+                    normalize_term(str(value), spec)
+                    for value in term.get("aliases", [])
+                ),
+            ]
+            safe_hit = any(
+                name and name not in disputed_names and name in normalized_source
+                for name in safe_names
+            )
+            item = {
+                key: term.get(key)
+                for key in ("source", "category", "description", "aliases")
+            }
+            item["preferred_translation"] = (
+                term.get("preferred_translation") if safe_hit else None
+            )
+            item["group_claims"] = sorted(
+                related_claims,
+                key=lambda value: (
+                    str(value.get("entry", "")),
+                    str(value.get("claimed_by", "")),
+                    str(value.get("alias", "")),
+                    str(value.get("reason", "")),
+                ),
+            )
+            payload.append(item)
+        bundle_key = "claim:" + ",".join(sorted(related_keys))
+        if payload and not any(item[3] == bundle_key for item in bundles):
+            bundles.append((1, len(alias_name), 0, bundle_key, payload))
+
+    grouped: dict[str, list[tuple[bool, int, dict[str, Any]]]] = {}
+    for term in terms:
+        normalized = str(
+            term.get("normalized")
+            or normalize_term(str(term.get("source", "")), spec)
+        )
+        if normalized in disputed:
+            continue
+        main_name = normalize_term(str(term.get("source", "")), spec)
         conflicted_aliases = {
-            normalize_term(str(item.get("alias", "")))
+            normalize_term(str(item.get("alias", "")), spec)
             for item in term.get("conflicts", {}).get("alias_primaries", [])
         }
         alias_names = [
-            normalize_term(str(name))
+            normalize_term(str(name), spec)
             for name in term.get("aliases", [])
-            if name and normalize_term(str(name)) not in conflicted_aliases
+            if name and normalize_term(str(name), spec) not in conflicted_aliases
         ]
         main_hit = bool(main_name and main_name in normalized_source)
         hits = [
@@ -1882,30 +2521,58 @@ def match_terms(source: str, library: dict[str, Any] | None, limit: int) -> list
         ]
         if not hits:
             continue
-        matched.append(
-            (
-                1 if main_hit else 0,
-                max(len(name) for name in hits),
-                1 if term.get("preferred_translation") else 0,
-                term,
+        primary = str(term.get("group_primary") or normalized)
+        grouped.setdefault(primary, []).append(
+            (main_hit, max(len(name) for name in hits), term)
+        )
+
+    for primary, hits in grouped.items():
+        primary_term = by_normalized.get(primary)
+        if primary_term is None:
+            raise UsageError(f"术语组主不存在：{primary}")
+        matched_terms = [value[2] for value in hits]
+        ordered = [primary_term]
+        ordered.extend(
+            sorted(
+                (
+                    term
+                    for term in matched_terms
+                    if str(
+                        term.get("normalized")
+                        or normalize_term(str(term.get("source", "")), spec)
+                    )
+                    != primary
+                ),
+                key=lambda term: str(term.get("source", "")),
             )
         )
-    matched.sort(
-        key=lambda item: (-item[0], -item[1], -item[2], item[3].get("source", ""))
-    )
-    return [
-        {
-            key: term.get(key)
-            for key in (
-                "source",
-                "category",
-                "description",
-                "preferred_translation",
-                "aliases",
+        payload = []
+        for term in ordered:
+            item = {
+                key: term.get(key)
+                for key in (
+                    "source",
+                    "category",
+                    "description",
+                    "preferred_translation",
+                    "aliases",
+                )
+            }
+            if term is not primary_term:
+                item["primary_source"] = primary_term.get("source")
+            payload.append(item)
+        bundles.append(
+            (
+                max(int(value[0]) for value in hits),
+                max(value[1] for value in hits),
+                max(int(bool(value[2].get("preferred_translation"))) for value in hits),
+                str(primary_term.get("source", "")),
+                payload,
             )
-        }
-        for _, _, _, term in matched[:limit]
-    ]
+        )
+
+    bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+    return [term for bundle in bundles[:limit] for term in bundle[4]]
 
 
 def validate_translation_text(
@@ -2041,67 +2708,52 @@ async def run_translation(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage="translation"
+        project, stage="translation"
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, "translation")
+    language = _prompt_language(project, "translation", prompt_language)
+    prompt = _prompt(project, "translation", language)
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
-        config, "translation", prompt, terms_revision=terms_revision
+        config,
+        "translation",
+        prompt_middle_digests(project, "translation"),
+        terms_revision=terms_revision,
     )
     history = load_stage_history(
-        project, "translation", repair_tail=not scope.dry_run
+        project, "translation"
     )
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
-            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    if library is None:
-        warnings.append("没有已发布术语库；本次翻译 terms_revision = null")
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        "translation",
-        selection.fingerprints,
-        fingerprint,
-        len(selection.reusable),
-        force=scope.force,
+    warnings = _assemble_warnings(
+        stage="translation",
         resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=selection.fingerprints,
+        reusable_count=len(selection.reusable),
+        force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=(
+            ["没有已发布术语库；本次翻译 terms_revision = null"]
+            if library is None
+            else []
+        ),
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
     latest_text = {
         segment_id: str(record["text"])
         for segment_id, record in selection.latest_completed.items()
@@ -2124,11 +2776,13 @@ async def run_translation(
             else []
         )
         terms_by_source: dict[str, dict[str, Any]] = {}
+        term_spec = term_normalization(config)
         for item in items:
             for term in match_terms(
                 str(item["source"]),
                 library,
                 config["terminology"]["max_terms_per_segment"],
+                term_spec,
             ):
                 terms_by_source[str(term["source"])] = term
         return {
@@ -2144,115 +2798,56 @@ async def run_translation(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage="translation",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage="translation",
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-                details={
-                    "terms_revision": terms_revision,
-                    "scope": _scope_record(scope),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        "translation",
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selection.selected),
+        requested_count=len(selection.work),
+        reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+            "prompt_language": language,
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            run_dir,
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            warnings=warnings,
-            error=error,
-        )
-
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in selection.work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        sources = [str(segment["source"])]
-        accepted_sources: list[str] = []
-        while sources:
-            source_part = sources.pop(0)
-            probe = {
-                **segment,
-                "segment_id": f"{segment['segment_id']}-PROBE",
-                "source": source_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_sources.append(source_part)
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left, right = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                sources[0:0] = [left, right]
-        part_ids: list[str] = []
-        for index, source_part in enumerate(accepted_sources, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            part = {
-                **segment,
-                "segment_id": part_id,
-                "source": source_part,
-            }
-            request_segments.append(part)
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+    preflight = _split_oversized_preflight(
+        selection.work,
+        stage="translation",
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=lambda segment, part: {
+            **segment,
+            "segment_id": f"{segment['segment_id']}-PROBE",
+            "source": part,
+        },
+        split_part=lambda part: list(_split_source_once(part)),
+        accept_part=lambda segment, part_id, part: {
+            **segment,
+            "segment_id": part_id,
+            "source": part,
+        },
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
+            stage="translation",
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -2278,33 +2873,6 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, "translation", planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    "translation",
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
@@ -2327,23 +2895,6 @@ async def run_translation(
 
     report_progress()
 
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                "translation",
-                [materialized],
-            )
-        return materialized
-
     async def save_completed(
         segment_id: str,
         text: str,
@@ -2358,6 +2909,7 @@ async def run_translation(
         )
         async with write_lock:
             append_jsonl(
+                project,
                 result_path,
                 record_header(
                     "stage_result",
@@ -2399,6 +2951,7 @@ async def run_translation(
         failure_counts[error_class] += 1
         async with write_lock:
             append_jsonl(
+                project,
                 result_path,
                 record_header(
                     "stage_result",
@@ -2430,7 +2983,7 @@ async def run_translation(
     async def accept_candidate(
         segment_id: str, text: str, request_id: str
     ) -> None:
-        text = _normalize_model_text(
+        text = normalize_model_text(
             files, by_id[segment_id], str(text), "translation"
         )
         original_id = part_original.get(segment_id)
@@ -2467,130 +3020,62 @@ async def run_translation(
         else:
             await save_completed(original_id, combined, combined_request_id)
 
-    async def request_translations(
-        group: list[dict[str, Any]],
-        *,
-        repair_candidates: dict[str, dict[str, Any]] | None = None,
-        initial_parent_request_id: str | None = None,
-    ) -> tuple[dict[str, tuple[str, str]], list[str]]:
-        valid_total: dict[str, tuple[str, str]] = {}
-        exhausted: list[str] = []
-        tasks: list[
-            tuple[
-                list[dict[str, Any]],
-                str | None,
-                int,
-                list[dict[str, Any]],
-            ]
-        ] = [(group, initial_parent_request_id, 0, group[:1])]
-        while tasks:
-            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
-            expected = [str(item["segment_id"]) for item in items]
-            payload = payload_builder(items or anchor)
-            if not items:
-                payload["segments"] = []
-            if repair_candidates is not None:
-                payload["segments"] = [
-                    {
-                        "id": item["segment_id"],
-                        "source": segment_model_source(item),
-                        "failed_candidate": repair_candidates[
-                            str(item["segment_id"])
-                        ]["candidate"],
-                        "validation_matches": repair_candidates[
-                            str(item["segment_id"])
-                        ]["findings"],
-                    }
-                    for item in items
-                ]
-                payload["validation_repair"] = (
-                    "返回不含所列残留字符的完整修正版译文。"
-                )
-            if format_attempt:
-                payload["format_correction"] = (
-                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
-                )
-            payload, id_map = localize_request_ids(payload, items)
-            messages = render_messages(prompt, payload)
-            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
-            try:
-                response, _ = await llm.chat(
-                    messages=messages,
-                    temperature=config["llm"]["temperature_translation"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    segment_id_map=id_map,
-                )
-                valid, unresolved, parse_errors, response_complete = (
-                    _map_local_translation_response(response.content, id_map)
-                )
-            except FatalExternalError:
-                raise
-            except ContextLengthError as exc:
-                if exc.segment_ids is None:
-                    exc.segment_ids = tuple(expected)
-                raise
-            except ExternalError as exc:
-                for segment_id in expected:
-                    await save_failed(
-                        segment_id,
-                        request_id,
-                        "external_error",
-                        str(exc),
-                    )
-                continue
-            for segment_id, text in valid.items():
-                try:
-                    await accept_candidate(segment_id, text, request_id)
-                except IncompleteError as exc:
-                    parse_errors.append(str(exc))
-                    if segment_id not in unresolved:
-                        unresolved.append(segment_id)
-                    continue
-                valid_total[segment_id] = (text, request_id)
-            if response_complete and not unresolved:
-                continue
-            logger.warning(
-                "format correction request=%s attempt=%d unresolved=%d errors=%d",
+    state = StageRunState(
+        project=project,
+        stage="translation",
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
+
+    async def accept_translation(
+        segment_id: str, request_id: str, text: Any
+    ) -> None:
+        await accept_candidate(segment_id, str(text), request_id)
+
+    async def save_external_error(
+        expected: list[str], request_id: str, message: str
+    ) -> None:
+        for segment_id in expected:
+            await save_failed(
+                segment_id,
                 request_id,
-                format_attempt + 1,
-                len(unresolved),
-                len(parse_errors),
+                "external_error",
+                message,
             )
-            if format_attempt >= config["retry"]["format_max_attempts"]:
-                exhausted.extend(unresolved)
-                continue
-            if not unresolved:
-                tasks.append(([], request_id, format_attempt + 1, anchor))
-                continue
-            unresolved_groups = contiguous_groups(
-                (by_id[segment_id] for segment_id in unresolved),
-                all_segments=segments,
-            )
-            tasks.extend(
-                (
-                    unresolved_group,
-                    request_id,
-                    format_attempt + 1,
-                    unresolved_group[:1],
-                )
-                for unresolved_group in unresolved_groups
-            )
-        return valid_total, list(dict.fromkeys(exhausted))
 
     async def process_once(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> None:
         group = list(chunk.segments)
-        valid, unresolved = await request_translations(
+        exhausted = await _localized_request_loop(
             group,
+            payload_builder=payload_builder,
+            prompt=prompt,
+            config=config,
+            llm=state.llm,
+            stage="translation",
+            accept=accept_translation,
+            save_error=save_external_error,
+            parse=_map_local_translation_response,
+            format_correction=(
+                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
+            ),
+            by_id=by_id,
+            segments=segments,
+            logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
-        for segment_id in unresolved:
+        for segment_id in exhausted:
             await save_failed(
                 segment_id,
                 f"REQ-{uuid.uuid4().hex[:12].upper()}",
@@ -2598,78 +3083,31 @@ async def run_translation(
                 "格式修正次数耗尽",
             )
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
-    ) -> None:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            await process_once(chunk, split_parent_request_id)
-            return
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
-            )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                        by_id=by_id,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                await save_failed(
-                    str(items[0]["segment_id"]),
-                    "REQ-NONE",
-                    "context_error",
-                    "模型报告上下文过长",
-                )
-                return
-            for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
-
     async def repair_group(
         group: list[dict[str, Any]],
         subset: dict[str, dict[str, Any]],
         parent_request_id: str | None = None,
     ) -> None:
         try:
-            valid, unresolved = await request_translations(
+            exhausted = await _localized_request_loop(
                 group,
-                repair_candidates=subset,
+                payload_builder=payload_builder,
+                prompt=prompt,
+                config=config,
+                llm=state.llm,
+                stage="translation",
+                accept=accept_translation,
+                save_error=save_external_error,
+                parse=_map_local_translation_response,
+                format_correction=(
+                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
+                ),
+                by_id=by_id,
+                segments=segments,
+                logger=logger,
                 initial_parent_request_id=parent_request_id,
+                repair_candidates=subset,
             )
         except ContextLengthError as exc:
             if len(group) > 1:
@@ -2718,166 +3156,139 @@ async def run_translation(
                 }
                 await repair_group([part], child_subset, exc.request_id)
             return
-        for segment_id in unresolved:
+        for segment_id in exhausted:
             validation_pending[segment_id] = subset[segment_id]
 
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage="translation",
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            for segment in preflight_failed:
-                await save_failed(
-                    str(segment["segment_id"]),
-                    f"REQ-{uuid.uuid4().hex[:12].upper()}",
-                    "context_error",
-                    "单 Segment 超过模型限制且内部拆分已关闭",
-                )
-            await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-            max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-            for repair_attempt in range(1, max_repairs + 1):
-                if not validation_pending:
-                    break
-                current_pending = dict(validation_pending)
-                validation_pending.clear()
-                groups = contiguous_groups(
-                    (item["segment"] for item in current_pending.values()),
-                    all_segments=segments,
-                )
-                logger.warning(
-                    "validation repair attempt=%d segments=%d chunks=%d",
-                    repair_attempt,
-                    len(current_pending),
-                    len(groups),
-                )
-                for group in groups:
-                    subset = {
-                        str(item["segment_id"]): current_pending[
-                            str(item["segment_id"])
-                        ]
-                        for item in group
-                    }
-                    await repair_group(group, subset)
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="interrupted",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="failed",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=len(selection.work) - len(completed_ids),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s completed=%d error_type=%s",
-            run_id,
-            len(completed_ids),
-            type(exc).__name__,
-        )
-        raise
-
-    exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
-    if exhausted_mode == "warning":
-        pending_part_originals = {
-            part_original[segment_id]
-            for segment_id in validation_pending
-            if segment_id in part_original
-        }
-        for original_id in pending_part_originals:
-            expected = original_parts[original_id]
-            combined_parts: list[str] = []
-            request_id = "REQ-NONE"
-            for part_id in expected:
-                if part_id in validation_pending:
-                    item = validation_pending[part_id]
-                    combined_parts.append(str(item["candidate"]))
-                    request_id = str(item["request_id"])
-                elif part_id in part_results.get(original_id, {}):
-                    text, request_id = part_results[original_id][part_id]
-                    combined_parts.append(text)
-                else:
-                    break
-            else:
-                combined = "".join(combined_parts)
-                await save_completed(
-                    original_id,
-                    combined,
-                    request_id,
-                    validation_status="warning",
-                    findings=validate_translation_text(
-                        combined,
-                        config["validation"]["translation"],
-                    ),
-                )
-                for part_id in expected:
-                    validation_pending.pop(part_id, None)
-    for segment_id, item in validation_pending.items():
-        if exhausted_mode == "warning":
-            await save_completed(
-                segment_id,
-                item["candidate"],
-                item["request_id"],
-                validation_status="warning",
-                findings=item["findings"],
-            )
-        else:
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
+    ) -> None:
+        for segment in failed:
             await save_failed(
-                segment_id,
-                item["request_id"],
-                "validation_error",
-                "翻译文字校验修复次数耗尽",
-                candidate=item["candidate"],
-                findings=item["findings"],
+                str(segment["segment_id"]),
+                f"REQ-{uuid.uuid4().hex[:12].upper()}",
+                "context_error",
+                "单 Segment 超过模型限制且内部拆分已关闭",
             )
-    failed_count = len(failed_ids)
-    usage = finalize_run(
-        run_dir,
-        status="completed" if failed_count == 0 else "failed",
-        completed=(
+
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        await save_failed(
+            str(items[0]["segment_id"]),
+            "REQ-NONE",
+            "context_error",
+            "模型报告上下文过长",
+        )
+
+    async def before_finalize() -> None:
+        max_repairs = config["validation"]["translation"]["max_retry_attempts"]
+        for repair_attempt in range(1, max_repairs + 1):
+            if not validation_pending:
+                break
+            current_pending = dict(validation_pending)
+            validation_pending.clear()
+            groups = contiguous_groups(
+                (item["segment"] for item in current_pending.values()),
+                all_segments=segments,
+                cross_boundary="translation"
+                in config["chunking"]["cross_boundary_batching"],
+            )
+            logger.warning(
+                "validation repair attempt=%d segments=%d chunks=%d",
+                repair_attempt,
+                len(current_pending),
+                len(groups),
+            )
+            for group in groups:
+                subset = {
+                    str(item["segment_id"]): current_pending[
+                        str(item["segment_id"])
+                    ]
+                    for item in group
+                }
+                await repair_group(group, subset)
+        exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
+        if exhausted_mode == "warning":
+            pending_part_originals = {
+                part_original[segment_id]
+                for segment_id in validation_pending
+                if segment_id in part_original
+            }
+            for original_id in pending_part_originals:
+                expected = original_parts[original_id]
+                combined_parts: list[str] = []
+                request_id = "REQ-NONE"
+                for part_id in expected:
+                    if part_id in validation_pending:
+                        item = validation_pending[part_id]
+                        combined_parts.append(str(item["candidate"]))
+                        request_id = str(item["request_id"])
+                    elif part_id in part_results.get(original_id, {}):
+                        text, request_id = part_results[original_id][part_id]
+                        combined_parts.append(text)
+                    else:
+                        break
+                else:
+                    combined = "".join(combined_parts)
+                    await save_completed(
+                        original_id,
+                        combined,
+                        request_id,
+                        validation_status="warning",
+                        findings=validate_translation_text(
+                            combined,
+                            config["validation"]["translation"],
+                        ),
+                    )
+                    for part_id in expected:
+                        validation_pending.pop(part_id, None)
+        for segment_id, item in validation_pending.items():
+            if exhausted_mode == "warning":
+                await save_completed(
+                    segment_id,
+                    item["candidate"],
+                    item["request_id"],
+                    validation_status="warning",
+                    findings=item["findings"],
+                )
+            else:
+                await save_failed(
+                    segment_id,
+                    item["request_id"],
+                    "validation_error",
+                    "翻译文字校验修复次数耗尽",
+                    candidate=item["candidate"],
+                    findings=item["findings"],
+                )
+
+    def completed_count() -> int:
+        return (
             len(selection.reusable) + len(completed_ids)
             if resume_run_id
             else len(completed_ids)
-        ),
-        failed=failed_count,
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        )
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_ids),
+        exception_completed=completed_count,
+        exception_failed=lambda: len(selection.work) - len(completed_ids),
+        failure_counts=failure_counts,
+        http_client=http_client,
+        runtime_parts_kwargs={"by_id": by_id},
     )
+    failed_count = len(failed_ids)
     logger.info(
         "run complete run=%s completed=%d failed=%d",
         run_id,
@@ -2907,15 +3318,13 @@ def require_success(summary: dict[str, Any]) -> None:
 def _base_results(
     project: Path,
     stage: str,
-    *,
-    repair_tail: bool,
 ) -> dict[str, dict[str, Any]]:
     translations = {
         str(key): value
         for key, value in classify_stage(
             [],
             load_stage_history(
-                project, "translation", repair_tail=repair_tail
+                project, "translation"
             ),
             force=False,
         ).latest_completed.items()
@@ -2925,7 +3334,7 @@ def _base_results(
     applied = classify_stage(
         [],
         load_stage_history(
-            project, "proofreading_applied", repair_tail=repair_tail
+            project, "proofreading_applied"
         ),
         force=False,
     ).latest_completed
@@ -3001,41 +3410,30 @@ async def run_review(
     limiter: SlidingWindowLimiter | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
     logger = get_logger(stage)
-    resume_arguments_ignored = False
-    if resume_run_id is not None:
-        resumed_scope = scope_from_run(
-            project, resume_run_id, dry_run=scope.dry_run
-        )
-        resume_arguments_ignored = (
-            scope.from_file,
-            scope.only_file,
-            scope.only_segment,
-            scope.force,
-        ) != (
-            resumed_scope.from_file,
-            resumed_scope.only_file,
-            resumed_scope.only_segment,
-            resumed_scope.force,
-        )
-        scope = resumed_scope
+    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
-        project, dry_run=scope.dry_run, stage=stage
+        project, stage=stage
     )
     _require_nonempty_segments(segments)
-    prompt = _prompt(project, stage)
+    language = _prompt_language(project, stage, prompt_language)
+    prompt = _prompt(project, stage, language)
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
-        config, stage, prompt, terms_revision=terms_revision
+        config,
+        stage,
+        prompt_middle_digests(project, stage),
+        terms_revision=terms_revision,
     )
     selected_segments = select_scope(segments, files, scope)
-    bases = _base_results(project, stage, repair_tail=not scope.dry_run)
+    bases = _base_results(project, stage)
     missing_base = [
         str(segment["segment_id"])
         for segment in selected_segments
@@ -3055,36 +3453,32 @@ async def run_review(
                     "text": str(segment["source"]),
                 },
             )
-    history = load_stage_history(project, stage, repair_tail=not scope.dry_run)
+    history = load_stage_history(project, stage)
     selection = classify_stage(selected_segments, history, force=scope.force)
-    warnings: list[str] = []
     usage: dict[str, Any] | None = None
-    if resume_run_id is not None:
-        warnings.append(
-            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
-        )
-        if resume_arguments_ignored:
-            warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
-    if missing_base:
-        warnings.append(
-            f"{stage} dry-run 使用源文占位估算；"
-            f"实际运行仍缺少 {len(missing_base)} 条上游结果"
-        )
-    fingerprint_warning = _confirm_fingerprint_reuse(
-        stage,
-        selection.fingerprints,
-        fingerprint,
-        len(selection.reusable),
-        force=scope.force,
+    warnings = _assemble_warnings(
+        stage=stage,
         resume_run_id=resume_run_id,
+        resume_arguments_ignored=resume_arguments_ignored,
+        resume_message=(
+            f"续用 Run {resume_run_id} 的原始范围；本次使用当前 config 和 Prompt"
+        ),
+        config=config,
+        fingerprint=fingerprint,
+        existing_fingerprints=selection.fingerprints,
+        reusable_count=len(selection.reusable),
+        force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
+        extra=(
+            [
+                f"{stage} dry-run 使用源文占位估算；"
+                f"实际运行仍缺少 {len(missing_base)} 条上游结果"
+            ]
+            if missing_base
+            else []
+        ),
     )
-    if fingerprint_warning:
-        warnings.append(fingerprint_warning)
     context_config = config["context"][stage]
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3105,11 +3499,13 @@ async def run_review(
             else []
         )
         terms_by_source: dict[str, dict[str, Any]] = {}
+        term_spec = term_normalization(config)
         for item in items:
             for term in match_terms(
                 str(item["source"]),
                 library,
                 config["terminology"]["max_terms_per_segment"],
+                term_spec,
             ):
                 terms_by_source[str(term["source"])] = term
         return {
@@ -3126,125 +3522,81 @@ async def run_review(
             ],
         }
 
-    run_id: str | None = None
-    run_dir: Path | None = None
-    if not scope.dry_run:
-        if resume_run_id is not None:
-            run_id, run_dir = continue_run(
-                project,
-                resume_run_id,
-                config=config,
-                stage=stage,
-                fingerprint=fingerprint,
-                prompt=prompt,
-                scope=scope,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-            )
-        else:
-            run_id, run_dir = create_run(
-                project,
-                config=config,
-                stage=stage,
-                fingerprint=fingerprint,
-                prompt=prompt,
-                selected_count=len(selection.selected),
-                requested_count=len(selection.work),
-                reused_count=len(selection.reusable),
-                details={
-                    "terms_revision": terms_revision,
-                    "scope": _scope_record(scope),
-                },
-            )
+    run_id, run_dir, fail_planning = _create_or_continue_run(
+        project,
+        stage,
+        scope=scope,
+        config=config,
+        fingerprint=fingerprint,
+        prompt=prompt,
+        resume_run_id=resume_run_id,
+        selected_count=len(selection.selected),
+        requested_count=len(selection.work),
+        reused_count=len(selection.reusable),
+        details={
+            "terms_revision": terms_revision,
+            "scope": _scope_record(scope),
+            "prompt_language": language,
+        },
+        warnings=warnings,
+    )
 
-    def fail_planning(error: BaseException) -> None:
-        _finalize_planning_failure(
-            run_dir,
-            requested_count=len(selection.work),
-            reused_count=len(selection.reusable),
-            warnings=warnings,
-            error=error,
+    def make_probe(segment: dict[str, Any], part: tuple[str, str]) -> dict[str, Any]:
+        probe_id = f"{segment['segment_id']}-PROBE"
+        bases[probe_id] = {
+            "record_id": bases[str(segment["segment_id"])]["record_id"],
+            "text": part[1],
+        }
+        return {**segment, "segment_id": probe_id, "source": part[0]}
+
+    def initial_part(segment: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(segment["source"]),
+            str(bases[str(segment["segment_id"])]["text"]),
         )
 
-    request_segments: list[dict[str, Any]] = []
-    part_original: dict[str, str] = {}
-    original_parts: dict[str, list[str]] = {}
-    preflight_failed: list[dict[str, Any]] = []
-    for segment in selection.work:
-        try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
-                config=config,
-                prompt=prompt,
-                payload_builder=payload_builder,
-            )
-            request_segments.append(segment)
-            continue
-        except RequestSizeError as exc:
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
-            if not config["chunking"]["allow_split_oversized_segment"]:
-                preflight_failed.append(segment)
-                continue
-        pending_parts = [
-            (str(segment["source"]), str(bases[str(segment["segment_id"])]["text"]))
+    def split_part(part: tuple[str, str]) -> list[tuple[str, str]]:
+        left_source, right_source = _split_source_once(part[0])
+        split_at = round(len(part[1]) * len(left_source) / len(part[0]))
+        return [
+            (left_source, part[1][:split_at]),
+            (right_source, part[1][split_at:]),
         ]
-        accepted_parts: list[tuple[str, str]] = []
-        while pending_parts:
-            source_part, text_part = pending_parts.pop(0)
-            probe_id = f"{segment['segment_id']}-PROBE"
-            probe = {**segment, "segment_id": probe_id, "source": source_part}
-            bases[probe_id] = {
-                "record_id": bases[str(segment["segment_id"])]["record_id"],
-                "text": text_part,
-            }
-            try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
-                    config=config,
-                    prompt=prompt,
-                    payload_builder=payload_builder,
-                )
-                accepted_parts.append((source_part, text_part))
-            except RequestSizeError as exc:
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
-                try:
-                    left_source, right_source = _split_source_once(source_part)
-                except ConfigError as split_error:
-                    fail_planning(split_error)
-                    raise
-                split_at = round(len(text_part) * len(left_source) / len(source_part))
-                pending_parts[0:0] = [
-                    (left_source, text_part[:split_at]),
-                    (right_source, text_part[split_at:]),
-                ]
-            finally:
-                bases.pop(probe_id, None)
-        part_ids: list[str] = []
-        for index, (source_part, text_part) in enumerate(accepted_parts, start=1):
-            part_id = f"{segment['segment_id']}-P{index:03d}"
-            request_segments.append(
-                {**segment, "segment_id": part_id, "source": source_part}
-            )
-            bases[part_id] = {
-                "record_id": bases[str(segment["segment_id"])]["record_id"],
-                "text": text_part,
-            }
-            part_original[part_id] = str(segment["segment_id"])
-            part_ids.append(part_id)
-        original_parts[str(segment["segment_id"])] = part_ids
+
+    def accept_part(
+        segment: dict[str, Any], part_id: str, part: tuple[str, str]
+    ) -> dict[str, Any]:
+        bases[part_id] = {
+            "record_id": bases[str(segment["segment_id"])]["record_id"],
+            "text": part[1],
+        }
+        return {**segment, "segment_id": part_id, "source": part[0]}
+
+    preflight = _split_oversized_preflight(
+        selection.work,
+        stage=stage,
+        config=config,
+        segments=segments,
+        prompt=prompt,
+        payload_builder=payload_builder,
+        fail_planning=fail_planning,
+        make_probe=make_probe,
+        split_part=split_part,
+        accept_part=accept_part,
+        initial_part=initial_part,
+        cleanup_probe=lambda probe_id: bases.pop(probe_id, None),
+    )
+    request_segments = preflight.request_segments
+    part_original = preflight.part_original
+    original_parts = preflight.original_parts
+    preflight_failed = preflight.preflight_failed
 
     if scope.dry_run:
         plans = build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
+            stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
         )
@@ -3269,33 +3621,6 @@ async def run_review(
             "warnings": warnings,
         }
     assert run_id is not None and run_dir is not None
-    logger.info("run start run=%s", run_id)
-    planned = iter_chunk_plans(
-        request_segments,
-        all_segments=segments,
-        config=config,
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    chunks = materialize_chunk_stream(run_id, stage, planned)
-    if config["debug"]["enabled"]:
-        planned_chunks = chunks
-        def debug_chunks() -> Iterable[ChunkPlan]:
-            for chunk in planned_chunks:
-                save_debug_chunks(
-                    run_dir,
-                    str(metadata["project_id"]),
-                    run_id,
-                    stage,
-                    [chunk],
-                )
-                yield chunk
-        chunks = debug_chunks()
-    if limiter is None:
-        limiter = SlidingWindowLimiter(
-            config["execution"]["requests_per_minute"],
-            config["execution"]["input_tokens_per_minute"],
-        )
     result_path = stage_result_path(project, stage)
     write_lock = asyncio.Lock()
     completed_ids: set[str] = set()
@@ -3306,6 +3631,20 @@ async def run_review(
         {str(item["segment_id"]): item for item in request_segments}
     )
     part_results: dict[str, dict[str, tuple[dict[str, Any], str]]] = {}
+    state = StageRunState(
+        project=project,
+        stage=stage,
+        config=config,
+        metadata=metadata,
+        segments=segments,
+        prompt=prompt,
+        fingerprint=fingerprint,
+        resume_run_id=resume_run_id,
+        warnings=warnings,
+        run_id=run_id,
+        run_dir=run_dir,
+        on_usage=on_usage,
+    )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -3316,23 +3655,6 @@ async def run_review(
             )
 
     report_progress()
-
-    def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
-        if chunk.chunk_id is not None:
-            return chunk
-        materialized = replace(
-            chunk,
-            chunk_id=f"CHK-{run_id}-R-{uuid.uuid4().hex[:10].upper()}",
-        )
-        if config["debug"]["enabled"]:
-            save_debug_chunks(
-                run_dir,
-                str(metadata["project_id"]),
-                run_id,
-                stage,
-                [materialized],
-            )
-        return materialized
 
     async def save_result(
         segment_id: str,
@@ -3349,7 +3671,7 @@ async def run_review(
             if parsed is not None:
                 suggested_text = parsed["suggested_text"]
                 if suggested_text is not None:
-                    suggested_text = _normalize_model_text(
+                    suggested_text = normalize_model_text(
                         files,
                         by_id[segment_id],
                         str(suggested_text),
@@ -3360,6 +3682,7 @@ async def run_review(
                         suggested_text,
                     )
                 append_jsonl(
+                    project,
                     result_path,
                     record_header(
                         "stage_result",
@@ -3388,6 +3711,7 @@ async def run_review(
             else:
                 failure_counts["stage_error"] += 1
                 append_jsonl(
+                    project,
                     result_path,
                     record_header(
                         "stage_result",
@@ -3449,102 +3773,39 @@ async def run_review(
             },
         )
 
+    async def save_external_error(
+        expected: list[str], request_id: str, message: str
+    ) -> None:
+        for segment_id in expected:
+            await save_result(segment_id, request_id, error=message)
+
     async def process_once(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> None:
-        exhausted: list[str] = []
-        tasks: list[
-            tuple[
-                list[dict[str, Any]],
-                str | None,
-                int,
-                list[dict[str, Any]],
-            ]
-        ] = [
-            (
-                list(chunk.segments),
-                initial_parent_request_id,
-                0,
-                list(chunk.segments[:1]),
-            )
-        ]
-        while tasks:
-            items, parent_request_id, format_attempt, anchor = tasks.pop(0)
-            expected = [str(item["segment_id"]) for item in items]
-            payload = payload_builder(items or anchor)
-            if not items:
-                payload["segments"] = []
-            if format_attempt:
-                payload["format_correction"] = (
-                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    'ID。accepted 每行使用 {"type":"segment","id":"...",'
-                    '"status":"accepted"}；suggested 每行使用 '
-                    '{"type":"segment","id":"...","status":"suggested",'
-                    '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
-                    '也可为 null。最后输出 {"type":"end"}。'
-                )
-            payload, id_map = localize_request_ids(payload, items)
-            messages = render_messages(prompt, payload)
-            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
-            try:
-                response, _ = await llm.chat(
-                    messages=messages,
-                    temperature=config["llm"][f"temperature_{stage}"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    segment_id_map=id_map,
-                )
-                valid, unresolved, parse_errors, response_complete = (
-                    _map_local_review_response(response.content, id_map)
-                )
-            except FatalExternalError:
-                raise
-            except ContextLengthError as exc:
-                if exc.segment_ids is None:
-                    exc.segment_ids = tuple(expected)
-                raise
-            except ExternalError as exc:
-                for segment_id in expected:
-                    await save_result(segment_id, request_id, error=str(exc))
-                continue
-            for segment_id, parsed in valid.items():
-                try:
-                    await accept_result(segment_id, request_id, parsed)
-                except IncompleteError as exc:
-                    parse_errors.append(str(exc))
-                    if segment_id not in unresolved:
-                        unresolved.append(segment_id)
-            if response_complete and not unresolved:
-                continue
-            logger.warning(
-                "format correction request=%s attempt=%d unresolved=%d errors=%d",
-                request_id,
-                format_attempt + 1,
-                len(unresolved),
-                len(parse_errors),
-            )
-            if format_attempt >= config["retry"]["format_max_attempts"]:
-                exhausted.extend(unresolved)
-                continue
-            if not unresolved:
-                tasks.append(([], request_id, format_attempt + 1, anchor))
-                continue
-            unresolved_groups = contiguous_groups(
-                (by_id[segment_id] for segment_id in unresolved),
-                all_segments=segments,
-            )
-            tasks.extend(
-                (
-                    unresolved_group,
-                    request_id,
-                    format_attempt + 1,
-                    unresolved_group[:1],
-                )
-                for unresolved_group in unresolved_groups
-            )
+        exhausted = await _localized_request_loop(
+            list(chunk.segments),
+            payload_builder=payload_builder,
+            prompt=prompt,
+            config=config,
+            llm=state.llm,
+            stage=stage,
+            accept=accept_result,
+            save_error=save_external_error,
+            parse=_map_local_review_response,
+            format_correction=(
+                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
+                'ID。accepted 每行使用 {"type":"segment","id":"...",'
+                '"status":"accepted"}；suggested 每行使用 '
+                '{"type":"segment","id":"...","status":"suggested",'
+                '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
+                '也可为 null。最后输出 {"type":"end"}。'
+            ),
+            by_id=by_id,
+            segments=segments,
+            logger=logger,
+            initial_parent_request_id=initial_parent_request_id,
+        )
         for segment_id in dict.fromkeys(exhausted):
             await save_result(
                 segment_id,
@@ -3552,144 +3813,54 @@ async def run_review(
                 error="格式修正次数耗尽",
             )
 
-    async def process(
-        chunk: ChunkPlan,
-        split_parent_request_id: str | None = None,
+    async def record_preflight_failure(
+        failed: list[dict[str, Any]],
     ) -> None:
-        chunk = ensure_runtime_chunk(chunk)
-        try:
-            await process_once(chunk, split_parent_request_id)
-            return
-        except ContextLengthError as exc:
-            logger.warning(
-                "context split parent_request=%s segments=%d",
-                exc.request_id,
-                len(chunk.segments),
+        for segment in failed:
+            await save_result(
+                str(segment["segment_id"]),
+                "REQ-NONE",
+                error="单 Segment 超过模型限制且内部拆分已关闭",
             )
-            requested_ids = (
-                set(exc.segment_ids) if exc.segment_ids is not None else None
-            )
-            items = [
-                item
-                for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
-            ]
-            if not items:
-                return
-            if len(items) > 1:
-                midpoint = len(items) // 2
-                groups = (items[:midpoint], items[midpoint:])
-            elif (
-                config["chunking"]["allow_split_oversized_segment"]
-                and len(str(items[0]["source"])) > 1
-            ):
-                groups = tuple(
-                    [part]
-                    for part in _replace_with_runtime_parts(
-                        items[0],
-                        part_original=part_original,
-                        original_parts=original_parts,
-                        by_id=by_id,
-                        bases=bases,
-                    )
-                )
-            else:
-                groups = ()
-            if not groups:
-                await save_result(
-                    str(items[0]["segment_id"]),
-                    "REQ-NONE",
-                    error="模型报告上下文过长",
-                )
-                return
-            for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
 
-    try:
-        async with LLMClient(
-            config,
-            limiter,
-            run_dir=run_dir,
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            stage=stage,
-            client=http_client,
-            on_usage=on_usage,
-        ) as llm:
-            for segment in preflight_failed:
-                await save_result(
-                    str(segment["segment_id"]),
-                    "REQ-NONE",
-                    error="单 Segment 超过模型限制且内部拆分已关闭",
-                )
-            await dispatch_chunks(
-                chunks,
-                process,
-                mode=config["execution"]["scheduling_mode"],
-                max_parallel=config["execution"]["max_parallel"],
-            )
-        _extend_unique(warnings, llm.warnings)
-        usage = llm.usage_summary()
-    except asyncio.CancelledError:
-        usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="interrupted",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=0,
-            warnings=[*warnings, "任务已由用户取消"],
-            usage=usage,
-            failure_counts=dict(failure_counts),
+    async def record_context_failure(
+        items: list[dict[str, Any]],
+    ) -> None:
+        await save_result(
+            str(items[0]["segment_id"]),
+            "REQ-NONE",
+            error="模型报告上下文过长",
         )
-        raise
-    except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
-        finalize_run(
-            run_dir,
-            status="failed",
-            completed=(
-                len(selection.reusable) + len(completed_ids)
-                if resume_run_id
-                else len(completed_ids)
-            ),
-            failed=len(selection.work) - len(completed_ids),
-            warnings=warnings,
-            usage=usage,
-            failure_counts=dict(failure_counts),
-        )
-        logger.error(
-            "run failed run=%s completed=%d error_type=%s",
-            run_id,
-            len(completed_ids),
-            type(exc).__name__,
-        )
-        raise
-    usage = finalize_run(
-        run_dir,
-        status="completed" if not failed_ids else "failed",
-        completed=(
+
+    async def before_finalize() -> None:
+        return None
+
+    def completed_count() -> int:
+        return (
             len(selection.reusable) + len(completed_ids)
             if resume_run_id
             else len(completed_ids)
-        ),
-        failed=len(failed_ids),
-        warnings=warnings,
-        usage=usage,
-        failure_counts=dict(failure_counts),
+        )
+
+    usage = await _execute_stage_run(
+        state,
+        request_segments=request_segments,
+        part_original=part_original,
+        original_parts=original_parts,
+        preflight_failed=preflight_failed,
+        limiter=limiter,
+        payload_builder=payload_builder,
+        process_once=process_once,
+        record_preflight_failure=record_preflight_failure,
+        record_context_failure=record_context_failure,
+        before_finalize=before_finalize,
+        completed_count=completed_count,
+        failed_count=lambda: len(failed_ids),
+        exception_completed=completed_count,
+        exception_failed=lambda: len(selection.work) - len(completed_ids),
+        failure_counts=failure_counts,
+        http_client=http_client,
+        runtime_parts_kwargs={"by_id": by_id, "bases": bases},
     )
     logger.info(
         "run complete run=%s completed=%d failed=%d",
@@ -3724,17 +3895,15 @@ def run_apply(
     if not confirmed_all:
         raise UsageError("apply 必须显式传入 --all")
     logger = get_logger("apply")
-    config, metadata, files, segments = _project_context(project, dry_run=scope.dry_run)
+    config, metadata, files, segments = _project_context(project)
     _require_nonempty_segments(segments)
     selected = select_scope(segments, files, scope)
     suggestions = classify_stage(
         selected,
-        load_stage_history(
-            project, review_stage, repair_tail=not scope.dry_run
-        ),
+        load_stage_history(project, review_stage),
         force=False,
     ).latest_completed
-    bases = _base_results(project, review_stage, repair_tail=not scope.dry_run)
+    bases = _base_results(project, review_stage)
     missing = [
         str(item["segment_id"])
         for item in selected
@@ -3808,6 +3977,7 @@ def run_apply(
             str(text),
         )
         append_jsonl(
+            project,
             result_path,
             record_header(
                 "stage_result",
@@ -3826,6 +3996,7 @@ def run_apply(
         )
     warnings = ["已强制应用旧基准建议"] if outdated else []
     finalize_run(
+        project,
         run_dir,
         status="completed",
         completed=len(selected),
@@ -3861,7 +4032,7 @@ def export_project(
     if output_format not in {"original", "txt"}:
         raise UsageError(f"不支持的导出格式：{output_format}")
     logger = get_logger("export")
-    config, _, files, segments = _project_context(project, dry_run=False)
+    config, _, files, segments = _project_context(project)
     if file_ids is not None:
         if not file_ids:
             raise UsageError("导出文件范围不能为空")
@@ -4015,7 +4186,7 @@ def export_project(
                 )
             state_path = file_record.get("document_adapter_state")
             if state_path is not None:
-                state_record = read_json(project / str(state_path))
+                state_record = read_json(project, project / str(state_path))
                 if (
                     state_record.get("adapter_id") != adapter_id
                     or str(state_record.get("adapter_version"))
@@ -4074,8 +4245,9 @@ async def run_all(
     *,
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
+    prompt_language: str | None = None,
 ) -> dict[str, Any]:
-    _require_nonempty_segments(load_segments(project, repair_tail=not scope.dry_run))
+    _require_nonempty_segments(load_segments(project))
     stages = ("terminology", "translation", "proofreading", "polishing")
     configs = {
         stage: load_project_config(project, stage=stage) for stage in stages
@@ -4106,7 +4278,7 @@ async def run_all(
         summaries: list[dict[str, Any]] = []
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
-        active = read_json(active_path) if logical_record_exists(active_path) else None
+        active = read_json(project, active_path) if record_exists(project, active_path) else None
         if scope.force or terms is None or (
             active and active.get("status") == "active"
         ):
@@ -4116,6 +4288,7 @@ async def run_all(
                 http_client=client_for("terminology"),
                 limiter=limiters[resource_keys["terminology"]],
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                prompt_language=prompt_language,
             )
             summaries.append(term_summary)
             require_success(term_summary)
@@ -4125,6 +4298,7 @@ async def run_all(
             http_client=client_for("translation"),
             limiter=limiters[resource_keys["translation"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(translation)
         require_success(translation)
@@ -4135,6 +4309,7 @@ async def run_all(
             http_client=client_for("proofreading"),
             limiter=limiters[resource_keys["proofreading"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(proofreading)
         require_success(proofreading)
@@ -4145,6 +4320,7 @@ async def run_all(
             http_client=client_for("polishing"),
             limiter=limiters[resource_keys["polishing"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
         )
         summaries.append(polishing)
         require_success(polishing)
@@ -4178,7 +4354,7 @@ async def run_all(
 
 
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    config, metadata, files, segments = _project_context(project, dry_run=dry_run)
+    config, metadata, files, segments = _project_context(project)
     nonempty = [item for item in segments if not item["is_empty"]]
     active_segment_ids = {
         str(item["segment_id"]) for item in nonempty
@@ -4215,23 +4391,23 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     current_term_fingerprint = stage_fingerprint(
         load_project_config(project, stage="terminology"),
         "terminology",
-        _prompt(project, "terminology"),
+        prompt_middle_digests(project, "terminology"),
     )
     summary["terminology"]["current_fingerprint"] = current_term_fingerprint
     if library:
         summary["terms_revision"] = library["terms_revision"]
     active_path = project / "terminology" / "active_task.json"
-    if logical_record_exists(active_path):
-        active = read_json(active_path)
+    if record_exists(project, active_path):
+        active = read_json(project, active_path)
         if active.get("status") in {"active", "completed"}:
             scans = [
                 item
                 for item in read_jsonl(
+                    project,
                     project / "terminology" / "scans.jsonl",
-                    repair_tail=not dry_run,
+                    task_id=active.get("active_task_id"),
                 )
-                if item.get("active_task_id") == active.get("active_task_id")
-                and str(item.get("segment_id")) in active_segment_ids
+                if str(item.get("segment_id")) in active_segment_ids
             ]
             completed = {
                 item["segment_id"] for item in scans if item["status"] == "completed"
@@ -4268,7 +4444,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         "polishing",
         "polishing_applied",
     ):
-        history = load_stage_history(project, stage, repair_tail=not dry_run)
+        history = load_stage_history(project, stage)
         active_history = [
             item
             for item in history
@@ -4300,7 +4476,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
             current_fingerprint = stage_fingerprint(
                 load_project_config(project, stage=stage),
                 stage,
-                _prompt(project, stage),
+                prompt_middle_digests(project, stage),
                 terms_revision=terms_revision,
             )
         else:
@@ -4336,7 +4512,7 @@ def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
         suggestions = classify_stage(
             [], histories[review_stage], force=False
         ).latest_completed
-        bases = _base_results(project, review_stage, repair_tail=not dry_run)
+        bases = _base_results(project, review_stage)
         summary["outdated_suggestions"][review_stage] = sum(
             suggestion.get("base_result_id")
             != bases.get(segment_id, {}).get("record_id")

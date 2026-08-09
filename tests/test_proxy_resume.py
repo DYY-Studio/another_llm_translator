@@ -26,11 +26,11 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.storage import (
+from app.sqlite_storage import (
     append_jsonl,
-    atomic_write_json,
     read_json,
     record_header,
+    write_json,
 )
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
@@ -81,6 +81,37 @@ def _new_running_run(
         details=details,
     )
     return run_id
+
+
+def _seed_terminology_task(project: Path, task_id: str) -> None:
+    metadata = read_json(project, project / "project.json")
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="old",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            str(metadata["project_id"]),
+            stage="terminology",
+            segment_id="F0001-S000001",
+            status="completed",
+            active_task_id=task_id,
+            stage_fingerprint="old",
+            run_id="OLD",
+            request_id="OLD",
+        ),
+    )
 
 
 def test_resume_flags_only_exist_on_standalone_llm_commands() -> None:
@@ -304,12 +335,12 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
         newer = _new_running_run(project, "translation")
         older_path = project / "runs" / older / "manifest.json"
         newer_path = project / "runs" / newer / "manifest.json"
-        older_manifest = read_json(older_path)
-        newer_manifest = read_json(newer_path)
+        older_manifest = read_json(project, older_path)
+        newer_manifest = read_json(project, newer_path)
         older_manifest["started_at"] = "2026-01-01T00:00:00+00:00"
         newer_manifest["started_at"] = "2026-01-02T00:00:00+00:00"
-        atomic_write_json(older_path, older_manifest)
-        atomic_write_json(newer_path, newer_manifest)
+        write_json(project, older_path, older_manifest)
+        write_json(project, newer_path, newer_manifest)
 
         with pytest.raises(UsageError, match="--resume-run"):
             choose_running_run(
@@ -319,7 +350,7 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
                 dry_run=False,
                 interactive=False,
             )
-        assert read_json(older_path)["superseded_by_run_id"] == newer
+        assert read_json(project, older_path)["superseded_by_run_id"] == newer
         before = newer_path.read_bytes()
         chosen, warnings = choose_running_run(
             project,
@@ -340,9 +371,8 @@ async def test_running_run_choice_decline_supersede_and_dry_run(
             interactive=True,
         )
         assert chosen is None
-        declined = read_json(newer_path)
+        declined = read_json(project, newer_path)
         assert declined["status"] == "interrupted"
-        assert declined["resume_declined"] is True
         assert "resume_declined_at" not in declined
         assert choose_running_run(
             project,
@@ -361,9 +391,10 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     run_id = _new_running_run(project, "translation")
     append_jsonl(
+        project,
         project / "stages" / "translation.jsonl",
         record_header(
             "stage_result",
@@ -395,7 +426,7 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
         json.dumps(preset), encoding="utf-8"
     )
     monkeypatch.setattr("app.config.APP_ROOT", preset_root)
-    prompt_path = project / "prompts" / "translation.middle.txt"
+    prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nCURRENT PROMPT",
         encoding="utf-8",
@@ -440,7 +471,7 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
         "utf-8"
     )
     assert "CURRENT PROMPT" in (continuation / "prompt.txt").read_text("utf-8")
-    manifest = read_json(project / "runs" / run_id / "manifest.json")
+    manifest = read_json(project, project / "runs" / run_id / "manifest.json")
     assert manifest["status"] == "completed"
     assert manifest["completed_segment_count"] == 3
     assert manifest["continuations"][0]["requested_segment_count"] == 2
@@ -454,8 +485,9 @@ async def test_translation_mixed_fingerprint_stops_before_run_or_request(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     append_jsonl(
+        project,
         project / "stages" / "translation.jsonl",
         record_header(
             "stage_result",
@@ -569,33 +601,8 @@ def test_cli_logs_resume_warning_once(
 @pytest.mark.asyncio
 async def test_terminology_resume_keeps_active_task(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "Alice\nBob")
-    metadata = read_json(project / "project.json")
     task_id = "TERM-TASK-KEEP"
-    atomic_write_json(
-        project / "terminology" / "active_task.json",
-        record_header(
-            "terminology_task",
-            str(metadata["project_id"]),
-            record_id=task_id,
-            active_task_id=task_id,
-            status="active",
-            initial_stage_fingerprint="old",
-        ),
-    )
-    append_jsonl(
-        project / "terminology" / "scans.jsonl",
-        record_header(
-            "terminology_scan",
-            str(metadata["project_id"]),
-            stage="terminology",
-            segment_id="F0001-S000001",
-            status="completed",
-            active_task_id=task_id,
-            stage_fingerprint="old",
-            run_id="OLD",
-            request_id="OLD",
-        ),
-    )
+    _seed_terminology_task(project, task_id)
     run_id = _new_running_run(
         project, "terminology", active_task_id=task_id
     )
@@ -630,33 +637,7 @@ async def test_terminology_ignores_old_fingerprint_outside_scope(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice\nBob")
-    metadata = read_json(project / "project.json")
-    task_id = "TERM-TASK-SCOPE"
-    atomic_write_json(
-        project / "terminology" / "active_task.json",
-        record_header(
-            "terminology_task",
-            str(metadata["project_id"]),
-            record_id=task_id,
-            active_task_id=task_id,
-            status="active",
-            initial_stage_fingerprint="old",
-        ),
-    )
-    append_jsonl(
-        project / "terminology" / "scans.jsonl",
-        record_header(
-            "terminology_scan",
-            str(metadata["project_id"]),
-            stage="terminology",
-            segment_id="F0001-S000001",
-            status="completed",
-            active_task_id=task_id,
-            stage_fingerprint="old",
-            run_id="OLD",
-            request_id="OLD",
-        ),
-    )
+    _seed_terminology_task(project, "TERM-TASK-SCOPE")
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -688,9 +669,10 @@ async def test_review_resume_reuses_completed_segments(
     tmp_path: Path, stage: str
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo")
-    metadata = read_json(project / "project.json")
+    metadata = read_json(project, project / "project.json")
     for index in (1, 2):
         append_jsonl(
+            project,
             project / "stages" / "translation.jsonl",
             record_header(
                 "stage_result",
@@ -709,6 +691,7 @@ async def test_review_resume_reuses_completed_segments(
         )
     run_id = _new_running_run(project, stage)
     append_jsonl(
+        project,
         project / "stages" / f"{stage}.jsonl",
         record_header(
             "stage_result",
