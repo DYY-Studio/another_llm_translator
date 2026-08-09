@@ -16,6 +16,7 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import psutil
@@ -187,6 +188,13 @@ def _resolve_export_file(root: Path, raw: str) -> Path:
     if not resolved.is_relative_to(output_root) or not resolved.is_file():
         raise UsageError("导出文件路径必须位于项目 output 目录内")
     return resolved
+
+
+def _attachment_header(filename: str) -> str:
+    encoded = quote(filename)
+    if encoded == filename:
+        return f'attachment; filename="{filename}"'
+    return f"attachment; filename*=utf-8''{encoded}"
 
 
 def create_app(
@@ -1602,9 +1610,7 @@ def create_app(
             content=path.read_bytes(),
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{path.name}"'
-                )
+                "Content-Disposition": _attachment_header(path.name)
             },
         )
 
@@ -1626,8 +1632,8 @@ def create_app(
             content=buffer.getvalue(),
             media_type="application/zip",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{name}-exports.zip"'
+                "Content-Disposition": _attachment_header(
+                    f"{name}-exports.zip"
                 )
             },
         )
