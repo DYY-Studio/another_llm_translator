@@ -10,7 +10,7 @@ interface TermForm {
   preferredTranslation: string;
   category: string;
   description: string;
-  aliases: string;
+  aliases: string[];
 }
 
 const emptyForm: TermForm = {
@@ -18,7 +18,7 @@ const emptyForm: TermForm = {
   preferredTranslation: "",
   category: "",
   description: "",
-  aliases: "",
+  aliases: [],
 };
 
 interface TermsCacheEntry {
@@ -63,11 +63,11 @@ function formFor(term: Term): TermForm {
     preferredTranslation: term.preferred_translation ?? "",
     category: term.category ?? "",
     description: term.description ?? "",
-    aliases: term.aliases.join("\n"),
+    aliases: [...term.aliases],
   };
 }
 
-function matchesFilters(term: Term, query: string, onlyConflicts: boolean, showDisabled: boolean) {
+function matchesFilters(term: Term, primarySource: string, query: string, onlyConflicts: boolean, showDisabled: boolean) {
   const normalized = query.trim().toLocaleLowerCase();
   const haystack = [
     term.source,
@@ -75,6 +75,7 @@ function matchesFilters(term: Term, query: string, onlyConflicts: boolean, showD
     term.category,
     term.description,
     ...term.aliases,
+    primarySource,
   ].filter(Boolean).join("\n").toLocaleLowerCase();
   return (!normalized || haystack.includes(normalized))
     && (!onlyConflicts || term.has_conflicts)
@@ -106,7 +107,8 @@ export function TermsView({
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
-  const [editorTab, setEditorTab] = useState<"edit" | "hits">("edit");
+  const [editorTab, setEditorTab] = useState<"edit" | "group" | "hits">("edit");
+  const [pendingPrimary, setPendingPrimary] = useState<string | null>(null);
   const [hits, setHits] = useState<TermHitsResponse | null>(null);
   const [hitsLoading, setHitsLoading] = useState(false);
   const [hitsError, setHitsError] = useState("");
@@ -118,6 +120,20 @@ export function TermsView({
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
+  const termByKey = useMemo(
+    () => new Map((data?.terms ?? []).map((term) => [term.normalized, term])),
+    [data],
+  );
+  const membersByPrimary = useMemo(() => {
+    const value = new Map<string, Term[]>();
+    for (const term of data?.terms ?? []) {
+      if (!term.group_primary) continue;
+      const members = value.get(term.group_primary) ?? [];
+      members.push(term);
+      value.set(term.group_primary, members);
+    }
+    return value;
+  }, [data]);
 
   // Restore a cached view synchronously during render so the browser never
   // paints an empty frame. This runs on the first mount too: prefetchTerms
@@ -239,9 +255,15 @@ export function TermsView({
 
   const visible = useMemo(() => {
     return (data?.terms ?? []).filter(
-      (term) => matchesFilters(term, search, onlyConflicts, showDisabled),
+      (term) => matchesFilters(
+        term,
+        term.group_primary ? termByKey.get(term.group_primary)?.source ?? "" : "",
+        search,
+        onlyConflicts,
+        showDisabled,
+      ),
     );
-  }, [data, onlyConflicts, search, showDisabled]);
+  }, [data, onlyConflicts, search, showDisabled, termByKey]);
   const visibleKeys = visible.map((term) => term.normalized);
   const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
   const selectedActive = visible.filter(
@@ -264,7 +286,13 @@ export function TermsView({
     const focused = data?.terms.find(
       (term) => term.normalized === selection.focusedKey,
     ) ?? null;
-    if (!focused || !matchesFilters(focused, nextSearch, nextConflicts, nextDisabled)) {
+    if (!focused || !matchesFilters(
+      focused,
+      focused.group_primary ? termByKey.get(focused.group_primary)?.source ?? "" : "",
+      nextSearch,
+      nextConflicts,
+      nextDisabled,
+    )) {
       resetFilterSelection();
     }
   }
@@ -290,7 +318,7 @@ export function TermsView({
           preferred_translation: form.preferredTranslation,
           category: form.category,
           description: form.description,
-          aliases: form.aliases.split("\n").map((item) => item.trim()).filter(Boolean),
+          aliases: form.aliases.map((item) => item.trim()).filter(Boolean),
           disabled,
         }),
       });
@@ -349,6 +377,52 @@ export function TermsView({
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function materializeAlias(alias: string) {
+    if (!selected) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse & { materialized: string }>(
+        `/api/v1/projects/${project}/terms/materialize`,
+        { method: "POST", body: JSON.stringify({ normalized: selected.normalized, alias }) },
+      );
+      setData(value);
+      const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
+      selection.reset(member?.normalized ?? "");
+      setForm(member ? {
+        ...formFor(member),
+        category: selected.category ?? "",
+        description: selected.description ?? "",
+      } : emptyForm);
+      setMessage(translate("terms.materializedUnsaved", language));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setPrimary() {
+    if (!pendingPrimary) return;
+    setSaving(true);
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/set-primary`,
+        { method: "POST", body: JSON.stringify({ normalized: pendingPrimary, confirm: true }) },
+      );
+      setData(value);
+      selection.reset(pendingPrimary);
+      const primary = value.terms.find((term) => term.normalized === pendingPrimary);
+      setForm(primary ? formFor(primary) : emptyForm);
+      setPendingPrimary(null);
+      setMessage(translate("terms.primaryChanged", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -444,14 +518,22 @@ export function TermsView({
             return (
               <button
                 key={term.normalized}
-                className={`term-row${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
+                className={`term-row${term.group_primary ? " term-member" : ""}${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
                 onClick={(event) => {
                   selection.select(term.normalized, visibleKeys, event);
                   focusTerm(term);
                 }}
               >
                 <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
-                <span><strong>{term.source}</strong><small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small></span>
+                <span>
+                  <strong>{term.source}</strong>
+                  <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                  {term.group_primary ? (
+                    <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
+                  ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
+                    <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
+                  ) : null}
+                </span>
                 <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
               </button>
             );
@@ -467,6 +549,7 @@ export function TermsView({
         {selected && (
           <div className="term-tabs">
             <button className={editorTab === "edit" ? "active" : ""} onClick={() => setEditorTab("edit")}>{translate("terms.tabEdit", language)}</button>
+            <button className={editorTab === "group" ? "active" : ""} onClick={() => setEditorTab("group")}>{translate("terms.tabGroup", language)}</button>
             <button className={editorTab === "hits" ? "active" : ""} onClick={() => setEditorTab("hits")}>{translate("terms.tabHits", language, { count: hits ? hits.total : "…" })}</button>
           </div>
         )}
@@ -499,6 +582,42 @@ export function TermsView({
               </>
             )}
           </div>
+        ) : selected && editorTab === "group" ? (
+          <div className="term-tab-panel term-group-panel">
+            {(() => {
+              const primaryKey = selected.group_primary ?? selected.normalized;
+              const primary = termByKey.get(primaryKey) ?? selected;
+              const members = membersByPrimary.get(primaryKey) ?? [];
+              const grouped = members.length > 0 || selected.group_primary !== null || selected.conflicts.group_claims.length > 0;
+              return grouped ? (
+                <>
+                  <div className="term-group-row primary">
+                    <button className="link-button" onClick={() => { selection.reset(primary.normalized); focusTerm(primary); }}>{primary.source}</button>
+                    <span>{primary.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                    <em>{translate("terms.groupPrimary", language)}</em>
+                  </div>
+                  {members.map((member) => (
+                    <div className="term-group-row" key={member.normalized}>
+                      <button className="link-button" onClick={() => { selection.reset(member.normalized); focusTerm(member); }}>{member.source}</button>
+                      <span>{member.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                      <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
+                    </div>
+                  ))}
+                  {!!selected.conflicts.group_claims.length && (
+                    <div className="conflict-box">
+                      <strong>{translate("terms.groupClaims", language)}</strong>
+                      {selected.conflicts.group_claims.map((claim) => (
+                        <p key={`${claim.entry}-${claim.claimed_by}-${claim.alias}`}>{claim.alias} · {claim.claimed_by} → {claim.entry} · {claim.reason}</p>
+                      ))}
+                      <button className="quiet-button" onClick={() => setPendingPrimary(selected.normalized)}>{translate("terms.resolveAsPrimary", language)}</button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="term-hits-state">{translate("terms.groupEmpty", language)}</div>
+              );
+            })()}
+          </div>
         ) : (
           <div className="term-tab-panel term-edit-panel">
             <label>{translate("terms.sourceTerm", language)}<input value={form.source} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, source: event.target.value })} /></label>
@@ -529,7 +648,17 @@ export function TermsView({
               </div>
             )}
             <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-            <label>{translate("terms.aliases", language)}<textarea value={form.aliases} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: event.target.value })} /></label>
+            <div className="term-alias-editor">
+              <strong>{translate("terms.aliases", language)}</strong>
+              {form.aliases.map((alias, index) => (
+                <div className="term-alias-row" key={index}>
+                  <input value={alias} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, aliases: form.aliases.map((value, aliasIndex) => aliasIndex === index ? event.target.value : value) })} />
+                  {selected && <button className="quiet-button" disabled={selected.disabled || saving || !alias.trim()} onClick={() => materializeAlias(alias)}>{translate("terms.materialize", language)}</button>}
+                  <button className="quiet-button" disabled={selected?.disabled} aria-label={translate("terms.removeAlias", language)} onClick={() => setForm({ ...form, aliases: form.aliases.filter((_, aliasIndex) => aliasIndex !== index) })}>×</button>
+                </div>
+              ))}
+              <button className="quiet-button" disabled={selected?.disabled} onClick={() => setForm({ ...form, aliases: [...form.aliases, ""] })}>{translate("terms.addAlias", language)}</button>
+            </div>
             {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
             <div className="editor-actions term-actions">
               {selected?.disabled ? (
@@ -563,6 +692,17 @@ export function TermsView({
           confirming={saving}
           onCancel={() => setDeleteOpen(false)}
           onConfirm={deleteSelected}
+        />
+      )}
+      {pendingPrimary && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.setPrimaryTitle", language)}
+          text={translate("terms.setPrimaryText", language, { source: termByKey.get(pendingPrimary)?.source ?? pendingPrimary })}
+          confirmLabel={translate("terms.setPrimary", language)}
+          confirming={saving}
+          onCancel={() => setPendingPrimary(null)}
+          onConfirm={setPrimary}
         />
       )}
       {importOpen && (

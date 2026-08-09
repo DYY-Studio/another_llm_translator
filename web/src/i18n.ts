@@ -186,7 +186,22 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.hitsJump": "定位到翻译页",
     "terms.hitsLoadMore": "加载更多",
     "terms.tabEdit": "编辑",
+    "terms.tabGroup": "组",
     "terms.tabHits": "命中 {count}",
+    "terms.groupPrimaryBadge": "组主：{source}",
+    "terms.groupCountBadge": "组 · {count} 成员",
+    "terms.groupPrimary": "组主条目",
+    "terms.groupEmpty": "未加入术语组",
+    "terms.setPrimary": "设为主条目",
+    "terms.setPrimaryTitle": "更换术语组主",
+    "terms.setPrimaryText": "将 {source} 设为组主，并更新组内全部成员关系。",
+    "terms.primaryChanged": "术语组主已更新",
+    "terms.groupClaims": "术语组关系待裁决",
+    "terms.resolveAsPrimary": "以此条目裁决",
+    "terms.materialize": "物化为条目",
+    "terms.materializedUnsaved": "已物化为组成员；类别和说明已从组主预填，保存后才会生效。",
+    "terms.addAlias": "+ 添加别名",
+    "terms.removeAlias": "删除别名",
     "diagnostics.unavailable": "不可用",
     "diagnostics.title": "诊断仪表盘",
     "diagnostics.live": "每秒刷新",
@@ -735,7 +750,22 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.hitsJump": "Locate in translation",
     "terms.hitsLoadMore": "Load more",
     "terms.tabEdit": "Edit",
+    "terms.tabGroup": "Group",
     "terms.tabHits": "Hits {count}",
+    "terms.groupPrimaryBadge": "Primary: {source}",
+    "terms.groupCountBadge": "Group · {count} members",
+    "terms.groupPrimary": "Primary term",
+    "terms.groupEmpty": "Not part of a term group",
+    "terms.setPrimary": "Set as primary",
+    "terms.setPrimaryTitle": "Change group primary",
+    "terms.setPrimaryText": "Set {source} as primary and update every member relationship.",
+    "terms.primaryChanged": "Term group primary updated",
+    "terms.groupClaims": "Term group relationship needs review",
+    "terms.resolveAsPrimary": "Resolve with this primary",
+    "terms.materialize": "Materialize",
+    "terms.materializedUnsaved": "Materialized as a group member. Category and description are prefilled from the primary and take effect only after saving.",
+    "terms.addAlias": "+ Add alias",
+    "terms.removeAlias": "Remove alias",
     "diagnostics.unavailable": "Unavailable",
     "diagnostics.title": "Diagnostics",
     "diagnostics.live": "Live · 1s",
@@ -1139,6 +1169,19 @@ const errorCodes: Record<Language, Record<string, string>> = {
   },
 };
 
+const termGroupReasons: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    primary_has_members: "组主仍有成员，不能移除或删除",
+    cross_group: "目标条目属于其他术语组",
+    target_disabled: "目标条目已移除，不能加入术语组",
+  },
+  en: {
+    primary_has_members: "A primary with members cannot be removed or deleted",
+    cross_group: "The target belongs to another term group",
+    target_disabled: "A removed target cannot join a term group",
+  },
+};
+
 let uiLanguage: Language = "zh-CN";
 
 export function setUiLanguage(language: Language): void {
@@ -1149,6 +1192,9 @@ export function translateError(
   code: string,
   params: Record<string, unknown>,
 ): string | null {
+  if (code === "term_group_error") {
+    return termGroupReasons[uiLanguage][String(params.reason ?? "")] ?? null;
+  }
   const template = errorCodes[uiLanguage][code];
   if (!template) return null;
   return template.replace(/\{(\w+)\}/g, (match, name: string) =>

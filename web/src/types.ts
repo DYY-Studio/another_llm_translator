@@ -219,6 +219,7 @@ export interface Term {
   description: string | null;
   preferred_translation: string | null;
   aliases: string[];
+  group_primary: string | null;
   disabled: boolean;
   conflicts: {
     categories: string[];
@@ -227,6 +228,12 @@ export interface Term {
       alias: string;
       primary_source: string;
       reason: "policy" | "cycle" | "multiple_owners";
+    }>;
+    group_claims: Array<{
+      entry: string;
+      claimed_by: string;
+      alias: string;
+      reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
     }>;
   };
   has_conflicts: boolean;
