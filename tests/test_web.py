@@ -7,6 +7,7 @@ import os
 import re
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -680,6 +681,19 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
         'attachment; filename="input.txt"'
     )
     assert downloaded.content == expected_bytes
+
+    unicode_file = project / "output" / "translated" / "译文.epub"
+    unicode_file.write_bytes(b"epub")
+    unicode_download = client.get(
+        "/api/v1/projects/sample/exports/download",
+        params={"file": "translated/译文.epub"},
+    )
+    assert unicode_download.status_code == 200
+    disposition = unicode_download.headers["content-disposition"]
+    assert disposition.startswith("attachment; filename*=utf-8''")
+    assert unquote(disposition.partition("''")[2]) == "译文.epub"
+    assert unicode_download.content == b"epub"
+    unicode_file.unlink()
 
     bundle = client.get(
         "/api/v1/projects/sample/exports/download-all",
