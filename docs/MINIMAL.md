@@ -419,7 +419,7 @@ previous_segments = 3
 unicode_normalization = "NFKC"
 case_insensitive = true
 max_terms_per_segment = 100
-alias_primary_collision = "conflict"
+alias_primary_collision = "merge"
 
 [validation.translation]
 japanese_kana = false
@@ -897,10 +897,16 @@ normalized = value.strip()
 alias 与另一条术语的主 source 相同时，由
 `terminology.alias_primary_collision` 决定：
 
-- `conflict`（默认）：保留两条主术语并标记冲突；碰撞 alias 不参与注入。
-- `merge`：声明 alias 的术语吸收另一条主术语；元数据不一致继续进入冲突。
+- `conflict`：保留两条主术语并记录 `group_claims`，争议文本只注入上下文，
+  不注入任何争用方的推荐译名。
+- `merge`（默认）：保留双方为独立条目，将被声明条目的 `group_primary` 指向
+  声明者所在组的主条目；类别、说明、译名和普通 aliases 不跨条目合并。
 
-循环 alias 或多个术语争用同一主条目无法安全自动合并，始终进入人工冲突。
+循环 alias、多个术语争用同一主条目或连接两个既有组无法安全自动组化，始终
+进入人工冲突。每个成员直接指向存在且启用的组主；悬空、链式和循环指针快速失败。
+
+人工换主在单次项目写锁内重写全组。组主仍有成员时不能移除或永久删除；成员
+移除时同时脱组。将 alias 物化为成员时不复制主条目的译名、类别或说明。
 
 人工 override 以 normalized source 定位：
 
@@ -911,6 +917,7 @@ alias 与另一条术语的主 source 相同时，由
   "preferred_translation": "爱丽丝",
   "description": "人工确认",
   "aliases": ["Alice"],
+  "group_primary": null,
   "disabled": false
 }
 ```
@@ -922,10 +929,13 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 ### 术语交换
 
 `terms-import` 和 `terms-export` 只接受 `.json`、`.csv`。JSON 顶层固定为
-`schema_version = 1`、`record_type = "terminology_exchange"` 和 `terms`。
+`record_type = "terminology_exchange"` 和 `terms`。当前导出
+`schema_version = 2`；继续读取 v1，且 v1 条目一律按独立主条目处理。
 术语字段为 source、preferred_translation、category、description、aliases、
-disabled，以及类别和推荐译名冲突候选。CSV 使用同一字段集合，数组字段保存为
-JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
+disabled、可选的 `group_primary`，以及类别和推荐译名冲突候选。交换格式中的
+`group_primary` 是组主 source，导入后按目标项目规则归一化。CSV 导出包含同名列；
+导入只接受旧版或新版完整表头。数组字段保存为 JSON 数组字符串，导出编码为带
+BOM 的 UTF-8。
 
 导入在完整校验后按 normalized source 合并到自动扫描基线；文件缺项不删除
 现有术语，人工 override 始终优先。`disabled = true` 是显式人工移除；
@@ -942,7 +952,10 @@ JSON 数组字符串，导出编码为带 BOM 的 UTF-8。
 2. alias 命中。
 3. 更长的词优先。
 4. 有推荐译名者优先。
-5. 每个 Segment 最多 `max_terms_per_segment`。
+5. 每个 Segment 最多 `max_terms_per_segment` 个术语组。
+
+命中成员时注入组主和实际命中的成员，成员额外携带 `primary_source`。截断先按组
+执行再展开，因此不会拆散组；同组多个成员命中时组主只出现一次。
 
 不持久化 occurrence 文件或逐 Segment 术语 Hash。每次构建翻译请求时重新确定匹配术语。
 
