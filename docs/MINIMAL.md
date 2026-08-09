@@ -1512,7 +1512,7 @@ output/bilingual/polished/
   任一生成或校验失败时不发布输出。
 
 `project.target_language_tag` 是输出文档的可选 BCP 47 语言标签，与供 LLM 使用的
-`target_language` 文本名称分离。宿主在原格式导出时将它传给 Document Adapter；
+`target_language` 文本名称分离。宿主在原格式导出时将两者传给 Document Adapter；
 具体 Adapter 决定是否应用或在标签为空时拒绝导出。旧项目缺少该字段时按空字符串
 读取，不根据 `target_language` 推断。当前 EPUB Adapter 要求非空，TXT Adapter
 忽略该字段。
@@ -1794,8 +1794,11 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
-- `target_language_tag` 由宿主传给所有 Document Adapter；EPUB 单语以该标签作为
-  唯一 `dc:language`，双语将其列为第一语言，并同步已重写 XHTML 的语言属性。
+- `target_language` 与 `target_language_tag` 由宿主传给所有 Document Adapter；EPUB
+  单语以该标签作为唯一 `dc:language`，双语将其列为第一语言，并同步已重写 XHTML
+  的语言属性。EPUB 译文标题增加 `（目标语言）`，双语标题增加
+  `（目标语言·双语）`，同时使用稳定独立出版标识和更新后的修改时间避免阅读器缓存
+  原书元数据。
 - EPUB Ruby 与同一文本流的前后文合为语义 Segment，三种导入模式、纯译文移除
   全部 Ruby 和双语在完整源句末尾追加译文均生效；导入选项只固化在对应 File
   Adapter 状态。

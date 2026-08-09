@@ -4216,6 +4216,7 @@ def export_project(
         output_text=output_text,
         bilingual=bilingual,
         output_encoding=encoding,
+        target_language=str(config["project"]["target_language"]),
         target_language_tag=str(config["project"]["target_language_tag"]),
     )
     for path in written:

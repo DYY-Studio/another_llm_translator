@@ -63,6 +63,7 @@ class DocumentAdapter(Protocol):
         output_text: dict[str, str],
         bilingual: bool,
         output_encoding: str,
+        target_language: str,
         target_language_tag: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]: ...
@@ -100,6 +101,7 @@ def publish_document_exports(
     output_text: dict[str, str],
     bilingual: bool,
     output_encoding: str,
+    target_language: str,
     target_language_tag: str,
 ) -> list[str]:
     staging_parent = project / "output" / ".staging"
@@ -120,6 +122,7 @@ def publish_document_exports(
                 output_text=output_text,
                 bilingual=bilingual,
                 output_encoding=output_encoding,
+                target_language=target_language,
                 target_language_tag=target_language_tag,
                 opaque_state=job.opaque_state,
             )
