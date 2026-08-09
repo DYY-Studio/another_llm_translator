@@ -18,6 +18,9 @@ from .errors import IncompleteError, ProjectError, UsageError
 MAX_EPUB_ENTRIES = 10_000
 MAX_EPUB_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_EPUB_COMPRESSION_RATIO = 200
+_OPF_NAMESPACE = "http://www.idpf.org/2007/opf"
+_DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
+_XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
 _INLINE_TEXT_ELEMENTS = {
     "a",
@@ -205,9 +208,14 @@ class EPUBDocumentAdapter:
         output_text: dict[str, str],
         bilingual: bool,
         output_encoding: str,
+        target_language_tag: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]:
         del output_encoding
+        if not target_language_tag:
+            raise IncompleteError(
+                "EPUB 导出需要 project.target_language_tag"
+            )
         if opaque_state is None:
             raise IncompleteError("EPUB 文件缺少 Document Adapter 状态")
         state = deepcopy(opaque_state)
@@ -235,6 +243,18 @@ class EPUBDocumentAdapter:
             if not isinstance(opf_path, str):
                 raise IncompleteError("EPUB 状态缺少 OPF 路径")
             _, epub_version = _spine_paths(archive, entries, opf_path)
+            opf_root = _parse_xml(archive.read(opf_path), opf_path)
+            source_languages = _opf_languages(opf_root)
+            _set_opf_languages(
+                opf_root,
+                target_language_tag,
+                source_languages if bilingual else [],
+            )
+            ElementTree.register_namespace("", _OPF_NAMESPACE)
+            ElementTree.register_namespace("dc", _DC_NAMESPACE)
+            changed[opf_path] = ElementTree.tostring(
+                opf_root, encoding="utf-8", xml_declaration=True
+            )
             for xhtml_path, items in by_xhtml.items():
                 if xhtml_path not in entries:
                     raise IncompleteError(
@@ -257,6 +277,7 @@ class EPUBDocumentAdapter:
                     raise IncompleteError(
                         f"EPUB XHTML 缺少 body：{xhtml_path}"
                     )
+                _set_xhtml_language(root, target_language_tag)
                 if bilingual:
                     style = body.get("style", "")
                     addition = "white-space: pre-line"
@@ -439,6 +460,63 @@ def _validate_xml_declarations(
         raise
     except expat.ExpatError as exc:
         raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
+
+
+def _opf_metadata(root: ElementTree.Element) -> ElementTree.Element:
+    for child in list(root):
+        if _local_name(child.tag) == "metadata":
+            return child
+    raise IncompleteError("EPUB OPF 缺少 metadata")
+
+
+def _opf_languages(root: ElementTree.Element) -> list[str]:
+    metadata = _opf_metadata(root)
+    return [
+        (child.text or "").strip()
+        for child in list(metadata)
+        if _namespace_uri(child.tag) == _DC_NAMESPACE
+        and _local_name(child.tag) == "language"
+        and (child.text or "").strip()
+    ]
+
+
+def _set_opf_languages(
+    root: ElementTree.Element,
+    target_language_tag: str,
+    source_languages: list[str],
+) -> None:
+    metadata = _opf_metadata(root)
+    language_nodes = [
+        child
+        for child in list(metadata)
+        if _namespace_uri(child.tag) == _DC_NAMESPACE
+        and _local_name(child.tag) == "language"
+    ]
+    first_index = (
+        list(metadata).index(language_nodes[0])
+        if language_nodes
+        else len(list(metadata))
+    )
+    for child in language_nodes:
+        metadata.remove(child)
+    values: list[str] = []
+    seen: set[str] = set()
+    for value in [target_language_tag, *source_languages]:
+        key = value.casefold()
+        if key not in seen:
+            seen.add(key)
+            values.append(value)
+    for offset, value in enumerate(values):
+        element = ElementTree.Element(f"{{{_DC_NAMESPACE}}}language")
+        element.text = value
+        metadata.insert(first_index + offset, element)
+
+
+def _set_xhtml_language(
+    root: ElementTree.Element, target_language_tag: str
+) -> None:
+    root.set("lang", target_language_tag)
+    root.set(f"{{{_XML_NAMESPACE}}}lang", target_language_tag)
 
 
 def _opf_path(

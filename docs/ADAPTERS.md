@@ -194,6 +194,12 @@ class DocumentAdapter(Protocol):
     def export_sources(...) -> list[Path]: ...
 ```
 
+`export_sources` 还会收到宿主项目配置中的 `target_language_tag: str`。这是可选
+的 BCP 47 输出语言标签，与 LLM 的目标语言名称分离；Adapter 可以忽略、应用到
+自己的格式元数据，或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言
+行为。更新该导出参数后，Document Adapter 插件协议版本为 `6`；旧协议插件会
+快速失败。
+
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
 
@@ -257,7 +263,7 @@ Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 5。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 6。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -271,6 +277,11 @@ EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File�
 的归档路径作为 Segment 的 `part_id`；普通透明内联
 元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写
 被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
+
+导出时宿主提供可选的 `target_language_tag`。EPUB Adapter 要求该值为非空 BCP 47
+标签，将单语输出的 OPF `dc:language` 设为该标签；双语输出把该标签放在第一项，
+随后保留源语言。已重写的 spine XHTML 同时更新根元素的 `lang` 和 `xml:lang`。
+中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
 
 双语模式在单槽 Segment 中按“源文、换行、目标文本”写入；复合 Segment 保留
 所有源槽，并在最后一个槽后追加“换行、目标文本”。body 声明
@@ -329,7 +340,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=1,
+        protocol_version=6,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```

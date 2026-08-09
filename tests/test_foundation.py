@@ -244,6 +244,54 @@ def test_config_defaults_alias_collision_for_existing_projects(
     assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
 
 
+def test_config_defaults_missing_target_language_tag_to_empty(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'target_language_tag = "zh-Hans"\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(config_path)["project"]["target_language_tag"] == ""
+
+
+@pytest.mark.parametrize("value", ["zh_CN", "zh Hans", "zh-"])
+def test_config_rejects_malformed_target_language_tag(
+    tmp_path: Path, value: str
+) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        source.read_text(encoding="utf-8").replace(
+            'target_language_tag = "zh-Hans"',
+            f'target_language_tag = "{value}"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="BCP 47"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", ["zh-Hans", "pt-BR", "sr-Latn-RS", "x-private"])
+def test_config_accepts_well_formed_target_language_tag(
+    tmp_path: Path, value: str
+) -> None:
+    source = Path(__file__).parents[1] / "config" / "config.toml"
+    path = tmp_path / "config.toml"
+    path.write_text(
+        source.read_text(encoding="utf-8").replace(
+            'target_language_tag = "zh-Hans"',
+            f'target_language_tag = "{value}"',
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(path)["project"]["target_language_tag"] == value
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [

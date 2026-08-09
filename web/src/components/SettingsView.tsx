@@ -156,6 +156,15 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
       <div className="config-form">
         <ConfigSection title={translate("settings.projectInput", language)} description={translate("settings.projectInputHint", language)}>
           <Field label={translate("settings.targetLanguage", language)}><input value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
+          <Field label={translate("settings.targetLanguageTag", language)} help={translate("settings.targetLanguageTagHint", language)}>
+            <input list="target-language-tag-options" value={config.project.target_language_tag} placeholder="zh-Hans" onChange={(event) => update((draft) => { draft.project.target_language_tag = event.target.value; })} />
+            <datalist id="target-language-tag-options">
+              {[
+                "zh-Hans", "zh-Hant", "ja", "ko", "en", "fr", "de", "es", "it",
+                "pt-BR", "pt-PT", "ru", "ar", "th", "vi",
+              ].map((value) => <option key={value} value={value} />)}
+            </datalist>
+          </Field>
           <Field label={translate("settings.txtOutputEncoding", language)}><input value={config.project.output_encoding} onChange={(event) => update((draft) => { draft.project.output_encoding = event.target.value; })} /></Field>
           <NumberField label={translate("settings.encodingThreshold", language)} value={config.input.encoding_confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.input.encoding_confidence_threshold = value; })} />
           <Field label={translate("settings.fallbackEncoding", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
