@@ -83,10 +83,10 @@ previous_segments = 3
 unicode_normalization = "NFKC"
 # 是否忽略大小写匹配（casefold）；关闭后按原始大小写匹配。
 case_insensitive = true
-# 每个 Segment 最多向 LLM 注入多少条确定性匹配到的术语。
+# 每个 Segment 最多向 LLM 注入多少个确定性匹配到的术语组；组主和命中成员不会被拆散。
 max_terms_per_segment = 100
-# alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性合并。
-alias_primary_collision = "conflict"
+# alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性组化。
+alias_primary_collision = "merge"
 
 [validation.translation]
 # 是否检查翻译结果中残留的日语平假名、片假名及相关 Kana Unicode 区块。

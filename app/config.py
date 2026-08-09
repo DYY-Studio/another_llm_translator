@@ -298,7 +298,7 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
-        terminology.setdefault("alias_primary_collision", "conflict")
+        terminology.setdefault("alias_primary_collision", "merge")
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
