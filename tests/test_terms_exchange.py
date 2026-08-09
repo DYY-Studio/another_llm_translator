@@ -120,6 +120,30 @@ def test_term_group_exchange_v2_round_trip_and_rejects_dangling_primary(
         import_terms(project, invalid, dry_run=False)
 
 
+def test_explicit_standalone_group_relation_blocks_automatic_grouping(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path, "locked-group")
+    source = tmp_path / "locked-group.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {**term("Alpha", aliases=["Beta"]), "group_primary": None},
+                    {**term("Beta"), "group_primary": None},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, source, dry_run=False)
+    rows = {item["source"]: item for item in load_terms(project)["terms"]}
+    assert rows["Beta"]["group_primary"] is None
+    assert rows["Beta"]["conflicts"]["group_claims"][0]["reason"] == "group_collision"
+
+
 def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     tmp_path: Path,
 ) -> None:

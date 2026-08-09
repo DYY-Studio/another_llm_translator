@@ -736,11 +736,6 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        write_json(
-            self.project,
-            self.project / "terminology" / "overrides.json",
-            override_record,
-        )
         revision = int(library["terms_revision"]) + 1 if library else 1
         terms = build_term_library_rows(
             self.project,
@@ -760,6 +755,11 @@ class WebStore:
             ),
             terms=terms,
             origin=origin,
+        )
+        write_json(
+            self.project,
+            self.project / "terminology" / "overrides.json",
+            override_record,
         )
         write_json(
             self.project,

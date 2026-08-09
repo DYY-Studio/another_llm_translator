@@ -906,6 +906,7 @@ def _term_bucket() -> dict[str, Any]:
         "alias_conflicts": [],
         "group_primary": None,
         "group_primary_set": False,
+        "group_primary_locked": False,
         "group_claims": [],
         "canonical_source": None,
     }
@@ -951,6 +952,9 @@ def _add_term_candidate(
             raise UsageError(f"同一术语存在冲突的组主关系：{candidate['source']}")
         current["group_primary"] = group_primary
         current["group_primary_set"] = True
+        current["group_primary_locked"] = current["group_primary_locked"] or bool(
+            candidate.get("_group_primary_locked", False)
+        )
 
 
 def _seed_published_terms(
@@ -995,6 +999,7 @@ def _apply_term_overrides(
                 str(group_primary) if group_primary is not None else None
             )
             current["group_primary_set"] = True
+            current["group_primary_locked"] = True
 
 
 def _alias_primary_collisions(
@@ -1075,6 +1080,7 @@ def _alias_primary_collisions(
                 if policy == "conflict"
                 else "group_collision"
                 if merged[target]["group_primary"] is not None
+                or merged[target]["group_primary_locked"]
                 or any(
                     value["group_primary"] == target
                     for value in merged.values()
@@ -1275,6 +1281,7 @@ def _exchange_term(
             normalize_term(group_primary, spec) if group_primary is not None else None
         ),
         "_group_primary_set": "group_primary" in value,
+        "_group_primary_locked": "group_primary" in value,
         "conflicts": {
             "categories": [
                 candidate.strip()
@@ -1323,6 +1330,7 @@ def _load_term_exchange(
             for row in rows:
                 row["group_primary"] = None
                 row["_group_primary_set"] = False
+                row["_group_primary_locked"] = False
         return rows
     if suffix != ".csv":
         raise UsageError("术语文件扩展名必须是 .json 或 .csv")
@@ -1373,6 +1381,7 @@ def _load_term_exchange(
             )
             if fields == LEGACY_TERM_CSV_FIELDS:
                 values[-1]["_group_primary_set"] = False
+                values[-1]["_group_primary_locked"] = False
         return values
     except csv.Error as exc:
         raise UsageError(f"术语 CSV 无效：{path}: {exc}") from exc
@@ -1620,6 +1629,7 @@ def import_terms(
                 raise UsageError(f"导入术语组关系与现有关系冲突：{normalized}")
             target["group_primary"] = item["group_primary"]
             target["group_primary_set"] = True
+            target["group_primary_locked"] = item["group_primary_locked"]
 
     overrides_path = project / "terminology" / "overrides.json"
     overrides_document = read_json(project, overrides_path)
