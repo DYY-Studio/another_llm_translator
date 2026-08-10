@@ -610,7 +610,7 @@ async def test_terminology_resume_keeps_active_task(tmp_path: Path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        seen.extend(item["source"] for item in payload["source_segments"])
+        seen.extend(payload["source_segments"])
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([])}}]},
@@ -642,7 +642,7 @@ async def test_terminology_ignores_old_fingerprint_outside_scope(
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        seen.extend(item["source"] for item in payload["source_segments"])
+        seen.extend(payload["source_segments"])
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([])}}]},

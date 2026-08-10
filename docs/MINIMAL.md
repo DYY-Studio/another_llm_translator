@@ -395,6 +395,8 @@ temperature_polishing = 0.3
 
 [execution]
 scheduling_mode = "ordered_by_file"
+# parallel 模式的纯源文 reference_context 使用字符串数组；ordered_by_file 保留
+# source/translation 对象以携带已完成的上文译文。
 
 [chunking]
 target_chunk_input_tokens = 11000
@@ -851,16 +853,14 @@ previous_segments = 3
 ```json
 {
   "target_language": "简体中文",
-  "reference_context": [
-    {"source": "此前原文"}
-  ],
-  "source_segments": [
-    {"source": "当前待扫描原文"}
-  ]
+  "reference_context": ["此前原文"],
+  "source_segments": ["当前待扫描原文"]
 }
 ```
 
-`reference_context` 和 `source_segments` 都只含 source。扫描范围与 Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment 引用。term 记录的 source 必须填写 `source_segments` 原文中实际出现的术语文本。
+术语扫描的 `reference_context` 和 `source_segments` 都是只含原文的字符串数组。扫描范围与
+Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment 引用。term 记录的 source
+必须填写 `source_segments` 原文中实际出现的术语文本。
 
 LLM 返回 JSONL；每个术语一行：
 
@@ -927,6 +927,12 @@ override 在自动合并后应用。`disabled = true` 的术语不发布、不�
 
 发布时可以按确定性排序重新分配只在当前库内有效的记录 ID，不承诺跨 revision 稳定。
 
+Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相关条目。推荐只供人工
+定位和确认，不参与自动组化；一字符被包含文本默认不推荐。确认后可以将候选加入术语组，
+或将候选 source 与 aliases 一并转为当前条目的 aliases 并以 disabled 方式移除候选。
+快捷操作会在项目写锁内重新验证关系；两个已有组、未裁决 group claim、有成员候选或
+外部主条目 alias 冲突时整体拒绝。
+
 ### 术语交换
 
 `terms-import` 和 `terms-export` 只接受 `.json`、`.csv`。JSON 顶层固定为
@@ -983,6 +989,10 @@ BOM 的 UTF-8。
   ]
 }
 ```
+
+`segments` 始终保留短 `id` 和 `source`，因为宿主需要将 JSONL 响应映射回持久
+Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象，并在可用时
+携带 `translation`；`parallel` 的纯源文上文使用字符串数组以减少输入开销。
 
 输出 JSONL：
 

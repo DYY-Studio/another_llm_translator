@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
-import type { Term, TermHitsResponse, TermsResponse } from "../types";
+import type { RelatedTerm, RelatedTermsResponse, Term, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 
@@ -114,6 +114,14 @@ export function TermsView({
   const [hitsLoading, setHitsLoading] = useState(false);
   const [hitsError, setHitsError] = useState("");
   const hitsRequestRef = useRef(0);
+  const [related, setRelated] = useState<RelatedTermsResponse | null>(null);
+  const [relatedLoading, setRelatedLoading] = useState(false);
+  const [relatedError, setRelatedError] = useState("");
+  const relatedRequestRef = useRef(0);
+  const relatedCacheRef = useRef(new Map<string, RelatedTermsResponse>());
+  const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
+  const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
+  const [relatedPrimary, setRelatedPrimary] = useState<string>("");
   const termListRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef<number | null>(null);
   const termsRestoredRef = useRef(false);
@@ -138,6 +146,7 @@ export function TermsView({
   const selectedMatchKey = selected
     ? JSON.stringify([selected.normalized, selected.source, selected.aliases])
     : "";
+  const selectedIsDisabled = Boolean(selected?.disabled);
 
   // Restore a cached view synchronously during render so the browser never
   // paints an empty frame. This runs on the first mount too: prefetchTerms
@@ -210,14 +219,17 @@ export function TermsView({
     return `/api/v1/projects/${project}/terms/hits?${params}`;
   }
 
-  // Metadata-only updates (including removal) do not change what can match in
-  // the source text. Keep the existing hit result instead of scanning every
-  // Segment again; source and alias edits change the key and still refresh it.
+  // Hits are intentionally loaded only when the user opens the hits tab. A
+  // normal term selection must not scan every Segment in the project.
   useEffect(() => {
     const normalized = selected?.normalized ?? "";
     const requestId = ++hitsRequestRef.current;
-    if (!normalized) {
-      setHits(null);
+    if (editorTab !== "hits" || !normalized || selectedIsDisabled) {
+      setHits(
+        editorTab === "hits" && normalized && selectedIsDisabled
+          ? { normalized, source: selected?.source ?? normalized, total: 0, offset: 0, limit: hitsPageSize, hits: [] }
+          : null,
+      );
       setHitsLoading(false);
       setHitsError("");
       return;
@@ -235,7 +247,46 @@ export function TermsView({
       .finally(() => {
         if (requestId === hitsRequestRef.current) setHitsLoading(false);
       });
-  }, [project, selectedMatchKey]);
+  }, [editorTab, project, selectedIsDisabled, selectedMatchKey]);
+
+  // Related terms are cheap to compute but only useful on the group tab. Keep
+  // a small revision-aware cache so switching between tabs does not repeat
+  // the same library scan, while a save/removal naturally invalidates it.
+  useEffect(() => {
+    const normalized = selected?.normalized ?? "";
+    const requestId = ++relatedRequestRef.current;
+    if (editorTab !== "group" || !normalized || selectedIsDisabled) {
+      setRelated(null);
+      setRelatedLoading(false);
+      setRelatedError("");
+      return;
+    }
+    const cacheKey = `${project}:${data?.terms_revision ?? "none"}:${selectedMatchKey}`;
+    const cached = relatedCacheRef.current.get(cacheKey);
+    if (cached) {
+      setRelated(cached);
+      setRelatedLoading(false);
+      setRelatedError("");
+      return;
+    }
+    setRelated(null);
+    setRelatedLoading(true);
+    setRelatedError("");
+    const params = new URLSearchParams({ normalized, limit: "20" });
+    void api<RelatedTermsResponse>(`/api/v1/projects/${project}/terms/related?${params}`)
+      .then((value) => {
+        if (requestId !== relatedRequestRef.current) return;
+        if (relatedCacheRef.current.size >= 50) relatedCacheRef.current.clear();
+        relatedCacheRef.current.set(cacheKey, value);
+        setRelated(value);
+      })
+      .catch((error) => {
+        if (requestId === relatedRequestRef.current) setRelatedError(String(error));
+      })
+      .finally(() => {
+        if (requestId === relatedRequestRef.current) setRelatedLoading(false);
+      });
+  }, [data?.terms_revision, editorTab, project, selectedIsDisabled, selectedMatchKey]);
 
   function loadMoreHits() {
     if (!selected || !hits) return;
@@ -449,6 +500,102 @@ export function TermsView({
     }
   }
 
+  async function copyRelatedSource(candidate: RelatedTerm) {
+    try {
+      await navigator.clipboard.writeText(candidate.source);
+      setMessage(translate("terms.relatedCopied", language));
+    } catch (error) {
+      setMessage(`${translate("terms.relatedCopyFailed", language)}: ${String(error)}`);
+    }
+  }
+
+  function locateRelated(candidate: RelatedTerm) {
+    const term = termByKey.get(candidate.normalized);
+    if (!term) return;
+    selection.reset(term.normalized);
+    focusTerm(term);
+  }
+
+  function openRelatedGroup(candidate: RelatedTerm) {
+    if (!selected) return;
+    const selectedRoot = selected.group_primary ?? selected.normalized;
+    const selectedSize =
+      (membersByPrimary.get(selectedRoot)?.length ?? 0) + 1;
+    const primary =
+      candidate.group_size > 1
+        ? candidate.group_root_normalized
+        : selectedSize > 1
+          ? selectedRoot
+          : candidate.relation === "contains_selected"
+            ? candidate.normalized
+            : selected.normalized;
+    setRelatedPrimary(primary);
+    setPendingRelatedGroup(candidate);
+  }
+
+  async function groupRelated() {
+    if (!selected || !pendingRelatedGroup || !relatedPrimary) return;
+    setSaving(true);
+    setMessage("");
+    const selectedNormalized = selected.normalized;
+    const candidateNormalized = pendingRelatedGroup.normalized;
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/group-related`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            normalized: selectedNormalized,
+            related_normalized: candidateNormalized,
+            primary_normalized: relatedPrimary,
+            confirm: true,
+          }),
+        },
+      );
+      setData(value);
+      const primary = value.terms.find((term) => term.normalized === relatedPrimary) ?? null;
+      selection.reset(primary?.normalized ?? selectedNormalized);
+      setForm(primary ? formFor(primary) : emptyForm);
+      setPendingRelatedGroup(null);
+      setMessage(translate("terms.relatedGrouped", language));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function convertRelatedToAlias() {
+    if (!selected || !pendingRelatedAlias) return;
+    setSaving(true);
+    setMessage("");
+    const selectedNormalized = selected.normalized;
+    const candidateNormalized = pendingRelatedAlias.normalized;
+    try {
+      const value = await api<TermsResponse & { aliases_added: string[] }>(
+        `/api/v1/projects/${project}/terms/convert-to-alias`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            normalized: selectedNormalized,
+            related_normalized: candidateNormalized,
+            confirm: true,
+          }),
+        },
+      );
+      setData(value);
+      const target = value.terms.find((term) => term.normalized === selectedNormalized) ?? null;
+      selection.reset(target?.normalized ?? "");
+      setForm(target ? formFor(target) : emptyForm);
+      setPendingRelatedAlias(null);
+      setMessage(translate("terms.relatedConverted", language, { count: value.aliases_added.length }));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="terms-workspace">
       <section className="terms-browser">
@@ -621,32 +768,85 @@ export function TermsView({
               const primary = termByKey.get(primaryKey) ?? selected;
               const members = membersByPrimary.get(primaryKey) ?? [];
               const grouped = members.length > 0 || selected.group_primary !== null || selected.conflicts.group_claims.length > 0;
-              return grouped ? (
+              return (
                 <>
-                  <div className="term-group-row primary">
-                    <button className="link-button" onClick={() => { selection.reset(primary.normalized); focusTerm(primary); }}>{primary.source}</button>
-                    <span>{primary.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
-                    <em>{translate("terms.groupPrimary", language)}</em>
-                  </div>
-                  {members.map((member) => (
-                    <div className="term-group-row" key={member.normalized}>
-                      <button className="link-button" onClick={() => { selection.reset(member.normalized); focusTerm(member); }}>{member.source}</button>
-                      <span>{member.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
-                      <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
-                    </div>
-                  ))}
-                  {!!selected.conflicts.group_claims.length && (
-                    <div className="conflict-box">
-                      <strong>{translate("terms.groupClaims", language)}</strong>
-                      {selected.conflicts.group_claims.map((claim) => (
-                        <p key={`${claim.entry}-${claim.claimed_by}-${claim.alias}`}>{claim.alias} · {claim.claimed_by} → {claim.entry} · {claim.reason}</p>
+                  {grouped ? (
+                    <>
+                      <div className="term-group-row primary">
+                        <button className="link-button" onClick={() => { selection.reset(primary.normalized); focusTerm(primary); }}>{primary.source}</button>
+                        <span>{primary.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                        <em>{translate("terms.groupPrimary", language)}</em>
+                      </div>
+                      {members.map((member) => (
+                        <div className="term-group-row" key={member.normalized}>
+                          <button className="link-button" onClick={() => { selection.reset(member.normalized); focusTerm(member); }}>{member.source}</button>
+                          <span>{member.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                          <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
+                        </div>
                       ))}
-                      <button className="quiet-button" onClick={() => setPendingPrimary(selected.normalized)}>{translate("terms.resolveAsPrimary", language)}</button>
-                    </div>
+                      {!!selected.conflicts.group_claims.length && (
+                        <div className="conflict-box">
+                          <strong>{translate("terms.groupClaims", language)}</strong>
+                          {selected.conflicts.group_claims.map((claim) => (
+                            <p key={`${claim.entry}-${claim.claimed_by}-${claim.alias}`}>{claim.alias} · {claim.claimed_by} → {claim.entry} · {claim.reason}</p>
+                          ))}
+                          <button className="quiet-button" onClick={() => setPendingPrimary(selected.normalized)}>{translate("terms.resolveAsPrimary", language)}</button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="term-hits-state">{translate("terms.groupEmpty", language)}</div>
                   )}
+                  <div className="term-related-panel">
+                    <strong>{translate("terms.relatedTitle", language)}</strong>
+                    <p className="term-related-help">{translate("terms.relatedHelp", language)}</p>
+                    {relatedLoading && <div className="term-hits-state">{translate("terms.relatedLoading", language)}</div>}
+                    {relatedError && <div className="term-hits-state error-text">{relatedError}</div>}
+                    {!relatedLoading && !relatedError && related && !related.related.length && (
+                      <div className="term-hits-state">{translate("terms.relatedEmpty", language)}</div>
+                    )}
+                    {!!related?.related.length && (
+                      <div className="term-related-list">
+                        {related.related.map((candidate) => (
+                          <div className="term-related-row" key={candidate.normalized}>
+                            <div className="term-related-main">
+                              <strong>{candidate.source}</strong>
+                              <span>{candidate.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
+                              <small>
+                                {translate(
+                                  candidate.relation === "contains_selected" ? "terms.relatedContains" : "terms.relatedContainedBy",
+                                  language,
+                                  { value: candidate.selected_match },
+                                )}
+                                {" · "}
+                                {translate(
+                                  candidate.related_match_type === "alias" ? "terms.relatedAliasMatch" : "terms.relatedSourceMatch",
+                                  language,
+                                  { value: candidate.related_match },
+                                )}
+                              </small>
+                              {candidate.group_size > 1 && (
+                                <small>
+                                  {translate("terms.relatedGroupStatus", language, {
+                                    source: candidate.group_root_source,
+                                    count: candidate.group_size,
+                                  })}
+                                </small>
+                              )}
+                            </div>
+                            <div className="term-related-actions">
+                              <button className="quiet-button" disabled={saving} onClick={() => void copyRelatedSource(candidate)}>{translate("terms.relatedCopy", language)}</button>
+                              <button className="quiet-button" disabled={saving} onClick={() => locateRelated(candidate)}>{translate("terms.relatedLocate", language)}</button>
+                              {candidate.can_group && <button className="quiet-button" disabled={saving} onClick={() => openRelatedGroup(candidate)}>{translate("terms.relatedGroup", language)}</button>}
+                              {candidate.can_convert_alias && <button className="danger-button" disabled={saving} onClick={() => setPendingRelatedAlias(candidate)}>{translate("terms.relatedConvert", language)}</button>}
+                            </div>
+                            {candidate.blocked_reason && <small className="term-related-blocked">{translate(`terms.relatedBlocked.${candidate.blocked_reason}`, language)}</small>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </>
-              ) : (
-                <div className="term-hits-state">{translate("terms.groupEmpty", language)}</div>
               );
             })()}
           </div>
@@ -737,6 +937,34 @@ export function TermsView({
           onConfirm={setPrimary}
         />
       )}
+      {pendingRelatedGroup && selected && (
+        <RelatedGroupDialog
+          language={language}
+          selected={selected}
+          candidate={pendingRelatedGroup}
+          primary={relatedPrimary}
+          selectedRoot={selected.group_primary ?? selected.normalized}
+          selectedRootSource={termByKey.get(selected.group_primary ?? selected.normalized)?.source ?? selected.source}
+          confirming={saving}
+          onPrimaryChange={setRelatedPrimary}
+          onCancel={() => setPendingRelatedGroup(null)}
+          onConfirm={groupRelated}
+        />
+      )}
+      {pendingRelatedAlias && selected && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.relatedConvertTitle", language)}
+          text={translate("terms.relatedConvertText", language, {
+            source: pendingRelatedAlias.source,
+            aliases: termByKey.get(pendingRelatedAlias.normalized)?.aliases.join("、") || translate("terms.relatedNoAliases", language),
+          })}
+          confirmLabel={translate("terms.relatedConvert", language)}
+          confirming={saving}
+          onCancel={() => setPendingRelatedAlias(null)}
+          onConfirm={convertRelatedToAlias}
+        />
+      )}
       {importOpen && (
         <TermImportDialog
           project={project}
@@ -821,6 +1049,67 @@ function ConfirmDialog({
       <div className="modal-actions">
         <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
         <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
+      </div>
+    </Modal>
+  );
+}
+
+function RelatedGroupDialog({
+  language,
+  selected,
+  candidate,
+  primary,
+  selectedRoot,
+  selectedRootSource,
+  confirming,
+  onPrimaryChange,
+  onCancel,
+  onConfirm,
+}: {
+  language: Language;
+  selected: Term;
+  candidate: RelatedTerm;
+  primary: string;
+  selectedRoot: string;
+  selectedRootSource: string;
+  confirming: boolean;
+  onPrimaryChange: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const options = [
+    {
+      normalized: selectedRoot,
+      source: selectedRootSource,
+    },
+    {
+      normalized: candidate.group_root_normalized,
+      source: candidate.group_root_source,
+    },
+  ].filter(
+    (option, index, all) =>
+      all.findIndex((item) => item.normalized === option.normalized) === index,
+  );
+  return (
+    <Modal ariaLabel={translate("terms.relatedGroupTitle", language)}>
+      <h2>{translate("terms.relatedGroupTitle", language)}</h2>
+      <p>{translate("terms.relatedGroupText", language, { source: candidate.source })}</p>
+      <div className="related-primary-options">
+        {options.map((option) => (
+          <label key={option.normalized}>
+            <input
+              type="radio"
+              name="related-primary"
+              checked={primary === option.normalized}
+              onChange={() => onPrimaryChange(option.normalized)}
+            />
+            {option.source}
+          </label>
+        ))}
+      </div>
+      <div className="modal-actions">
+        <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
+        <button className="primary-button" disabled={confirming} onClick={onConfirm}>{translate("terms.relatedGroup", language)}</button>
       </div>
     </Modal>
   );
