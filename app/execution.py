@@ -610,22 +610,6 @@ class PreviousContextIndex:
         return result
 
 
-def previous_context(
-    all_segments: list[dict[str, Any]],
-    first: dict[str, Any],
-    count: int,
-    *,
-    target_resolver: Callable[[str], str | None] | None = None,
-    source_key: str = "source",
-) -> list[dict[str, str]]:
-    return PreviousContextIndex(all_segments).previous(
-        first,
-        count,
-        target_resolver=target_resolver,
-        source_key=source_key,
-    )
-
-
 def contiguous_groups(
     segments: Iterable[dict[str, Any]],
     *,
@@ -880,32 +864,6 @@ def _validate_request_estimate(
             f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
             reason="itpm",
         )
-
-
-def estimate_single_segment(
-    segment: dict[str, Any],
-    *,
-    config: dict[str, Any],
-    prompt: str,
-    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
-) -> int:
-    """Estimate and validate one Segment without building a Chunk stream."""
-    input_limit = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["context_safety_margin_tokens"]
-    )
-    payload = payload_builder([segment])
-    estimated = estimate_messages(
-        render_messages(prompt, payload),
-        config["execution"]["token_safety_factor"],
-    )
-    _validate_request_estimate(
-        segment,
-        estimated,
-        input_limit=input_limit,
-        input_tokens_per_minute=config["execution"]["input_tokens_per_minute"],
-    )
-    return estimated
 
 
 def estimate_single_segment_preflight(
