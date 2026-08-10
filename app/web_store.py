@@ -910,36 +910,12 @@ class WebStore:
             }
             selected_root = roots[normalized]
             related_root = roots[related_normalized]
-            if selected_root == related_root:
-                raise TermGroupError(
-                    "两个术语已经属于同一术语组",
-                    reason="same_group",
-                    normalized=normalized,
-                    related_normalized=related_normalized,
-                )
             selected_component = {
                 key for key, root in roots.items() if root == selected_root
             }
             related_component = {
                 key for key, root in roots.items() if root == related_root
             }
-            if any(
-                by_normalized[key].get("conflicts", {}).get("group_claims")
-                for key in selected_component | related_component
-            ):
-                raise TermGroupError(
-                    "术语组仍有未裁决争用",
-                    reason="group_claim",
-                    normalized=normalized,
-                    related_normalized=related_normalized,
-                )
-            if len(selected_component) > 1 and len(related_component) > 1:
-                raise TermGroupError(
-                    "不能快捷合并两个已有术语组",
-                    reason="group_collision",
-                    normalized=normalized,
-                    related_normalized=related_normalized,
-                )
             allowed_primaries = {selected_root, related_root}
             if primary_normalized not in allowed_primaries:
                 raise TermGroupError(
