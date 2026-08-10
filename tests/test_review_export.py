@@ -461,9 +461,9 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
             review_calls.append(ids)
             if "format_correction" in payload:
                 correction = payload["format_correction"]
-                assert '"status":"accepted"}' in correction
-                assert '"status":"suggested"' in correction
-                assert '"suggested_text":"完整建议"' in correction
+                assert "遵守固定字段" in correction
+                assert "accepted 仅含 type、id、status" in system
+                assert '"suggested_text":"完整建议"' in system
             returned = [ids[1]] if len(ids) == 3 else ids
             records = [
                 {
