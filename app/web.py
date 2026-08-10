@@ -1237,6 +1237,10 @@ def create_app(
     async def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).set_term_primary(payload)
 
+    @app.post("/api/v1/projects/{name}/terms/leave-group")
+    async def leave_term_group(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).leave_term_group(payload)
+
     @app.post("/api/v1/projects/{name}/terms/group-related")
     async def group_related_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).group_related_terms(payload)

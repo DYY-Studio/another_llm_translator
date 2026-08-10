@@ -1183,6 +1183,49 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     assert rows["alice"]["group_primary"] == "alicia"
 
 
+def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    for source in ("John Smith", "John"):
+        response = client.post(
+            "/api/v1/projects/sample/terms",
+            json={"source": source, "aliases": [], "disabled": False},
+        )
+        assert response.status_code == 200
+    grouped = client.post(
+        "/api/v1/projects/sample/terms/group-related",
+        json={
+            "normalized": "john smith",
+            "related_normalized": "john",
+            "primary_normalized": "john smith",
+            "confirm": True,
+        },
+    )
+    assert grouped.status_code == 200
+
+    missing_confirmation = client.post(
+        "/api/v1/projects/sample/terms/leave-group",
+        json={"normalized": "john"},
+    )
+    assert missing_confirmation.status_code == 400
+    left = client.post(
+        "/api/v1/projects/sample/terms/leave-group",
+        json={"normalized": "john", "confirm": True},
+    )
+    assert left.status_code == 200
+    rows = {item["normalized"]: item for item in left.json()["terms"]}
+    assert rows["john"]["group_primary"] is None
+    assert rows["john smith"]["group_primary"] is None
+
+    primary = client.post(
+        "/api/v1/projects/sample/terms/leave-group",
+        json={"normalized": "john smith", "confirm": True},
+    )
+    assert primary.status_code == 400
+    assert primary.json()["code"] == "term_group_error"
+    assert primary.json()["params"]["reason"] == "not_group_member"
+
+
 def test_web_related_term_actions_are_exposed(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))

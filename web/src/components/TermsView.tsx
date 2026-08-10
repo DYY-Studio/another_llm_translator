@@ -122,6 +122,7 @@ export function TermsView({
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
   const [pendingGroupMemberAlias, setPendingGroupMemberAlias] = useState<Term | null>(null);
+  const [pendingGroupMemberLeave, setPendingGroupMemberLeave] = useState<Term | null>(null);
   const [pendingRelatedRemoval, setPendingRelatedRemoval] = useState<RelatedTerm | null>(null);
   const [relatedPrimary, setRelatedPrimary] = useState<string>("");
   const termListRef = useRef<HTMLDivElement>(null);
@@ -628,6 +629,32 @@ export function TermsView({
     }
   }
 
+  async function leaveGroup() {
+    if (!pendingGroupMemberLeave) return;
+    const normalized = pendingGroupMemberLeave.normalized;
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/leave-group`,
+        {
+          method: "POST",
+          body: JSON.stringify({ normalized, confirm: true }),
+        },
+      );
+      setData(value);
+      const left = value.terms.find((term) => term.normalized === normalized) ?? null;
+      selection.reset(left?.normalized ?? "");
+      setForm(left ? formFor(left) : emptyForm);
+      setPendingGroupMemberLeave(null);
+      setMessage(translate("terms.groupMemberLeft", language));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function removeRelated() {
     if (!pendingRelatedRemoval) return;
     setSaving(true);
@@ -838,6 +865,7 @@ export function TermsView({
                           <div className="term-group-actions">
                             <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
                             <button className="danger-button" disabled={member.disabled || saving} onClick={() => setPendingGroupMemberAlias(member)}>{translate("terms.relatedConvert", language)}</button>
+                            <button className="danger-button" disabled={member.disabled || saving} onClick={() => setPendingGroupMemberLeave(member)}>{translate("terms.leaveGroup", language)}</button>
                           </div>
                         </div>
                       ))}
@@ -1035,6 +1063,19 @@ export function TermsView({
           confirming={saving}
           onCancel={() => setPendingGroupMemberAlias(null)}
           onConfirm={convertGroupMemberToAlias}
+        />
+      )}
+      {pendingGroupMemberLeave && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.leaveGroupTitle", language)}
+          text={translate("terms.leaveGroupText", language, {
+            source: pendingGroupMemberLeave.source,
+          })}
+          confirmLabel={translate("terms.leaveGroup", language)}
+          confirming={saving}
+          onCancel={() => setPendingGroupMemberLeave(null)}
+          onConfirm={leaveGroup}
         />
       )}
       {pendingRelatedRemoval && (
