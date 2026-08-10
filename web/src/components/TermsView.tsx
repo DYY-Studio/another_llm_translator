@@ -121,6 +121,8 @@ export function TermsView({
   const relatedCacheRef = useRef(new Map<string, RelatedTermsResponse>());
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
+  const [pendingGroupMemberAlias, setPendingGroupMemberAlias] = useState<Term | null>(null);
+  const [pendingRelatedRemoval, setPendingRelatedRemoval] = useState<RelatedTerm | null>(null);
   const [relatedPrimary, setRelatedPrimary] = useState<string>("");
   const termListRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef<number | null>(null);
@@ -596,6 +598,58 @@ export function TermsView({
     }
   }
 
+  async function convertGroupMemberToAlias() {
+    if (!selected || !pendingGroupMemberAlias) return;
+    const primaryNormalized = selected.group_primary ?? selected.normalized;
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse & { aliases_added: string[] }>(
+        `/api/v1/projects/${project}/terms/convert-to-alias`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            normalized: primaryNormalized,
+            related_normalized: pendingGroupMemberAlias.normalized,
+            confirm: true,
+          }),
+        },
+      );
+      setData(value);
+      const primary = value.terms.find((term) => term.normalized === primaryNormalized) ?? null;
+      selection.reset(primary?.normalized ?? primaryNormalized);
+      setForm(primary ? formFor(primary) : emptyForm);
+      setPendingGroupMemberAlias(null);
+      setMessage(translate("terms.groupMemberConverted", language, { count: value.aliases_added.length }));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeRelated() {
+    if (!pendingRelatedRemoval) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse & { removed: number }>(
+        `/api/v1/projects/${project}/terms/remove`,
+        {
+          method: "POST",
+          body: JSON.stringify({ normalized: [pendingRelatedRemoval.normalized] }),
+        },
+      );
+      setData(value);
+      setPendingRelatedRemoval(null);
+      setMessage(translate("terms.relatedRemoved", language));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="terms-workspace">
       <section className="terms-browser">
@@ -781,7 +835,10 @@ export function TermsView({
                         <div className="term-group-row" key={member.normalized}>
                           <button className="link-button" onClick={() => { selection.reset(member.normalized); focusTerm(member); }}>{member.source}</button>
                           <span>{member.preferred_translation || translate("terms.noPreferredTranslation", language)}</span>
-                          <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
+                          <div className="term-group-actions">
+                            <button className="quiet-button" disabled={member.disabled || saving} onClick={() => setPendingPrimary(member.normalized)}>{translate("terms.setPrimary", language)}</button>
+                            <button className="danger-button" disabled={member.disabled || saving} onClick={() => setPendingGroupMemberAlias(member)}>{translate("terms.relatedConvert", language)}</button>
+                          </div>
                         </div>
                       ))}
                       {!!selected.conflicts.group_claims.length && (
@@ -839,6 +896,7 @@ export function TermsView({
                               <button className="quiet-button" disabled={saving} onClick={() => locateRelated(candidate)}>{translate("terms.relatedLocate", language)}</button>
                               {candidate.can_group && <button className="quiet-button" disabled={saving} onClick={() => openRelatedGroup(candidate)}>{translate("terms.relatedGroup", language)}</button>}
                               {candidate.can_convert_alias && <button className="danger-button" disabled={saving} onClick={() => setPendingRelatedAlias(candidate)}>{translate("terms.relatedConvert", language)}</button>}
+                              {candidate.can_remove && <button className="danger-button" disabled={saving} onClick={() => setPendingRelatedRemoval(candidate)}>{translate("terms.relatedRemove", language)}</button>}
                             </div>
                             {candidate.blocked_reason && <small className="term-related-blocked">{translate(`terms.relatedBlocked.${candidate.blocked_reason}`, language)}</small>}
                           </div>
@@ -963,6 +1021,31 @@ export function TermsView({
           confirming={saving}
           onCancel={() => setPendingRelatedAlias(null)}
           onConfirm={convertRelatedToAlias}
+        />
+      )}
+      {pendingGroupMemberAlias && selected && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.groupMemberAliasTitle", language)}
+          text={translate("terms.groupMemberAliasText", language, {
+            source: pendingGroupMemberAlias.source,
+            aliases: pendingGroupMemberAlias.aliases.join("、") || translate("terms.relatedNoAliases", language),
+          })}
+          confirmLabel={translate("terms.relatedConvert", language)}
+          confirming={saving}
+          onCancel={() => setPendingGroupMemberAlias(null)}
+          onConfirm={convertGroupMemberToAlias}
+        />
+      )}
+      {pendingRelatedRemoval && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.relatedRemoveTitle", language)}
+          text={translate("terms.relatedRemoveText", language, { source: pendingRelatedRemoval.source })}
+          confirmLabel={translate("terms.relatedRemove", language)}
+          confirming={saving}
+          onCancel={() => setPendingRelatedRemoval(null)}
+          onConfirm={removeRelated}
         />
       )}
       {importOpen && (

@@ -79,6 +79,8 @@ def test_related_terms_rank_containment_and_group_independent_entries(
     }
     assert all(item["relation"] == "contained_by_selected" for item in related["related"])
     assert all(item["can_group"] is True for item in related["related"])
+    assert all(item["can_convert_alias"] is True for item in related["related"])
+    assert all(item["can_remove"] is True for item in related["related"])
 
     grouped = store.group_related_terms(
         {
@@ -217,6 +219,76 @@ def test_related_conversion_rejects_external_alias_collision_without_writing(
     assert error.value.params["reason"] == "alias_collision"
     assert read_json(project, project / "terminology" / "terms.json") == before_library
     assert read_json(project, project / "terminology" / "overrides.json") == before_overrides
+
+
+def test_group_member_conversion_moves_forms_to_primary_without_containment(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "John Smith John Alice A Bob B")
+    store = WebStore(project)
+    store.save_term({"source": "John Smith"})
+    store.save_term({"source": "John", "preferred_translation": "约翰"})
+    store.group_related_terms(
+        {
+            "normalized": "john smith",
+            "related_normalized": "john",
+            "primary_normalized": "john smith",
+            "confirm": True,
+        }
+    )
+    store.save_term(
+        {"old_normalized": "john smith", "source": "John Smith", "aliases": ["Bob"]}
+    )
+    store.materialize_term({"normalized": "john smith", "alias": "Bob"})
+    store.save_term(
+        {
+            "old_normalized": "john",
+            "source": "Alice",
+            "aliases": ["A"],
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "member-only data",
+        }
+    )
+    store.save_term({"old_normalized": "bob", "source": "Bob", "aliases": ["B"]})
+    before = load_terms(project)
+
+    converted = store.convert_related_to_alias(
+        {
+            "normalized": "bob",
+            "related_normalized": "alice",
+            "confirm": True,
+        }
+    )
+
+    rows = {item["normalized"]: item for item in converted["terms"]}
+    assert set(rows["john smith"]["aliases"]) == {"Alice", "A"}
+    assert rows["alice"]["disabled"] is True
+    assert rows["alice"]["group_primary"] is None
+    assert converted["terms_revision"] == int(before["terms_revision"]) + 1
+
+
+def test_related_capabilities_protect_group_primary_from_conversion_and_removal(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "John Smith John Johnny")
+    store = WebStore(project)
+    store.save_term({"source": "John Smith"})
+    store.save_term({"source": "John"})
+    store.save_term({"source": "Johnny"})
+    store.group_related_terms(
+        {
+            "normalized": "john",
+            "related_normalized": "johnny",
+            "primary_normalized": "john",
+            "confirm": True,
+        }
+    )
+
+    related = store.related_terms("john smith")["related"]
+    candidate = next(item for item in related if item["normalized"] == "john")
+    assert candidate["can_convert_alias"] is False
+    assert candidate["can_remove"] is False
 
 
 def test_match_terms_counts_a_group_as_one_slot() -> None:
