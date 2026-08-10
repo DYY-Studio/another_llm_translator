@@ -909,6 +909,12 @@ alias 与另一条术语的主 source 相同时，由
 人工换主在单次项目写锁内重写全组。组主仍有成员时不能移除或永久删除；成员
 移除时同时脱组。将 alias 物化为成员时不复制主条目的译名、类别或说明。
 
+术语组副条目可以在组页通过“退出组”解除关系。退组只写入显式
+`group_primary = null` override，保留该条目的 source、aliases、译名、类别和说明；
+组主及其他成员不受影响。组主不能直接退组，需要逐个让副条目退出。若原 alias
+仍与退组条目的 source 碰撞，退组不会删除 alias，而是按当前 collision policy 生成
+待裁决的 `group_claims`；显式独立 override 会阻止后续自动重新组化。
+
 人工 override 以 normalized source 定位：
 
 ```json

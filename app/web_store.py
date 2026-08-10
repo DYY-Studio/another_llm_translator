@@ -1501,6 +1501,58 @@ class WebStore:
                 library, current, overrides, origin="web_set_term_primary"
             )
 
+    def leave_term_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认退出术语组")
+        normalized = payload.get("normalized")
+        if not isinstance(normalized, str) or not normalized:
+            raise UsageError("normalized 必须是非空字符串")
+        with project_write_lock(self.project):
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            term = current.get(normalized)
+            if term is None:
+                raise TermGroupError(
+                    "术语不存在、已移除或请求已过期",
+                    reason="stale_member",
+                    normalized=normalized,
+                )
+            primary = term.get("group_primary")
+            if not isinstance(primary, str) or not primary:
+                raise TermGroupError(
+                    "只有术语组副条目可以退出术语组",
+                    reason="not_group_member",
+                    normalized=normalized,
+                )
+            primary_term = current.get(primary)
+            if primary_term is None or primary_term.get("group_primary") is not None:
+                raise TermGroupError(
+                    "术语组主指针无效，无法退出术语组",
+                    reason="invalid_group",
+                    normalized=normalized,
+                    group_primary=primary,
+                )
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            override = overrides.get(
+                normalized,
+                {"normalized": normalized, "source": term.get("source", normalized)},
+            )
+            overrides[normalized] = {**override, "group_primary": None}
+            current[normalized]["group_primary"] = None
+            result = self._publish_terms(
+                library, current, overrides, origin="web_leave_term_group"
+            )
+            return result
+
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         spec = term_normalization(self.config)
         source = payload.get("source")
