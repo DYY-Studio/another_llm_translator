@@ -128,6 +128,7 @@ export function TermsView({
   const [relatedPrimary, setRelatedPrimary] = useState<string>("");
   const termListRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef<number | null>(null);
+  const suppressFocusScrollForDataRef = useRef<TermsResponse | null>(null);
   const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
   const selected = data?.terms.find(
@@ -345,6 +346,7 @@ export function TermsView({
   // stays in view: clearing a filter can move it far down the full list.
   useEffect(() => {
     if (!selection.focusedKey) return;
+    if (suppressFocusScrollForDataRef.current === data) return;
     const index = visible.findIndex(
       (term) => term.normalized === selection.focusedKey,
     );
@@ -352,6 +354,7 @@ export function TermsView({
   }, [data, onlyConflicts, search, showDisabled, selection.focusedKey, termVirtualizer, visible]);
 
   function resetFilterSelection() {
+    suppressFocusScrollForDataRef.current = null;
     selection.reset();
     setForm(emptyForm);
     setMessage("");
@@ -364,6 +367,7 @@ export function TermsView({
     nextConflicts: boolean,
     nextDisabled: boolean,
   ) {
+    suppressFocusScrollForDataRef.current = null;
     const focused = data?.terms.find(
       (term) => term.normalized === selection.focusedKey,
     ) ?? null;
@@ -379,6 +383,7 @@ export function TermsView({
   }
 
   function focusTerm(term: Term) {
+    suppressFocusScrollForDataRef.current = null;
     setForm(formFor(term));
     setMessage("");
   }
@@ -403,10 +408,15 @@ export function TermsView({
           disabled,
         }),
       });
-      setData(value);
       const saved = value.terms.find(
         (term) => term.source === form.source && term.disabled === disabled,
       ) ?? null;
+      if (selected?.has_conflicts && saved && !saved.has_conflicts) {
+        suppressFocusScrollForDataRef.current = value;
+      } else {
+        suppressFocusScrollForDataRef.current = null;
+      }
+      setData(value);
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
