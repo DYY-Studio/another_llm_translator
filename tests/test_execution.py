@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 
@@ -9,8 +10,9 @@ import httpx
 import pytest
 
 from app.config import load_global_config
-from app.errors import ExternalError, FatalExternalError
+from app.errors import ExternalError, FatalExternalError, RequestSizeError
 from app.execution import (
+    CJK_RE,
     ChunkPlan,
     LLMClient,
     PreviousContextIndex,
@@ -18,7 +20,11 @@ from app.execution import (
     SlidingWindowLimiter,
     build_chunk_plans,
     classify_stage,
+    classify_stage_states,
     estimate_messages,
+    estimate_messages_upper_bound,
+    estimate_single_segment_preflight,
+    estimate_tokens,
     finalize_run,
     full_prompt,
     dispatch_chunks,
@@ -32,7 +38,14 @@ from app.execution import (
 )
 from app.llm_adapter import load_json_adapter
 from app.project import init_project
-from app.sqlite_storage import read_json, write_json
+from app.sqlite_storage import (
+    append_jsonl,
+    latest_stage_states,
+    record_header,
+    read_json,
+    terminology_scan_state,
+    write_json,
+)
 from tests.test_foundation import make_app_root
 
 
@@ -86,6 +99,168 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
         else "parallel"
     )
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) != original
+
+
+def test_token_estimate_matches_the_previous_character_accounting() -> None:
+    samples = [
+        "",
+        "English words and punctuation!",
+        "简体中文、繁體中文、日本語、한국어",
+        "line\n\twith\u2003unicode whitespace",
+        '\\"quoted\\" \\ slash \\u0000 control',
+        "😀" * 17,
+    ]
+    for text in samples:
+        cjk_count = len(CJK_RE.findall(text))
+        non_cjk = CJK_RE.sub("", text)
+        non_space = sum(not char.isspace() for char in non_cjk)
+        whitespace = sum(char.isspace() for char in non_cjk)
+        expected = max(
+            1,
+            math.ceil(cjk_count * 1.1 + non_space / 4 + whitespace / 8),
+        ) if text else 0
+        assert estimate_tokens(text) == expected
+
+
+def test_message_upper_bound_is_conservative() -> None:
+    messages = render_messages(
+        "系统提示：保留 JSONL。",
+        {
+            "segments": [
+                {"id": "1", "source": '引号\\换行\n and symbols 😀'},
+                {"id": "2", "source": "plain"},
+            ]
+        },
+    )
+    for factor in (0.5, 1.0, 1.05, 2.0):
+        assert estimate_messages(messages, factor) <= estimate_messages_upper_bound(
+            messages, factor
+        )
+
+
+def test_single_segment_preflight_falls_back_when_upper_bound_is_uncertain() -> None:
+    segment = {
+        "segment_id": "F0001-S000001",
+        "source": "ordinary latin text " * 40,
+    }
+
+    def payload_builder(items: list[dict]) -> dict:
+        return {
+            "segments": [
+                {"id": item["segment_id"], "source": item["source"]}
+                for item in items
+            ]
+        }
+
+    current = config()
+    prompt = "prompt"
+    messages = render_messages(prompt, payload_builder([segment]))
+    exact = estimate_messages(messages, current["execution"]["token_safety_factor"])
+    upper = estimate_messages_upper_bound(
+        messages,
+        current["execution"]["token_safety_factor"],
+    )
+    assert upper > exact
+    current["llm"]["context_window_tokens"] = (
+        exact + current["llm"]["context_safety_margin_tokens"]
+    )
+    current["execution"]["input_tokens_per_minute"] = 0
+    assert estimate_single_segment_preflight(
+        segment,
+        config=current,
+        prompt=prompt,
+        payload_builder=payload_builder,
+    ) is False
+
+    current["llm"]["context_window_tokens"] -= 1
+    with pytest.raises(RequestSizeError, match="模型硬限制"):
+        estimate_single_segment_preflight(
+            segment,
+            config=current,
+            prompt=prompt,
+            payload_builder=payload_builder,
+        )
+
+
+def test_latest_stage_states_preserve_classification_semantics(tmp_path: Path) -> None:
+    project = _finalize_project(tmp_path)
+    selected = [
+        {"segment_id": "F0001-S000001"},
+        {"segment_id": "F0001-S000002"},
+        {"segment_id": "F0001-S000003"},
+        {"segment_id": "F0001-S000004"},
+    ]
+
+    def append_stage(segment_id: str, status: str, **fields: object) -> None:
+        append_jsonl(
+            project,
+            project / "stages" / "translation.jsonl",
+            record_header(
+                "stage_result",
+                "PROJECT",
+                stage="translation",
+                segment_id=segment_id,
+                status=status,
+                **fields,
+            ),
+        )
+
+    append_stage("F0001-S000001", "completed", text="old", stage_fingerprint="fp-old")
+    append_stage("F0001-S000001", "failed")
+    append_stage("F0001-S000002", "completed", text="reset", stage_fingerprint="fp-reset")
+    append_stage("F0001-S000002", "reset")
+    append_stage("F0001-S000003", "reset")
+    append_stage("F0001-S000003", "completed", text="new", stage_fingerprint="fp-new")
+    append_stage("F0001-S000004", "failed")
+
+    states = latest_stage_states(
+        project,
+        "translation",
+        [item["segment_id"] for item in selected],
+    )
+    classified = classify_stage_states(selected, states, force=False)
+    assert [item["segment_id"] for item in classified.reusable] == [
+        "F0001-S000001",
+        "F0001-S000003",
+    ]
+    assert [item["segment_id"] for item in classified.work] == [
+        "F0001-S000002",
+        "F0001-S000004",
+    ]
+    assert classified.latest_completed["F0001-S000001"]["text"] == "old"
+    assert classified.latest_completed["F0001-S000003"]["text"] == "new"
+    assert classified.last_attempt_failed == ("F0001-S000001",)
+    assert classified.fingerprints == frozenset({"fp-old", "fp-new"})
+
+
+def test_terminology_scan_state_uses_completed_records_only(tmp_path: Path) -> None:
+    project = _finalize_project(tmp_path)
+    path = project / "terminology" / "scans.jsonl"
+
+    def append_scan(segment_id: str, status: str, fingerprint: str | None) -> None:
+        append_jsonl(
+            project,
+            path,
+            record_header(
+                "terminology_scan",
+                "PROJECT",
+                active_task_id="TASK-1",
+                segment_id=segment_id,
+                status=status,
+                stage_fingerprint=fingerprint,
+            ),
+        )
+
+    append_scan("F0001-S000001", "completed", "fp-1")
+    append_scan("F0001-S000001", "failed", "fp-failed")
+    append_scan("F0001-S000002", "failed", "fp-2")
+    completed, fingerprints = terminology_scan_state(
+        project,
+        "TASK-1",
+        ("F0001-S000001", "F0001-S000002"),
+    )
+    assert completed == {"F0001-S000001"}
+    assert fingerprints == {"fp-1"}
 
 
 @pytest.mark.parametrize("stage", ["proofreading", "polishing"])
