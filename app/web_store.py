@@ -888,7 +888,11 @@ class WebStore:
             if not related["can_group"]:
                 raise TermGroupError(
                     "相关推荐条目不能快捷加入术语组",
-                    reason=str(related["blocked_reason"] or "group_collision"),
+                    reason=(
+                        "group_collision"
+                        if related["blocked_reason"] == "cross_group"
+                        else str(related["blocked_reason"] or "group_collision")
+                    ),
                     normalized=normalized,
                     related_normalized=related_normalized,
                 )
