@@ -274,7 +274,7 @@ def _make_stage_selection(
     )
 
 
-PROMPT_RULES_VERSION = 3
+PROMPT_RULES_VERSION = 4
 
 _COMMON_RULES: dict[str, str] = {
     "zh-CN": (
@@ -297,25 +297,31 @@ _COMMON_RULES: dict[str, str] = {
 _STAGE_RULES: dict[str, dict[str, str]] = {
     "terminology": {
         "zh-CN": (
-            "只从 source_segments[] 中的原文字符串提取术语；reference_context 中的"
-            "内容不得单独触发提取。term 记录的 source 必须填写原文中实际"
-            "出现的术语文本。"
-            '每个术语输出一条 type="term" 记录，包含 source、category、'
-            "description，preferred_translation 和 aliases 可选。没有术语时"
-            "直接输出 end。记录格式："
-            '{"type":"term","source":"Alice","category":"女性人名",'
-            '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
+            "准确率优先。仅提取专名、作品或领域特有概念、或需跨段统一译法的"
+            "表达；排除普通词、泛称、一般描述和日常事物，不确定则忽略。"
+            "只依据 source_segments[]；reference_context 不得触发提取。source、"
+            "aliases 各值必须是其中原文。aliases 仅为同一术语的其他源文形式，"
+            "禁放目标译文、释义及面向 target_language 的音译；目标形式只放 "
+            'preferred_translation。每术语输出一行 type="term"，必含 source、'
+            "category、description，可含 preferred_translation、aliases；无合格"
+            '术语则输出 end。格式：{"type":"term","source":"Alice",'
+            '"category":"人名","description":"人物",'
+            '"preferred_translation":"爱丽丝","aliases":["Ally"]}。'
         ),
         "en": (
-            "Extract terms only from the source strings in source_segments; content in "
-            "reference_context must not trigger extraction on its own. The "
-            "term record's source must be the term text as it actually "
-            'appears in the source. Output one type="term" record per term '
-            "with source, category, and description; preferred_translation "
-            "and aliases are optional. Output end directly when there are no "
-            'terms. Record format: {"type":"term","source":"Alice",'
-            '"category":"female person name","description":"character",'
-            '"preferred_translation":"爱丽丝","aliases":[]}.'
+            "Favor precision. Extract only proper names, work- or domain-specific "
+            "concepts, or expressions needing consistent translation across segments. "
+            "Skip ordinary words, generic labels, descriptions, everyday things, and "
+            "uncertain cases. Use only source_segments; reference_context cannot "
+            "trigger extraction. source and each aliases value must occur there. "
+            "aliases means alternate source-language forms only, never target "
+            "translations, explanations, or transliterations for target_language; "
+            "put target forms only in preferred_translation. Output one line per term "
+            'with type="term", source, category, and description; '
+            "preferred_translation and aliases are optional. With no qualifying term, "
+            'output end. Format: {"type":"term","source":"Alice",'
+            '"category":"person name","description":"character",'
+            '"preferred_translation":"爱丽丝","aliases":["Ally"]}.'
         ),
     },
     "translation": {
