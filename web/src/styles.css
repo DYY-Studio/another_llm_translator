@@ -282,6 +282,10 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .term-row > span:nth-child(2) { min-width: 0; display: grid; gap: 4px; }
 .term-row strong, .term-row small { overflow-wrap: anywhere; }
 .term-row small { color: var(--muted); }
+.term-row-summary { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.term-row-summary > small:first-child { min-width: 0; flex: 1; }
+.term-row-category { flex: 0 1 auto; max-width: 48%; overflow: hidden; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft); text-overflow: ellipsis; white-space: nowrap; }
+.term-row-category.conflict { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }
 .term-row em { color: var(--muted); font-size: 12px; font-style: normal; white-space: nowrap; }
 .term-state { width: 9px; height: 9px; border: 1.5px solid var(--success); border-radius: 50%; background: var(--success); }
 .term-state.conflict { border-color: var(--status-warning); background: var(--status-warning); }
