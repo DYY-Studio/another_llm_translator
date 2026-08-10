@@ -43,12 +43,13 @@ from .execution import (
     SlidingWindowLimiter,
     build_chunk_plans,
     classify_stage,
+    classify_stage_states,
     continue_run,
     contiguous_groups,
     create_run,
     dispatch_chunks,
     estimate_messages,
-    estimate_single_segment,
+    estimate_single_segment_preflight,
     find_running_runs,
     finalize_run,
     full_prompt,
@@ -80,6 +81,8 @@ from .sqlite_storage import (
     read_jsonl,
     record_exists,
     record_header,
+    latest_stage_states,
+    terminology_scan_state,
     write_json,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
@@ -309,6 +312,8 @@ class _Preflight:
     part_original: dict[str, str]
     original_parts: dict[str, list[str]]
     preflight_failed: list[dict[str, Any]]
+    fast_checked: int
+    exact_checked: int
 
 
 def _split_oversized_preflight(
@@ -328,17 +333,24 @@ def _split_oversized_preflight(
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
     preflight_failed: list[dict[str, Any]] = []
+    fast_checked = 0
+    exact_checked = 0
     for segment in work:
         try:
-            estimate_single_segment(
+            fast = estimate_single_segment_preflight(
                 segment,
                 config=config,
                 prompt=prompt,
                 payload_builder=payload_builder,
             )
+            if fast:
+                fast_checked += 1
+            else:
+                exact_checked += 1
             request_segments.append(segment)
             continue
         except RequestSizeError as exc:
+            exact_checked += 1
             if exc.reason != "context":
                 fail_planning(exc)
                 raise
@@ -353,14 +365,19 @@ def _split_oversized_preflight(
             part = pending_parts.pop(0)
             probe = make_probe(segment, part)
             try:
-                estimate_single_segment(
+                fast = estimate_single_segment_preflight(
                     probe,
                     config=config,
                     prompt=prompt,
                     payload_builder=payload_builder,
                 )
+                if fast:
+                    fast_checked += 1
+                else:
+                    exact_checked += 1
                 accepted_parts.append(part)
             except RequestSizeError as exc:
+                exact_checked += 1
                 if exc.reason != "context":
                     fail_planning(exc)
                     raise
@@ -385,6 +402,8 @@ def _split_oversized_preflight(
         part_original=part_original,
         original_parts=original_parts,
         preflight_failed=preflight_failed,
+        fast_checked=fast_checked,
+        exact_checked=exact_checked,
     )
 
 
@@ -1899,19 +1918,12 @@ async def run_terminology(
     if scope.force:
         # A forced terminology run rescans the full project and merges at publish.
         selected = [segment for segment in segments if not segment["is_empty"]]
-    scans = [
-        record
-        for record in read_jsonl(
-            project,
-            project / "terminology" / "scans.jsonl",
-            task_id=task_id,
-        )
-    ]
-    completed_ids = {
-        str(record["segment_id"])
-        for record in scans
-        if record.get("status") == "completed"
-    }
+    selected_ids = {str(segment["segment_id"]) for segment in selected}
+    completed_ids, existing_fingerprints = terminology_scan_state(
+        project,
+        task_id,
+        selected_ids,
+    )
     work = (
         selected
         if scope.force and not create_task
@@ -1928,14 +1940,6 @@ async def run_terminology(
         len(work),
         len(completed_ids),
     )
-    selected_ids = {str(segment["segment_id"]) for segment in selected}
-    existing_fingerprints = {
-        str(record["stage_fingerprint"])
-        for record in scans
-        if record.get("status") == "completed"
-        and str(record.get("segment_id")) in selected_ids
-        and record.get("stage_fingerprint")
-    }
     usage: dict[str, Any] | None = None
     warnings = _assemble_warnings(
         stage="terminology",
@@ -2018,10 +2022,12 @@ async def run_terminology(
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
     logger.info(
-        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d fast=%d exact=%d",
         time.perf_counter() - preparation_started_at,
         len(request_segments),
         len(preflight_failed),
+        preflight.fast_checked,
+        preflight.exact_checked,
     )
 
     if scope.dry_run:
@@ -2873,11 +2879,22 @@ async def run_translation(
         prompt_middle_digests(project, "translation"),
         terms_revision=terms_revision,
     )
-    history = load_stage_history(
-        project, "translation"
-    )
     selected_segments = select_scope(segments, files, scope)
-    selection = classify_stage(selected_segments, history, force=scope.force)
+    active_segment_ids = [
+        str(segment["segment_id"])
+        for segment in segments
+        if not segment["is_empty"]
+    ]
+    history_states = latest_stage_states(
+        project,
+        "translation",
+        active_segment_ids,
+    )
+    selection = classify_stage_states(
+        selected_segments,
+        history_states,
+        force=scope.force,
+    )
     logger.info(
         "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
         time.perf_counter() - preparation_started_at,
@@ -2987,10 +3004,12 @@ async def run_translation(
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
     logger.info(
-        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d fast=%d exact=%d",
         time.perf_counter() - preparation_started_at,
         len(request_segments),
         len(preflight_failed),
+        preflight.fast_checked,
+        preflight.exact_checked,
     )
 
     if scope.dry_run:
@@ -3470,7 +3489,28 @@ def require_success(summary: dict[str, Any]) -> None:
 def _base_results(
     project: Path,
     stage: str,
+    *,
+    segment_ids: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    if segment_ids is not None:
+        values = [str(value) for value in segment_ids]
+        translations = {
+            key: state["completed"]
+            for key, state in latest_stage_states(
+                project, "translation", values
+            ).items()
+            if isinstance(state.get("completed"), dict)
+        }
+        if stage == "proofreading":
+            return translations
+        applied = {
+            key: state["completed"]
+            for key, state in latest_stage_states(
+                project, "proofreading_applied", values
+            ).items()
+            if isinstance(state.get("completed"), dict)
+        }
+        return {**translations, **applied}
     translations = {
         str(key): value
         for key, value in classify_stage(
@@ -3592,7 +3632,16 @@ async def run_review(
         terms_revision=terms_revision,
     )
     selected_segments = select_scope(segments, files, scope)
-    bases = _base_results(project, stage)
+    active_segment_ids = [
+        str(segment["segment_id"])
+        for segment in segments
+        if not segment["is_empty"]
+    ]
+    bases = _base_results(
+        project,
+        stage,
+        segment_ids=active_segment_ids,
+    )
     missing_base = [
         str(segment["segment_id"])
         for segment in selected_segments
@@ -3612,8 +3661,16 @@ async def run_review(
                     "text": str(segment["source"]),
                 },
             )
-    history = load_stage_history(project, stage)
-    selection = classify_stage(selected_segments, history, force=scope.force)
+    history_states = latest_stage_states(
+        project,
+        stage,
+        active_segment_ids,
+    )
+    selection = classify_stage_states(
+        selected_segments,
+        history_states,
+        force=scope.force,
+    )
     logger.info(
         "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
         time.perf_counter() - preparation_started_at,
@@ -3750,10 +3807,12 @@ async def run_review(
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
     logger.info(
-        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d fast=%d exact=%d",
         time.perf_counter() - preparation_started_at,
         len(request_segments),
         len(preflight_failed),
+        preflight.fast_checked,
+        preflight.exact_checked,
     )
 
     if scope.dry_run:

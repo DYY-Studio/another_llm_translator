@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -192,10 +192,50 @@ def classify_stage(
     selected_list = list(selected)
     history_list = list(history)
     completed = latest_completed_by_segment(history_list)
-    records_by_segment: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    latest_status: dict[str, Any] = {}
     for record in history_list:
         if record.get("segment_id"):
-            records_by_segment[str(record["segment_id"])].append(record)
+            latest_status[str(record["segment_id"])] = record.get("status")
+    return _make_stage_selection(
+        selected_list,
+        completed,
+        latest_status,
+        force=force,
+    )
+
+
+def classify_stage_states(
+    selected: Iterable[dict[str, Any]],
+    states: Mapping[str, Mapping[str, Any]],
+    *,
+    force: bool,
+) -> StageSelection:
+    """Classify a stage from storage's latest per-Segment state."""
+    selected_list = list(selected)
+    completed = {
+        str(segment_id): state["completed"]
+        for segment_id, state in states.items()
+        if isinstance(state.get("completed"), dict)
+    }
+    latest_status = {
+        str(segment_id): state.get("latest_status")
+        for segment_id, state in states.items()
+    }
+    return _make_stage_selection(
+        selected_list,
+        completed,
+        latest_status,
+        force=force,
+    )
+
+
+def _make_stage_selection(
+    selected_list: list[dict[str, Any]],
+    completed: Mapping[str, dict[str, Any]],
+    latest_status: Mapping[str, Any],
+    *,
+    force: bool,
+) -> StageSelection:
     reusable = [
         segment
         for segment in selected_list
@@ -214,8 +254,7 @@ def classify_stage(
         str(segment["segment_id"])
         for segment in selected_list
         if str(segment["segment_id"]) in completed
-        and records_by_segment[str(segment["segment_id"])]
-        and records_by_segment[str(segment["segment_id"])][-1].get("status") == "failed"
+        and latest_status.get(str(segment["segment_id"])) == "failed"
     )
     reusable_ids = {
         str(segment["segment_id"]) for segment in reusable
@@ -452,15 +491,30 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     cjk_count = len(CJK_RE.findall(text))
-    non_cjk = CJK_RE.sub("", text)
-    non_space = sum(not char.isspace() for char in non_cjk)
-    whitespace = sum(char.isspace() for char in non_cjk)
+    whitespace = sum(map(str.isspace, text))
+    non_space = len(text) - cjk_count - whitespace
     return max(1, math.ceil(cjk_count * 1.1 + non_space / 4 + whitespace / 8))
 
 
 def estimate_messages(messages: list[dict[str, str]], factor: float) -> int:
     rendered = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
     return math.ceil(estimate_tokens(rendered) * factor)
+
+
+def estimate_messages_upper_bound(
+    messages: list[dict[str, str]], factor: float
+) -> int:
+    """Return a safe upper bound for the exact message estimate.
+
+    The exact estimator assigns at most 1.1 tokens to every serialized
+    character.  Counting serialized characters is therefore sufficient for a
+    conservative preflight check and avoids the Unicode classification pass.
+    """
+    rendered = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    # ``estimate_tokens`` rounds before applying the safety factor, so round
+    # the per-character upper bound at the same stage to keep this bound
+    # valid for factors greater than one.
+    return math.ceil(math.ceil(len(rendered) * 1.1) * factor)
 
 
 def render_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -852,6 +906,37 @@ def estimate_single_segment(
         input_tokens_per_minute=config["execution"]["input_tokens_per_minute"],
     )
     return estimated
+
+
+def estimate_single_segment_preflight(
+    segment: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    prompt: str,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+) -> bool:
+    """Validate one Segment, using a conservative estimate when possible."""
+    input_limit = (
+        config["llm"]["context_window_tokens"]
+        - config["llm"]["context_safety_margin_tokens"]
+    )
+    factor = config["execution"]["token_safety_factor"]
+    payload = payload_builder([segment])
+    messages = render_messages(prompt, payload)
+    upper_bound = estimate_messages_upper_bound(messages, factor)
+    input_tokens_per_minute = config["execution"]["input_tokens_per_minute"]
+    if upper_bound <= input_limit and (
+        input_tokens_per_minute <= 0 or upper_bound <= input_tokens_per_minute
+    ):
+        return True
+    estimated = estimate_messages(messages, factor)
+    _validate_request_estimate(
+        segment,
+        estimated,
+        input_limit=input_limit,
+        input_tokens_per_minute=input_tokens_per_minute,
+    )
+    return False
 
 
 def build_chunk_plans(
