@@ -13,6 +13,7 @@ from app.errors import ExternalError, FatalExternalError
 from app.execution import (
     ChunkPlan,
     LLMClient,
+    PreviousContextIndex,
     Scope,
     SlidingWindowLimiter,
     build_chunk_plans,
@@ -592,6 +593,62 @@ def test_context_is_same_file_and_optional_target() -> None:
     )
     assert [item["source"] for item in context] == ["three", "four"]
     assert all("translation" in item for item in context)
+
+
+def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
+    source = [
+        {
+            "segment_id": "S3",
+            "file_id": "F1",
+            "part_id": "P1",
+            "line_index": 3,
+            "source": "three",
+            "model_source": "model-three",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "S1",
+            "file_id": "F1",
+            "part_id": "P1",
+            "line_index": 1,
+            "source": "one",
+            "model_source": "model-one",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "S2",
+            "file_id": "F1",
+            "part_id": "P1",
+            "line_index": 2,
+            "source": "",
+            "model_source": "",
+            "is_empty": True,
+        },
+        {
+            "segment_id": "S4",
+            "file_id": "F2",
+            "part_id": "P1",
+            "line_index": 4,
+            "source": "other file",
+            "model_source": "other model",
+            "is_empty": False,
+        },
+    ]
+    index = PreviousContextIndex(source)
+    probe = {**source[0], "segment_id": "S3-PROBE", "source": "probe"}
+    resolver = lambda segment_id: f"translated:{segment_id}"
+    assert index.previous(
+        probe,
+        2,
+        target_resolver=resolver,
+        source_key="model_source",
+    ) == previous_context(
+        source,
+        probe,
+        2,
+        target_resolver=resolver,
+        source_key="model_source",
+    )
 
 
 @pytest.mark.asyncio

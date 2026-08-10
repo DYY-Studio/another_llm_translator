@@ -8,6 +8,7 @@ import json
 import re
 import shlex
 import sys
+import time
 import unicodedata
 import uuid
 from collections import Counter
@@ -37,6 +38,7 @@ from .errors import (
 from .execution import (
     ChunkPlan,
     LLMClient,
+    PreviousContextIndex,
     Scope,
     SlidingWindowLimiter,
     build_chunk_plans,
@@ -46,6 +48,7 @@ from .execution import (
     create_run,
     dispatch_chunks,
     estimate_messages,
+    estimate_single_segment,
     find_running_runs,
     finalize_run,
     full_prompt,
@@ -54,7 +57,6 @@ from .execution import (
     localize_request_ids,
     materialize_chunk_stream,
     parse_jsonl_document,
-    previous_context,
     render_messages,
     segment_model_source,
     save_debug_chunks,
@@ -312,9 +314,7 @@ class _Preflight:
 def _split_oversized_preflight(
     work: Iterable[dict[str, Any]],
     *,
-    stage: str,
     config: dict[str, Any],
-    segments: list[dict[str, Any]],
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     fail_planning: Callable[[BaseException], None],
@@ -330,11 +330,9 @@ def _split_oversized_preflight(
     preflight_failed: list[dict[str, Any]] = []
     for segment in work:
         try:
-            build_chunk_plans(
-                [segment],
-                all_segments=segments,
+            estimate_single_segment(
+                segment,
                 config=config,
-                stage=stage,
                 prompt=prompt,
                 payload_builder=payload_builder,
             )
@@ -355,11 +353,9 @@ def _split_oversized_preflight(
             part = pending_parts.pop(0)
             probe = make_probe(segment, part)
             try:
-                build_chunk_plans(
-                    [probe],
-                    all_segments=segments,
+                estimate_single_segment(
+                    probe,
                     config=config,
-                    stage=stage,
                     prompt=prompt,
                     payload_builder=payload_builder,
                 )
@@ -406,6 +402,7 @@ class StageRunState:
     run_id: str
     run_dir: Path
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
+    preparation_started_at: float | None = None
     llm: LLMClient | None = None
 
 
@@ -549,6 +546,7 @@ async def _execute_stage_run(
             stage=state.stage,
             client=http_client,
             on_usage=state.on_usage,
+            preparation_started_at=state.preparation_started_at,
         ) as llm:
             state.llm = llm
             await record_preflight_failure(preflight_failed)
@@ -1841,9 +1839,16 @@ async def run_terminology(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("terminology")
+    preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage="terminology"
+    )
+    logger.info(
+        "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
+        time.perf_counter() - preparation_started_at,
+        len(files),
+        len(segments),
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, "terminology", prompt_language)
@@ -1916,6 +1921,13 @@ async def run_terminology(
             if str(segment["segment_id"]) not in completed_ids
         ]
     )
+    logger.info(
+        "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d completed=%d",
+        time.perf_counter() - preparation_started_at,
+        len(selected),
+        len(work),
+        len(completed_ids),
+    )
     selected_ids = {str(segment["segment_id"]) for segment in selected}
     existing_fingerprints = {
         str(record["stage_fingerprint"])
@@ -1943,11 +1955,11 @@ async def run_terminology(
         extra=[],
     )
     context_config = config["context"]["terminology"]
+    context_index = PreviousContextIndex(segments)
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         raw_context = (
-            previous_context(
-                segments,
+            context_index.previous(
                 items[0],
                 context_config["previous_segments"],
             )
@@ -1985,9 +1997,7 @@ async def run_terminology(
 
     preflight = _split_oversized_preflight(
         work,
-        stage="terminology",
         config=config,
-        segments=segments,
         prompt=prompt,
         payload_builder=payload_builder,
         fail_planning=fail_planning,
@@ -2007,6 +2017,12 @@ async def run_terminology(
     part_original = preflight.part_original
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
+    logger.info(
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        time.perf_counter() - preparation_started_at,
+        len(request_segments),
+        len(preflight_failed),
+    )
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -2057,6 +2073,7 @@ async def run_terminology(
         run_id=run_id,
         run_dir=run_dir,
         on_usage=on_usage,
+        preparation_started_at=preparation_started_at,
     )
 
     def report_progress() -> None:
@@ -2401,6 +2418,290 @@ async def run_terminology(
     }
 
 
+class _PreparedTermMatcher:
+    """Pre-index a published terminology library for repeated segment matches."""
+
+    def __init__(self, library: dict[str, Any], spec: TermNormalization) -> None:
+        self.spec = spec
+        self.terms = list(library.get("terms", []))
+        self.by_normalized = {
+            str(
+                term.get("normalized")
+                or normalize_term(str(term.get("source", "")), spec)
+            ): term
+            for term in self.terms
+        }
+        self._term_names: list[tuple[str, tuple[str, ...], set[str]]] = []
+        self._name_terms: dict[str, set[int]] = {}
+        self._prefix_names: dict[str, set[str]] = {}
+        self._single_names: set[str] = set()
+        for index, term in enumerate(self.terms):
+            main_name = normalize_term(str(term.get("source", "")), spec)
+            aliases = tuple(
+                normalize_term(str(value), spec)
+                for value in term.get("aliases", [])
+                if value
+            )
+            conflicted_aliases = {
+                normalize_term(str(item.get("alias", "")), spec)
+                for item in term.get("conflicts", {}).get("alias_primaries", [])
+            }
+            self._term_names.append((main_name, aliases, conflicted_aliases))
+            for name in {main_name, *aliases}:
+                if not name:
+                    continue
+                self._name_terms.setdefault(name, set()).add(index)
+                if len(name) == 1:
+                    self._single_names.add(name)
+                else:
+                    self._prefix_names.setdefault(name[:2], set()).add(name)
+
+        claims: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for term in self.terms:
+            for claim in term.get("conflicts", {}).get("group_claims", []):
+                key = (
+                    str(claim.get("entry", "")),
+                    str(claim.get("claimed_by", "")),
+                    str(claim.get("alias", "")),
+                    str(claim.get("reason", "")),
+                )
+                claims[key] = dict(claim)
+        self._claims = list(claims.values())
+        self._claim_components = self._build_claim_components()
+        for claim in self._claims:
+            alias_name = normalize_term(str(claim.get("alias", "")), spec)
+            if not alias_name:
+                continue
+            if len(alias_name) == 1:
+                self._single_names.add(alias_name)
+            else:
+                self._prefix_names.setdefault(alias_name[:2], set()).add(alias_name)
+
+    def _build_claim_components(
+        self,
+    ) -> list[tuple[set[str], list[dict[str, Any]]]]:
+        components: list[tuple[set[str], list[dict[str, Any]]]] = []
+        for claim in self._claims:
+            endpoints = {
+                str(claim.get("entry", "")),
+                str(claim.get("claimed_by", "")),
+            }
+            matching: list[int] = []
+            related_keys = set(endpoints)
+            changed = True
+            while changed:
+                changed = False
+                for index, value in enumerate(self._claims):
+                    value_endpoints = {
+                        str(value.get("entry", "")),
+                        str(value.get("claimed_by", "")),
+                    }
+                    if not value_endpoints & related_keys or index in matching:
+                        continue
+                    matching.append(index)
+                    before = len(related_keys)
+                    related_keys.update(value_endpoints)
+                    changed = changed or len(related_keys) != before
+            related_claims = [self._claims[index] for index in matching]
+            if any(existing[0] == related_keys for existing in components):
+                continue
+            components.append((related_keys, related_claims))
+        return components
+
+    def _candidate_names(self, normalized_source: str) -> set[str]:
+        candidates = {
+            name
+            for index in range(len(normalized_source) - 1)
+            for name in self._prefix_names.get(normalized_source[index : index + 2], ())
+        }
+        candidates.update(
+            character
+            for character in normalized_source
+            if character in self._single_names
+        )
+        return {name for name in candidates if name in normalized_source}
+
+    @staticmethod
+    def _claim_sort_key(value: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(value.get("entry", "")),
+            str(value.get("claimed_by", "")),
+            str(value.get("alias", "")),
+            str(value.get("reason", "")),
+        )
+
+    def match(self, source: str, limit: int) -> list[dict]:
+        normalized_source = normalize_term(source, self.spec)
+        candidate_names = self._candidate_names(normalized_source)
+        bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
+        disputed: set[str] = set()
+        for related_keys, related_claims in self._claim_components:
+            active_claims = [
+                claim
+                for claim in related_claims
+                if normalize_term(str(claim.get("alias", "")), self.spec)
+                in candidate_names
+            ]
+            if not active_claims:
+                continue
+            disputed.update(related_keys)
+            related_terms = [
+                self.by_normalized[key]
+                for key in sorted(related_keys)
+                if key in self.by_normalized
+            ]
+            payload = []
+            for term in related_terms:
+                term_normalized = str(
+                    term.get("normalized")
+                    or normalize_term(str(term.get("source", "")), self.spec)
+                )
+                disputed_names = {
+                    normalize_term(str(value.get("alias", "")), self.spec)
+                    for value in related_claims
+                    if term_normalized
+                    in {str(value.get("entry")), str(value.get("claimed_by"))}
+                }
+                safe_names = [
+                    normalize_term(str(term.get("source", "")), self.spec),
+                    *(
+                        normalize_term(str(value), self.spec)
+                        for value in term.get("aliases", [])
+                    ),
+                ]
+                safe_hit = any(
+                    name and name not in disputed_names and name in candidate_names
+                    for name in safe_names
+                )
+                item = {
+                    key: term.get(key)
+                    for key in ("source", "category", "description", "aliases")
+                }
+                item["preferred_translation"] = (
+                    term.get("preferred_translation") if safe_hit else None
+                )
+                item["group_claims"] = sorted(
+                    related_claims, key=self._claim_sort_key
+                )
+                payload.append(item)
+            bundle_key = "claim:" + ",".join(sorted(related_keys))
+            if payload:
+                alias_name = normalize_term(
+                    str(active_claims[0].get("alias", "")), self.spec
+                )
+                bundles.append((1, len(alias_name), 0, bundle_key, payload))
+
+        grouped: dict[str, list[tuple[bool, int, dict[str, Any]]]] = {}
+        candidate_term_indexes = {
+            index
+            for name in candidate_names
+            for index in self._name_terms.get(name, ())
+        }
+        for index in sorted(candidate_term_indexes):
+            term = self.terms[index]
+            normalized = str(
+                term.get("normalized")
+                or normalize_term(str(term.get("source", "")), self.spec)
+            )
+            if normalized in disputed:
+                continue
+            main_name, aliases, conflicted_aliases = self._term_names[index]
+            alias_names = [
+                name for name in aliases if name not in conflicted_aliases
+            ]
+            main_hit = bool(main_name and main_name in candidate_names)
+            hits = [
+                name
+                for name in ([main_name] if main_hit else alias_names)
+                if name and name in candidate_names
+            ]
+            if not hits:
+                continue
+            primary = str(term.get("group_primary") or normalized)
+            grouped.setdefault(primary, []).append(
+                (main_hit, max(len(name) for name in hits), term)
+            )
+
+        for primary, hits in grouped.items():
+            primary_term = self.by_normalized.get(primary)
+            if primary_term is None:
+                raise UsageError(f"术语组主不存在：{primary}")
+            matched_terms = [value[2] for value in hits]
+            ordered = [primary_term]
+            ordered.extend(
+                sorted(
+                    (
+                        term
+                        for term in matched_terms
+                        if str(
+                            term.get("normalized")
+                            or normalize_term(str(term.get("source", "")), self.spec)
+                        )
+                        != primary
+                    ),
+                    key=lambda term: str(term.get("source", "")),
+                )
+            )
+            payload = []
+            for term in ordered:
+                item = {
+                    key: term.get(key)
+                    for key in (
+                        "source",
+                        "category",
+                        "description",
+                        "preferred_translation",
+                        "aliases",
+                    )
+                }
+                if term is not primary_term:
+                    item["primary_source"] = primary_term.get("source")
+                payload.append(item)
+            bundles.append(
+                (
+                    max(int(value[0]) for value in hits),
+                    max(value[1] for value in hits),
+                    max(
+                        int(bool(value[2].get("preferred_translation")))
+                        for value in hits
+                    ),
+                    str(primary_term.get("source", "")),
+                    payload,
+                )
+            )
+
+        bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+        return [term for bundle in bundles[:limit] for term in bundle[4]]
+
+
+class _TermMatchCache:
+    def __init__(
+        self,
+        library: dict[str, Any] | None,
+        spec: TermNormalization,
+        limit: int,
+    ) -> None:
+        self.matcher = _PreparedTermMatcher(library, spec) if library else None
+        self.limit = limit
+        self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
+
+    def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
+        by_source: dict[str, dict] = {}
+        for item in items:
+            key = (str(item["segment_id"]), str(item["source"]))
+            matches = self._cache.get(key)
+            if matches is None:
+                matches = tuple(
+                    self.matcher.match(str(item["source"]), self.limit)
+                    if self.matcher is not None
+                    else []
+                )
+                self._cache[key] = matches
+            for term in matches:
+                by_source[str(term["source"])] = term
+        return list(by_source.values())
+
+
 def match_terms(
     source: str,
     library: dict[str, Any] | None,
@@ -2409,170 +2710,7 @@ def match_terms(
 ) -> list[dict]:
     if library is None:
         return []
-    normalized_source = normalize_term(source, spec)
-    terms = list(library.get("terms", []))
-    by_normalized = {
-        str(term.get("normalized") or normalize_term(str(term.get("source", "")), spec)): term
-        for term in terms
-    }
-    claims: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for term in terms:
-        for claim in term.get("conflicts", {}).get("group_claims", []):
-            key = (
-                str(claim.get("entry", "")),
-                str(claim.get("claimed_by", "")),
-                str(claim.get("alias", "")),
-                str(claim.get("reason", "")),
-            )
-            claims[key] = dict(claim)
-
-    bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
-    disputed: set[str] = set()
-    for claim in claims.values():
-        alias_name = normalize_term(str(claim.get("alias", "")), spec)
-        if not alias_name or alias_name not in normalized_source:
-            continue
-        related_keys = {str(claim["entry"]), str(claim["claimed_by"])}
-        related_claims: list[dict[str, Any]] = []
-        changed = True
-        while changed:
-            changed = False
-            for value in claims.values():
-                endpoints = {
-                    str(value.get("entry")), str(value.get("claimed_by"))
-                }
-                if not endpoints & related_keys or value in related_claims:
-                    continue
-                related_claims.append(value)
-                before = len(related_keys)
-                related_keys.update(endpoints)
-                changed = changed or len(related_keys) != before
-        disputed.update(related_keys)
-        related_terms = [
-            by_normalized[key] for key in sorted(related_keys) if key in by_normalized
-        ]
-        payload = []
-        for term in related_terms:
-            term_normalized = str(
-                term.get("normalized")
-                or normalize_term(str(term.get("source", "")), spec)
-            )
-            disputed_names = {
-                normalize_term(str(value.get("alias", "")), spec)
-                for value in related_claims
-                if term_normalized
-                in {str(value.get("entry")), str(value.get("claimed_by"))}
-            }
-            safe_names = [
-                normalize_term(str(term.get("source", "")), spec),
-                *(
-                    normalize_term(str(value), spec)
-                    for value in term.get("aliases", [])
-                ),
-            ]
-            safe_hit = any(
-                name and name not in disputed_names and name in normalized_source
-                for name in safe_names
-            )
-            item = {
-                key: term.get(key)
-                for key in ("source", "category", "description", "aliases")
-            }
-            item["preferred_translation"] = (
-                term.get("preferred_translation") if safe_hit else None
-            )
-            item["group_claims"] = sorted(
-                related_claims,
-                key=lambda value: (
-                    str(value.get("entry", "")),
-                    str(value.get("claimed_by", "")),
-                    str(value.get("alias", "")),
-                    str(value.get("reason", "")),
-                ),
-            )
-            payload.append(item)
-        bundle_key = "claim:" + ",".join(sorted(related_keys))
-        if payload and not any(item[3] == bundle_key for item in bundles):
-            bundles.append((1, len(alias_name), 0, bundle_key, payload))
-
-    grouped: dict[str, list[tuple[bool, int, dict[str, Any]]]] = {}
-    for term in terms:
-        normalized = str(
-            term.get("normalized")
-            or normalize_term(str(term.get("source", "")), spec)
-        )
-        if normalized in disputed:
-            continue
-        main_name = normalize_term(str(term.get("source", "")), spec)
-        conflicted_aliases = {
-            normalize_term(str(item.get("alias", "")), spec)
-            for item in term.get("conflicts", {}).get("alias_primaries", [])
-        }
-        alias_names = [
-            normalize_term(str(name), spec)
-            for name in term.get("aliases", [])
-            if name and normalize_term(str(name), spec) not in conflicted_aliases
-        ]
-        main_hit = bool(main_name and main_name in normalized_source)
-        hits = [
-            name
-            for name in ([main_name] if main_hit else alias_names)
-            if name and name in normalized_source
-        ]
-        if not hits:
-            continue
-        primary = str(term.get("group_primary") or normalized)
-        grouped.setdefault(primary, []).append(
-            (main_hit, max(len(name) for name in hits), term)
-        )
-
-    for primary, hits in grouped.items():
-        primary_term = by_normalized.get(primary)
-        if primary_term is None:
-            raise UsageError(f"术语组主不存在：{primary}")
-        matched_terms = [value[2] for value in hits]
-        ordered = [primary_term]
-        ordered.extend(
-            sorted(
-                (
-                    term
-                    for term in matched_terms
-                    if str(
-                        term.get("normalized")
-                        or normalize_term(str(term.get("source", "")), spec)
-                    )
-                    != primary
-                ),
-                key=lambda term: str(term.get("source", "")),
-            )
-        )
-        payload = []
-        for term in ordered:
-            item = {
-                key: term.get(key)
-                for key in (
-                    "source",
-                    "category",
-                    "description",
-                    "preferred_translation",
-                    "aliases",
-                )
-            }
-            if term is not primary_term:
-                item["primary_source"] = primary_term.get("source")
-            payload.append(item)
-        bundles.append(
-            (
-                max(int(value[0]) for value in hits),
-                max(value[1] for value in hits),
-                max(int(bool(value[2].get("preferred_translation"))) for value in hits),
-                str(primary_term.get("source", "")),
-                payload,
-            )
-        )
-
-    bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
-    return [term for bundle in bundles[:limit] for term in bundle[4]]
+    return _PreparedTermMatcher(library, spec).match(source, limit)
 
 
 def validate_translation_text(
@@ -2713,9 +2851,16 @@ async def run_translation(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     logger = get_logger("translation")
+    preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage="translation"
+    )
+    logger.info(
+        "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
+        time.perf_counter() - preparation_started_at,
+        len(files),
+        len(segments),
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, "translation", prompt_language)
@@ -2733,6 +2878,13 @@ async def run_translation(
     )
     selected_segments = select_scope(segments, files, scope)
     selection = classify_stage(selected_segments, history, force=scope.force)
+    logger.info(
+        "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
+        time.perf_counter() - preparation_started_at,
+        len(selection.selected),
+        len(selection.work),
+        len(selection.reusable),
+    )
     usage: dict[str, Any] | None = None
     warnings = _assemble_warnings(
         stage="translation",
@@ -2759,14 +2911,19 @@ async def run_translation(
         for segment_id, record in selection.latest_completed.items()
     }
     context_config = config["context"]["translation"]
+    context_index = PreviousContextIndex(segments)
+    term_match_cache = _TermMatchCache(
+        library,
+        term_normalization(config),
+        int(config["terminology"]["max_terms_per_segment"]),
+    )
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         resolver = None
         if config["execution"]["scheduling_mode"] == "ordered_by_file":
             resolver = latest_text.get
         context = (
-            previous_context(
-                segments,
+            context_index.previous(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
@@ -2775,20 +2932,10 @@ async def run_translation(
             if context_config["enabled"]
             else []
         )
-        terms_by_source: dict[str, dict[str, Any]] = {}
-        term_spec = term_normalization(config)
-        for item in items:
-            for term in match_terms(
-                str(item["source"]),
-                library,
-                config["terminology"]["max_terms_per_segment"],
-                term_spec,
-            ):
-                terms_by_source[str(term["source"])] = term
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
-            "terms": list(terms_by_source.values()),
+            "terms": term_match_cache.for_items(items),
             "segments": [
                 {
                     "id": item["segment_id"],
@@ -2819,9 +2966,7 @@ async def run_translation(
 
     preflight = _split_oversized_preflight(
         selection.work,
-        stage="translation",
         config=config,
-        segments=segments,
         prompt=prompt,
         payload_builder=payload_builder,
         fail_planning=fail_planning,
@@ -2841,6 +2986,12 @@ async def run_translation(
     part_original = preflight.part_original
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
+    logger.info(
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        time.perf_counter() - preparation_started_at,
+        len(request_segments),
+        len(preflight_failed),
+    )
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -3033,6 +3184,7 @@ async def run_translation(
         run_id=run_id,
         run_dir=run_dir,
         on_usage=on_usage,
+        preparation_started_at=preparation_started_at,
     )
 
     async def accept_translation(
@@ -3417,9 +3569,16 @@ async def run_review(
     if stage not in {"proofreading", "polishing"}:
         raise ValueError(f"unsupported review stage: {stage}")
     logger = get_logger(stage)
+    preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
     config, metadata, files, segments = _project_context(
         project, stage=stage
+    )
+    logger.info(
+        "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
+        time.perf_counter() - preparation_started_at,
+        len(files),
+        len(segments),
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, stage, prompt_language)
@@ -3455,6 +3614,13 @@ async def run_review(
             )
     history = load_stage_history(project, stage)
     selection = classify_stage(selected_segments, history, force=scope.force)
+    logger.info(
+        "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
+        time.perf_counter() - preparation_started_at,
+        len(selection.selected),
+        len(selection.work),
+        len(selection.reusable),
+    )
     usage: dict[str, Any] | None = None
     warnings = _assemble_warnings(
         stage=stage,
@@ -3480,6 +3646,12 @@ async def run_review(
         ),
     )
     context_config = config["context"][stage]
+    context_index = PreviousContextIndex(segments)
+    term_match_cache = _TermMatchCache(
+        library,
+        term_normalization(config),
+        int(config["terminology"]["max_terms_per_segment"]),
+    )
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         resolver = None
@@ -3488,8 +3660,7 @@ async def run_review(
                 str(bases[segment_id]["text"]) if segment_id in bases else None
             )
         context = (
-            previous_context(
-                segments,
+            context_index.previous(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
@@ -3498,20 +3669,10 @@ async def run_review(
             if context_config["enabled"]
             else []
         )
-        terms_by_source: dict[str, dict[str, Any]] = {}
-        term_spec = term_normalization(config)
-        for item in items:
-            for term in match_terms(
-                str(item["source"]),
-                library,
-                config["terminology"]["max_terms_per_segment"],
-                term_spec,
-            ):
-                terms_by_source[str(term["source"])] = term
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
-            "terms": list(terms_by_source.values()),
+            "terms": term_match_cache.for_items(items),
             "segments": [
                 {
                     "id": item["segment_id"],
@@ -3574,9 +3735,7 @@ async def run_review(
 
     preflight = _split_oversized_preflight(
         selection.work,
-        stage=stage,
         config=config,
-        segments=segments,
         prompt=prompt,
         payload_builder=payload_builder,
         fail_planning=fail_planning,
@@ -3590,6 +3749,12 @@ async def run_review(
     part_original = preflight.part_original
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
+    logger.info(
+        "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d",
+        time.perf_counter() - preparation_started_at,
+        len(request_segments),
+        len(preflight_failed),
+    )
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -3644,6 +3809,7 @@ async def run_review(
         run_id=run_id,
         run_dir=run_dir,
         on_usage=on_usage,
+        preparation_started_at=preparation_started_at,
     )
 
     def report_progress() -> None:
