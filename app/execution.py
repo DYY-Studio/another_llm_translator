@@ -274,7 +274,7 @@ def _make_stage_selection(
     )
 
 
-PROMPT_RULES_VERSION = 4
+PROMPT_RULES_VERSION = 5
 
 _COMMON_RULES: dict[str, str] = {
     "zh-CN": (
@@ -302,10 +302,12 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
             "只依据 source_segments[]；reference_context 不得触发提取。source、"
             "aliases 各值必须是其中原文。aliases 仅为同一术语的其他源文形式，"
             "禁放目标译文、释义及面向 target_language 的音译；目标形式只放 "
-            'preferred_translation。每术语输出一行 type="term"，必含 source、'
-            "category、description，可含 preferred_translation、aliases；无合格"
+            "preferred_translation。人物应据上下文尽量判定性别，在 category "
+            "标明；不确定则不标，勿猜。每术语输出一行 "
+            'type="term"，必含 source、category，可含 description、'
+            "preferred_translation、aliases；无合格"
             '术语则输出 end。格式：{"type":"term","source":"Alice",'
-            '"category":"人名","description":"人物",'
+            '"category":"女性人名",'
             '"preferred_translation":"爱丽丝","aliases":["Ally"]}。'
         ),
         "en": (
@@ -316,11 +318,13 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
             "trigger extraction. source and each aliases value must occur there. "
             "aliases means alternate source-language forms only, never target "
             "translations, explanations, or transliterations for target_language; "
-            "put target forms only in preferred_translation. Output one line per term "
-            'with type="term", source, category, and description; '
-            "preferred_translation and aliases are optional. With no qualifying term, "
+            "put target forms only in preferred_translation. For people, state reliably "
+            "inferred gender in category; otherwise omit gender. Output one line per term "
+            "with "
+            'type="term", source, and category; description, preferred_translation, '
+            "and aliases are optional. With no qualifying term, "
             'output end. Format: {"type":"term","source":"Alice",'
-            '"category":"person name","description":"character",'
+            '"category":"female person name",'
             '"preferred_translation":"爱丽丝","aliases":["Ally"]}.'
         ),
     },

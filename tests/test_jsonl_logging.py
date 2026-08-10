@@ -232,16 +232,18 @@ def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
                 {
                     "type": "term",
                     "source": "Alice",
-                    "category": "人物",
-                    "description": "人物",
+                    "category": "女性人名",
                     "aliases": [],
                 },
                 {"type": "term", "source": "", "category": "人物", "description": "x"},
+                {"type": "term", "source": "Bob", "category": "男性人名", "description": 1},
             ]
         )
     )
     assert [item["source"] for item in terms] == ["Alice"]
+    assert terms[0]["description"] is None
     assert errors
+    assert any("description 类型错误" in error for error in errors)
     assert complete is False
 
 
@@ -454,8 +456,7 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
                 {
                     "type": "term",
                     "source": "Alice",
-                    "category": "人物",
-                    "description": "人物",
+                    "category": "女性人名",
                     "aliases": [],
                 }
             )
@@ -476,6 +477,8 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
         del os.environ["LLM_API_KEY"]
     assert summary["published"] is True
     assert calls == 2
+    terms = read_json(project, project / "terminology" / "terms.json")["terms"]
+    assert terms[0]["description"] == ""
 
 
 @pytest.mark.asyncio

@@ -1719,9 +1719,12 @@ def _validate_term_items(
     errors = list(document.errors)
     for index, item in enumerate(document.records, start=1):
         item_errors: list[str] = []
-        for key in ("source", "category", "description"):
+        for key in ("source", "category"):
             if not isinstance(item.get(key), str) or not item[key].strip():
                 item_errors.append(f"术语记录 {index} 缺少有效 {key}")
+        description = item.get("description")
+        if description is not None and not isinstance(description, str):
+            item_errors.append(f"术语记录 {index} 的 description 类型错误")
         preferred = item.get("preferred_translation")
         if preferred is not None and not isinstance(preferred, str):
             item_errors.append(
@@ -1739,7 +1742,7 @@ def _validate_term_items(
             {
                 "source": item["source"].strip(),
                 "category": item["category"].strip(),
-                "description": item["description"].strip(),
+                "description": description.strip() if description else None,
                 "preferred_translation": preferred.strip() if preferred else None,
                 "aliases": [alias.strip() for alias in aliases if alias.strip()],
             }

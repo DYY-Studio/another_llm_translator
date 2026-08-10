@@ -49,9 +49,13 @@ def test_terminology_prompt_defines_precision_and_alias_boundaries() -> None:
     assert "排除普通词、泛称、一般描述和日常事物，不确定则忽略" in zh
     assert "aliases 仅为同一术语的其他源文形式" in zh
     assert "目标形式只放 preferred_translation" in zh
+    assert "不确定则不标，勿猜" in zh
+    assert "可含 description" in zh
     assert "Skip ordinary words, generic labels, descriptions" in en
     assert "aliases means alternate source-language forms only" in en
     assert "put target forms only in preferred_translation" in en
+    assert "state reliably inferred gender in category; otherwise omit gender" in en
+    assert "description, preferred_translation, and aliases are optional" in en
 
 
 def test_full_prompt_rejects_unknown_language() -> None:

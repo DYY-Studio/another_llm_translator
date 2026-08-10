@@ -865,11 +865,17 @@ Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment �
 LLM 返回 JSONL；每个术语一行：
 
 ```jsonl
-{"type":"term","source":"Silver Knight","category":"人物称号","description":"银发骑士的称号","preferred_translation":"白银骑士","aliases":["The Silver Knight"]}
+{"type":"term","source":"Alice","category":"女性人名","preferred_translation":"爱丽丝","aliases":["Ally"]}
 {"type":"end"}
 ```
 
-LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。否则格式修正仍重试原请求范围。`end` 必须严格等于 `{"type":"end"}`；例如 `{"type":"type":"end"}` 仍拒绝，不自动修复或接受。严格失败不会回滚已经解析的候选，失败 Segment 会记录安全错误分类，Run manifest 记录分类及数量。
+`source` 和 `category` 必填；`description`、`preferred_translation` 和 `aliases`
+可选。人物类别尽量在上下文证据充分时标明性别，无法可靠判断时使用不带性别的
+类别。LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有
+所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。
+否则格式修正仍重试原请求范围。`end` 必须严格等于 `{"type":"end"}`；例如
+`{"type":"type":"end"}` 仍拒绝，不自动修复或接受。严格失败不会回滚已经解析的
+候选，失败 Segment 会记录安全错误分类，Run manifest 记录分类及数量。
 
 活动扫描的合法候选可以在全量扫描完成前读取：`terms-export --source scanned`
 或 Web 术语页的“导出当前扫描结果”只导出当前活动任务候选，不改动已发布库。用户
