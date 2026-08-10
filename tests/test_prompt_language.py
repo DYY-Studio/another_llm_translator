@@ -42,6 +42,18 @@ def test_full_prompt_assembles_rules_and_middle_per_language() -> None:
     assert "只处理 user 消息" not in en
 
 
+def test_terminology_prompt_defines_precision_and_alias_boundaries() -> None:
+    zh = full_prompt("terminology", "术语偏好。", "zh-CN")
+    en = full_prompt("terminology", "Terminology preferences.", "en")
+
+    assert "排除普通词、泛称、一般描述和日常事物，不确定则忽略" in zh
+    assert "aliases 仅为同一术语的其他源文形式" in zh
+    assert "目标形式只放 preferred_translation" in zh
+    assert "Skip ordinary words, generic labels, descriptions" in en
+    assert "aliases means alternate source-language forms only" in en
+    assert "put target forms only in preferred_translation" in en
+
+
 def test_full_prompt_rejects_unknown_language() -> None:
     from app.errors import UsageError
 
