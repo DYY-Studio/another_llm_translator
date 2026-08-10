@@ -1183,6 +1183,63 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     assert rows["alice"]["group_primary"] == "alicia"
 
 
+def test_web_related_term_actions_are_exposed(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={"source": "John Smith", "aliases": [], "disabled": False},
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={"source": "John", "aliases": [], "disabled": False},
+    ).status_code == 200
+
+    related = client.get(
+        "/api/v1/projects/sample/terms/related",
+        params={"normalized": "john smith"},
+    )
+    assert related.status_code == 200
+    assert related.json()["related"][0]["normalized"] == "john"
+
+    grouped = client.post(
+        "/api/v1/projects/sample/terms/group-related",
+        json={
+            "normalized": "john smith",
+            "related_normalized": "john",
+            "primary_normalized": "john smith",
+            "confirm": True,
+        },
+    )
+    assert grouped.status_code == 200
+    rows = {item["normalized"]: item for item in grouped.json()["terms"]}
+    assert rows["john"]["group_primary"] == "john smith"
+
+
+def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    for source, aliases in (("John Smith", []), ("John", ["Johnny"])):
+        response = client.post(
+            "/api/v1/projects/sample/terms",
+            json={"source": source, "aliases": aliases, "disabled": False},
+        )
+        assert response.status_code == 200
+
+    converted = client.post(
+        "/api/v1/projects/sample/terms/convert-to-alias",
+        json={
+            "normalized": "john smith",
+            "related_normalized": "john",
+            "confirm": True,
+        },
+    )
+    assert converted.status_code == 200
+    rows = {item["normalized"]: item for item in converted.json()["terms"]}
+    assert set(rows["john smith"]["aliases"]) == {"John", "Johnny"}
+    assert rows["john"]["disabled"] is True
+
+
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
