@@ -506,6 +506,56 @@ def segment_model_source(segment: dict[str, Any]) -> str:
     return str(value) if isinstance(value, str) else str(segment["source"])
 
 
+class PreviousContextIndex:
+    """Indexed lookup for the preceding non-empty segments of a Segment."""
+
+    def __init__(self, all_segments: Iterable[dict[str, Any]]) -> None:
+        by_part: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for item in all_segments:
+            if not item["is_empty"]:
+                by_part[_segment_part_key(item)].append(item)
+        self._by_part = {
+            key: tuple((int(item["line_index"]), item) for item in values)
+            for key, values in by_part.items()
+        }
+
+    def previous(
+        self,
+        first: dict[str, Any],
+        count: int,
+        *,
+        target_resolver: Callable[[str], str | None] | None = None,
+        source_key: str = "source",
+    ) -> list[dict[str, str]]:
+        if count <= 0:
+            return []
+        key = _segment_part_key(first)
+        values = self._by_part.get(key, ())
+        first_line = int(first["line_index"])
+        candidates: list[dict[str, Any]] = []
+        for line_index, item in reversed(values):
+            if line_index < first_line:
+                candidates.append(item)
+                if len(candidates) >= count:
+                    break
+        candidates.reverse()
+        result: list[dict[str, str]] = []
+        for item in candidates:
+            context = {
+                "source": (
+                    segment_model_source(item)
+                    if source_key == "model_source"
+                    else str(item["source"])
+                )
+            }
+            if target_resolver is not None:
+                target = target_resolver(str(item["segment_id"]))
+                if target is not None:
+                    context["translation"] = target
+            result.append(context)
+        return result
+
+
 def previous_context(
     all_segments: list[dict[str, Any]],
     first: dict[str, Any],
@@ -514,31 +564,12 @@ def previous_context(
     target_resolver: Callable[[str], str | None] | None = None,
     source_key: str = "source",
 ) -> list[dict[str, str]]:
-    if count <= 0:
-        return []
-    first_part = _segment_part_key(first)
-    candidates = [
-        item
-        for item in all_segments
-        if _segment_part_key(item) == first_part
-        and int(item["line_index"]) < int(first["line_index"])
-        and not item["is_empty"]
-    ][-count:]
-    result: list[dict[str, str]] = []
-    for item in candidates:
-        context = {
-            "source": (
-                segment_model_source(item)
-                if source_key == "model_source"
-                else str(item["source"])
-            )
-        }
-        if target_resolver is not None:
-            target = target_resolver(str(item["segment_id"]))
-            if target is not None:
-                context["translation"] = target
-        result.append(context)
-    return result
+    return PreviousContextIndex(all_segments).previous(
+        first,
+        count,
+        target_resolver=target_resolver,
+        source_key=source_key,
+    )
 
 
 def contiguous_groups(
@@ -596,16 +627,18 @@ def _iter_contiguous_groups(
     *,
     all_segments: Iterable[dict[str, Any]],
     cross_boundary: bool = False,
+    empty_positions: set[tuple[Any, ...]] | None = None,
 ) -> Iterable[list[dict[str, Any]]]:
-    empty_positions = {
-        (
-            (str(item["file_id"]), int(item["line_index"]))
-            if cross_boundary
-            else (*_segment_part_key(item), int(item["line_index"]))
-        )
-        for item in all_segments
-        if item["is_empty"]
-    }
+    if empty_positions is None:
+        empty_positions = {
+            (
+                (str(item["file_id"]), int(item["line_index"]))
+                if cross_boundary
+                else (*_segment_part_key(item), int(item["line_index"]))
+            )
+            for item in all_segments
+            if item["is_empty"]
+        }
     ordered = sorted(
         segments,
         key=lambda item: (
@@ -673,12 +706,25 @@ def iter_chunk_plans(
         target_limits.append(config["execution"]["input_tokens_per_minute"])
     target = min(target_limits)
     factor = config["execution"]["token_safety_factor"]
+    cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
+    all_segment_list = list(all_segments)
+    empty_positions = {
+        (
+            (str(item["file_id"]), int(item["line_index"]))
+            if cross_boundary
+            else (*_segment_part_key(item), int(item["line_index"]))
+        )
+        for item in all_segment_list
+        if item["is_empty"]
+    }
 
     def plan_groups(
         groups: Iterable[list[dict[str, Any]]],
     ) -> Iterable[ChunkPlan]:
         for group in groups:
             current: list[dict[str, Any]] = []
+            current_payload: dict[str, Any] | None = None
+            current_estimate = 0
             for segment in group:
                 candidate = [*current, segment]
                 payload = payload_builder(candidate)
@@ -687,10 +733,6 @@ def iter_chunk_plans(
                 )
                 started_new_chunk = False
                 if current and estimated > target:
-                    current_payload = payload_builder(current)
-                    current_estimate = estimate_messages(
-                        render_messages(prompt, current_payload), factor
-                    )
                     yield ChunkPlan(
                         file_id=str(current[0]["file_id"]),
                         segments=tuple(current),
@@ -703,35 +745,26 @@ def iter_chunk_plans(
                         render_messages(prompt, payload), factor
                     )
                     started_new_chunk = True
-                if estimated > input_limit:
-                    raise RequestSizeError(
-                        f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
-                        reason="context",
-                    )
-                if (
-                    config["execution"]["input_tokens_per_minute"] > 0
-                    and estimated
-                    > config["execution"]["input_tokens_per_minute"]
-                ):
-                    raise RequestSizeError(
-                        f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
-                        reason="itpm",
-                    )
+                _validate_request_estimate(
+                    segment,
+                    estimated,
+                    input_limit=input_limit,
+                    input_tokens_per_minute=(
+                        config["execution"]["input_tokens_per_minute"]
+                    ),
+                )
                 if not started_new_chunk:
                     current = candidate
+                current_payload = payload
+                current_estimate = estimated
             if current:
-                payload = payload_builder(current)
-                estimated = estimate_messages(
-                    render_messages(prompt, payload), factor
-                )
                 yield ChunkPlan(
                     file_id=str(current[0]["file_id"]),
                     segments=tuple(current),
-                    payload=payload,
-                    estimated_input_tokens=estimated,
+                    payload=current_payload or {},
+                    estimated_input_tokens=current_estimate,
                 )
 
-    cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
     if (
         config["execution"]["scheduling_mode"] != "ordered_by_file"
         or cross_boundary
@@ -739,8 +772,9 @@ def iter_chunk_plans(
         yield from plan_groups(
             _iter_contiguous_groups(
                 work,
-                all_segments=all_segments,
+                all_segments=all_segment_list,
                 cross_boundary=cross_boundary,
+                empty_positions=empty_positions,
             )
         )
         return
@@ -753,8 +787,9 @@ def iter_chunk_plans(
             plan_groups(
                 _iter_contiguous_groups(
                     items,
-                    all_segments=all_segments,
+                    all_segments=all_segment_list,
                     cross_boundary=False,
+                    empty_positions=empty_positions,
                 )
             )
         )
@@ -769,6 +804,54 @@ def iter_chunk_plans(
                 continue
             remaining.append(stream)
         streams = remaining
+
+
+def _validate_request_estimate(
+    segment: dict[str, Any],
+    estimated: int,
+    *,
+    input_limit: int,
+    input_tokens_per_minute: int,
+) -> None:
+    if estimated > input_limit:
+        raise RequestSizeError(
+            f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
+            reason="context",
+        )
+    if (
+        input_tokens_per_minute > 0
+        and estimated > input_tokens_per_minute
+    ):
+        raise RequestSizeError(
+            f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
+            reason="itpm",
+        )
+
+
+def estimate_single_segment(
+    segment: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    prompt: str,
+    payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+) -> int:
+    """Estimate and validate one Segment without building a Chunk stream."""
+    input_limit = (
+        config["llm"]["context_window_tokens"]
+        - config["llm"]["context_safety_margin_tokens"]
+    )
+    payload = payload_builder([segment])
+    estimated = estimate_messages(
+        render_messages(prompt, payload),
+        config["execution"]["token_safety_factor"],
+    )
+    _validate_request_estimate(
+        segment,
+        estimated,
+        input_limit=input_limit,
+        input_tokens_per_minute=config["execution"]["input_tokens_per_minute"],
+    )
+    return estimated
 
 
 def build_chunk_plans(
@@ -1254,6 +1337,7 @@ class LLMClient:
         client: httpx.AsyncClient | None = None,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+        preparation_started_at: float | None = None,
     ) -> None:
         self.config = config
         self.limiter = limiter
@@ -1265,6 +1349,7 @@ class LLMClient:
         self.owns_client = client is None
         self.sleeper = sleeper
         self.on_usage = on_usage
+        self.preparation_started_at = preparation_started_at
         self.log_lock = asyncio.Lock()
         self.send_count = 0
         self.warnings: list[str] = []
@@ -1415,14 +1500,25 @@ class LLMClient:
                     attempt,
                 )
             self.send_count += 1
-            self.logger.info(
-                "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
-                request_id,
-                attempt,
-                attempts,
-                estimated_input_tokens,
-                effective_output,
-            )
+            if self.preparation_started_at is None:
+                self.logger.info(
+                    "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
+                    request_id,
+                    attempt,
+                    attempts,
+                    estimated_input_tokens,
+                    effective_output,
+                )
+            else:
+                self.logger.info(
+                    "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d preparation_elapsed=%.3fs",
+                    request_id,
+                    attempt,
+                    attempts,
+                    estimated_input_tokens,
+                    effective_output,
+                    time.perf_counter() - self.preparation_started_at,
+                )
             started = time.monotonic()
             response_status: int | None = None
             if diagnostics is not None:

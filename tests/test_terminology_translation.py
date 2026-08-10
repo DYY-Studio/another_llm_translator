@@ -13,6 +13,7 @@ from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import (
     TermNormalization,
+    _TermMatchCache,
     _restore_leading_whitespace,
     load_terms,
     match_terms,
@@ -400,6 +401,36 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
         "Alice Wonderland arrived.", library, 10, TermNormalization("NFKC", True)
     )
     assert [item["source"] for item in matched] == ["Alice", "Other"]
+
+
+def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["A"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+    assert cache.matcher is not None
+    calls = 0
+    original_match = cache.matcher.match
+
+    def counted_match(source: str, limit: int) -> list[dict]:
+        nonlocal calls
+        calls += 1
+        return original_match(source, limit)
+
+    cache.matcher.match = counted_match  # type: ignore[method-assign]
+    items = [
+        {"segment_id": "S1", "source": "Alice"},
+        {"segment_id": "S1", "source": "Alice"},
+        {"segment_id": "S2", "source": "Alice"},
+    ]
+    assert [item["source"] for item in cache.for_items(items)] == ["Alice"]
+    assert calls == 2
 
 
 @pytest.mark.asyncio
