@@ -825,6 +825,8 @@ export function TermsView({
             {virtualTerms.map((virtualTerm) => {
               const term = visible[virtualTerm.index];
               if (!term) return null;
+              const category = term.category || term.conflicts.categories.join(" / ");
+              const categoryHasConflict = !term.category && term.conflicts.categories.length > 0;
               const selectedRow = selection.selectedKeys.has(term.normalized);
               const focused = selection.focusedKey === term.normalized;
               return (
@@ -848,7 +850,15 @@ export function TermsView({
                   <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
                   <span>
                     <strong>{term.source}</strong>
-                    <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                    <span className="term-row-summary">
+                      <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                      {category ? (
+                        <small
+                          className={`term-row-category${categoryHasConflict ? " conflict" : ""}`}
+                          title={`${translate("terms.category", language)}: ${category}`}
+                        >{category}</small>
+                      ) : null}
+                    </span>
                     {term.group_primary ? (
                       <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
                     ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
