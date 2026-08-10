@@ -1096,14 +1096,14 @@ function RelatedGroupDialog({
       <p>{translate("terms.relatedGroupText", language, { source: candidate.source })}</p>
       <div className="related-primary-options">
         {options.map((option) => (
-          <label key={option.normalized}>
+          <label key={option.normalized} className="radio-option">
             <input
               type="radio"
               name="related-primary"
               checked={primary === option.normalized}
               onChange={() => onPrimaryChange(option.normalized)}
             />
-            {option.source}
+            <span>{option.source}</span>
           </label>
         ))}
       </div>
