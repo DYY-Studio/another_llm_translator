@@ -327,7 +327,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
     "translation": {
         "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
-            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "源文若使用 Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
             "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
             "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
@@ -338,7 +338,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
         ),
         "en": (
             "Use only the 1-based short IDs from the request; do not invent "
-            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "or rewrite IDs. If the source use Aozora Ruby, "
             "keep it only when truly necessary; when kept, use the exact "
             "｜base《reading》 form and you may translate or transliterate "
             "the reading into letters or annotations suitable for the target "
@@ -355,7 +355,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
     "proofreading": {
         "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
-            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "源文若使用 Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
             "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
             "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
@@ -372,7 +372,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
         ),
         "en": (
             "Use only the 1-based short IDs from the request; do not invent "
-            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "or rewrite IDs. If the source use Aozora Ruby, "
             "keep it only when truly necessary; when kept, use the exact "
             "｜base《reading》 form and you may translate or transliterate "
             "the reading into letters or annotations suitable for the target "
@@ -394,7 +394,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
     "polishing": {
         "zh-CN": (
             "只使用请求中从 1 开始的短 ID，不要臆造或改写 ID。"
-            "源文若来自 EPUB Aozora Ruby，只有确有必要时保留；保留时严格使用"
+            "源文若使用 Aozora Ruby，只有确有必要时保留；保留时严格使用"
             "｜base《reading》形式，可将 reading 翻译或转写为目标语言适用的字母/注音；"
             "不保留 Ruby 也合法。若 source 含形如 <em1> 的受控格式标记，"
             "只保留已有且成对、正确嵌套的标记，不添加 attrs、未知标记或 HTML；"
@@ -411,7 +411,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
         ),
         "en": (
             "Use only the 1-based short IDs from the request; do not invent "
-            "or rewrite IDs. If the source comes from an EPUB Aozora Ruby, "
+            "or rewrite IDs. If the source use Aozora Ruby, "
             "keep it only when truly necessary; when kept, use the exact "
             "｜base《reading》 form and you may translate or transliterate "
             "the reading into letters or annotations suitable for the target "
