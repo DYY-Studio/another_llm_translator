@@ -103,6 +103,7 @@ export function TermsView({
   const [saving, setSaving] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
@@ -322,6 +323,14 @@ export function TermsView({
   const selectedActive = visible.filter(
     (term) => selection.selectedKeys.has(term.normalized) && !term.disabled,
   );
+  const canClearStage = Boolean(
+    data && (
+      data.terms_revision !== null
+      || data.terms.length > 0
+      || data.scan.status !== "none"
+      || data.scan.candidate_count > 0
+    ),
+  );
 
   const termVirtualizer = useVirtualizer({
     count: visible.length,
@@ -449,6 +458,44 @@ export function TermsView({
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clearTerms() {
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/clear`,
+        { method: "POST", body: JSON.stringify({ confirm: true }) },
+      );
+      setData(value);
+      selection.reset();
+      setForm(emptyForm);
+      setHits(null);
+      setHitsLoading(false);
+      setHitsError("");
+      setRelated(null);
+      setRelatedLoading(false);
+      setRelatedError("");
+      setPendingPrimary(null);
+      setPendingRelatedGroup(null);
+      setPendingRelatedAlias(null);
+      setPendingGroupMemberAlias(null);
+      setPendingGroupMemberLeave(null);
+      setPendingRelatedRemoval(null);
+      setRelatedPrimary("");
+      setShowScanFailures(false);
+      setPartialOpen(false);
+      hitsRequestRef.current += 1;
+      relatedRequestRef.current += 1;
+      relatedCacheRef.current.clear();
+      setClearOpen(false);
+      setMessage(translate("terms.stageCleared", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -726,6 +773,11 @@ export function TermsView({
                 disabled={!selectedTerms.length}
                 onClick={() => setDeleteOpen(true)}
               >{translate("terms.deletePermanently", language)}</button>
+              <button
+                className="danger-button"
+                disabled={saving || !canClearStage}
+                onClick={() => setClearOpen(true)}
+              >{translate("terms.clearStage", language)}</button>
             </div>
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
@@ -1010,6 +1062,17 @@ export function TermsView({
           confirming={saving}
           onCancel={() => setDeleteOpen(false)}
           onConfirm={deleteSelected}
+        />
+      )}
+      {clearOpen && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.clearStageTitle", language)}
+          text={translate("terms.clearStageText", language)}
+          confirmLabel={translate("terms.clearStageConfirm", language)}
+          confirming={saving}
+          onCancel={() => setClearOpen(false)}
+          onConfirm={clearTerms}
         />
       )}
       {pendingPrimary && (
