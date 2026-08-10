@@ -601,6 +601,28 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
         )
 
 
+def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
+    """Atomically remove published and in-progress terminology state."""
+    ensure_supported(project)
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute(
+                "DELETE FROM terms_state WHERE key IN ('terms', 'active_task')"
+            )
+            connection.execute("DELETE FROM terminology_scans")
+            connection.execute("DELETE FROM terminology_candidates")
+            connection.execute(
+                "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                ("overrides", _json(overrides)),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法清空术语阶段状态：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def _records(
     project: Path, kind: str, key: str | None = None, *, task_id: str | None = None
 ) -> list[dict[str, Any]]:
