@@ -156,7 +156,7 @@ def test_related_terms_blocks_two_existing_groups(tmp_path: Path) -> None:
     related = store.related_terms("john")
     john = next(item for item in related["related"] if item["normalized"] == "john smith")
     assert john["blocked_reason"] == "cross_group"
-    with pytest.raises(TermGroupError, match="不能快捷加入"):
+    with pytest.raises(TermGroupError, match="不能快捷加入") as error:
         store.group_related_terms(
             {
                 "normalized": "john",
@@ -165,6 +165,7 @@ def test_related_terms_blocks_two_existing_groups(tmp_path: Path) -> None:
                 "confirm": True,
             }
         )
+    assert error.value.params["reason"] == "group_collision"
 
 
 def test_related_conversion_moves_all_forms_and_disables_candidate(
