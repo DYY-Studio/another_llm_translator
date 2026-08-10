@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
 import type { Term, TermHitsResponse, TermsResponse } from "../types";
@@ -134,6 +135,9 @@ export function TermsView({
     }
     return value;
   }, [data]);
+  const selectedMatchKey = selected
+    ? JSON.stringify([selected.normalized, selected.source, selected.aliases])
+    : "";
 
   // Restore a cached view synchronously during render so the browser never
   // paints an empty frame. This runs on the first mount too: prefetchTerms
@@ -196,14 +200,6 @@ export function TermsView({
     if (focusFailures) setShowScanFailures(true);
   }, [focusFailures]);
 
-  // After a filter change keeps the focused term visible, make sure its row
-  // stays in view: clearing a filter can move it far down the full list.
-  useEffect(() => {
-    if (!selection.focusedKey) return;
-    termListRef.current?.querySelector(".term-row.focused")
-      ?.scrollIntoView({ block: "nearest" });
-  }, [data, onlyConflicts, search, showDisabled, selection.focusedKey]);
-
   const hitsPageSize = 50;
   function hitsUrl(normalized: string, offset: number) {
     const params = new URLSearchParams({
@@ -214,6 +210,9 @@ export function TermsView({
     return `/api/v1/projects/${project}/terms/hits?${params}`;
   }
 
+  // Metadata-only updates (including removal) do not change what can match in
+  // the source text. Keep the existing hit result instead of scanning every
+  // Segment again; source and alias edits change the key and still refresh it.
   useEffect(() => {
     const normalized = selected?.normalized ?? "";
     const requestId = ++hitsRequestRef.current;
@@ -236,7 +235,7 @@ export function TermsView({
       .finally(() => {
         if (requestId === hitsRequestRef.current) setHitsLoading(false);
       });
-  }, [project, selected]);
+  }, [project, selectedMatchKey]);
 
   function loadMoreHits() {
     if (!selected || !hits) return;
@@ -269,6 +268,25 @@ export function TermsView({
   const selectedActive = visible.filter(
     (term) => selection.selectedKeys.has(term.normalized) && !term.disabled,
   );
+
+  const termVirtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => termListRef.current,
+    getItemKey: (index) => visible[index]?.normalized ?? index,
+    estimateSize: () => 72,
+    overscan: 10,
+  });
+  const virtualTerms = termVirtualizer.getVirtualItems();
+
+  // After a filter change keeps the focused term visible, make sure its row
+  // stays in view: clearing a filter can move it far down the full list.
+  useEffect(() => {
+    if (!selection.focusedKey) return;
+    const index = visible.findIndex(
+      (term) => term.normalized === selection.focusedKey,
+    );
+    if (index >= 0) termVirtualizer.scrollToIndex(index, { align: "auto" });
+  }, [data, onlyConflicts, search, showDisabled, selection.focusedKey, termVirtualizer, visible]);
 
   function resetFilterSelection() {
     selection.reset();
@@ -513,32 +531,45 @@ export function TermsView({
           const cached = termsCache.get(project);
           if (cached) cached.scrollTop = event.currentTarget.scrollTop;
         }}>
-          {visible.map((term) => {
-            const selectedRow = selection.selectedKeys.has(term.normalized);
-            const focused = selection.focusedKey === term.normalized;
-            return (
-              <button
-                key={term.normalized}
-                className={`term-row${term.group_primary ? " term-member" : ""}${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
-                onClick={(event) => {
-                  selection.select(term.normalized, visibleKeys, event);
-                  focusTerm(term);
-                }}
-              >
-                <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
-                <span>
-                  <strong>{term.source}</strong>
-                  <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
-                  {term.group_primary ? (
-                    <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
-                  ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
-                    <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
-                  ) : null}
-                </span>
-                <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
-              </button>
-            );
-          })}
+          <div className="term-row-stack" style={{ height: termVirtualizer.getTotalSize(), position: "relative" }}>
+            {virtualTerms.map((virtualTerm) => {
+              const term = visible[virtualTerm.index];
+              if (!term) return null;
+              const selectedRow = selection.selectedKeys.has(term.normalized);
+              const focused = selection.focusedKey === term.normalized;
+              return (
+                <button
+                  key={virtualTerm.key}
+                  ref={termVirtualizer.measureElement}
+                  data-index={virtualTerm.index}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualTerm.start}px)`,
+                  }}
+                  className={`term-row${term.group_primary ? " term-member" : ""}${selectedRow ? " selected" : ""}${focused ? " focused" : ""}`}
+                  onClick={(event) => {
+                    selection.select(term.normalized, visibleKeys, event);
+                    focusTerm(term);
+                  }}
+                >
+                  <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
+                  <span>
+                    <strong>{term.source}</strong>
+                    <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                    {term.group_primary ? (
+                      <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
+                    ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
+                      <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
+                    ) : null}
+                  </span>
+                  <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
+                </button>
+              );
+            })}
+          </div>
           {data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
           {!data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
