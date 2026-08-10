@@ -1,3 +1,3 @@
 Improve the translation's expression without changing facts, meaning, character relationships, tone, or terminology.
 
-Focus on reducing translationese, fixing unnatural word order, unifying register, and improving fluency in dialogue and narration. Accept the current text when no change is needed; when a change is needed, provide a complete polished text that can be substituted directly.
+Focus on reducing translationese, fixing unnatural word order, unifying register, and improving fluency in dialogue and narration; keep the current text when no real improvement is available.

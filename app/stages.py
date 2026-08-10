@@ -637,6 +637,7 @@ async def _localized_request_loop(
         tuple[dict[str, Any], list[str], list[str], bool],
     ],
     format_correction: str,
+    prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
     logger: Any,
@@ -675,16 +676,11 @@ async def _localized_request_loop(
                 }
                 for item in items
             ]
-            payload["validation_repair"] = (
-                "返回不含所列残留字符的完整修正版译文。"
-            )
+            payload["validation_repair"] = _VALIDATION_REPAIR[prompt_language]
         if format_attempt:
-            correction = format_correction
-            if format_errors:
-                correction = (
-                    f"{correction}\n错误详情：{'；'.join(format_errors[:5])}"
-                )
-            payload["format_correction"] = correction
+            payload["format_correction"] = _correction_with_errors(
+                format_correction, format_errors, prompt_language
+            )
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -884,6 +880,38 @@ def _prompt(project: Path, stage: str, language: str | None = None) -> str:
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
     return full_prompt(stage, middle, language)
+
+
+_FORMAT_CORRECTION = {
+    "zh-CN": (
+        "上次响应违反输出协议或遗漏项目。只处理当前待处理内容并遵守固定字段；"
+        '每行一个紧凑 JSON 对象，末行精确为 {"type":"end"}。'
+    ),
+    "en": (
+        "The previous response violated the output protocol or omitted items. "
+        "Process only the current pending content and follow the fixed fields; "
+        'write one compact JSON object per line and end with exactly {"type":"end"}.'
+    ),
+}
+
+_VALIDATION_REPAIR = {
+    "zh-CN": (
+        "以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
+        "返回完整且格式合规的译文。"
+    ),
+    "en": (
+        "Use failed_candidate as the base, fix only the issues in "
+        "validation_matches, and return a complete, format-compliant translation."
+    ),
+}
+
+
+def _correction_with_errors(
+    correction: str, errors: list[str], language: str
+) -> str:
+    if language == "zh-CN" and errors:
+        return f"{correction}\n错误详情：{'；'.join(errors[:5])}"
+    return correction
 
 
 def load_terms(project: Path) -> dict[str, Any] | None:
@@ -1719,9 +1747,12 @@ def _validate_term_items(
     errors = list(document.errors)
     for index, item in enumerate(document.records, start=1):
         item_errors: list[str] = []
-        for key in ("source", "category", "description"):
+        for key in ("source", "category"):
             if not isinstance(item.get(key), str) or not item[key].strip():
                 item_errors.append(f"术语记录 {index} 缺少有效 {key}")
+        description = item.get("description")
+        if description is not None and not isinstance(description, str):
+            item_errors.append(f"术语记录 {index} 的 description 类型错误")
         preferred = item.get("preferred_translation")
         if preferred is not None and not isinstance(preferred, str):
             item_errors.append(
@@ -1739,7 +1770,7 @@ def _validate_term_items(
             {
                 "source": item["source"].strip(),
                 "category": item["category"].strip(),
-                "description": item["description"].strip(),
+                "description": description.strip() if description else None,
                 "preferred_translation": preferred.strip() if preferred else None,
                 "aliases": [alias.strip() for alias in aliases if alias.strip()],
             }
@@ -2099,16 +2130,9 @@ async def run_terminology(
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
-                correction = (
-                    "上一次响应不符合 JSONL 协议。每行只输出一个紧凑 JSON "
-                    "对象，不要解释，最后一行必须严格输出 {\"type\":\"end\"}，"
-                    "不要输出 {\"type\":\"type\":\"end\"} 或其他字段。"
+                payload["format_correction"] = _correction_with_errors(
+                    _FORMAT_CORRECTION[language], parse_errors, language
                 )
-                if parse_errors:
-                    correction = (
-                        f"{correction}\n错误详情：{'；'.join(parse_errors[:5])}"
-                    )
-                payload["format_correction"] = correction
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
@@ -3235,10 +3259,8 @@ async def run_translation(
             accept=accept_translation,
             save_error=save_external_error,
             parse=_map_local_translation_response,
-            format_correction=(
-                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
-            ),
+            format_correction=_FORMAT_CORRECTION[language],
+            prompt_language=language,
             by_id=by_id,
             segments=segments,
             logger=logger,
@@ -3268,10 +3290,8 @@ async def run_translation(
                 accept=accept_translation,
                 save_error=save_external_error,
                 parse=_map_local_translation_response,
-                format_correction=(
-                    "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                    "ID，每行一个紧凑 JSON 对象，最后输出 {\"type\":\"end\"}。"
-                ),
+                format_correction=_FORMAT_CORRECTION[language],
+                prompt_language=language,
                 by_id=by_id,
                 segments=segments,
                 logger=logger,
@@ -4018,14 +4038,8 @@ async def run_review(
             accept=accept_result,
             save_error=save_external_error,
             parse=_map_local_review_response,
-            format_correction=(
-                "上一次响应不符合 JSONL 协议或缺少 Segment。只返回未决 "
-                'ID。accepted 每行使用 {"type":"segment","id":"...",'
-                '"status":"accepted"}；suggested 每行使用 '
-                '{"type":"segment","id":"...","status":"suggested",'
-                '"suggested_text":"完整建议","reason":"原因"}，其中 reason '
-                '也可为 null。最后输出 {"type":"end"}。'
-            ),
+            format_correction=_FORMAT_CORRECTION[language],
+            prompt_language=language,
             by_id=by_id,
             segments=segments,
             logger=logger,

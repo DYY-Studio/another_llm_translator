@@ -1255,6 +1255,15 @@ def create_app(
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).remove_terms(payload)
 
+    @app.post("/api/v1/projects/{name}/terms/clear")
+    async def clear_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认清空术语阶段")
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，结束或取消后才能清空术语阶段")
+        return WebStore(root).clear_terms()
+
     @app.post("/api/v1/projects/{name}/terms/delete")
     async def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)

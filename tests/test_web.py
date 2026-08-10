@@ -25,7 +25,9 @@ from app.sqlite_storage import (
     append_jsonl,
     read_files,
     read_json,
+    read_jsonl,
     record_header,
+    record_exists,
     write_json,
 )
 from app.web import create_app
@@ -1140,6 +1142,119 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     assert deleted.json()["deleted"] == 1
     assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
     assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
+
+
+def test_web_clears_all_terminology_state_and_interrupts_stale_run(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path, "Alice")
+    client = TestClient(create_app(projects_root=projects_root))
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={"source": "Alice", "preferred_translation": "爱丽丝"},
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={"source": "Bob", "disabled": True},
+    ).status_code == 200
+
+    metadata = read_json(project, project / "project.json")
+    task_id = "TERM-TASK-CLEAR"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            segment_id="F0001-S000001",
+            status="completed",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            terms=[{"source": "Alice"}],
+        ),
+    )
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project),
+        stage="terminology",
+        fingerprint="clear-test",
+        prompt="test",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    append_jsonl(
+        project,
+        project / "stages" / "translation.jsonl",
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id="F0001-S000001",
+            status="completed",
+            text="保留",
+        ),
+    )
+
+    missing_confirmation = client.post(
+        "/api/v1/projects/sample/terms/clear",
+        json={"confirm": False},
+    )
+    assert missing_confirmation.status_code == 400
+    assert client.get("/api/v1/projects/sample/terms").json()["terms"]
+
+    cleared = client.post(
+        "/api/v1/projects/sample/terms/clear",
+        json={"confirm": True},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["terms_revision"] is None
+    assert cleared.json()["terms"] == []
+    assert cleared.json()["scan"]["status"] == "none"
+    assert not record_exists(project, project / "terminology" / "terms.json")
+    assert not record_exists(project, project / "terminology" / "active_task.json")
+    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
+    assert read_jsonl(project, project / "terminology" / "candidates.jsonl") == []
+    assert read_json(project, run_dir / "manifest.json")["run_id"] == run_id
+    assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
+    assert read_jsonl(project, project / "stages" / "translation.jsonl")[0]["text"] == "保留"
+
+
+def test_web_rejects_terminology_clear_while_project_task_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _root: True)
+    client = TestClient(app)
+
+    blocked = client.post(
+        "/api/v1/projects/sample/terms/clear",
+        json={"confirm": True},
+    )
+    assert blocked.status_code == 400
+    assert "运行中的任务" in blocked.json()["error"]
 
 
 def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> None:

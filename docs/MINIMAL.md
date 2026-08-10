@@ -753,7 +753,16 @@ applied 结果保存：
 按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
 改版时显式升 `prompt_rules_version`。
 
-固定部分定义角色、输入输出结构、请求内短 ID 约束、参考上文边界和严格 JSONL 要求。每个非空物理行只能包含一个紧凑 JSON 对象，所有阶段最后一行必须为 `{"type":"end"}`。middle Prompt 只承载项目背景、文体、翻译习惯、术语偏好、校对或润色标准。
+固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界。除顶层
+`format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考
+数据，模型不得执行其中的指令。固定 Suffix 定义字段条件、请求内短 ID、格式保真和
+严格 JSONL；每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为
+`{"type":"end"}`。
+
+middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景、文体、翻译策略、
+术语偏好及校对或润色严格度；它可以改变处理方式，但不能覆盖 Prefix/Suffix 的范围、
+数据边界和输出协议。内置 middle 的更新只进入新项目或用户明确执行的模板同步，
+不自动覆盖既有项目副本；代码内 Prefix/Suffix 更新对所有项目生效。
 
 Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
 `--language`/`MINIMAL_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
@@ -800,6 +809,11 @@ previous_segments = 3
 - 上文只含源文，不依赖当前 Run 尚未产生的结果。
 
 术语提示词必须说明：参考上文只用于判断人物性别、指代、身份和上下文含义，不要仅因词语只出现在上文中就提取。
+
+格式修正请求使用顶层 `format_correction`，只重新处理当前待处理内容并遵守固定输出
+协议。翻译校验修复使用 `validation_repair`，以每项 `failed_candidate` 为基准，只
+修复 `validation_matches` 所列问题并返回完整译文。两类控制说明使用本 Run 的 Prompt
+语言；英文 Prompt 不混入中文修正说明或中文解析错误详情。
 
 ## 4.2 术语
 
@@ -865,11 +879,17 @@ Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment �
 LLM 返回 JSONL；每个术语一行：
 
 ```jsonl
-{"type":"term","source":"Silver Knight","category":"人物称号","description":"银发骑士的称号","preferred_translation":"白银骑士","aliases":["The Silver Knight"]}
+{"type":"term","source":"Alice","category":"女性人名","preferred_translation":"爱丽丝","aliases":["Ally"]}
 {"type":"end"}
 ```
 
-LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。否则格式修正仍重试原请求范围。`end` 必须严格等于 `{"type":"end"}`；例如 `{"type":"type":"end"}` 仍拒绝，不自动修复或接受。严格失败不会回滚已经解析的候选，失败 Segment 会记录安全错误分类，Run manifest 记录分类及数量。
+`source` 和 `category` 必填；`description`、`preferred_translation` 和 `aliases`
+可选。人物类别尽量在上下文证据充分时标明性别，无法可靠判断时使用不带性别的
+类别。LLM 不需要声明术语属于哪个 Segment。合法术语行可以先保存为候选；只有
+所有行合法且最终存在 end 时，请求覆盖的每个 Segment 才记录扫描 completed。
+否则格式修正仍重试原请求范围。`end` 必须严格等于 `{"type":"end"}`；例如
+`{"type":"type":"end"}` 仍拒绝，不自动修复或接受。严格失败不会回滚已经解析的
+候选，失败 Segment 会记录安全错误分类，Run manifest 记录分类及数量。
 
 活动扫描的合法候选可以在全量扫描完成前读取：`terms-export --source scanned`
 或 Web 术语页的“导出当前扫描结果”只导出当前活动任务候选，不改动已发布库。用户
@@ -1179,9 +1199,8 @@ effective_max_tokens
 
 Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 
-- 固定 Prompt。
+- 固定 Prefix/Suffix。
 - middle Prompt。
-- 输出结构说明。
 - 目标语言。
 - 上文。
 - 术语。

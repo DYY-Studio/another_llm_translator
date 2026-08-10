@@ -12,7 +12,9 @@ from .plugins import normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
+    clear_terminology_state,
     get_segment,
+    list_runs,
     latest_stage_results,
     new_record_id,
     query_segment_neighbors,
@@ -24,6 +26,7 @@ from .sqlite_storage import (
     record_header,
     segment_count,
     segment_ids,
+    utc_now,
     write_json,
 )
 from .stages import (
@@ -690,6 +693,29 @@ class WebStore:
             "scan": self.terminology_scan(),
         }
 
+    def clear_terms(self) -> dict[str, Any]:
+        with project_write_lock(self.project):
+            for run in list_runs(self.project, stage="terminology", status="running"):
+                run.update(
+                    status="interrupted",
+                    interrupted_reason="terminology_cleared",
+                    interrupted_at=utc_now(),
+                    completed_at=utc_now(),
+                )
+                write_json(
+                    self.project,
+                    self.project / "runs" / str(run["run_id"]) / "manifest.json",
+                    run,
+                )
+            overrides = record_header(
+                "terminology_overrides",
+                self.project_id,
+                record_id="TERMINOLOGY-OVERRIDES",
+                overrides=[],
+            )
+            clear_terminology_state(self.project, overrides)
+            return self.terms()
+
     @staticmethod
     def _term_forms(term: dict[str, Any]) -> list[tuple[str, str]]:
         return [
@@ -1300,11 +1326,12 @@ class WebStore:
     def _reject_group_primary_removal(
         values: tuple[str, ...], current: dict[str, dict[str, Any]]
     ) -> None:
+        selected = set(values)
         for normalized in values:
             members = [
                 key
                 for key, term in current.items()
-                if term.get("group_primary") == normalized
+                if term.get("group_primary") == normalized and key not in selected
             ]
             if members:
                 raise TermGroupError(

@@ -63,6 +63,60 @@ def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> 
     assert removed["removed"] == 1
 
 
+def _group_three_terms(store: WebStore) -> None:
+    for source in ("John", "Johnny", "John Jr"):
+        store.save_term({"source": source})
+    store.group_related_terms(
+        {
+            "normalized": "john",
+            "related_normalized": "johnny",
+            "primary_normalized": "john",
+            "confirm": True,
+        }
+    )
+    store.group_related_terms(
+        {
+            "normalized": "john",
+            "related_normalized": "john jr",
+            "primary_normalized": "john",
+            "confirm": True,
+        }
+    )
+
+
+def test_term_group_primary_and_all_members_can_be_removed_together(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "John Smith John Johnny")
+    store = WebStore(project)
+    _group_three_terms(store)
+
+    with pytest.raises(TermGroupError) as partial_error:
+        store.remove_terms({"normalized": ["john", "johnny"]})
+    assert partial_error.value.params == {
+        "reason": "primary_has_members",
+        "normalized": "john",
+        "members": ["john jr"],
+    }
+
+    removed = store.remove_terms(
+        {"normalized": ["john", "johnny", "john jr"]}
+    )
+    assert removed["removed"] == 3
+    assert all(item["disabled"] for item in removed["terms"])
+
+    delete_root = tmp_path / "delete"
+    delete_root.mkdir()
+    project = create_web_store_project(delete_root, "John Johnny John Jr")
+    store = WebStore(project)
+    _group_three_terms(store)
+    deleted = store.delete_terms(
+        {"normalized": ["john", "johnny", "john jr"]}
+    )
+    assert deleted["deleted"] == 3
+    assert deleted["terms"] == []
+
+
 def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) -> None:
     project = create_web_store_project(tmp_path, "John Smith John John Jr")
     store = WebStore(project)

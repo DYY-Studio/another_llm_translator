@@ -103,6 +103,7 @@ export function TermsView({
   const [saving, setSaving] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
@@ -127,6 +128,7 @@ export function TermsView({
   const [relatedPrimary, setRelatedPrimary] = useState<string>("");
   const termListRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef<number | null>(null);
+  const suppressFocusScrollForDataRef = useRef<TermsResponse | null>(null);
   const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
   const selected = data?.terms.find(
@@ -322,6 +324,14 @@ export function TermsView({
   const selectedActive = visible.filter(
     (term) => selection.selectedKeys.has(term.normalized) && !term.disabled,
   );
+  const canClearStage = Boolean(
+    data && (
+      data.terms_revision !== null
+      || data.terms.length > 0
+      || data.scan.status !== "none"
+      || data.scan.candidate_count > 0
+    ),
+  );
 
   const termVirtualizer = useVirtualizer({
     count: visible.length,
@@ -336,6 +346,7 @@ export function TermsView({
   // stays in view: clearing a filter can move it far down the full list.
   useEffect(() => {
     if (!selection.focusedKey) return;
+    if (suppressFocusScrollForDataRef.current === data) return;
     const index = visible.findIndex(
       (term) => term.normalized === selection.focusedKey,
     );
@@ -343,6 +354,7 @@ export function TermsView({
   }, [data, onlyConflicts, search, showDisabled, selection.focusedKey, termVirtualizer, visible]);
 
   function resetFilterSelection() {
+    suppressFocusScrollForDataRef.current = null;
     selection.reset();
     setForm(emptyForm);
     setMessage("");
@@ -355,6 +367,7 @@ export function TermsView({
     nextConflicts: boolean,
     nextDisabled: boolean,
   ) {
+    suppressFocusScrollForDataRef.current = null;
     const focused = data?.terms.find(
       (term) => term.normalized === selection.focusedKey,
     ) ?? null;
@@ -370,6 +383,7 @@ export function TermsView({
   }
 
   function focusTerm(term: Term) {
+    suppressFocusScrollForDataRef.current = null;
     setForm(formFor(term));
     setMessage("");
   }
@@ -394,10 +408,15 @@ export function TermsView({
           disabled,
         }),
       });
-      setData(value);
       const saved = value.terms.find(
         (term) => term.source === form.source && term.disabled === disabled,
       ) ?? null;
+      if (selected?.has_conflicts && saved && !saved.has_conflicts) {
+        suppressFocusScrollForDataRef.current = value;
+      } else {
+        suppressFocusScrollForDataRef.current = null;
+      }
+      setData(value);
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
@@ -449,6 +468,44 @@ export function TermsView({
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clearTerms() {
+    setSaving(true);
+    setMessage("");
+    try {
+      const value = await api<TermsResponse>(
+        `/api/v1/projects/${project}/terms/clear`,
+        { method: "POST", body: JSON.stringify({ confirm: true }) },
+      );
+      setData(value);
+      selection.reset();
+      setForm(emptyForm);
+      setHits(null);
+      setHitsLoading(false);
+      setHitsError("");
+      setRelated(null);
+      setRelatedLoading(false);
+      setRelatedError("");
+      setPendingPrimary(null);
+      setPendingRelatedGroup(null);
+      setPendingRelatedAlias(null);
+      setPendingGroupMemberAlias(null);
+      setPendingGroupMemberLeave(null);
+      setPendingRelatedRemoval(null);
+      setRelatedPrimary("");
+      setShowScanFailures(false);
+      setPartialOpen(false);
+      hitsRequestRef.current += 1;
+      relatedRequestRef.current += 1;
+      relatedCacheRef.current.clear();
+      setClearOpen(false);
+      setMessage(translate("terms.stageCleared", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -726,6 +783,11 @@ export function TermsView({
                 disabled={!selectedTerms.length}
                 onClick={() => setDeleteOpen(true)}
               >{translate("terms.deletePermanently", language)}</button>
+              <button
+                className="danger-button"
+                disabled={saving || !canClearStage}
+                onClick={() => setClearOpen(true)}
+              >{translate("terms.clearStage", language)}</button>
             </div>
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
@@ -763,6 +825,8 @@ export function TermsView({
             {virtualTerms.map((virtualTerm) => {
               const term = visible[virtualTerm.index];
               if (!term) return null;
+              const category = term.category || term.conflicts.categories.join(" / ");
+              const categoryHasConflict = !term.category && term.conflicts.categories.length > 0;
               const selectedRow = selection.selectedKeys.has(term.normalized);
               const focused = selection.focusedKey === term.normalized;
               return (
@@ -786,7 +850,15 @@ export function TermsView({
                   <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
                   <span>
                     <strong>{term.source}</strong>
-                    <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                    <span className="term-row-summary">
+                      <small>{term.preferred_translation || translate("terms.noPreferredTranslation", language)}</small>
+                      {category ? (
+                        <small
+                          className={`term-row-category${categoryHasConflict ? " conflict" : ""}`}
+                          title={`${translate("terms.category", language)}: ${category}`}
+                        >{category}</small>
+                      ) : null}
+                    </span>
                     {term.group_primary ? (
                       <small>{translate("terms.groupPrimaryBadge", language, { source: termByKey.get(term.group_primary)?.source ?? term.group_primary })}</small>
                     ) : (membersByPrimary.get(term.normalized)?.length ?? 0) > 0 ? (
@@ -1010,6 +1082,17 @@ export function TermsView({
           confirming={saving}
           onCancel={() => setDeleteOpen(false)}
           onConfirm={deleteSelected}
+        />
+      )}
+      {clearOpen && (
+        <ConfirmDialog
+          language={language}
+          title={translate("terms.clearStageTitle", language)}
+          text={translate("terms.clearStageText", language)}
+          confirmLabel={translate("terms.clearStageConfirm", language)}
+          confirming={saving}
+          onCancel={() => setClearOpen(false)}
+          onConfirm={clearTerms}
         />
       )}
       {pendingPrimary && (
