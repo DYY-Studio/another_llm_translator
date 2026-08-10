@@ -274,7 +274,7 @@ def _make_stage_selection(
     )
 
 
-PROMPT_RULES_VERSION = 2
+PROMPT_RULES_VERSION = 3
 
 _COMMON_RULES: dict[str, str] = {
     "zh-CN": (
@@ -297,7 +297,7 @@ _COMMON_RULES: dict[str, str] = {
 _STAGE_RULES: dict[str, dict[str, str]] = {
     "terminology": {
         "zh-CN": (
-            "只从 source_segments[].source 提取术语；reference_context 中的"
+            "只从 source_segments[] 中的原文字符串提取术语；reference_context 中的"
             "内容不得单独触发提取。term 记录的 source 必须填写原文中实际"
             "出现的术语文本。"
             '每个术语输出一条 type="term" 记录，包含 source、category、'
@@ -307,7 +307,7 @@ _STAGE_RULES: dict[str, dict[str, str]] = {
             '"description":"人物","preferred_translation":"爱丽丝","aliases":[]}。'
         ),
         "en": (
-            "Extract terms only from source_segments[].source; content in "
+            "Extract terms only from the source strings in source_segments; content in "
             "reference_context must not trigger extraction on its own. The "
             "term record's source must be the term text as it actually "
             'appears in the source. Output one type="term" record per term '

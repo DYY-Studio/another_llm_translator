@@ -1972,12 +1972,8 @@ async def run_terminology(
         )
         return {
             "target_language": config["project"]["target_language"],
-            "reference_context": [
-                {"source": item["source"]} for item in raw_context
-            ],
-            "source_segments": [
-                {"source": item["source"]} for item in items
-            ],
+            "reference_context": [item["source"] for item in raw_context],
+            "source_segments": [item["source"] for item in items],
         }
 
     run_id, run_dir, fail_planning = _create_or_continue_run(
@@ -2949,6 +2945,8 @@ async def run_translation(
             if context_config["enabled"]
             else []
         )
+        if config["execution"]["scheduling_mode"] == "parallel":
+            context = [item["source"] for item in context]
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
@@ -3726,6 +3724,8 @@ async def run_review(
             if context_config["enabled"]
             else []
         )
+        if config["execution"]["scheduling_mode"] == "parallel":
+            context = [item["source"] for item in context]
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
