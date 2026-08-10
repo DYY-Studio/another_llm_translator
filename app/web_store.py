@@ -818,7 +818,15 @@ class WebStore:
                     "disabled": False,
                     "has_conflicts": bool(candidate.get("has_conflicts")),
                     "can_group": blocked_reason is None,
-                    "can_convert_alias": blocked_reason is None,
+                    "can_convert_alias": (
+                        blocked_reason is None
+                        and candidate.get("group_primary") is None
+                        and component_sizes[candidate_root] == 1
+                    ),
+                    "can_remove": (
+                        candidate.get("group_primary") is not None
+                        or component_sizes[candidate_root] == 1
+                    ),
                     "blocked_reason": blocked_reason,
                     "sort_key": best,
                     **best_match,
@@ -994,33 +1002,37 @@ class WebStore:
                     normalized=normalized,
                     related_normalized=related_normalized,
                 )
-            related = next(
-                (
-                    item
-                    for item in self._related_term_rows(rows, selected)
-                    if item["normalized"] == related_normalized
-                ),
-                None,
-            )
-            if related is None:
-                raise TermGroupError(
-                    "相关推荐关系已失效",
-                    reason="stale_recommendation",
-                    normalized=normalized,
-                    related_normalized=related_normalized,
-                )
             roots = {
                 str(item["normalized"]): self._term_group_root(item, by_normalized)
                 for item in rows
             }
             selected_root = roots[normalized]
+            related_root = roots[related_normalized]
+            same_group_member = (
+                selected_root == related_root
+                and candidate.get("group_primary") is not None
+            )
+            if not same_group_member:
+                if not any(
+                    item["normalized"] == related_normalized
+                    for item in self._related_term_rows(rows, selected)
+                ):
+                    raise TermGroupError(
+                        "相关推荐关系已失效",
+                        reason="stale_recommendation",
+                        normalized=normalized,
+                        related_normalized=related_normalized,
+                    )
             selected_component = {
                 key for key, root in roots.items() if root == selected_root
             }
             candidate_component = {
                 key for key, root in roots.items() if root == roots[related_normalized]
             }
-            if candidate.get("group_primary") is not None or len(candidate_component) > 1:
+            if not same_group_member and (
+                candidate.get("group_primary") is not None
+                or len(candidate_component) > 1
+            ):
                 raise TermGroupError(
                     "有成员的术语不能快捷转为别名",
                     reason="candidate_has_members",
@@ -1036,18 +1048,22 @@ class WebStore:
                     normalized=normalized,
                     related_normalized=related_normalized,
                 )
+            target_normalized = selected_root if same_group_member else normalized
+            target = by_normalized[target_normalized]
+            target_component = selected_component
             spec = term_normalization(self.config)
-            existing = [selected["source"], *selected.get("aliases", [])]
+            existing = [target["source"], *target.get("aliases", [])]
             existing_normalized = {normalize_term(value, spec) for value in existing}
             group_source_normalized = {
                 normalize_term(by_normalized[key]["source"], spec)
-                for key in selected_component
+                for key in target_component
+                if key != related_normalized
             }
             active_external_sources = {
                 normalize_term(item["source"], spec): str(item["normalized"])
                 for item in rows
                 if not item.get("disabled")
-                and str(item["normalized"]) not in selected_component
+                and str(item["normalized"]) not in target_component
                 and str(item["normalized"]) != related_normalized
             }
             additions: list[str] = []
@@ -1080,12 +1096,19 @@ class WebStore:
                 for item in overrides_document.get("overrides", [])
             }
             target_override = overrides.get(
-                normalized,
-                {"normalized": normalized, "source": selected["source"]},
+                target_normalized,
+                {"normalized": target_normalized, "source": target["source"]},
             )
-            target_aliases = [*selected.get("aliases", []), *additions]
-            overrides[normalized] = {**target_override, "aliases": target_aliases}
-            current[normalized]["aliases"] = target_aliases
+            target_aliases: list[str] = []
+            target_alias_seen = {normalize_term(target["source"], spec)}
+            for value in [*target.get("aliases", []), *additions]:
+                normalized_value = normalize_term(value, spec)
+                if not normalized_value or normalized_value in target_alias_seen:
+                    continue
+                target_alias_seen.add(normalized_value)
+                target_aliases.append(str(value))
+            overrides[target_normalized] = {**target_override, "aliases": target_aliases}
+            current[target_normalized]["aliases"] = target_aliases
             candidate_override = overrides.get(
                 related_normalized,
                 {"normalized": related_normalized, "source": candidate["source"]},

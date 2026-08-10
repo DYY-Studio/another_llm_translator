@@ -1240,6 +1240,34 @@ def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
     assert rows["john"]["disabled"] is True
 
 
+def test_web_related_quick_remove_uses_reversible_remove_route(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    for source in ("John Smith", "John"):
+        response = client.post(
+            "/api/v1/projects/sample/terms",
+            json={"source": source, "aliases": [], "disabled": False},
+        )
+        assert response.status_code == 200
+
+    related = client.get(
+        "/api/v1/projects/sample/terms/related",
+        params={"normalized": "john smith"},
+    )
+    assert related.status_code == 200
+    candidate = related.json()["related"][0]
+    assert candidate["can_remove"] is True
+
+    removed = client.post(
+        "/api/v1/projects/sample/terms/remove",
+        json={"normalized": [candidate["normalized"]]},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == 1
+    rows = {item["normalized"]: item for item in removed.json()["terms"]}
+    assert rows["john"]["disabled"] is True
+
+
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))

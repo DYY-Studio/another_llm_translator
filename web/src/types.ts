@@ -279,6 +279,7 @@ export interface RelatedTerm {
   related_match_type: "source" | "alias";
   can_group: boolean;
   can_convert_alias: boolean;
+  can_remove: boolean;
   blocked_reason: "group_claim" | "cross_group" | null;
 }
 

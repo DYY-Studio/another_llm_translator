@@ -297,6 +297,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .term-group-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
 .term-group-row.primary { background: var(--sidebar); }
 .term-group-row em { color: var(--muted); font-style: normal; }
+.term-group-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .term-related-panel { display: grid; gap: 8px; margin-top: 12px; padding-top: 16px; border-top: 1px solid var(--border); }
 .term-related-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .term-related-list { display: grid; gap: 8px; }
@@ -627,6 +628,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .term-group-panel { padding: 18px 14px 50px; }
   .term-group-row { grid-template-columns: minmax(0, 1fr) auto; }
   .term-group-row > :last-child { grid-column: 2; justify-self: end; }
+  .term-group-actions { justify-content: flex-end; }
   .term-related-actions button { flex: 1 1 120px; min-width: 0; }
   .term-hits-panel { padding: 14px 14px 18px; }
   .term-secondary { grid-template-columns: 1fr; }
