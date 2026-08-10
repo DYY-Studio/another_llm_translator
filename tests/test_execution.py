@@ -31,7 +31,6 @@ from app.execution import (
     iter_chunk_plans,
     localize_request_ids,
     materialize_chunk_stream,
-    previous_context,
     render_messages,
     select_scope,
     stage_fingerprint,
@@ -523,8 +522,9 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
         ["F0001-S000001"],
         ["F0001-S000003", "F0001-S000004"],
     ]
-    assert previous_context(source, source[2], 3) == []
-    assert previous_context(source, source[3], 3) == [{"source": "第二章"}]
+    context_index = PreviousContextIndex(source)
+    assert context_index.previous(source[2], 3) == []
+    assert context_index.previous(source[3], 3) == [{"source": "第二章"}]
 
 
 def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None:
@@ -760,8 +760,7 @@ def test_context_is_same_file_and_optional_target() -> None:
             "is_empty": False,
         }
     )
-    context = previous_context(
-        source,
+    context = PreviousContextIndex(source).previous(
         source[4],
         2,
         target_resolver=lambda segment_id: f"translated:{segment_id}",
@@ -817,13 +816,9 @@ def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
         2,
         target_resolver=resolver,
         source_key="model_source",
-    ) == previous_context(
-        source,
-        probe,
-        2,
-        target_resolver=resolver,
-        source_key="model_source",
-    )
+    ) == [
+        {"source": "model-one", "translation": "translated:S1"},
+    ]
 
 
 @pytest.mark.asyncio
