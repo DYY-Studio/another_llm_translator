@@ -413,9 +413,11 @@ class TXTDocumentAdapter:
         output_text: dict[str, str],
         bilingual: bool,
         output_encoding: str,
+        target_language: str,
+        target_language_tag: str,
         opaque_state: dict[str, object] | None,
     ) -> list[Path]:
-        del project, opaque_state
+        del project, opaque_state, target_language, target_language_tag
         lines: list[str] = []
         for segment in sorted(
             segments, key=lambda item: int(item["line_index"])

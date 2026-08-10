@@ -262,6 +262,32 @@ export interface TermHitsResponse {
   hits: TermHit[];
 }
 
+export interface RelatedTerm {
+  normalized: string;
+  source: string;
+  preferred_translation: string | null;
+  group_primary: string | null;
+  group_root_normalized: string;
+  group_root_source: string;
+  group_size: number;
+  disabled: boolean;
+  has_conflicts: boolean;
+  relation: "contains_selected" | "contained_by_selected";
+  selected_match: string;
+  selected_match_type: "source" | "alias";
+  related_match: string;
+  related_match_type: "source" | "alias";
+  can_group: boolean;
+  can_convert_alias: boolean;
+  can_remove: boolean;
+  blocked_reason: "group_claim" | "cross_group" | null;
+}
+
+export interface RelatedTermsResponse {
+  normalized: string;
+  related: RelatedTerm[];
+}
+
 export interface TerminologyScan {
   active_task_id: string | null;
   status: "none" | "active" | "completed" | "partial_published" | string;
@@ -286,6 +312,7 @@ export type ThemeMode = "system" | "light" | "dark";
 export interface ProjectConfig {
   project: {
     target_language: string;
+    target_language_tag: string;
     output_encoding: string;
   };
   input: {

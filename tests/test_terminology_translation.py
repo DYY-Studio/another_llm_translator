@@ -13,6 +13,7 @@ from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import init_project
 from app.stages import (
     TermNormalization,
+    _TermMatchCache,
     _restore_leading_whitespace,
     load_terms,
     match_terms,
@@ -142,10 +143,7 @@ async def test_terminology_publishes_and_translation_uses_terms(
     assert seen_terminology_payload == {
         "target_language": "简体中文",
         "reference_context": [],
-        "source_segments": [
-            {"source": "Alice entered."},
-            {"source": "Alice waved."},
-        ],
+        "source_segments": ["Alice entered.", "Alice waved."],
     }
     assert load_terms(project)["terms"][0]["preferred_translation"] == "爱丽丝"
     assert translation_summary["completed"] == 2
@@ -189,8 +187,7 @@ async def test_case_insensitive_false_keeps_case_distinct_terms(
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         records = []
-        for item in payload["source_segments"]:
-            source = item["source"]
+        for source in payload["source_segments"]:
             records.append(
                 {
                     "type": "term",
@@ -258,10 +255,10 @@ async def test_unicode_normalization_setting_controls_scan_dedup(
         records = [
             {
                 "type": "term",
-                "source": item["source"],
+                "source": item,
                 "category": "名称",
-                "description": f"说明-{item['source']}",
-                "preferred_translation": f"译-{item['source']}",
+                "description": f"说明-{item}",
+                "preferred_translation": f"译-{item}",
                 "aliases": [],
             }
             for item in payload["source_segments"]
@@ -326,9 +323,9 @@ async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        assert all(set(item) == {"source"} for item in payload["source_segments"])
-        assert all(set(item) == {"source"} for item in payload["reference_context"])
-        requested.extend(item["source"] for item in payload["source_segments"])
+        assert all(isinstance(item, str) for item in payload["source_segments"])
+        assert all(isinstance(item, str) for item in payload["reference_context"])
+        requested.extend(payload["source_segments"])
         return httpx.Response(
             200,
             json={
@@ -360,8 +357,8 @@ async def test_terminology_context_and_sources_never_expose_segment_ids(
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        assert payload["reference_context"] == [{"source": "before"}]
-        assert payload["source_segments"] == [{"source": "current"}]
+        assert payload["reference_context"] == ["before"]
+        assert payload["source_segments"] == ["current"]
         assert "id" not in json.dumps(payload)
         return httpx.Response(
             200,
@@ -379,6 +376,51 @@ async def test_terminology_context_and_sources_never_expose_segment_ids(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_translation_uses_compact_source_only_context(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "before\ncurrent")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'scheduling_mode = "ordered_by_file"',
+            'scheduling_mode = "parallel"',
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.update(payload)
+        records = [
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": f"译文:{item['source']}",
+            }
+            for item in payload["segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(only_segment="F0001-S000002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+    assert seen["reference_context"] == ["before"]
+    assert seen["segments"] == [{"id": "1", "source": "current"}]
 
 
 def test_term_matching_prefers_main_name_over_alias() -> None:
@@ -400,6 +442,36 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
         "Alice Wonderland arrived.", library, 10, TermNormalization("NFKC", True)
     )
     assert [item["source"] for item in matched] == ["Alice", "Other"]
+
+
+def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["A"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+    assert cache.matcher is not None
+    calls = 0
+    original_match = cache.matcher.match
+
+    def counted_match(source: str, limit: int) -> list[dict]:
+        nonlocal calls
+        calls += 1
+        return original_match(source, limit)
+
+    cache.matcher.match = counted_match  # type: ignore[method-assign]
+    items = [
+        {"segment_id": "S1", "source": "Alice"},
+        {"segment_id": "S1", "source": "Alice"},
+        {"segment_id": "S2", "source": "Alice"},
+    ]
+    assert [item["source"] for item in cache.for_items(items)] == ["Alice"]
+    assert calls == 2
 
 
 @pytest.mark.asyncio

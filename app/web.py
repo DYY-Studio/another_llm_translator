@@ -1213,6 +1213,18 @@ def create_app(
             normalized, offset=offset, limit=limit
         )
 
+    @app.get("/api/v1/projects/{name}/terms/related")
+    async def related_terms(name: str, request: Request) -> dict[str, Any]:
+        params = request.query_params
+        normalized = params.get("normalized")
+        if not normalized:
+            raise UsageError("术语推荐查询必须提供 normalized")
+        try:
+            limit = int(params.get("limit", "20"))
+        except ValueError as exc:
+            raise UsageError("术语推荐数量参数必须是整数") from exc
+        return WebStore(project(name)).related_terms(normalized, limit=limit)
+
     @app.post("/api/v1/projects/{name}/terms")
     async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).save_term(payload)
@@ -1224,6 +1236,20 @@ def create_app(
     @app.post("/api/v1/projects/{name}/terms/set-primary")
     async def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).set_term_primary(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/leave-group")
+    async def leave_term_group(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).leave_term_group(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/group-related")
+    async def group_related_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return WebStore(project(name)).group_related_terms(payload)
+
+    @app.post("/api/v1/projects/{name}/terms/convert-to-alias")
+    async def convert_related_to_alias(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return WebStore(project(name)).convert_related_to_alias(payload)
 
     @app.post("/api/v1/projects/{name}/terms/remove")
     async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:

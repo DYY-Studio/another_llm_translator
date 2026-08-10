@@ -1030,3 +1030,98 @@ def latest_stage_summary(
         }
     finally:
         connection.close()
+
+
+def latest_stage_states(
+    project: Path,
+    stage: str,
+    segment_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Read only the latest completed payload and attempt status per Segment."""
+    values = [str(value) for value in segment_ids]
+    if not values:
+        return {}
+    placeholders = ",".join("?" for _ in values)
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            f"""
+            WITH aggregate AS (
+                SELECT segment_id,
+                       MAX(CASE WHEN status = 'completed' THEN sequence END)
+                           AS completed_sequence,
+                       MAX(CASE WHEN status = 'reset' THEN sequence END)
+                           AS reset_sequence,
+                       MAX(sequence) AS latest_sequence
+                FROM stage_results
+                WHERE stage = ? AND segment_id IN ({placeholders})
+                GROUP BY segment_id
+            )
+            SELECT aggregate.segment_id,
+                   CASE
+                       WHEN aggregate.completed_sequence IS NOT NULL
+                        AND aggregate.completed_sequence
+                            > COALESCE(aggregate.reset_sequence, 0)
+                       THEN completed.payload_json
+                   END AS completed_payload,
+                   latest.status AS latest_status
+            FROM aggregate
+            LEFT JOIN stage_results AS completed
+              ON completed.sequence = aggregate.completed_sequence
+            LEFT JOIN stage_results AS latest
+              ON latest.sequence = aggregate.latest_sequence
+            """,
+            [stage, *values],
+        ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            completed_payload = row["completed_payload"]
+            result[str(row["segment_id"])] = {
+                "completed": (
+                    _validate_record(
+                        _load(str(completed_payload)),
+                        f"stage={stage} segment={row['segment_id']}",
+                    )
+                    if completed_payload is not None
+                    else None
+                ),
+                "latest_status": row["latest_status"],
+            }
+        return result
+    finally:
+        connection.close()
+
+
+def terminology_scan_state(
+    project: Path,
+    task_id: str,
+    segment_ids: Iterable[str],
+) -> tuple[set[str], set[str]]:
+    """Return completed Segment IDs and fingerprints for one terminology task."""
+    values = [str(value) for value in segment_ids]
+    if not values:
+        return set(), set()
+    placeholders = ",".join("?" for _ in values)
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT DISTINCT segment_id,
+                   json_extract(payload_json, '$.stage_fingerprint')
+                       AS stage_fingerprint
+            FROM terminology_scans
+            WHERE active_task_id = ?
+              AND status = 'completed'
+              AND segment_id IN ({placeholders})
+            """,
+            [task_id, *values],
+        ).fetchall()
+        completed = {str(row["segment_id"]) for row in rows}
+        fingerprints = {
+            str(row["stage_fingerprint"])
+            for row in rows
+            if row["stage_fingerprint"] is not None
+        }
+        return completed, fingerprints
+    finally:
+        connection.close()

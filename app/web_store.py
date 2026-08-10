@@ -690,6 +690,416 @@ class WebStore:
             "scan": self.terminology_scan(),
         }
 
+    @staticmethod
+    def _term_forms(term: dict[str, Any]) -> list[tuple[str, str]]:
+        return [
+            ("source", str(term["source"])),
+            *[("alias", str(alias)) for alias in term.get("aliases", [])],
+        ]
+
+    @staticmethod
+    def _term_group_root(
+        term: dict[str, Any], by_normalized: dict[str, dict[str, Any]]
+    ) -> str:
+        primary = term.get("group_primary")
+        return (
+            str(primary)
+            if primary and str(primary) in by_normalized
+            else str(term["normalized"])
+        )
+
+    def _related_term_rows(
+        self,
+        rows: list[dict[str, Any]],
+        selected: dict[str, Any],
+        *,
+        exclude_same_group: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Find deterministic source/alias containment candidates."""
+        spec = term_normalization(self.config)
+        by_normalized = {str(item["normalized"]): item for item in rows}
+        selected_root = self._term_group_root(selected, by_normalized)
+        roots = {
+            str(item["normalized"]): self._term_group_root(item, by_normalized)
+            for item in rows
+        }
+        component_sizes: Counter[str] = Counter(roots.values())
+        components: dict[str, list[dict[str, Any]]] = {}
+        for item in rows:
+            components.setdefault(roots[str(item["normalized"])], []).append(item)
+        selected_component = components[selected_root]
+        selected_has_claim = any(
+            item.get("conflicts", {}).get("group_claims")
+            for item in selected_component
+        )
+
+        selected_forms = [
+            (kind, value, normalize_term(value, spec))
+            for kind, value in self._term_forms(selected)
+        ]
+        selected_forms = [item for item in selected_forms if item[2]]
+        candidates: list[dict[str, Any]] = []
+        for candidate in rows:
+            if candidate.get("disabled"):
+                continue
+            candidate_normalized = str(candidate["normalized"])
+            if candidate_normalized == str(selected["normalized"]):
+                continue
+            candidate_root = roots[candidate_normalized]
+            if exclude_same_group and candidate_root == selected_root:
+                continue
+            candidate_component = components[candidate_root]
+            candidate_has_claim = any(
+                item.get("conflicts", {}).get("group_claims")
+                for item in candidate_component
+            )
+            best: tuple[Any, ...] | None = None
+            best_match: dict[str, Any] | None = None
+            candidate_forms = [
+                (kind, value, normalize_term(value, spec))
+                for kind, value in self._term_forms(candidate)
+            ]
+            candidate_forms = [item for item in candidate_forms if item[2]]
+            for selected_kind, selected_value, selected_normalized in selected_forms:
+                for candidate_kind, candidate_value, candidate_normalized_value in candidate_forms:
+                    if selected_normalized == candidate_normalized_value:
+                        continue
+                    if (
+                        len(selected_normalized) >= 2
+                        and selected_normalized in candidate_normalized_value
+                    ):
+                        relation = "contains_selected"
+                        contained_length = len(selected_normalized)
+                        length_delta = len(candidate_normalized_value) - contained_length
+                    elif (
+                        len(candidate_normalized_value) >= 2
+                        and candidate_normalized_value in selected_normalized
+                    ):
+                        relation = "contained_by_selected"
+                        contained_length = len(candidate_normalized_value)
+                        length_delta = len(selected_normalized) - contained_length
+                    else:
+                        continue
+                    sort_key = (
+                        0 if relation == "contains_selected" else 1,
+                        int(selected_kind != "source" or candidate_kind != "source"),
+                        length_delta,
+                        -contained_length,
+                        candidate_normalized,
+                    )
+                    if best is None or sort_key < best:
+                        best = sort_key
+                        best_match = {
+                            "relation": relation,
+                            "selected_match": selected_value,
+                            "selected_match_type": selected_kind,
+                            "related_match": candidate_value,
+                            "related_match_type": candidate_kind,
+                        }
+            if best is None or best_match is None:
+                continue
+            blocked_reason: str | None = None
+            if selected_has_claim or candidate_has_claim:
+                blocked_reason = "group_claim"
+            elif (
+                component_sizes[selected_root] > 1
+                and component_sizes[candidate_root] > 1
+            ):
+                blocked_reason = "cross_group"
+            candidates.append(
+                {
+                    "normalized": candidate_normalized,
+                    "source": candidate["source"],
+                    "preferred_translation": candidate.get("preferred_translation"),
+                    "group_primary": candidate.get("group_primary"),
+                    "group_root_normalized": candidate_root,
+                    "group_root_source": by_normalized[candidate_root]["source"],
+                    "group_size": component_sizes[candidate_root],
+                    "disabled": False,
+                    "has_conflicts": bool(candidate.get("has_conflicts")),
+                    "can_group": blocked_reason is None,
+                    "can_convert_alias": (
+                        blocked_reason is None
+                        and candidate.get("group_primary") is None
+                        and component_sizes[candidate_root] == 1
+                    ),
+                    "can_remove": (
+                        candidate.get("group_primary") is not None
+                        or component_sizes[candidate_root] == 1
+                    ),
+                    "blocked_reason": blocked_reason,
+                    "sort_key": best,
+                    **best_match,
+                }
+            )
+        candidates.sort(key=lambda item: item.pop("sort_key"))
+        return candidates
+
+    def related_terms(
+        self, normalized: str, *, limit: int = 20
+    ) -> dict[str, Any]:
+        if not normalized:
+            raise UsageError("术语推荐查询必须提供 normalized")
+        if limit < 1 or limit > 100:
+            raise UsageError("术语推荐数量参数无效")
+        rows = self.terms()["terms"]
+        selected = next(
+            (item for item in rows if item["normalized"] == normalized), None
+        )
+        if selected is None or selected.get("disabled"):
+            raise UsageError(f"术语不存在或已移除：{normalized}")
+        return {
+            "normalized": normalized,
+            "related": self._related_term_rows(rows, selected)[:limit],
+        }
+
+    def group_related_terms(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认建立术语组")
+        normalized = payload.get("normalized")
+        related_normalized = payload.get("related_normalized")
+        primary_normalized = payload.get("primary_normalized")
+        if not all(
+            isinstance(value, str) and value
+            for value in (normalized, related_normalized, primary_normalized)
+        ):
+            raise UsageError("normalized、related_normalized 和 primary_normalized 必须是非空字符串")
+        with project_write_lock(self.project):
+            rows = self.terms()["terms"]
+            by_normalized = {str(item["normalized"]): item for item in rows}
+            selected = by_normalized.get(normalized)
+            candidate = by_normalized.get(related_normalized)
+            if selected is None or candidate is None or selected.get("disabled") or candidate.get("disabled"):
+                raise TermGroupError(
+                    "相关推荐条目不存在或已移除",
+                    reason="stale_recommendation",
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            related = next(
+                (
+                    item
+                    for item in self._related_term_rows(
+                        rows, selected, exclude_same_group=False
+                    )
+                    if item["normalized"] == related_normalized
+                ),
+                None,
+            )
+            if related is None:
+                raise TermGroupError(
+                    "相关推荐关系已失效",
+                    reason="stale_recommendation",
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            if not related["can_group"]:
+                raise TermGroupError(
+                    "相关推荐条目不能快捷加入术语组",
+                    reason=(
+                        "group_collision"
+                        if related["blocked_reason"] == "cross_group"
+                        else str(related["blocked_reason"] or "group_collision")
+                    ),
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            roots = {
+                str(item["normalized"]): self._term_group_root(item, by_normalized)
+                for item in rows
+            }
+            selected_root = roots[normalized]
+            related_root = roots[related_normalized]
+            selected_component = {
+                key for key, root in roots.items() if root == selected_root
+            }
+            related_component = {
+                key for key, root in roots.items() if root == related_root
+            }
+            allowed_primaries = {selected_root, related_root}
+            if primary_normalized not in allowed_primaries:
+                raise TermGroupError(
+                    "组主必须是当前条目、相关推荐条目或已有组主",
+                    reason="invalid_primary",
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            component = selected_component | related_component
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            for key in component:
+                primary = None if key == primary_normalized else primary_normalized
+                if key not in current:
+                    raise TermGroupError(
+                        "术语组成员不在当前发布库中",
+                        reason="missing_entry",
+                        normalized=key,
+                    )
+                current[key]["group_primary"] = primary
+                override = overrides.get(
+                    key,
+                    {"normalized": key, "source": current[key].get("source", key)},
+                )
+                overrides[key] = {**override, "group_primary": primary}
+            result = self._publish_terms(
+                library, current, overrides, origin="web_group_related"
+            )
+            result["group_primary"] = primary_normalized
+            return result
+
+    def convert_related_to_alias(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认将术语转为别名")
+        normalized = payload.get("normalized")
+        related_normalized = payload.get("related_normalized")
+        if not isinstance(normalized, str) or not normalized:
+            raise UsageError("normalized 必须是非空字符串")
+        if not isinstance(related_normalized, str) or not related_normalized:
+            raise UsageError("related_normalized 必须是非空字符串")
+        with project_write_lock(self.project):
+            rows = self.terms()["terms"]
+            by_normalized = {str(item["normalized"]): item for item in rows}
+            selected = by_normalized.get(normalized)
+            candidate = by_normalized.get(related_normalized)
+            if selected is None or candidate is None or selected.get("disabled") or candidate.get("disabled"):
+                raise TermGroupError(
+                    "相关推荐条目不存在或已移除",
+                    reason="stale_recommendation",
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            roots = {
+                str(item["normalized"]): self._term_group_root(item, by_normalized)
+                for item in rows
+            }
+            selected_root = roots[normalized]
+            related_root = roots[related_normalized]
+            same_group_member = (
+                selected_root == related_root
+                and candidate.get("group_primary") is not None
+            )
+            if not same_group_member:
+                if not any(
+                    item["normalized"] == related_normalized
+                    for item in self._related_term_rows(rows, selected)
+                ):
+                    raise TermGroupError(
+                        "相关推荐关系已失效",
+                        reason="stale_recommendation",
+                        normalized=normalized,
+                        related_normalized=related_normalized,
+                    )
+            selected_component = {
+                key for key, root in roots.items() if root == selected_root
+            }
+            candidate_component = {
+                key for key, root in roots.items() if root == roots[related_normalized]
+            }
+            if not same_group_member and (
+                candidate.get("group_primary") is not None
+                or len(candidate_component) > 1
+            ):
+                raise TermGroupError(
+                    "有成员的术语不能快捷转为别名",
+                    reason="candidate_has_members",
+                    normalized=related_normalized,
+                )
+            if any(
+                by_normalized[key].get("conflicts", {}).get("group_claims")
+                for key in selected_component | candidate_component
+            ):
+                raise TermGroupError(
+                    "术语组仍有未裁决争用",
+                    reason="group_claim",
+                    normalized=normalized,
+                    related_normalized=related_normalized,
+                )
+            target_normalized = selected_root if same_group_member else normalized
+            target = by_normalized[target_normalized]
+            target_component = selected_component
+            spec = term_normalization(self.config)
+            existing = [target["source"], *target.get("aliases", [])]
+            existing_normalized = {normalize_term(value, spec) for value in existing}
+            group_source_normalized = {
+                normalize_term(by_normalized[key]["source"], spec)
+                for key in target_component
+                if key != related_normalized
+            }
+            active_external_sources = {
+                normalize_term(item["source"], spec): str(item["normalized"])
+                for item in rows
+                if not item.get("disabled")
+                and str(item["normalized"]) not in target_component
+                and str(item["normalized"]) != related_normalized
+            }
+            additions: list[str] = []
+            seen = set(existing_normalized)
+            for value in [candidate["source"], *candidate.get("aliases", [])]:
+                normalized_value = normalize_term(value, spec)
+                if not normalized_value or normalized_value in seen or normalized_value in group_source_normalized:
+                    continue
+                if normalized_value in active_external_sources:
+                    raise TermGroupError(
+                        "待转移 alias 与其他启用主条目冲突",
+                        reason="alias_collision",
+                        normalized=normalized,
+                        related_normalized=related_normalized,
+                        alias=value,
+                        claimed_by=active_external_sources[normalized_value],
+                    )
+                seen.add(normalized_value)
+                additions.append(str(value))
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            target_override = overrides.get(
+                target_normalized,
+                {"normalized": target_normalized, "source": target["source"]},
+            )
+            target_aliases: list[str] = []
+            target_alias_seen = {normalize_term(target["source"], spec)}
+            for value in [*target.get("aliases", []), *additions]:
+                normalized_value = normalize_term(value, spec)
+                if not normalized_value or normalized_value in target_alias_seen:
+                    continue
+                target_alias_seen.add(normalized_value)
+                target_aliases.append(str(value))
+            overrides[target_normalized] = {**target_override, "aliases": target_aliases}
+            current[target_normalized]["aliases"] = target_aliases
+            candidate_override = overrides.get(
+                related_normalized,
+                {"normalized": related_normalized, "source": candidate["source"]},
+            )
+            candidate_override = {**candidate_override, "disabled": True}
+            candidate_override.pop("group_primary", None)
+            overrides[related_normalized] = candidate_override
+            current.pop(related_normalized, None)
+            result = self._publish_terms(
+                library, current, overrides, origin="web_convert_related_alias"
+            )
+            result["converted"] = related_normalized
+            result["aliases_added"] = additions
+            return result
+
     def term_hits(
         self,
         normalized: str,
@@ -1066,6 +1476,58 @@ class WebStore:
             return self._publish_terms(
                 library, current, overrides, origin="web_set_term_primary"
             )
+
+    def leave_term_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认退出术语组")
+        normalized = payload.get("normalized")
+        if not isinstance(normalized, str) or not normalized:
+            raise UsageError("normalized 必须是非空字符串")
+        with project_write_lock(self.project):
+            library = load_terms(self.project)
+            current = {
+                str(item["normalized"]): dict(item)
+                for item in (library or {}).get("terms", [])
+            }
+            term = current.get(normalized)
+            if term is None:
+                raise TermGroupError(
+                    "术语不存在、已移除或请求已过期",
+                    reason="stale_member",
+                    normalized=normalized,
+                )
+            primary = term.get("group_primary")
+            if not isinstance(primary, str) or not primary:
+                raise TermGroupError(
+                    "只有术语组副条目可以退出术语组",
+                    reason="not_group_member",
+                    normalized=normalized,
+                )
+            primary_term = current.get(primary)
+            if primary_term is None or primary_term.get("group_primary") is not None:
+                raise TermGroupError(
+                    "术语组主指针无效，无法退出术语组",
+                    reason="invalid_group",
+                    normalized=normalized,
+                    group_primary=primary,
+                )
+            overrides_document = read_json(
+                self.project, self.project / "terminology" / "overrides.json"
+            )
+            overrides = {
+                str(item["normalized"]): dict(item)
+                for item in overrides_document.get("overrides", [])
+            }
+            override = overrides.get(
+                normalized,
+                {"normalized": normalized, "source": term.get("source", normalized)},
+            )
+            overrides[normalized] = {**override, "group_primary": None}
+            current[normalized]["group_primary"] = None
+            result = self._publish_terms(
+                library, current, overrides, origin="web_leave_term_group"
+            )
+            return result
 
     def _save_term(self, payload: dict[str, Any]) -> dict[str, Any]:
         spec = term_normalization(self.config)

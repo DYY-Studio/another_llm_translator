@@ -374,6 +374,7 @@ Web 不暴露完整 TOML 编辑器，而是读取和提交覆盖下列全部字�
 ```toml
 [project]
 target_language = "简体中文"
+target_language_tag = "zh-Hans"
 output_encoding = "utf-8-sig"
 
 [input]
@@ -394,6 +395,8 @@ temperature_polishing = 0.3
 
 [execution]
 scheduling_mode = "ordered_by_file"
+# parallel 模式的纯源文 reference_context 使用字符串数组；ordered_by_file 保留
+# source/translation 对象以携带已完成的上文译文。
 
 [chunking]
 target_chunk_input_tokens = 11000
@@ -850,16 +853,14 @@ previous_segments = 3
 ```json
 {
   "target_language": "简体中文",
-  "reference_context": [
-    {"source": "此前原文"}
-  ],
-  "source_segments": [
-    {"source": "当前待扫描原文"}
-  ]
+  "reference_context": ["此前原文"],
+  "source_segments": ["当前待扫描原文"]
 }
 ```
 
-`reference_context` 和 `source_segments` 都只含 source。扫描范围与 Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment 引用。term 记录的 source 必须填写 `source_segments` 原文中实际出现的术语文本。
+术语扫描的 `reference_context` 和 `source_segments` 都是只含原文的字符串数组。扫描范围与
+Segment ID 由程序内部持有；LLM 不需要也不得返回来源 Segment 引用。term 记录的 source
+必须填写 `source_segments` 原文中实际出现的术语文本。
 
 LLM 返回 JSONL；每个术语一行：
 
@@ -908,6 +909,12 @@ alias 与另一条术语的主 source 相同时，由
 人工换主在单次项目写锁内重写全组。组主仍有成员时不能移除或永久删除；成员
 移除时同时脱组。将 alias 物化为成员时不复制主条目的译名、类别或说明。
 
+术语组副条目可以在组页通过“退出组”解除关系。退组只写入显式
+`group_primary = null` override，保留该条目的 source、aliases、译名、类别和说明；
+组主及其他成员不受影响。组主不能直接退组，需要逐个让副条目退出。若原 alias
+仍与退组条目的 source 碰撞，退组不会删除 alias，而是按当前 collision policy 生成
+待裁决的 `group_claims`；显式独立 override 会阻止后续自动重新组化。
+
 人工 override 以 normalized source 定位：
 
 ```json
@@ -925,6 +932,17 @@ alias 与另一条术语的主 source 相同时，由
 override 在自动合并后应用。`disabled = true` 的术语不发布、不匹配也不注入。
 
 发布时可以按确定性排序重新分配只在当前库内有效的记录 ID，不承诺跨 revision 稳定。
+
+Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相关条目。推荐只供人工
+定位和确认，不参与自动组化；一字符被包含文本默认不推荐。确认后可以将候选加入术语组，
+或将候选 source 与 aliases 一并转为当前条目的 aliases 并以 disabled 方式移除候选。
+快捷操作会在项目写锁内重新验证关系；两个已有组、未裁决 group claim、有成员候选或
+外部主条目 alias 冲突时整体拒绝。
+
+组页中的副条目也可以直接转为组主别名；此操作不要求 source 之间存在包含关系，
+会将副条目 source 与 aliases 合并到组主，保留其他成员关系，并以 disabled 方式移除
+该副条目的独立译名、类别和说明。相关推荐中的“快速移除”复用可恢复的 disabled
+移除语义；有成员的组主仍不可移除。
 
 ### 术语交换
 
@@ -982,6 +1000,10 @@ BOM 的 UTF-8。
   ]
 }
 ```
+
+`segments` 始终保留短 `id` 和 `source`，因为宿主需要将 JSONL 响应映射回持久
+Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象，并在可用时
+携带 `translation`；`parallel` 的纯源文上文使用字符串数组以减少输入开销。
 
 输出 JSONL：
 
@@ -1510,9 +1532,17 @@ output/bilingual/polished/
 - 所有 Adapter 先在同一宿主临时目录生成并完成路径校验，再移动到正式目录；
   任一生成或校验失败时不发布输出。
 
+`project.target_language_tag` 是输出文档的可选 BCP 47 语言标签，与供 LLM 使用的
+`target_language` 文本名称分离。宿主在原格式导出时将两者传给 Document Adapter；
+具体 Adapter 决定是否应用或在标签为空时拒绝导出。旧项目缺少该字段时按空字符串
+读取，不根据 `target_language` 推断。当前 EPUB Adapter 要求非空，TXT Adapter
+忽略该字段。
+
 TXT 按 `file_order` 和 `line_index` 重建，每个输入文件独立导出，并使用
 `project.output_encoding` 严格编码。编码无法表示结果字符时失败，不静默替换。
-EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，只重写翻译对应的
+EPUB 输出一个 `.translated.epub` 或 `.bilingual.epub`，使用 BCP 47 标签重写
+OPF `dc:language`；双语文件把目标语言放在第一项并保留源语言。已重写的
+spine XHTML 根元素同时更新 `lang` 和 `xml:lang`。除此之外只重写翻译对应的
 XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写入首个槽并清空
 其余槽，保留原内联标签骨架；包含 Ruby 的复合 Segment 可以混合普通槽和 Ruby
 槽，单语移除该 Segment 的全部 Ruby，双语在完整源句末尾追加译文。只有旧的
@@ -1785,6 +1815,11 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；
   纯译文和双语文件均可重新打开。
+- `target_language` 与 `target_language_tag` 由宿主传给所有 Document Adapter；EPUB
+  单语以该标签作为唯一 `dc:language`，双语将其列为第一语言，并同步已重写 XHTML
+  的语言属性。EPUB 译文标题增加 `（目标语言）`，双语标题增加
+  `（目标语言·双语）`，同时使用稳定独立出版标识和更新后的修改时间避免阅读器缓存
+  原书元数据。
 - EPUB Ruby 与同一文本流的前后文合为语义 Segment，三种导入模式、纯译文移除
   全部 Ruby 和双语在完整源句末尾追加译文均生效；导入选项只固化在对应 File
   Adapter 状态。

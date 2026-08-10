@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import stat
 import zipfile
@@ -9,6 +10,7 @@ from xml.etree import ElementTree
 
 import pytest
 
+from app.config import dump_config, load_config
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
 from app.documents import publish_document_exports
@@ -41,6 +43,10 @@ def make_epub(
     xhtml: bytes | None = None,
     xhtmls: tuple[bytes, ...] | None = None,
     opf_version: str = "3.0",
+    opf_languages: tuple[str, ...] = (),
+    opf_titles: tuple[str, ...] = ("Demo",),
+    opf_identifier: str | None = "source-id",
+    opf_modified: tuple[str, ...] = (),
 ) -> None:
     default_chapter = xhtml or (
         b'<?xml version="1.0" encoding="utf-8"?>'
@@ -65,10 +71,39 @@ def make_epub(
         f'<itemref idref="c{index}"/>'.encode()
         for index in range(1, len(chapters) + 1)
     )
+    titles = b"".join(
+        f"<dc:title>{value}</dc:title>".encode()
+        for value in opf_titles
+    )
+    languages = b"".join(
+        f'<dc:language>{value}</dc:language>'.encode()
+        for value in opf_languages
+    )
+    identifier = (
+        f'<dc:identifier id="source-id">{opf_identifier}</dc:identifier>'.encode()
+        if opf_identifier is not None
+        else b""
+    )
+    if opf_version == "2.0":
+        modified = b"".join(
+            f'<dc:date opf:event="modification">{value}</dc:date>'.encode()
+            for value in opf_modified
+        )
+    else:
+        modified = b"".join(
+            f'<meta property="dcterms:modified">{value}</meta>'.encode()
+            for value in opf_modified
+        )
     opf = (
         b'<?xml version="1.0" encoding="utf-8"?>'
-        + f'<package xmlns="http://www.idpf.org/2007/opf" version="{opf_version}">'.encode()
-        + b'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Demo</dc:title></metadata>'
+        + f'<package xmlns="http://www.idpf.org/2007/opf" version="{opf_version}"'.encode()
+        + (b' unique-identifier="source-id">' if opf_identifier is not None else b">")
+        + b'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">'
+        + identifier
+        + titles
+        + languages
+        + modified
+        + b"</metadata>"
         + b'<manifest>' + manifest
         + b'<item id="css" href="style.css" media-type="text/css"/>'
         + b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
@@ -161,6 +196,303 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+def test_epub_export_rewrites_language_metadata_and_xhtml_attributes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "language.epub"
+    make_epub(
+        source,
+        opf_languages=("ja", "JA", "en"),
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml" lang="ja" '
+            b'xml:lang="ja"><body><p>Hello world.</p></body></html>'
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="language",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = "zh-Hant"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+        languages = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "language"
+        ]
+        assert languages == ["zh-Hant"]
+        titles = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "title"
+        ]
+        assert titles == ["Demo（简体中文）"]
+        identifier_id = opf.get("unique-identifier")
+        assert identifier_id and identifier_id != "source-id"
+        identifiers = {
+            element.get("id"): element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "identifier"
+        }
+        assert identifiers["source-id"] == "source-id"
+        assert identifiers[identifier_id].startswith("urn:uuid:")
+        modified = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "meta"
+            and element.get("property") == "dcterms:modified"
+        ]
+        assert len(modified) == 1
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", modified[0] or ""
+        )
+        root = ElementTree.fromstring(
+            archive.read("OEBPS/text/ch1.xhtml")
+        )
+        assert root.get("lang") == "zh-Hant"
+        assert root.get("{http://www.w3.org/XML/1998/namespace}lang") == "zh-Hant"
+
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+        languages = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "language"
+        ]
+        assert languages == ["zh-Hant", "ja", "en"]
+        titles = [
+            element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "title"
+        ]
+        assert titles == ["Demo（简体中文·双语）"]
+        bilingual_identifier_id = opf.get("unique-identifier")
+        assert bilingual_identifier_id
+        bilingual_identifiers = {
+            element.get("id"): element.text
+            for element in opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "identifier"
+        }
+        assert bilingual_identifiers[bilingual_identifier_id] != identifiers[identifier_id]
+        root = ElementTree.fromstring(
+            archive.read("OEBPS/text/ch1.xhtml")
+        )
+        assert root.get("lang") == "zh-Hant"
+
+
+def test_epub_publication_identity_is_stable_and_language_changes_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_epub(tmp_path)
+    add_translations(project)
+    timestamps = iter(
+        ("2026-08-10T01:02:03Z", "2026-08-10T01:02:04Z", "2026-08-10T01:02:05Z")
+    )
+    monkeypatch.setattr(
+        "app.epub_adapter._utc_modified_timestamp", lambda: next(timestamps)
+    )
+
+    first = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    first_path = project / first["written"][0]
+    with zipfile.ZipFile(first_path) as archive:
+        first_opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+    first_id = first_opf.get("unique-identifier")
+    first_identifier = next(
+        element.text
+        for element in first_opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "identifier"
+        and element.get("id") == first_id
+    )
+    first_modified = next(
+        element.text
+        for element in first_opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "meta"
+        and element.get("property") == "dcterms:modified"
+    )
+
+    second = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / second["written"][0]) as archive:
+        second_opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+    assert second_opf.get("unique-identifier") == first_id
+    assert next(
+        element.text
+        for element in second_opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "identifier"
+        and element.get("id") == first_id
+    ) == first_identifier
+    assert (
+        next(
+            element.text
+            for element in second_opf.iter()
+            if element.tag.rsplit("}", 1)[-1] == "meta"
+            and element.get("property") == "dcterms:modified"
+        )
+        != first_modified
+    )
+
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = "ja"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    third = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / third["written"][0]) as archive:
+        third_opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+    third_id = third_opf.get("unique-identifier")
+    assert third_id == first_id
+    third_identifier = next(
+        element.text
+        for element in third_opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "identifier"
+        and element.get("id") == third_id
+    )
+    assert third_identifier != first_identifier
+
+
+def test_epub2_export_updates_modification_date_and_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "legacy.epub"
+    make_epub(
+        source,
+        opf_version="2.0",
+        opf_modified=("2000-01-01", "2001-01-01"),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="legacy",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_translations(project)
+    monkeypatch.setattr(
+        "app.epub_adapter._utc_modified_timestamp",
+        lambda: "2026-08-10T01:02:03Z",
+    )
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / result["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+    dates = [
+        element.text
+        for element in opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "date"
+        and element.get("{http://www.idpf.org/2007/opf}event") == "modification"
+    ]
+    assert dates == ["2026-08-10T01:02:03Z"]
+    assert [
+        element.text
+        for element in opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "title"
+    ] == ["Demo（简体中文）"]
+
+
+def test_epub_export_titles_escape_display_language_and_preserve_secondary_title(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "titles.epub"
+    make_epub(source, opf_titles=("Demo", "副标题"))
+    project, _ = init_project(
+        [str(source)],
+        name="titles",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language"] = "中 <文>&"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / result["written"][0]) as archive:
+        opf = ElementTree.fromstring(archive.read("OEBPS/content.opf"))
+    assert [
+        element.text
+        for element in opf.iter()
+        if element.tag.rsplit("}", 1)[-1] == "title"
+    ] == ["Demo（中 <文>&）", "副标题"]
+
+
+def test_epub_export_rejects_missing_primary_title_without_output(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "untitled.epub"
+    make_epub(source, opf_titles=("",))
+    project, _ = init_project(
+        [str(source)],
+        name="untitled",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_translations(project)
+    with pytest.raises(IncompleteError, match="主标题"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert not list((project / "output").rglob("*.epub"))
+
+
+def test_epub_export_rejects_empty_target_language_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_epub(tmp_path)
+    add_translations(project)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language"] = ""
+    monkeypatch.setattr(
+        "app.stages.load_project_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    with pytest.raises(IncompleteError, match="target_language"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert not list((project / "output").rglob("*.epub"))
+
+
+def test_epub_export_requires_language_tag_without_partial_output(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = ""
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+
+    with pytest.raises(IncompleteError, match="target_language_tag"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert not list((project / "output").rglob("*.epub"))
 
 
 def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
@@ -1098,6 +1430,8 @@ def test_document_export_failure_publishes_nothing(tmp_path: Path) -> None:
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
+            target_language="简体中文",
+            target_language_tag="zh-Hans",
         )
     assert not directory.exists()
 
@@ -1118,6 +1452,8 @@ def test_document_export_validates_all_files_before_publish(
             output_text={},
             bilingual=False,
             output_encoding="utf-8",
+            target_language="简体中文",
+            target_language_tag="zh-Hans",
         )
     assert not directory.exists()
 
@@ -1132,14 +1468,17 @@ class FakeEntryPoint:
         return self.descriptor
 
 
+@pytest.mark.parametrize(
+    "incompatible_version", [5, 6, PLUGIN_PROTOCOL_VERSION + 1]
+)
 def test_plugin_host_rejects_protocol_and_duplicate_adapter(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, incompatible_version: int
 ) -> None:
     txt_adapter = get_document_adapter("txt")
     incompatible = PluginDescriptor(
         plugin_id="future",
         version="1",
-        protocol_version=PLUGIN_PROTOCOL_VERSION + 1,
+        protocol_version=incompatible_version,
     )
     monkeypatch.setattr(
         "app.plugins.entry_points",
