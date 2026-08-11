@@ -309,10 +309,12 @@ PUBLIC 标识都会快速失败。
 （`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
 位置快速失败。纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余
 普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个
-Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以自由决定是否在译文、
-校对或润色结果中保留 Ruby；严格闭合的 `｜base《reading》` 会在纯译文和双语
-译文区域恢复为 EPUB Ruby，reading 可由模型翻译或转写为目标语言适用的字母/注音。
-没有返回 Ruby 不会触发重试；不完整、嵌套、含 HTML 或跨行的形式按普通文本保留。
+Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略译文、校对或润色
+结果中的 Ruby 标记和 reading，但必须翻译属于正文的 base，不能因其位于 Ruby 中
+而照抄。保留时须返回严格闭合的 `｜已翻译base《目标语言适用reading》`，系统会在
+纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉
+标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
+含 HTML 或跨行的形式按普通文本保留。
 `base_only` 和 `parenthetical` 不执行 Ruby 还原。
 
 当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
