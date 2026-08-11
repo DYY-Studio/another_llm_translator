@@ -1,0 +1,319 @@
+# 用户指南
+
+本文介绍 Another LLM Translator 的本地 Web、macOS 桌面壳和 CLI 用法。普通用户建议优先使用 Web 或桌面界面；CLI 放在文档末尾，适合自动化和精确控制执行范围。
+
+## 1. 选择使用方式
+
+### 本地 Web
+
+本地 Web 是当前最完整、最直接的使用方式。它在本机启动服务，并通过浏览器提供项目、术语、翻译、校对、润色、设置和导出界面。
+
+从源码启动需要 Python 3.11+ 和 Node.js/npm：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+npm ci --prefix web
+npm run build --prefix web
+python -m app.web
+```
+
+打开 `http://127.0.0.1:8765`。使用 `python -m app.web --port PORT` 可以更换端口。前端构建完成后，日常启动只需激活虚拟环境并运行 `python -m app.web`。
+
+### macOS 桌面壳
+
+桌面壳使用与 Web 相同的项目存储和执行逻辑，但在独立应用窗口中运行，并提供原生文件、文件夹和导出位置选择器。当前仓库没有可直接下载的 GitHub Release，需要从源码构建；参见[开发指南](DEVELOPMENT.md#5-macos-桌面开发与打包)。
+
+Windows 和 Linux 桌面版本当前尚未公开提供。其他平台可以使用本地 Web。
+
+## 2. 配置模型连接与凭据
+
+首次翻译前，至少需要一个可用的 LLM Preset。Preset 保存端点、模型、限流参数、Adapter 和凭据引用，但不保存 API Key 本身。
+
+1. 打开右上角“设置”。不需要先打开项目也可以编辑全局设置。
+2. 进入全局 Preset 管理，选择一个内置示例或创建同名用户版本。
+3. 填写实际的 API 端点、模型和限流参数，并确认 Adapter 与端点协议匹配。
+4. 在 `credential` 中明确选择一种凭据来源：环境变量或系统钥匙串。两者不会互相回退。
+5. 保存后可以手动检测模型列表，并查看已脱敏的请求预览和诊断信息。
+
+全局配置中的目标语言是新项目的默认值。现有项目拥有自己的配置副本，需要在打开项目后进入“项目设置”修改；全局配置变化不会自动改写已有项目。
+
+### 使用环境变量
+
+例如，Preset 引用 `LLM_API_KEY` 时，需要在启动 Web 或桌面开发壳前设置：
+
+```bash
+export LLM_API_KEY="your-api-key"
+python -m app.web
+```
+
+内置示例通常使用以下环境变量：
+
+| Preset | Adapter | 示例凭据变量 |
+| --- | --- | --- |
+| `default` | `openai-compatible` | `LLM_API_KEY` |
+| `openai-responses` | `openai-responses` | `OPENAI_API_KEY` |
+| `google-gemini` | `google-gemini` | `GEMINI_API_KEY` |
+| `anthropic-claude` | `anthropic` | `ANTHROPIC_API_KEY` |
+
+这些 Preset 只是示例，使用前必须核对端点、模型和限流设置。
+
+### 使用系统钥匙串
+
+在设置页的凭据管理中保存密钥，再让 Preset 通过 `keychain` 和凭据 ID 引用它。项目配置、Preset、Run 快照和日志只记录引用，不记录密钥正文。
+
+不要把 API Key 写入 TOML、Preset JSON、Prompt、项目源文件或日志。
+
+## 3. 创建和管理项目
+
+### 创建项目
+
+在项目选择菜单中选择“新建项目”，填写项目名、项目父目录并添加源文件。未选择文件时会创建空项目，之后可以继续添加内容。项目使用创建时的全局目标语言默认值；创建后可在项目设置中修改。
+
+- Web 浏览器模式通过上传或服务端目录浏览器添加文件。
+- macOS 桌面壳可使用原生文件或文件夹选择器。
+- 一个项目可以包含多个 TXT 和 EPUB 文件。
+- 运行阶段任务期间不能添加或移除文件。
+
+项目创建时会复制源文件，并生成独立的项目设置和 Prompt 副本。之后修改全局模板不会自动改变现有项目；如需更新，必须在项目设置中明确同步。
+
+### 打开和删除项目
+
+项目可以从用户数据目录的项目列表打开，也可以通过绝对路径打开外部项目。外部项目不会被移动。
+
+“从项目移除文件”会让该文件不再参与后续统计、复用和导出，但既有历史结果与输出文件会保留。“删除项目”会永久删除整个项目目录，应先确认没有需要保留的数据，也没有未完成的 Run。
+
+请勿手工修改项目中的 `project.sqlite` 或 `input/` 内容。修改源文不支持增量更新，通常应重新创建项目或重新导入文件。
+
+## 4. 完整翻译工作流
+
+推荐按“术语 → 翻译 → 校对 → 应用校对 → 润色 → 应用润色 → 导出”的顺序操作。术语、校对和润色可以根据项目需要跳过。
+
+### 4.1 术语
+
+“术语”阶段扫描源文并生成候选术语。扫描完成后可以：
+
+- 搜索、编辑和新增术语。
+- 设置首选译名、类别、说明和别名。
+- 对冲突候选进行人工裁决或建立术语组。
+- 移除不应使用的术语；重新扫描不会自动恢复已移除条目。
+- 导入或导出 JSON/CSV 术语表。
+- 在扫描未完成但已有候选时，明确发布当前结果。
+
+术语冲突不会由程序静默裁决。已发布术语会在翻译时按项目配置匹配并提供给模型。
+
+### 4.2 翻译
+
+进入“翻译”，选择运行范围并启动任务。已完成 Segment 默认复用；失败和未完成内容可以继续处理。
+
+如果 Prompt、Preset、Adapter 或其他影响结果的设置已经变化，运行对话框会提示已有结果的设置指纹不同。此时必须明确选择：
+
+- 复用已有完成结果，只处理待处理或失败内容；或
+- 重做所选范围内已有结果。
+
+程序不会替用户自动决定，也不会因为设置变化静默清空历史结果。
+
+翻译页面支持逐个查看和编辑 Segment。人工保存的译文会成为当前可用的翻译结果。
+
+### 4.3 校对与应用
+
+“校对”阶段以当前翻译为基础生成建议。结果分为：
+
+- `accepted`：建议保留当前文本。
+- `suggested`：提供建议文本和原因。
+
+生成建议不会覆盖翻译。逐条审阅后可以应用选中建议，也可以批量应用。应用操作会保存独立结果，原翻译和校对历史仍然保留。
+
+### 4.4 润色与应用
+
+“润色”与校对采用相同的建议和应用机制。润色使用运行时选定的当前基准；如果希望它基于已应用的校对结果，应先完成校对应用，再启动润色。
+
+“运行完整流程”会依次生成术语、翻译、校对和润色结果，但不会自动应用校对或润色建议。因此，完整流程中的润色默认不会隐式采用尚未应用的校对建议。
+
+### 4.5 任务取消与恢复
+
+阶段进度以 Segment 为单位持久化，而不是以一次临时 LLM 请求为单位。任务取消、网络失败或应用重启后，已成功的结果仍然保留，未成功内容可以继续执行。
+
+同一项目的写任务互斥；已经运行任务时，第二个写任务会明确失败。Web 后台任务状态仅存在于当前进程，但项目结果和 Run 记录会持久化。
+
+## 5. 导出
+
+在“导出”中选择：
+
+- 结果阶段：翻译、已应用校对或已应用润色。
+- 输出格式：保留各文件原格式，或统一输出 TXT。
+- 文件范围：全部文件或指定 File。
+- 单语或双语对照。
+
+TXT 和 EPUB 会按各自 Document Adapter 重建。EPUB 导出会保留导航、元数据、图片、CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
+
+导出不会把多个 File 合并为一个文件，也不支持单独导出某个 Segment。Web 可以逐个下载输出，也可以下载 zip；桌面壳还可以选择本机保存位置。
+
+## 6. 支持的输入与限制
+
+### TXT
+
+- 支持 `.txt` 和 `.text`。
+- 支持文件、目录和递归目录导入。
+- 能识别 BOM 并探测常见编码，GBK/GB2312 会映射到 GB18030。
+- 保留逻辑行、空行和 Segment 顺序，但不保证原始字节、换行符、BOM 或输入编码完全往返。
+
+### EPUB
+
+- 支持 OPF 2.0/3.0 和 spine XHTML。
+- 保留文档 part 边界及未翻译资源。
+- 支持 `aozora`、`base_only` 和 `parenthetical` Ruby 导入模式。
+- 导入选项在文件加入项目时确定；修改选项需要移除并重新导入。
+
+当前不支持 PDF、DOCX、Markdown 或任意格式互转，也不提供自动翻译质量评分。
+
+## 7. 数据、安全与局域网共享
+
+### 数据位置
+
+项目、用户设置、Preset、Adapter、凭据索引和日志默认存放在平台用户数据目录。macOS 默认路径是：
+
+```text
+~/Library/Application Support/minimal-llm-translator/
+```
+
+开发或特殊部署可以用 `MINIMAL_LLM_USER_ROOT` 指向其他用户数据根目录。项目数据库是项目元数据、File、Segment、术语、阶段结果和 Run 索引的权威存储。
+
+### 日志与敏感内容
+
+普通日志不会保存完整 Prompt、源文、鉴权 Header 或未脱敏请求正文。Debug 模式会额外保存完整请求、响应、Attempt 和 Chunk 信息，其中可能包含 Prompt 与源文；处理敏感材料时不要启用 Debug。
+
+安装的可信 Python Document Adapter 与应用在同一进程运行，拥有当前用户进程权限，不提供沙箱。
+
+### 局域网共享
+
+Web 默认只允许本机回环访问，并限制 Host 和 Origin。局域网共享必须在设置页显式开启并选择接口。
+
+- 开启认证后，局域网客户端通过登录页和会话 Cookie 访问；密码保存在系统钥匙串。
+- 不开启认证时，同网段客户端拥有完整项目操作和 LLM 请求权限，界面会持续警告。
+- 首版共享使用 HTTP，不提供 TLS、多账号、角色、密码找回或公网访问。
+
+不要把服务直接暴露到公网。
+
+## 8. CLI（高级用法）
+
+CLI 与 Web 共用项目存储、阶段执行、写锁、限速和恢复逻辑。以下示例在源码目录执行；安装包用户也可以使用 `minimal-llm-translator` 替代 `python -m app.main`。
+
+### 安装和帮助
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m app.main --help
+```
+
+CLI 默认输出 JSON 摘要，日志写入标准错误和项目 `logs/app.log`。使用 `--language system`、`--language zh-CN` 或 `--language en` 选择界面语言。
+
+### 快速开始
+
+```bash
+python -m app.main init novel.txt --name novel
+python -m app.main run-all novel
+python -m app.main inspect novel
+python -m app.main apply novel --stage proofreading --all
+python -m app.main apply novel --stage polishing --all
+python -m app.main export novel --stage polished --bilingual
+```
+
+`run-all` 不会隐式应用校对或润色建议。如果希望润色基于已应用的校对结果，应分阶段运行：
+
+```bash
+python -m app.main terminology novel
+python -m app.main translate novel
+python -m app.main proofread novel
+python -m app.main apply novel --stage proofreading --all
+python -m app.main polish novel
+python -m app.main apply novel --stage polishing --all
+python -m app.main export novel --stage polished
+```
+
+### 项目和文件
+
+项目默认创建在用户数据根目录的 `projects/<name>/`。也可以指定父目录，或使用项目绝对路径代替项目名：
+
+```bash
+python -m app.main init novel.txt --name novel
+python -m app.main init ./books --recursive --name collection
+python -m app.main init --empty --name novel
+python -m app.main init --empty --name novel --parent-dir /absolute/parent
+python -m app.main files-add novel chapter-1.txt chapter-2.txt
+python -m app.main files-add novel appendix.epub
+python -m app.main files-remove novel F0001
+```
+
+EPUB 可以显式指定 Adapter 和导入选项：
+
+```bash
+python -m app.main init book.epub \
+  --name book \
+  --document-adapter epub \
+  --adapter-option epub.ruby_mode=aozora
+```
+
+任意 Document Adapter 的选项都使用可重复的 `--adapter-option ADAPTER.OPTION=VALUE`。
+
+### 阶段和范围
+
+主要阶段命令包括：
+
+- `terminology`：扫描并发布术语。
+- `translate`：执行翻译。
+- `proofread`：生成校对建议。
+- `polish`：生成润色建议。
+- `run-all`：依次运行完整建议流程，不自动 apply。
+- `apply`：应用校对或润色建议。
+- `inspect`：查看项目状态、结果和设置指纹。
+
+翻译、校对和润色可以限制到 File 或 Segment：
+
+```bash
+python -m app.main translate novel --only-file F0001
+python -m app.main translate novel --only-segment F0001-S000001
+python -m app.main translate novel --from-file F0002
+```
+
+阶段命令的关键控制选项：
+
+- `--dry-run`：只报告范围、Chunk 数、Token 估算和必要决策，不写项目、不创建 Run、不调用 LLM。
+- `--force`：重做所选范围内已有的 completed 结果。
+- `--reuse-mixed-fingerprints`：明确复用设置指纹不同的已完成结果。
+- `--resume-run`、`--decline-run`：在非交互环境明确处理同阶段未完成 Run。
+
+以具体子命令的 `--help` 为准，例如 `python -m app.main translate --help`。
+
+### 术语交换
+
+```bash
+python -m app.main terms-export novel glossary.json
+python -m app.main terms-export novel glossary.csv
+python -m app.main terms-import novel glossary.json
+python -m app.main terms-export novel scanned.json --source scanned
+python -m app.main terms-publish-partial novel
+```
+
+术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。
+
+### 导出
+
+```bash
+python -m app.main export novel --stage translated
+python -m app.main export novel --stage proofread --bilingual
+python -m app.main export novel --stage polished --format txt
+python -m app.main export novel --stage translated --file F0001
+```
+
+`translated`、`proofread` 和 `polished` 分别表示翻译、已应用校对和已应用润色结果。`--format original` 按原 Document Adapter 重建，`--format txt` 统一导出为 TXT。
+
+## 9. 相关文档
+
+- [开发指南](DEVELOPMENT.md)：源码开发、桌面壳和打包。
+- [MVP 规范](MINIMAL.md)：完整行为、数据结构、恢复和安全边界。
+- [Adapter 契约](ADAPTERS.md)：请求模板、模型发现、usage 和文档格式契约。
+- [产品路线图](ROADMAP.md)：当前阶段和后续方向。
