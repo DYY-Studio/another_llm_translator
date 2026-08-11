@@ -291,10 +291,12 @@ EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
 更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
 EPUB 将整条译文写入该语义 Segment 的首个可用位置，清空其余普通槽并移除全部
 Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。使用
-`ruby_mode=aozora` 时，模型可以自由决定是否保留 Ruby；严格的
-`｜base《reading》` 会在译文区域恢复为 EPUB Ruby，reading 可翻译或转写为目标
-语言适用的字母/注音。没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML
-或跨行的形式保持普通文本。`base_only` 和 `parenthetical` 不还原 Ruby。
+`ruby_mode=aozora` 时，模型可以省略译文中的 Ruby 标记和 reading，但 base 是正文，
+必须正常翻译，不能因位于 Ruby 中而照抄。保留时须返回严格的
+`｜已翻译base《目标语言适用reading》`，系统会在译文区域恢复 EPUB Ruby；reading
+必须翻译或转写，无法适配目标语言时应去掉标记和 reading，仅返回已翻译 base。
+没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML 或跨行的形式保持普通
+文本。`base_only` 和 `parenthetical` 不还原 Ruby。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露普通内联
