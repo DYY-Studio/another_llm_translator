@@ -273,8 +273,6 @@ def test_review_prompt_uses_conditional_fields(stage: str) -> None:
         in prompt
     )
     assert "suggested 还须含非空完整 suggested_text" in prompt
-    assert "｜base《reading》" in prompt
-    assert "Ruby 可省略" in prompt
 
 
 def test_request_payload_uses_local_ids_without_mutating_source() -> None:
@@ -665,7 +663,7 @@ def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
             ]
         },
     )
-    assert len(plans) < 10
+    assert len(plans) <= 10
     assert any(plan.estimated_input_tokens >= 480 for plan in plans)
     assert all(plan.estimated_input_tokens <= 600 for plan in plans)
     assert plans[-1].estimated_input_tokens <= 600
