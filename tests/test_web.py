@@ -665,6 +665,13 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     (staging / "temp.txt").write_text("temp", encoding="utf-8")
     (project / "output" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
     (project / "output" / "translated" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+    symlink_path = project / "output" / "translated" / "link.txt"
+    symlink_created = False
+    try:
+        symlink_path.symlink_to(output_file)
+        symlink_created = True
+    except OSError:
+        pass
 
     listing = client.get("/api/v1/projects/sample/exports")
     assert listing.status_code == 200
@@ -697,34 +704,39 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     assert unicode_download.content == b"epub"
     unicode_file.unlink()
 
+    nested_file = project / "output" / "proofread" / "nested.txt"
+    nested_file.parent.mkdir(parents=True, exist_ok=True)
+    nested_file.write_bytes(b"proofread")
+
     bundle = client.get(
-        "/api/v1/projects/sample/exports/download-all",
-        params={"file": ["translated/input.txt"]},
+        "/api/v1/projects/sample/exports/download-all"
     )
     assert bundle.status_code == 200
     assert bundle.headers["content-type"].startswith("application/zip")
     with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
-        assert archive.namelist() == ["translated/input.txt"]
+        assert archive.namelist() == [
+            "proofread/nested.txt",
+            "translated/input.txt",
+        ]
         assert archive.read("translated/input.txt") == expected_bytes
-
-    deduped = client.get(
-        "/api/v1/projects/sample/exports/download-all",
-        params={"file": ["translated/input.txt", "translated/input.txt"]},
-    )
-    with zipfile.ZipFile(io.BytesIO(deduped.content)) as archive:
-        assert archive.namelist() == ["translated/input.txt"]
-    assert client.get(
-        "/api/v1/projects/sample/exports/download-all"
-    ).status_code == 400
+        assert archive.read("proofread/nested.txt") == b"proofread"
 
     removed = client.post(
         "/api/v1/projects/sample/exports/remove",
-        json={"files": ["translated/input.txt"]},
+        json={"files": ["translated/input.txt", "proofread/nested.txt"]},
     )
     assert removed.status_code == 200
-    assert removed.json()["removed"] == ["translated/input.txt"]
+    assert removed.json()["removed"] == [
+        "translated/input.txt",
+        "proofread/nested.txt",
+    ]
     assert not output_file.exists()
+    if symlink_created:
+        symlink_path.unlink()
     assert client.get("/api/v1/projects/sample/exports").json()["files"] == []
+    assert client.get(
+        "/api/v1/projects/sample/exports/download-all"
+    ).status_code == 400
 
     again = client.post(
         "/api/v1/projects/sample/exports/remove",
@@ -758,10 +770,6 @@ def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
         assert client.get(
             "/api/v1/projects/sample/exports/download",
             params={"file": raw},
-        ).status_code == 400
-        assert client.get(
-            "/api/v1/projects/sample/exports/download-all",
-            params={"file": [raw]},
         ).status_code == 400
         assert client.post(
             "/api/v1/projects/sample/exports/remove",

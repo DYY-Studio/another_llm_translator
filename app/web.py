@@ -21,7 +21,7 @@ from urllib.parse import quote
 import httpx
 import psutil
 import uvicorn
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -188,6 +188,29 @@ def _resolve_export_file(root: Path, raw: str) -> Path:
     if not resolved.is_relative_to(output_root) or not resolved.is_file():
         raise UsageError("导出文件路径必须位于项目 output 目录内")
     return resolved
+
+
+def _export_files(root: Path) -> list[Path]:
+    """Return sorted regular files that are eligible for export downloads."""
+    output_root = (root / "output").resolve()
+    if not output_root.is_dir():
+        return []
+    files: list[Path] = []
+    for path in sorted(output_root.rglob("*")):
+        try:
+            is_symlink = path.is_symlink()
+            is_file = path.is_file()
+        except OSError:
+            continue
+        if is_symlink or not is_file:
+            continue
+        relative = path.relative_to(output_root)
+        if any(part == ".staging" for part in relative.parts):
+            continue
+        if path.name == ".DS_Store":
+            continue
+        files.append(path)
+    return files
 
 
 def _attachment_header(filename: str) -> str:
@@ -1611,30 +1634,18 @@ def create_app(
     @app.get("/api/v1/projects/{name}/exports")
     async def exports(name: str) -> dict[str, Any]:
         root = project(name)
-        output_root = root / "output"
+        output_root = (root / "output").resolve()
         files: list[dict[str, Any]] = []
-        if output_root.is_dir():
-            for path in sorted(output_root.rglob("*")):
-                try:
-                    is_symlink = path.is_symlink()
-                    is_file = path.is_file()
-                except OSError:
-                    continue
-                if is_symlink or not is_file:
-                    continue
-                relative = path.relative_to(output_root)
-                if any(part == ".staging" for part in relative.parts):
-                    continue
-                if path.name == ".DS_Store":
-                    continue
-                stat = path.stat()
-                files.append(
-                    {
-                        "path": relative.as_posix(),
-                        "size": stat.st_size,
-                        "mtime": int(stat.st_mtime),
-                    }
-                )
+        for path in _export_files(root):
+            relative = path.relative_to(output_root)
+            stat = path.stat()
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                }
+            )
         return {"files": files}
 
     @app.get("/api/v1/projects/{name}/exports/download")
@@ -1650,14 +1661,11 @@ def create_app(
         )
 
     @app.get("/api/v1/projects/{name}/exports/download-all")
-    async def download_export_all(
-        name: str, file: list[str] = Query(default=[])
-    ) -> Response:
+    async def download_export_all(name: str) -> Response:
         root = project(name)
-        if not file:
+        paths = _export_files(root)
+        if not paths:
             raise UsageError("至少需要一个导出文件")
-        files = list(dict.fromkeys(file))
-        paths = [_resolve_export_file(root, raw) for raw in files]
         output_root = (root / "output").resolve()
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:

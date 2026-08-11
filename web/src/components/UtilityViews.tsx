@@ -575,9 +575,7 @@ export function ExportView({
 
   function downloadAll() {
     if (!files.length) return;
-    const url = `/api/v1/projects/${project}/exports/download-all?${files
-      .map((item) => `file=${encodeURIComponent(item.path)}`)
-      .join("&")}`;
+    const url = `/api/v1/projects/${project}/exports/download-all`;
     if (!native) {
       const anchor = document.createElement("a");
       anchor.href = url;
