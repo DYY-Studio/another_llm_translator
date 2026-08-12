@@ -96,9 +96,10 @@ button { cursor: pointer; }
 .topbar button { height: 36px; }
 .topbar-spacer { flex: 1; }
 .global-run-status { grid-row: 2; grid-column: 1 / -1; min-width: 0; min-height: 54px; display: grid; grid-template-columns: minmax(150px, auto) minmax(190px, 1fr) auto minmax(0, auto) minmax(0, auto) auto; align-items: center; gap: 12px 20px; padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--surface-raised); font-size: 12px; }
-.run-identity { min-width: 0; display: grid; gap: 2px; }
+.run-identity { min-width: 0; max-width: 260px; display: grid; gap: 2px; }
 .run-identity strong { color: var(--accent-text); font-size: 13px; }
 .run-identity span, .run-progress > span, .run-tokens { color: var(--muted); }
+.run-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(80px, 1fr); align-items: center; gap: 10px; }
 .progress-track { display: flex; height: 7px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .progress-track > span { display: block; height: 100%; transition: width .2s ease; }
@@ -618,8 +619,11 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 }
 
 @media (max-width: 980px) {
-  .global-run-status { grid-template-columns: minmax(130px, auto) minmax(0, 1fr) auto; gap: 8px 12px; }
+  .global-run-status { grid-template-columns: minmax(130px, auto) minmax(0, 1fr); gap: 8px 12px; }
   .run-tokens { grid-column: 1 / -1; }
+}
+
+@media (max-width: 1240px) {
   .run-error { grid-column: 1 / -1; max-width: none; }
 }
 
@@ -636,9 +640,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .brand { font-size: 19px; }
   .topbar { gap: 7px; padding-inline: 10px; }
   .global-run-status { position: sticky; top: 58px; z-index: 3; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 8px 12px; }
+  .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }
   .run-tokens { min-width: 0; gap: 12px; white-space: normal; }
-  .run-error { grid-column: 1 / -1; max-width: none; }
   .overview-project-bar select { max-width: none; }
   .sidebar { position: fixed; inset: auto 0 0; z-index: 5; display: block; padding: 6px; border: 0; border-top: 1px solid var(--border); }
   .sidebar nav { display: grid; grid-template-columns: repeat(7, 1fr); }
