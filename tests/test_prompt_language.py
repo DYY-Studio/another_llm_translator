@@ -132,8 +132,9 @@ def test_builtin_middles_keep_editable_policy_without_machine_protocol(
 @pytest.mark.parametrize(
     ("stage", "language", "baseline"),
     [
-        ("terminology", "zh-CN", 646),
-        ("terminology", "en", 1427),
+        # terminology 基线记录有意扩充后的组装长度（排除现实通用词等策略）
+        ("terminology", "zh-CN", 851),
+        ("terminology", "en", 2041),
         ("translation", "zh-CN", 598),
         ("translation", "en", 1555),
         ("proofreading", "zh-CN", 818),
