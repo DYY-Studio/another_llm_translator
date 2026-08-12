@@ -129,8 +129,9 @@ def test_json_adapter_extracts_optional_reasoning_content(tmp_path: Path) -> Non
         {"result": [{"text": "answer", "reasoning": None}]}
     ).reasoning_content is None
 
-    with pytest.raises(ExternalError, match="思考正文路径"):
-        adapter.parse_response({"result": [{"text": "answer"}]})
+    assert adapter.parse_response(
+        {"result": [{"text": "answer"}]}
+    ).reasoning_content is None
     with pytest.raises(ExternalError, match="字符串或 null"):
         adapter.parse_response(
             {"result": [{"text": "answer", "reasoning": {}}]}
