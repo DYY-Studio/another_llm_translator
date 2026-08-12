@@ -316,6 +316,10 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
 含 HTML 或跨行的形式按普通文本保留。
 `base_only` 和 `parenthetical` 不执行 Ruby 还原。
+确定性术语注入使用同一严格青空语法：匹配视图只保留 base，不保留
+Ruby 标记和 reading。因此 `｜漢《かん》｜字《じ》` 可命中术语“漢字”，
+但“かんじ”不会仅因出现在 reading 中而触发。该匹配规则不改写 Segment
+原文或发送给模型的 `source`。
 
 当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是

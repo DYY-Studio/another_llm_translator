@@ -9,6 +9,56 @@ from typing import Any, Protocol
 from .errors import ProjectError
 
 
+_AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
+
+
+def parse_aozora_text(
+    value: str,
+) -> tuple[list[tuple[str, str, str | None]], bool]:
+    """Parse only strict, non-nested Aozora ruby expressions."""
+    fragments: list[tuple[str, str, str | None]] = []
+    plain_start = 0
+    cursor = 0
+    found_ruby = False
+    while cursor < len(value):
+        marker = value.find("｜", cursor)
+        if marker < 0:
+            break
+        opening = value.find("《", marker + 1)
+        closing = value.find("》", opening + 1) if opening >= 0 else -1
+        if opening < 0 or closing < 0:
+            break
+        base = value[marker + 1 : opening]
+        reading = value[opening + 1 : closing]
+        candidate = f"{base}{reading}"
+        if (
+            not base
+            or not reading
+            or any(character in _AOZORA_DELIMITERS for character in candidate)
+        ):
+            cursor = closing + 1
+            continue
+        if marker > plain_start:
+            fragments.append(("text", value[plain_start:marker], None))
+        fragments.append(("ruby", base, reading))
+        found_ruby = True
+        cursor = closing + 1
+        plain_start = cursor
+    if plain_start < len(value):
+        fragments.append(("text", value[plain_start:], None))
+    if not fragments:
+        fragments.append(("text", value, None))
+    return fragments, found_ruby
+
+
+def aozora_base_text(value: str) -> str:
+    """Return strict Aozora ruby as its base text for semantic matching."""
+    fragments, found_ruby = parse_aozora_text(value)
+    if not found_ruby:
+        return value
+    return "".join(text for _, text, _ in fragments)
+
+
 @dataclass(frozen=True)
 class ImportedFile:
     source_path: Path
