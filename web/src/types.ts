@@ -112,6 +112,30 @@ export interface TaskUsage {
   available: boolean;
 }
 
+export type DiagnosticsRequestStatus =
+  | "running"
+  | "retrying"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export interface DiagnosticsRequestSummary {
+  timestamp: string;
+  finished_at: string | null;
+  project: string | null;
+  stage: string | null;
+  request_id: string;
+  model: string;
+  status: DiagnosticsRequestStatus;
+  attempt_count: number;
+  last_http_status: number | null;
+  latest_latency_ms: number | null;
+  has_content: boolean;
+  has_reasoning: boolean;
+  error: string | null;
+  detail_available: boolean;
+}
+
 export interface DiagnosticsResponse {
   metrics: {
     project: string | null;
@@ -136,20 +160,13 @@ export interface DiagnosticsResponse {
     stage: string;
     message: string;
   }>;
-  requests: Array<{
-    timestamp: string;
-    project: string | null;
-    stage: string | null;
-    request_id: string;
-    model: string;
-    status: "running" | "retrying" | "completed" | "failed" | "interrupted";
-    attempt_count: number;
-    last_http_status: number | null;
-    latest_latency_ms: number | null;
-    has_content: boolean;
-    has_reasoning: boolean;
-    error: string | null;
-  }>;
+  requests: {
+    session_id: string;
+    cursor: number;
+    reset: boolean;
+    total: number;
+    items: DiagnosticsRequestSummary[];
+  };
   filters: {
     levels: string[];
     projects: string[];
@@ -163,7 +180,7 @@ export interface DiagnosticsRequestDetail {
   stage: string | null;
   request_id: string;
   model: string;
-  status: "running" | "retrying" | "completed" | "failed" | "interrupted";
+  status: DiagnosticsRequestStatus;
   max_attempts: number;
   segment_id_map: Record<string, string>;
   messages: Array<{

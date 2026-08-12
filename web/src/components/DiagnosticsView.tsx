@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { DiagnosticsRequestDetail, DiagnosticsResponse } from "../types";
+import type {
+  DiagnosticsRequestDetail,
+  DiagnosticsRequestStatus,
+  DiagnosticsRequestSummary,
+  DiagnosticsResponse,
+} from "../types";
 import { translate, type Language } from "../i18n";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
@@ -60,12 +66,89 @@ function layoutDetailsColumns(bar: HTMLDivElement) {
   bar.style.gridTemplateColumns = `repeat(${columns}, max-content)`;
 }
 
+const RequestGroup = memo(function RequestGroup({
+  className,
+  items,
+  language,
+  onOpen,
+  statusLabels,
+  title,
+}: {
+  className: string;
+  items: DiagnosticsRequestSummary[];
+  language: Language;
+  onOpen: (requestId: string) => void;
+  statusLabels: Record<DiagnosticsRequestStatus, string>;
+  title: string;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => listRef.current,
+    getItemKey: (index) => items[index]?.request_id ?? index,
+    estimateSize: () => 82,
+    overscan: 8,
+  });
+
+  return (
+    <section className={`request-group ${className}`}>
+      <header className="request-group-heading">
+        <h3>{title}</h3>
+        <span>{translate("diagnostics.requestsLabel", language, { count: items.length })}</span>
+      </header>
+      <div className="request-list" ref={listRef}>
+        <div className="request-list-content" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const item = items[virtualRow.index];
+            return (
+              <article
+                key={item.request_id}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
+                style={{ transform: `translateY(${virtualRow.start}px)` }}
+                onDoubleClick={() => {
+                  if (item.detail_available) onOpen(item.request_id);
+                }}
+              >
+                <div className="request-row-main">
+                  <header><code>{item.request_id}</code><time>{clock(item.timestamp, language)}</time></header>
+                  <strong>{item.model}</strong>
+                  <span>
+                    <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
+                    {translate("diagnostics.attempts", language, { count: item.attempt_count })}
+                    {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
+                    {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
+                  </span>
+                </div>
+                <button
+                  className="quiet-button"
+                  disabled={!item.detail_available}
+                  title={!item.detail_available ? translate("diagnostics.detailExpired", language) : undefined}
+                  onClick={() => onOpen(item.request_id)}
+                >
+                  {item.detail_available
+                    ? translate("diagnostics.view", language)
+                    : translate("diagnostics.expired", language)}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+});
+
 export function DiagnosticsView({ language }: { language: Language }) {
-  const statusLabels: Record<string, string> = Object.fromEntries(
+  const statusLabels = useMemo(() => Object.fromEntries(
     ["running", "retrying", "completed", "failed", "interrupted"]
       .map((key) => [key, translate(`reqStatus.${key}`, language)]),
-  );
+  ) as Record<DiagnosticsRequestStatus, string>, [language]);
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
+  const [requestSummaries, setRequestSummaries] = useState<Map<string, DiagnosticsRequestSummary>>(
+    () => new Map(),
+  );
+  const [requestTotal, setRequestTotal] = useState(0);
   const [level, setLevel] = useState("");
   const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
@@ -79,6 +162,8 @@ export function DiagnosticsView({ language }: { language: Language }) {
   const [detailTab, setDetailTab] = useState<DetailTab>("request");
   const logRef = useRef<HTMLDivElement>(null);
   const detailsRef = useRef<HTMLDivElement>(null);
+  const requestFeedRef = useRef({ sessionId: "", cursor: 0 });
+  const summaryLoadRef = useRef(0);
 
   useLayoutEffect(() => {
     const bar = detailsRef.current;
@@ -96,40 +181,91 @@ export function DiagnosticsView({ language }: { language: Language }) {
   }, [language]);
 
   const load = useCallback(async () => {
+    const loadId = ++summaryLoadRef.current;
     const params = new URLSearchParams();
     if (level) params.set("level", level);
     if (project) params.set("project", project);
     if (stage) params.set("stage", stage);
     if (query) params.set("q", query);
+    const currentFeed = requestFeedRef.current;
+    if (currentFeed.sessionId) {
+      params.set("request_session", currentFeed.sessionId);
+      params.set("request_after", String(currentFeed.cursor));
+    }
     try {
-      const summary = api<DiagnosticsResponse>(
+      const nextValue = await api<DiagnosticsResponse>(
         `/api/v1/diagnostics${params.size ? `?${params}` : ""}`,
       );
-      const requestDetail = selectedRequest
-        ? api<DiagnosticsRequestDetail>(
-            `/api/v1/diagnostics/requests/${encodeURIComponent(selectedRequest)}`,
-          ).then(
-            (next) => ({ value: next, error: "" }),
-            (reason) => ({ value: null, error: String(reason) }),
-          )
-        : Promise.resolve({ value: null, error: "" });
-      const [nextValue, nextDetail] = await Promise.all([summary, requestDetail]);
-      setValue(nextValue);
-      if (selectedRequest) {
-        setDetail(nextDetail.value);
-        setDetailError(nextDetail.error);
+      if (loadId !== summaryLoadRef.current) return;
+      const feed = nextValue.requests;
+      const previousSession = requestFeedRef.current.sessionId;
+      if (feed.reset) {
+        setRequestSummaries(new Map(
+          feed.items.map((item) => [item.request_id, item]),
+        ));
+        if (previousSession && previousSession !== feed.session_id) {
+          setSelectedRequest(null);
+          setDetail(null);
+          setDetailError("");
+        }
+      } else if (feed.items.length) {
+        setRequestSummaries((current) => {
+          const next = new Map(current);
+          for (const item of feed.items) next.set(item.request_id, item);
+          return next;
+        });
       }
+      requestFeedRef.current = {
+        sessionId: feed.session_id,
+        cursor: feed.cursor,
+      };
+      setRequestTotal(feed.total);
+      setValue(nextValue);
       setError("");
     } catch (reason) {
-      setError(String(reason));
+      if (loadId === summaryLoadRef.current) setError(String(reason));
     }
-  }, [level, project, stage, query, selectedRequest]);
+  }, [level, project, stage, query]);
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(), 1000);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await load();
+      if (!stopped) timer = window.setTimeout(() => void poll(), 1000);
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [load]);
+
+  useEffect(() => {
+    if (!selectedRequest) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const pollDetail = async () => {
+      try {
+        const next = await api<DiagnosticsRequestDetail>(
+          `/api/v1/diagnostics/requests/${encodeURIComponent(selectedRequest)}`,
+        );
+        if (stopped) return;
+        setDetail(next);
+        setDetailError("");
+        if (next.status === "running" || next.status === "retrying") {
+          timer = window.setTimeout(() => void pollDetail(), 1000);
+        }
+      } catch (reason) {
+        if (!stopped) setDetailError(String(reason));
+      }
+    };
+    void pollDetail();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [selectedRequest]);
 
   useEffect(() => {
     if (autoScroll && logRef.current) {
@@ -146,18 +282,35 @@ export function DiagnosticsView({ language }: { language: Language }) {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [selectedRequest]);
 
-  const openDetail = (requestId: string) => {
+  const openDetail = useCallback((requestId: string) => {
     setSelectedRequest(requestId);
     setDetail(null);
     setDetailError("");
     setDetailTab("request");
-  };
+  }, []);
 
   const closeDetail = () => {
     setSelectedRequest(null);
     setDetail(null);
     setDetailError("");
   };
+
+  const requestGroups = useMemo(() => {
+    const active: DiagnosticsRequestSummary[] = [];
+    const finished: DiagnosticsRequestSummary[] = [];
+    for (const item of requestSummaries.values()) {
+      if (item.status === "running" || item.status === "retrying") {
+        active.push(item);
+      } else {
+        finished.push(item);
+      }
+    }
+    active.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+    finished.sort((left, right) => (
+      right.finished_at ?? right.timestamp
+    ).localeCompare(left.finished_at ?? left.timestamp));
+    return { active, finished };
+  }, [requestSummaries]);
 
   const metrics = value?.metrics;
   const throughput = metrics
@@ -250,27 +403,37 @@ export function DiagnosticsView({ language }: { language: Language }) {
 
         <section className="diagnostics-panel request-panel">
           <div className="diagnostics-panel-heading">
-            <div><h2>{translate("diagnostics.currentRunRequests", language)}</h2><span>{translate("diagnostics.latest50", language)}</span></div>
+            <div>
+              <h2>{translate("diagnostics.currentRunRequests", language)}</h2>
+              <span>{translate("diagnostics.requestRetention", language, { count: requestTotal })}</span>
+            </div>
           </div>
-          <div className="request-list">
-            {value?.requests.length ? [...value.requests].reverse().map((item) => (
-              <article
-                key={item.request_id}
-                onDoubleClick={() => openDetail(item.request_id)}
-              >
-                <div className="request-row-main">
-                  <header><code>{item.request_id}</code><time>{clock(item.timestamp, language)}</time></header>
-                  <strong>{item.model}</strong>
-                  <span>
-                    <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
-                    {translate("diagnostics.attempts", language, { count: item.attempt_count })}
-                    {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
-                    {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
-                  </span>
-                </div>
-                <button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button>
-              </article>
-            )) : <div className="diagnostics-empty">{translate("diagnostics.noRequests", language)}</div>}
+          <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
+            {requestGroups.active.length > 0 && (
+              <RequestGroup
+                className="request-group-active"
+                items={requestGroups.active}
+                language={language}
+                onOpen={openDetail}
+                statusLabels={statusLabels}
+                title={translate("diagnostics.activeRequests", language)}
+              />
+            )}
+            {requestGroups.finished.length > 0 && (
+              <RequestGroup
+                className="request-group-finished"
+                items={requestGroups.finished}
+                language={language}
+                onOpen={openDetail}
+                statusLabels={statusLabels}
+                title={translate("diagnostics.finishedRequests", language)}
+              />
+            )}
+            {!requestTotal && (
+              <div className="diagnostics-empty request-groups-empty">
+                {translate("diagnostics.noRequests", language)}
+              </div>
+            )}
           </div>
         </section>
       </div>
@@ -307,10 +470,9 @@ export function DiagnosticsView({ language }: { language: Language }) {
                 </button>
               ))}
             </nav>
-            {detailError ? (
-              <div className="warning-banner">{detailError}</div>
-            ) : !detail ? (
-              <div className="diagnostics-empty">{translate("diagnostics.loadingDetails", language)}</div>
+            {detailError && <div className="warning-banner">{detailError}</div>}
+            {!detail ? (
+              !detailError && <div className="diagnostics-empty">{translate("diagnostics.loadingDetails", language)}</div>
             ) : (
               <div className="exchange-detail">
                 <div className="exchange-meta">
