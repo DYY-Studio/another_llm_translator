@@ -21,6 +21,7 @@ from app.execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
+    contiguous_groups,
     estimate_messages,
     estimate_messages_upper_bound,
     estimate_single_segment_preflight,
@@ -593,6 +594,61 @@ def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None
         },
     )
     assert [len(plan.segments) for plan in plans] == [1, 1]
+
+
+def test_chunk_and_repair_grouping_follow_source_file_order_not_file_id() -> None:
+    source = [
+        {
+            "segment_id": "F0002-S000001",
+            "file_id": "F0002",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "second file in ID order",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0001-S000001",
+            "file_id": "F0001",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "first file in ID order",
+            "is_empty": False,
+        },
+    ]
+    payload_builder = lambda items: {
+        "segments": [
+            {"id": item["segment_id"], "source": item["source"]}
+            for item in items
+        ]
+    }
+
+    plans = build_chunk_plans(
+        reversed(source),
+        all_segments=source,
+        config=config(),
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=payload_builder,
+    )
+    assert [plan.file_id for plan in plans] == ["F0002", "F0001"]
+
+    cross_boundary_config = config()
+    cross_boundary_config["chunking"]["cross_boundary_batching"] = ["translation"]
+    plans = build_chunk_plans(
+        reversed(source),
+        all_segments=source,
+        config=cross_boundary_config,
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=payload_builder,
+    )
+    assert [item["file_id"] for item in plans[0].segments] == ["F0002", "F0001"]
+    repair_groups = contiguous_groups(
+        reversed(source),
+        all_segments=source,
+        cross_boundary=True,
+    )
+    assert [item["file_id"] for item in repair_groups[0]] == ["F0002", "F0001"]
 
 
 @pytest.mark.asyncio

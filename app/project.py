@@ -53,9 +53,16 @@ class InputFile:
     original_name: str
 
 
-def _natural_key(value: str) -> list[tuple[int, int | str]]:
-    parts = re.split(r"(\d+)", value.casefold())
-    return [(0, int(part)) if part.isdigit() else (1, part) for part in parts]
+def natural_path_key(
+    value: str,
+) -> tuple[tuple[tuple[int, int | str], ...], str]:
+    folded = value.lower()
+    parts = re.split(r"([0-9]+)", folded)
+    natural = tuple(
+        (0, int(part)) if part.isascii() and part.isdigit() else (1, part)
+        for part in parts
+    )
+    return natural, value
 
 
 def _directory_txt_files(root: Path, recursive: bool) -> list[InputFile]:
@@ -65,7 +72,7 @@ def _directory_txt_files(root: Path, recursive: bool) -> list[InputFile]:
             current_path = Path(current)
             dirs[:] = sorted(
                 [name for name in dirs if not (current_path / name).is_symlink()],
-                key=_natural_key,
+                key=natural_path_key,
             )
             for name in files:
                 path = current_path / name
@@ -80,7 +87,9 @@ def _directory_txt_files(root: Path, recursive: bool) -> list[InputFile]:
             and not path.is_symlink()
             and path.suffix.casefold() in _TXT_EXTENSIONS
         ]
-    candidates.sort(key=lambda path: _natural_key(path.relative_to(root).as_posix()))
+    candidates.sort(
+        key=lambda path: natural_path_key(path.relative_to(root).as_posix())
+    )
     return [
         InputFile(path=path, original_name=path.relative_to(root).as_posix())
         for path in candidates
@@ -188,7 +197,7 @@ def _auto_input_files(
                     ),
                 )
             )
-        directory_files.sort(key=lambda item: _natural_key(item.original_name))
+        directory_files.sort(key=lambda item: natural_path_key(item.original_name))
         discovered.extend(directory_files)
         if ignored:
             warnings.append(f"{path}: 已忽略 {ignored} 个不支持的文件")
@@ -880,6 +889,49 @@ def add_project_files(
         "file_count": len(files) + len(added_files),
         "segment_count": len(segments) + len(added_segments),
         "warnings": warnings,
+    }
+
+
+def reorder_project_files(
+    project: Path,
+    file_ids: list[str],
+) -> dict[str, object]:
+    if not file_ids:
+        raise UsageError("必须提供至少一个文件 ID")
+    if len(set(file_ids)) != len(file_ids):
+        raise UsageError("文件 ID 不能重复")
+    running = _running_run_ids(project)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能重排文件：{', '.join(running)}"
+        )
+    metadata, files, segments = _source_records(project)
+    known = {str(item["file_id"]): item for item in files}
+    requested = set(file_ids)
+    if len(file_ids) != len(files) or requested != set(known):
+        raise UsageError("文件顺序必须且仅包含全部活动 File ID")
+
+    reordered_files: list[dict[str, Any]] = []
+    for file_order, file_id in enumerate(file_ids, start=1):
+        file_record = dict(known[file_id])
+        file_record["file_order"] = file_order
+        reordered_files.append(file_record)
+    retained_states = [
+        state
+        for file_record in files
+        if (state := read_adapter_state(project, str(file_record["file_id"])))
+        is not None
+    ]
+    replace_source(
+        project,
+        reordered_files,
+        segments,
+        metadata,
+        retained_states,
+    )
+    return {
+        "reordered_file_ids": file_ids,
+        "file_count": len(reordered_files),
     }
 
 

@@ -626,17 +626,26 @@ def contiguous_groups(
     all_segments: Iterable[dict[str, Any]],
     cross_boundary: bool = False,
 ) -> list[list[dict[str, Any]]]:
+    all_segment_list = list(all_segments)
+    file_rank: dict[str, int] = {}
+    for item in all_segment_list:
+        file_rank.setdefault(str(item["file_id"]), len(file_rank))
     empty_positions = {
         (
             (str(item["file_id"]), int(item["line_index"]))
             if cross_boundary
             else (*_segment_part_key(item), int(item["line_index"]))
         )
-        for item in all_segments
+        for item in all_segment_list
         if item["is_empty"]
     }
     ordered = sorted(
-        segments, key=lambda item: (str(item["file_id"]), int(item["line_index"]))
+        segments,
+        key=lambda item: (
+            file_rank.get(str(item["file_id"]), len(file_rank)),
+            int(item["line_index"]),
+            str(item["segment_id"]),
+        ),
     )
     groups: list[list[dict[str, Any]]] = []
     for segment in ordered:
@@ -677,6 +686,10 @@ def _iter_contiguous_groups(
     cross_boundary: bool = False,
     empty_positions: set[tuple[Any, ...]] | None = None,
 ) -> Iterable[list[dict[str, Any]]]:
+    all_segment_list = list(all_segments)
+    file_rank: dict[str, int] = {}
+    for item in all_segment_list:
+        file_rank.setdefault(str(item["file_id"]), len(file_rank))
     if empty_positions is None:
         empty_positions = {
             (
@@ -684,13 +697,13 @@ def _iter_contiguous_groups(
                 if cross_boundary
                 else (*_segment_part_key(item), int(item["line_index"]))
             )
-            for item in all_segments
+            for item in all_segment_list
             if item["is_empty"]
         }
     ordered = sorted(
         segments,
         key=lambda item: (
-            str(item["file_id"]),
+            file_rank.get(str(item["file_id"]), len(file_rank)),
             int(item["line_index"]),
             str(item["segment_id"]),
         ),
@@ -756,6 +769,9 @@ def iter_chunk_plans(
     factor = config["execution"]["token_safety_factor"]
     cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
     all_segment_list = list(all_segments)
+    file_rank: dict[str, int] = {}
+    for item in all_segment_list:
+        file_rank.setdefault(str(item["file_id"]), len(file_rank))
     empty_positions = {
         (
             (str(item["file_id"]), int(item["line_index"]))
@@ -834,14 +850,17 @@ def iter_chunk_plans(
         iter(
             plan_groups(
                 _iter_contiguous_groups(
-                    items,
+                    by_file[file_id],
                     all_segments=all_segment_list,
                     cross_boundary=False,
                     empty_positions=empty_positions,
                 )
             )
         )
-        for items in by_file.values()
+        for file_id in sorted(
+            by_file,
+            key=lambda value: file_rank.get(value, len(file_rank)),
+        )
     ]
     while streams:
         remaining: list[Iterable[ChunkPlan]] = []
