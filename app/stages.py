@@ -23,6 +23,7 @@ import httpx
 from .config import load_project_config
 from .documents import (
     DocumentExportJob,
+    aozora_base_text,
     publish_document_exports,
 )
 from .errors import (
@@ -2557,7 +2558,7 @@ class _PreparedTermMatcher:
         )
 
     def match(self, source: str, limit: int) -> list[dict]:
-        normalized_source = normalize_term(source, self.spec)
+        normalized_source = normalize_term(aozora_base_text(source), self.spec)
         candidate_names = self._candidate_names(normalized_source)
         bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
         disputed: set[str] = set()

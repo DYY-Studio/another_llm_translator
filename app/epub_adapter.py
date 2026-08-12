@@ -13,7 +13,12 @@ from xml.parsers import expat
 from xml.etree import ElementTree
 from uuid import UUID, uuid5
 
-from .documents import DocumentChoiceOption, DocumentImport, ImportedFile
+from .documents import (
+    DocumentChoiceOption,
+    DocumentImport,
+    ImportedFile,
+    parse_aozora_text,
+)
 from .errors import IncompleteError, ProjectError, StorageError, UsageError
 from .sqlite_storage import read_json
 
@@ -1152,7 +1157,7 @@ def _set_regular_slot(
     ruby_mode: str = "",
 ) -> None:
     if ruby_mode == "aozora":
-        fragments, found_ruby = _parse_aozora_text(target)
+        fragments, found_ruby = parse_aozora_text(target)
         if found_ruby:
             _set_regular_aozora(
                 root,
@@ -1332,48 +1337,6 @@ def _composite_source(
     return "".join(parts)
 
 
-_AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
-
-
-def _parse_aozora_text(
-    value: str,
-) -> tuple[list[tuple[str, str, str | None]], bool]:
-    """Parse only strict, non-nested Aozora ruby expressions."""
-    fragments: list[tuple[str, str, str | None]] = []
-    plain_start = 0
-    cursor = 0
-    found_ruby = False
-    while cursor < len(value):
-        marker = value.find("｜", cursor)
-        if marker < 0:
-            break
-        opening = value.find("《", marker + 1)
-        closing = value.find("》", opening + 1) if opening >= 0 else -1
-        if opening < 0 or closing < 0:
-            break
-        base = value[marker + 1 : opening]
-        reading = value[opening + 1 : closing]
-        candidate = f"{base}{reading}"
-        if (
-            not base
-            or not reading
-            or any(character in _AOZORA_DELIMITERS for character in candidate)
-        ):
-            cursor = closing + 1
-            continue
-        if marker > plain_start:
-            fragments.append(("text", value[plain_start:marker], None))
-        fragments.append(("ruby", base, reading))
-        found_ruby = True
-        cursor = closing + 1
-        plain_start = cursor
-    if plain_start < len(value):
-        fragments.append(("text", value[plain_start:], None))
-    if not fragments:
-        fragments.append(("text", value, None))
-    return fragments, found_ruby
-
-
 def _namespace_uri(tag: str) -> str:
     return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
 
@@ -1496,7 +1459,7 @@ def _set_composite_aozora(
     *,
     bilingual: bool,
 ) -> None:
-    fragments, found_ruby = _parse_aozora_text(target)
+    fragments, found_ruby = parse_aozora_text(target)
     if not found_ruby:
         raise IncompleteError("EPUB Aozora Ruby 解析状态无标记")
     if bilingual:
@@ -1569,7 +1532,7 @@ def _set_composite_slot(
     if _composite_source(slots, members) != source:
         raise IncompleteError("EPUB 复合 Segment 与原文不一致")
     if ruby_mode == "aozora":
-        _, found_ruby = _parse_aozora_text(target)
+        _, found_ruby = parse_aozora_text(target)
         if found_ruby:
             _set_composite_aozora(
                 root,
@@ -1641,7 +1604,7 @@ def _set_ruby_slot(
         raise IncompleteError("EPUB Ruby 定位 slot 损坏")
     parent, ruby = _resolve_ruby_slot(root, raw)
     if ruby_mode == "aozora":
-        fragments, found_ruby = _parse_aozora_text(target)
+        fragments, found_ruby = parse_aozora_text(target)
         if found_ruby:
             ruby_tail = ruby.tail or ""
             tail_in_source = raw.get("tail_in_source")
