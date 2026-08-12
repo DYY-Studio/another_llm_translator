@@ -1106,6 +1106,50 @@ def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     assert read_files(project) == before
 
 
+def test_web_reorders_all_project_files_and_rejects_invalid_permutations(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    added = client.post(
+        "/api/v1/projects/sample/files",
+        files=[
+            ("files", ("second.txt", b"second", "text/plain")),
+            ("files", ("third.txt", b"third", "text/plain")),
+        ],
+    )
+    assert added.status_code == 200
+
+    reordered = client.post(
+        "/api/v1/projects/sample/files/reorder",
+        json={"file_ids": ["F0003", "F0001", "F0002"]},
+    )
+    assert reordered.status_code == 200
+    assert reordered.json() == {
+        "reordered_file_ids": ["F0003", "F0001", "F0002"],
+        "file_count": 3,
+    }
+    overview = client.get("/api/v1/projects/sample").json()
+    assert [item["file_id"] for item in overview["files"]] == [
+        "F0003",
+        "F0001",
+        "F0002",
+    ]
+    before = read_files(project)
+
+    for file_ids in (
+        ["F0003", "F0001"],
+        ["F0003", "F0001", "F0001"],
+        ["F0003", "F0001", "F9999"],
+    ):
+        response = client.post(
+            "/api/v1/projects/sample/files/reorder",
+            json={"file_ids": file_ids},
+        )
+        assert response.status_code == 400
+        assert read_files(project) == before
+
+
 def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
@@ -2396,9 +2440,11 @@ def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
     single.write_text("one\ntwo", encoding="utf-8")
     folder = tmp_path / "book"
     folder.mkdir()
-    (folder / "chapter1.txt").write_text("three", encoding="utf-8")
+    (folder / "chapter10.txt").write_text("ten", encoding="utf-8")
+    (folder / "chapter2.txt").write_text("two", encoding="utf-8")
+    (folder / "chapter02.txt").write_text("zero two", encoding="utf-8")
     (folder / "nested").mkdir()
-    (folder / "nested" / "chapter2.txt").write_text("four", encoding="utf-8")
+    (folder / "nested" / "chapter1.txt").write_text("nested", encoding="utf-8")
     (folder / "notes.md").write_text("ignored", encoding="utf-8")
 
     created = client.post(
@@ -2414,8 +2460,13 @@ def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
     )
     assert created.status_code == 200, created.text
     overview = client.get("/api/v1/projects/server-path-project").json()
-    names = {item["name"] for item in overview["files"]}
-    assert names == {"single.txt", "chapter1.txt", "nested/chapter2.txt"}
+    assert [item["name"] for item in overview["files"]] == [
+        "single.txt",
+        "chapter02.txt",
+        "chapter2.txt",
+        "chapter10.txt",
+        "nested/chapter1.txt",
+    ]
 
 
 def test_web_server_paths_reject_invalid_inputs(tmp_path: Path) -> None:

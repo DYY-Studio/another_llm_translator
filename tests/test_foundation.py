@@ -13,6 +13,7 @@ from app.project import (
     decode_txt,
     discover_inputs,
     init_project,
+    natural_path_key,
     resolve_project_parent,
     sync_global_templates,
 )
@@ -339,6 +340,59 @@ def test_decode_gbk_as_gb18030() -> None:
     assert text == source
     assert detected
     assert used.casefold() in {"gb18030", "gb2312"}
+
+
+def test_natural_path_key_orders_relative_paths_deterministically() -> None:
+    names = [
+        "chapter10.txt",
+        "Chapter2.txt",
+        "chapter02.txt",
+        "chapter1.txt",
+        "part10/chapter1.txt",
+        "part2/chapter10.txt",
+        "part2/chapter2.txt",
+    ]
+
+    assert sorted(names, key=natural_path_key) == [
+        "chapter1.txt",
+        "Chapter2.txt",
+        "chapter02.txt",
+        "chapter10.txt",
+        "part2/chapter2.txt",
+        "part2/chapter10.txt",
+        "part10/chapter1.txt",
+    ]
+
+
+def test_recursive_discovery_uses_natural_relative_path_order(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "book"
+    names = [
+        "chapter10.txt",
+        "Chapter2.txt",
+        "chapter02.txt",
+        "chapter1.txt",
+        "part10/chapter1.txt",
+        "part2/chapter10.txt",
+        "part2/chapter2.txt",
+    ]
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name, encoding="utf-8")
+
+    discovered = discover_inputs([str(root)], recursive=True)
+
+    assert [item.original_name for item in discovered] == [
+        "chapter1.txt",
+        "Chapter2.txt",
+        "chapter02.txt",
+        "chapter10.txt",
+        "part2/chapter2.txt",
+        "part2/chapter10.txt",
+        "part10/chapter1.txt",
+    ]
 
 
 def test_init_preserves_files_segments_and_empty_lines(tmp_path: Path) -> None:

@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type RefObject,
+} from "react";
 import { api } from "../api";
 import {
   nativeBridgeAvailable,
@@ -68,10 +74,87 @@ interface DirectoryListing {
 }
 
 type DirectoryPickerMode = "parent" | "project";
+type ProjectFile = ProjectOverview["files"][number];
+type DropPosition = "before" | "after";
+
+interface OptimisticFileOrder {
+  project: string;
+  before: string[];
+  after: string[];
+}
+
+const NATURAL_NUMBER = /^[0-9]+$/;
+const NATURAL_PARTS = /([0-9]+)/;
 
 function extensionOf(path: string) {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase();
+}
+
+function compareText(left: string, right: string) {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) {
+      return leftPoints[index] - rightPoints[index];
+    }
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareNaturalPaths(left: string, right: string) {
+  const leftFolded = left.toLowerCase();
+  const rightFolded = right.toLowerCase();
+  const leftParts = leftFolded.split(NATURAL_PARTS);
+  const rightParts = rightFolded.split(NATURAL_PARTS);
+  const length = Math.min(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index];
+    const rightPart = rightParts[index];
+    const leftIsNumber = NATURAL_NUMBER.test(leftPart);
+    const rightIsNumber = NATURAL_NUMBER.test(rightPart);
+    if (leftIsNumber && rightIsNumber) {
+      const difference = BigInt(leftPart) - BigInt(rightPart);
+      if (difference !== 0n) return difference < 0n ? -1 : 1;
+      continue;
+    }
+    if (leftIsNumber !== rightIsNumber) return leftIsNumber ? -1 : 1;
+    const comparison = compareText(leftPart, rightPart);
+    if (comparison) return comparison;
+  }
+  if (leftParts.length !== rightParts.length) {
+    return leftParts.length - rightParts.length;
+  }
+  return compareText(left, right);
+}
+
+function sameOrder(left: string[], right: string[]) {
+  return left.length === right.length
+    && left.every((fileId, index) => fileId === right[index]);
+}
+
+function filesInOrder(files: ProjectFile[], fileIds: string[]) {
+  const byId = new Map(files.map((item) => [item.file_id, item]));
+  const ordered = fileIds.flatMap((fileId) => {
+    const item = byId.get(fileId);
+    return item ? [item] : [];
+  });
+  return ordered.length === files.length ? ordered : files;
+}
+
+function movedFileIds(
+  fileIds: string[],
+  draggedFileId: string,
+  targetFileId: string,
+  position: DropPosition,
+) {
+  if (draggedFileId === targetFileId) return fileIds;
+  const reordered = fileIds.filter((fileId) => fileId !== draggedFileId);
+  const targetIndex = reordered.indexOf(targetFileId);
+  if (targetIndex < 0) return fileIds;
+  reordered.splice(targetIndex + (position === "after" ? 1 : 0), 0, draggedFileId);
+  return reordered;
 }
 
 function driveTypeLabel(type: string, language: Language) {
@@ -151,6 +234,9 @@ function InputQueue({
     if (!incoming.length) {
       setMessage(translate("inputQueue.noSupported", language));
       return;
+    }
+    if (kind === "folder") {
+      incoming.sort((left, right) => compareNaturalPaths(left.path, right.path));
     }
     const known = new Set(
       [...existingPaths, ...value.map((item) => item.path)]
@@ -309,6 +395,20 @@ export function Overview({
   onDeleted: (path: string) => Promise<void>;
   language: Language;
 }) {
+  const selection = useClassicSelection();
+  const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
+  const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
+  const [removing, setRemoving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
+  const [draggedFileId, setDraggedFileId] = useState("");
+  const [dropTarget, setDropTarget] = useState<{
+    fileId: string;
+    position: DropPosition;
+  } | null>(null);
+
   if (!value) {
     return (
       <div className="page">
@@ -319,14 +419,12 @@ export function Overview({
   }
   const completed = value.completed_segments;
   const projectPath = value.path;
-  const selection = useClassicSelection();
-  const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
-  const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
-  const [removing, setRemoving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const fileIds = value.files.map((item) => item.file_id);
+  const serverFileIds = value.files.map((item) => item.file_id);
+  const orderedFiles = optimisticOrder?.project === project
+    && sameOrder(serverFileIds, optimisticOrder.before)
+    ? filesInOrder(value.files, optimisticOrder.after)
+    : value.files;
+  const fileIds = orderedFiles.map((item) => item.file_id);
 
   async function upload() {
     if (!pendingInputs.length) return;
@@ -381,6 +479,76 @@ export function Overview({
     }
   }
 
+  async function saveFileOrder(before: string[], after: string[]) {
+    setOptimisticOrder({ project, before, after });
+    setBusy(true);
+    setError("");
+    let saved = false;
+    try {
+      await api(`/api/v1/projects/${project}/files/reorder`, {
+        method: "POST",
+        body: JSON.stringify({ file_ids: after }),
+      });
+      saved = true;
+      await onFilesChanged();
+    } catch (reason) {
+      if (!saved) setOptimisticOrder(null);
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startFileDrag(event: ReactDragEvent<HTMLButtonElement>, fileId: string) {
+    if (busy || orderedFiles.length < 2) {
+      event.preventDefault();
+      return;
+    }
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", fileId);
+    setDraggedFileId(fileId);
+    setDropTarget(null);
+  }
+
+  function updateDropTarget(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
+    if (busy || orderedFiles.length < 2) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (draggedFileId === fileId) {
+      setDropTarget(null);
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < bounds.top + bounds.height / 2
+      ? "before"
+      : "after";
+    setDropTarget((current) => (
+      current?.fileId === fileId && current.position === position
+        ? current
+        : { fileId, position }
+    ));
+  }
+
+  function dropFile(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
+    event.preventDefault();
+    const sourceFileId = draggedFileId || event.dataTransfer.getData("text/plain");
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < bounds.top + bounds.height / 2
+      ? "before"
+      : "after";
+    setDraggedFileId("");
+    setDropTarget(null);
+    if (
+      !sourceFileId
+      || sourceFileId === fileId
+      || !fileIds.includes(sourceFileId)
+    ) return;
+    const nextFileIds = movedFileIds(fileIds, sourceFileId, fileId, position);
+    if (sameOrder(fileIds, nextFileIds)) return;
+    void saveFileOrder(fileIds, nextFileIds);
+  }
+
   async function deleteProject() {
     setBusy(true);
     setError("");
@@ -430,15 +598,37 @@ export function Overview({
             <span>{translate("overview.addHint", language)}</span>
           </div>
         )}
-        {value.files.map((item) => (
-          <button
-            type="button"
+        {orderedFiles.map((item) => (
+          <div
             key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
-            onClick={(event) => selection.select(item.file_id, fileIds, event)}
+            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${draggedFileId === item.file_id ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
+            onDragOver={(event) => updateDropTarget(event, item.file_id)}
+            onDrop={(event) => dropFile(event, item.file_id)}
           >
-            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-          </button>
+            <button
+              type="button"
+              className="file-row-drag"
+              draggable={!busy && orderedFiles.length > 1}
+              disabled={busy || orderedFiles.length < 2}
+              aria-label={translate("overview.reorderHandle", language, { name: item.name })}
+              title={translate("overview.reorderHandle", language, { name: item.name })}
+              onClick={(event) => event.stopPropagation()}
+              onDragStart={(event) => startFileDrag(event, item.file_id)}
+              onDragEnd={() => {
+                setDraggedFileId("");
+                setDropTarget(null);
+              }}
+            >
+              <span aria-hidden="true">⠿</span>
+            </button>
+            <button
+              type="button"
+              className="file-row-select"
+              onClick={(event) => selection.select(item.file_id, fileIds, event)}
+            >
+              <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+            </button>
+          </div>
         ))}
       </div>
       {removing && (

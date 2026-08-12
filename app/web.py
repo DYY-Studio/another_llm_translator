@@ -68,8 +68,10 @@ from .project import (
     add_project_files,
     delete_project,
     init_project,
+    natural_path_key,
     prompt_file,
     remove_project_files,
+    reorder_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
@@ -303,8 +305,8 @@ def create_app(
                     for dirpath, dirnames, filenames in os.walk(
                         current, followlinks=False
                     ):
-                        dirnames.sort()
-                        for filename in sorted(filenames):
+                        dirnames.sort(key=natural_path_key)
+                        for filename in filenames:
                             full = Path(dirpath) / filename
                             relative = full.relative_to(current).as_posix()
                             try:
@@ -312,6 +314,7 @@ def create_app(
                             except UsageError:
                                 continue
                             found.append((relative, full))
+                    found.sort(key=lambda item: natural_path_key(item[0]))
                     if not found:
                         raise UsageError(f"目录中没有受支持的输入文件：{raw}")
                     server_entries.extend(found)
@@ -1200,6 +1203,21 @@ def create_app(
         root = project(name)
         with project_write_lock(root):
             return remove_project_files(root, file_ids)
+
+    @app.post("/api/v1/projects/{name}/files/reorder")
+    async def reorder_files(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        file_ids = payload.get("file_ids")
+        if (
+            not isinstance(file_ids, list)
+            or not file_ids
+            or not all(isinstance(value, str) and value for value in file_ids)
+        ):
+            raise UsageError("file_ids 必须是非空字符串数组")
+        root = project(name)
+        with project_write_lock(root):
+            return reorder_project_files(root, file_ids)
 
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")
     async def segment(name: str, segment_id: str) -> dict[str, Any]:
