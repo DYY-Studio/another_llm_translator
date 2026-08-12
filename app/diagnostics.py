@@ -4,6 +4,7 @@ import contextvars
 import copy
 import logging
 import time
+import uuid
 from collections import deque
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
@@ -25,10 +26,11 @@ _ACTIVE: contextvars.ContextVar[Diagnostics | None] = contextvars.ContextVar(
     "diagnostics", default=None
 )
 _LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_REQUEST_LIMIT = 50
+_REQUEST_DETAIL_LIMIT = 200
 _MESSAGE_LIMIT = 100_000
 _CONTENT_LIMIT = 100_000
 _REASONING_LIMIT = 20_000
+_TERMINAL_REQUEST_STATUSES = {"completed", "failed", "interrupted"}
 
 
 def current_diagnostics() -> Diagnostics | None:
@@ -43,7 +45,10 @@ class Diagnostics:
     def __init__(self, log_path: Path) -> None:
         self.log_path = log_path
         self.logs: deque[dict[str, Any]] = deque(maxlen=1000)
-        self.requests: deque[dict[str, Any]] = deque(maxlen=_REQUEST_LIMIT)
+        self.requests: dict[str, dict[str, Any]] = {}
+        self._retained_terminal_details: deque[str] = deque()
+        self._request_session = uuid.uuid4().hex
+        self._request_cursor = 0
         self.project: str | None = None
         self.stage: str | None = None
         self.active_requests = 0
@@ -101,15 +106,18 @@ class Diagnostics:
         self.latest_latency_seconds = None
         self.usage = None
         self.requests.clear()
+        self._retained_terminal_details.clear()
+        self._request_session = uuid.uuid4().hex
+        self._request_cursor = 0
         self._started_monotonic = time.monotonic()
         self._elapsed_seconds = 0.0
         self._running = True
         try:
             yield
         finally:
-            for request in self.requests:
+            for request in self.requests.values():
                 if request["status"] in {"running", "retrying"}:
-                    request["status"] = "interrupted"
+                    self._finish_request(request, status="interrupted")
             self.active_requests = 0
             self.rate_limit_waiting_requests = 0
             if self._started_monotonic is not None:
@@ -140,41 +148,74 @@ class Diagnostics:
                     "truncated": truncated,
                 }
             )
-        self.requests.append(
-            {
-                "timestamp": _now(),
-                "project": self.project,
-                "stage": self.stage,
-                "request_id": request_id,
-                "model": model,
-                "segment_id_map": dict(segment_id_map or {}),
-                "status": "running",
-                "max_attempts": max_attempts,
-                "messages": normalized_messages,
-                "response_content": None,
-                "response_content_truncated": False,
-                "reasoning_content": None,
-                "reasoning_content_truncated": False,
-                "attempts": [],
-                "error": None,
-            }
-        )
+        request = {
+            "timestamp": _now(),
+            "finished_at": None,
+            "project": self.project,
+            "stage": self.stage,
+            "request_id": request_id,
+            "model": model,
+            "segment_id_map": dict(segment_id_map or {}),
+            "status": "running",
+            "max_attempts": max_attempts,
+            "messages": normalized_messages,
+            "response_content": None,
+            "response_content_truncated": False,
+            "reasoning_content": None,
+            "reasoning_content_truncated": False,
+            "has_content": False,
+            "has_reasoning": False,
+            "attempts": [],
+            "error": None,
+            "detail_available": True,
+            "_revision": 0,
+        }
+        self.requests[request_id] = request
+        self._touch_request(request)
 
     def _request(self, request_id: str) -> dict[str, Any] | None:
-        return next(
-            (
-                request
-                for request in reversed(self.requests)
-                if request["request_id"] == request_id
-            ),
-            None,
-        )
+        return self.requests.get(request_id)
+
+    def _touch_request(self, request: dict[str, Any]) -> None:
+        self._request_cursor += 1
+        request["_revision"] = self._request_cursor
+
+    def _finish_request(
+        self,
+        request: dict[str, Any],
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        was_terminal = request["status"] in _TERMINAL_REQUEST_STATUSES
+        request["status"] = status
+        if error is not None:
+            request["error"] = error
+        if not was_terminal:
+            request["finished_at"] = _now()
+            self._retained_terminal_details.append(request["request_id"])
+        self._touch_request(request)
+        self._prune_terminal_details()
+
+    def _prune_terminal_details(self) -> None:
+        while len(self._retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
+            request_id = self._retained_terminal_details.popleft()
+            request = self.requests.get(request_id)
+            if request is None or not request["detail_available"]:
+                continue
+            request["detail_available"] = False
+            request["segment_id_map"] = {}
+            request["messages"] = []
+            request["response_content"] = None
+            request["reasoning_content"] = None
+            self._touch_request(request)
 
     def request_started(self, request_id: str) -> None:
         self.active_requests += 1
         request = self._request(request_id)
         if request is not None:
             request["status"] = "running"
+            self._touch_request(request)
 
     def request_finished(
         self,
@@ -208,9 +249,13 @@ class Diagnostics:
             }
         )
         if error:
-            request["status"] = (
-                "retrying" if attempt < request["max_attempts"] else "failed"
-            )
+            if attempt < request["max_attempts"]:
+                request["status"] = "retrying"
+                self._touch_request(request)
+            else:
+                self._finish_request(request, status="failed")
+        else:
+            self._touch_request(request)
 
     def retried(self) -> None:
         self.retry_count += 1
@@ -236,25 +281,30 @@ class Diagnostics:
         response_content, content_truncated = _bounded(content, _CONTENT_LIMIT)
         request["response_content"] = response_content
         request["response_content_truncated"] = content_truncated
+        request["has_content"] = True
         if reasoning_content is not None:
             reasoning, reasoning_truncated = _bounded(
                 reasoning_content, _REASONING_LIMIT
             )
             request["reasoning_content"] = reasoning
             request["reasoning_content_truncated"] = reasoning_truncated
-        request["status"] = "completed"
+            request["has_reasoning"] = True
+        self._finish_request(request, status="completed")
 
     def fail_request(self, request_id: str, error: str) -> None:
         request = self._request(request_id)
         if request is not None:
-            request["status"] = "failed"
-            request["error"] = error
+            self._finish_request(request, status="failed", error=error)
 
     def request_detail(self, request_id: str) -> dict[str, Any]:
         request = self._request(request_id)
         if request is None:
             raise ValueError(f"本次运行中不存在请求：{request_id}")
-        return copy.deepcopy(request)
+        if not request["detail_available"]:
+            raise ValueError(f"请求详情已从内存释放：{request_id}")
+        return copy.deepcopy(
+            {key: value for key, value in request.items() if key != "_revision"}
+        )
 
     def snapshot(
         self,
@@ -263,10 +313,14 @@ class Diagnostics:
         project: str | None = None,
         stage: str | None = None,
         query: str | None = None,
+        request_session: str | None = None,
+        request_after: int | None = None,
     ) -> dict[str, Any]:
         normalized_level = level.upper() if level else None
         if normalized_level is not None and normalized_level not in _LEVELS:
             raise ValueError(f"未知日志级别：{level}")
+        if request_after is not None and request_after < 0:
+            raise ValueError("request_after 不能小于 0")
         query_text = query.casefold() if query else None
         logs = [
             item
@@ -314,31 +368,47 @@ class Diagnostics:
                 "throughput_tokens_per_second": throughput_total,
             },
             "logs": logs,
-            "requests": [
-                {
-                    "timestamp": request["timestamp"],
-                    "project": request["project"],
-                    "stage": request["stage"],
-                    "request_id": request["request_id"],
-                    "model": request["model"],
-                    "status": request["status"],
-                    "attempt_count": len(request["attempts"]),
-                    "last_http_status": (
-                        request["attempts"][-1]["http_status"]
-                        if request["attempts"]
-                        else None
-                    ),
-                    "latest_latency_ms": (
-                        request["attempts"][-1]["latency_ms"]
-                        if request["attempts"]
-                        else None
-                    ),
-                    "has_content": request["response_content"] is not None,
-                    "has_reasoning": request["reasoning_content"] is not None,
-                    "error": request["error"],
-                }
-                for request in self.requests
-            ],
+            "requests": {
+                "session_id": self._request_session,
+                "cursor": self._request_cursor,
+                "reset": (
+                    request_session != self._request_session
+                    or request_after is None
+                ),
+                "total": len(self.requests),
+                "items": [
+                    {
+                        "timestamp": request["timestamp"],
+                        "finished_at": request["finished_at"],
+                        "project": request["project"],
+                        "stage": request["stage"],
+                        "request_id": request["request_id"],
+                        "model": request["model"],
+                        "status": request["status"],
+                        "attempt_count": len(request["attempts"]),
+                        "last_http_status": (
+                            request["attempts"][-1]["http_status"]
+                            if request["attempts"]
+                            else None
+                        ),
+                        "latest_latency_ms": (
+                            request["attempts"][-1]["latency_ms"]
+                            if request["attempts"]
+                            else None
+                        ),
+                        "has_content": request["has_content"],
+                        "has_reasoning": request["has_reasoning"],
+                        "error": request["error"],
+                        "detail_available": request["detail_available"],
+                    }
+                    for request in self.requests.values()
+                    if (
+                        request_session != self._request_session
+                        or request_after is None
+                        or request["_revision"] > request_after
+                    )
+                ],
+            },
             "filters": {
                 "levels": sorted({item["level"] for item in self.logs}),
                 "projects": sorted({item["project"] for item in self.logs}),

@@ -1556,6 +1556,8 @@ def create_app(
         project: str | None = None,
         stage: str | None = None,
         q: str | None = None,
+        request_session: str | None = None,
+        request_after: int | None = None,
     ) -> dict[str, Any]:
         try:
             return app.state.diagnostics.snapshot(
@@ -1563,6 +1565,8 @@ def create_app(
                 project=project or None,
                 stage=stage or None,
                 query=q or None,
+                request_session=request_session or None,
+                request_after=request_after,
             )
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
