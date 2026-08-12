@@ -1,4 +1,5 @@
 export type DropPosition = "before" | "after";
+export type FileMoveCommand = "top" | "up" | "down" | "bottom";
 
 export function moveFileBlock(
   fileIds: string[],
@@ -25,4 +26,31 @@ export function moveFileBlock(
     ...orderedMoved,
     ...remaining.slice(insertionIndex),
   ];
+}
+
+export function moveFileByCommand(
+  fileIds: string[],
+  fileId: string,
+  command: FileMoveCommand,
+) {
+  const index = fileIds.indexOf(fileId);
+  if (index < 0) return fileIds;
+  if (command === "top") {
+    return index === 0
+      ? fileIds
+      : moveFileBlock(fileIds, [fileId], fileIds[0], "before");
+  }
+  if (command === "up") {
+    return index === 0
+      ? fileIds
+      : moveFileBlock(fileIds, [fileId], fileIds[index - 1], "before");
+  }
+  if (command === "down") {
+    return index === fileIds.length - 1
+      ? fileIds
+      : moveFileBlock(fileIds, [fileId], fileIds[index + 1], "after");
+  }
+  return index === fileIds.length - 1
+    ? fileIds
+    : moveFileBlock(fileIds, [fileId], fileIds[fileIds.length - 1], "after");
 }

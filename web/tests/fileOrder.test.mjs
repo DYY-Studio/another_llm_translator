@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { moveFileBlock } from "../src/fileOrder.ts";
+import { moveFileBlock, moveFileByCommand } from "../src/fileOrder.ts";
 
 const ORDER = ["A", "B", "C", "D", "E"];
 
@@ -40,4 +40,19 @@ test("rejects empty, duplicate, unknown, and missing move inputs", () => {
   assert.strictEqual(moveFileBlock(ORDER, ["B", "B"], "C", "before"), ORDER);
   assert.strictEqual(moveFileBlock(ORDER, ["X"], "C", "before"), ORDER);
   assert.strictEqual(moveFileBlock(ORDER, ["B"], "X", "before"), ORDER);
+});
+
+test("moves one file with top, up, down, and bottom commands", () => {
+  assert.deepEqual(moveFileByCommand(ORDER, "C", "top"), ["C", "A", "B", "D", "E"]);
+  assert.deepEqual(moveFileByCommand(ORDER, "C", "up"), ["A", "C", "B", "D", "E"]);
+  assert.deepEqual(moveFileByCommand(ORDER, "C", "down"), ["A", "B", "D", "C", "E"]);
+  assert.deepEqual(moveFileByCommand(ORDER, "C", "bottom"), ["A", "B", "D", "E", "C"]);
+});
+
+test("keeps the current order for command boundaries and unknown files", () => {
+  assert.strictEqual(moveFileByCommand(ORDER, "A", "top"), ORDER);
+  assert.strictEqual(moveFileByCommand(ORDER, "A", "up"), ORDER);
+  assert.strictEqual(moveFileByCommand(ORDER, "E", "down"), ORDER);
+  assert.strictEqual(moveFileByCommand(ORDER, "E", "bottom"), ORDER);
+  assert.strictEqual(moveFileByCommand(ORDER, "X", "top"), ORDER);
 });
