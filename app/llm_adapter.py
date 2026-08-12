@@ -125,11 +125,8 @@ class JSONLLMAdapter:
                 reasoning_content = _resolve_json_pointer(
                     response, self.response_reasoning_content_pointer
                 )
-            except ExternalError as exc:
-                raise ExternalError(
-                    "LLM 响应缺少思考正文路径："
-                    f"{self.response_reasoning_content_pointer}"
-                ) from exc
+            except ExternalError:
+                reasoning_content = None
             if reasoning_content is not None and not isinstance(
                 reasoning_content, str
             ):

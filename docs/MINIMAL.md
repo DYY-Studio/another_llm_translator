@@ -1252,8 +1252,9 @@ Content-Type: application/json
 ```
 
 Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
-内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
-`/choices/0/message/content`。另内置 `anthropic`、`google-gemini` 与
+内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body、正文
+路径 `/choices/0/message/content` 和可选推理路径
+`/choices/0/message/reasoning_content`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
 `endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
 声明式 Adapter 只支持非流式 JSON POST。
@@ -1310,8 +1311,9 @@ HTTP 重试：
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
 - Adapter 还可配置 `response_reasoning_content_pointer` 提取字符串或 null 的
-  结构化思考字段。规范化响应包含 `content` 和可空的 `reasoning_content`；
-  结构化字段与内嵌块同时非空时快速失败，不猜测合并顺序。
+  结构化思考字段；路径缺失时同样规范化为 null，字段存在但类型错误时快速
+  失败。规范化响应包含 `content` 和可空的 `reasoning_content`；结构化字段
+  与内嵌块同时非空时快速失败，不猜测合并顺序。
 - 思考正文只存在于当前请求生命周期，不属于 Prompt、Chunk、Segment 结果或
   进度。普通模式不持久化；debug 模式仍只在原始响应 Payload 中保存，不新增
   独立思考记录。
@@ -1797,8 +1799,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 - 原始 JSONL、CRLF、BOM、空行、受支持 Markdown 围栏和已知开头思考块均可解析。
 - 未闭合、重复、嵌套或不在开头的思考标签会进入格式修正，JSON 字段内标签文本
   保持原样。
-- 结构化思考 Pointer 的字符串/null、缺失路径、非法类型及其与内嵌思考块冲突
-  均按规范化边界处理；普通模式不新增思考持久化记录。
+- 结构化思考 Pointer 的字符串正常提取，null 或缺失路径归一化为 null，非法
+  类型及其与内嵌思考块冲突快速失败；普通模式不新增思考持久化记录。
 - 缺失、重复或提前 end、非法行、重复或未知 ID 会进入格式修正。
 - 旧顶层 JSON 对象或数组不再接受。
 - 格式修正和校验修复只请求连续分组后的未决 Segment。
