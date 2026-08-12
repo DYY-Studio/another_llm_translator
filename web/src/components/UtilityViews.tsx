@@ -12,6 +12,7 @@ import {
   pickNativeFolder,
   saveExport,
 } from "../native";
+import { moveFileBlock, type DropPosition } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
@@ -75,7 +76,6 @@ interface DirectoryListing {
 
 type DirectoryPickerMode = "parent" | "project";
 type ProjectFile = ProjectOverview["files"][number];
-type DropPosition = "before" | "after";
 
 interface OptimisticFileOrder {
   project: string;
@@ -141,20 +141,6 @@ function filesInOrder(files: ProjectFile[], fileIds: string[]) {
     return item ? [item] : [];
   });
   return ordered.length === files.length ? ordered : files;
-}
-
-function movedFileIds(
-  fileIds: string[],
-  draggedFileId: string,
-  targetFileId: string,
-  position: DropPosition,
-) {
-  if (draggedFileId === targetFileId) return fileIds;
-  const reordered = fileIds.filter((fileId) => fileId !== draggedFileId);
-  const targetIndex = reordered.indexOf(targetFileId);
-  if (targetIndex < 0) return fileIds;
-  reordered.splice(targetIndex + (position === "after" ? 1 : 0), 0, draggedFileId);
-  return reordered;
 }
 
 function driveTypeLabel(type: string, language: Language) {
@@ -403,7 +389,7 @@ export function Overview({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
-  const [draggedFileId, setDraggedFileId] = useState("");
+  const [draggedFileIds, setDraggedFileIds] = useState<string[]>([]);
   const [dropTarget, setDropTarget] = useState<{
     fileId: string;
     position: DropPosition;
@@ -425,6 +411,7 @@ export function Overview({
     ? filesInOrder(value.files, optimisticOrder.after)
     : value.files;
   const fileIds = orderedFiles.map((item) => item.file_id);
+  const draggedFileIdSet = new Set(draggedFileIds);
 
   async function upload() {
     if (!pendingInputs.length) return;
@@ -505,9 +492,17 @@ export function Overview({
       return;
     }
     event.stopPropagation();
+    const movingFileIds = selection.selectedKeys.has(fileId)
+      ? fileIds.filter((candidate) => selection.selectedKeys.has(candidate))
+      : [fileId];
+    if (!selection.selectedKeys.has(fileId)) selection.reset(fileId);
     event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/x-minimal-llm-file-ids",
+      JSON.stringify(movingFileIds),
+    );
     event.dataTransfer.setData("text/plain", fileId);
-    setDraggedFileId(fileId);
+    setDraggedFileIds(movingFileIds);
     setDropTarget(null);
   }
 
@@ -515,7 +510,7 @@ export function Overview({
     if (busy || orderedFiles.length < 2) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    if (draggedFileId === fileId) {
+    if (draggedFileIdSet.has(fileId)) {
       setDropTarget(null);
       return;
     }
@@ -532,19 +527,27 @@ export function Overview({
 
   function dropFile(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
     event.preventDefault();
-    const sourceFileId = draggedFileId || event.dataTransfer.getData("text/plain");
+    let movingFileIds = draggedFileIds;
+    if (movingFileIds.length === 0) {
+      try {
+        const payload = JSON.parse(
+          event.dataTransfer.getData("application/x-minimal-llm-file-ids"),
+        );
+        if (Array.isArray(payload) && payload.every((item) => typeof item === "string")) {
+          movingFileIds = payload;
+        }
+      } catch {
+        const fallbackFileId = event.dataTransfer.getData("text/plain");
+        movingFileIds = fallbackFileId ? [fallbackFileId] : [];
+      }
+    }
     const bounds = event.currentTarget.getBoundingClientRect();
     const position = event.clientY < bounds.top + bounds.height / 2
       ? "before"
       : "after";
-    setDraggedFileId("");
+    setDraggedFileIds([]);
     setDropTarget(null);
-    if (
-      !sourceFileId
-      || sourceFileId === fileId
-      || !fileIds.includes(sourceFileId)
-    ) return;
-    const nextFileIds = movedFileIds(fileIds, sourceFileId, fileId, position);
+    const nextFileIds = moveFileBlock(fileIds, movingFileIds, fileId, position);
     if (sameOrder(fileIds, nextFileIds)) return;
     void saveFileOrder(fileIds, nextFileIds);
   }
@@ -601,7 +604,7 @@ export function Overview({
         {orderedFiles.map((item) => (
           <div
             key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${draggedFileId === item.file_id ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
+            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
             onDragOver={(event) => updateDropTarget(event, item.file_id)}
             onDrop={(event) => dropFile(event, item.file_id)}
           >
@@ -615,7 +618,7 @@ export function Overview({
               onClick={(event) => event.stopPropagation()}
               onDragStart={(event) => startFileDrag(event, item.file_id)}
               onDragEnd={() => {
-                setDraggedFileId("");
+                setDraggedFileIds([]);
                 setDropTarget(null);
               }}
             >
