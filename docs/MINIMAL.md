@@ -456,9 +456,12 @@ inject_missing_segment_every = 0
 `NFKD`，作用于术语主名称、别名与匹配文本的归一化。`terminology.case_insensitive`
 为 `false` 时不做 casefold，按原始大小写匹配。两项设置共同决定扫描候选去重、
 导入合并、alias 冲突判定与翻译时匹配；关闭归一化后仍保留首尾空白裁剪。
-翻译、校对和润色的术语匹配会先把严格、非嵌套的青空 Ruby
-`｜base《reading》` 投影为 `base`，因此可跨相邻 Ruby 匹配连续正文；
-reading 不触发术语。不完整、嵌套、跨行或含 HTML 的形式仍按原文匹配。
+翻译、校对和润色的术语匹配会为严格、非嵌套的青空 Ruby
+`｜base《reading》` 建立独立的 `base` 正文视图和 `reading` 视图：base 可跨相邻
+Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会连续组合；普通正文会切断
+reading 组合，base 与 reading 不会互相拼接。因此 `｜漢《かん》｜字《じ》` 可分别
+命中“漢字”和“かんじ”，而 `｜漢《かん》A｜字《じ》` 不会把 reading 拼成“かんじ”。
+同一术语从两个视图命中时只注入一次。不完整、嵌套、跨行或含 HTML 的形式仍按原文匹配。
 已发布术语库中的 `normalized` 键是持久化标识，配置变更后不做迁移：旧术语与
 override 继续按原键生效，新配置只影响之后的扫描、导入与匹配。术语阶段指纹包含
 全部术语配置，变更后重新扫描会自然产生新 revision；翻译、校对、润色阶段不记录

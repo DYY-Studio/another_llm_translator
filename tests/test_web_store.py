@@ -545,6 +545,27 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
     ]
 
 
+def test_term_hits_include_matches_found_in_aozora_ruby_reading(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "｜猫《Aoki》出现")
+    store = WebStore(project)
+    store.save_term(
+        {
+            "source": "Aoki",
+            "category": "人名",
+            "description": None,
+            "preferred_translation": "青木",
+            "aliases": [],
+        }
+    )
+
+    hits = store.term_hits("aoki")
+
+    assert hits["total"] == 1
+    assert hits["hits"][0]["source"] == "｜猫《Aoki》出现"
+
+
 def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
     tmp_path: Path,
 ) -> None:
