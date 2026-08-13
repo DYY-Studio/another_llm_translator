@@ -53,10 +53,32 @@ def parse_aozora_text(
 
 def aozora_base_text(value: str) -> str:
     """Return strict Aozora ruby as its base text for semantic matching."""
+    return aozora_match_views(value)[0]
+
+
+def aozora_match_views(value: str) -> tuple[str, ...]:
+    """Return independent base and adjacent-reading views for term matching."""
     fragments, found_ruby = parse_aozora_text(value)
     if not found_ruby:
-        return value
-    return "".join(text for _, text, _ in fragments)
+        return (value,)
+    if value.count("｜") != sum(kind == "ruby" for kind, _, _ in fragments):
+        return (value,)
+
+    base_parts: list[str] = []
+    reading_views: list[str] = []
+    adjacent_readings: list[str] = []
+    for kind, text, reading in fragments:
+        if kind == "ruby":
+            base_parts.append(text)
+            adjacent_readings.append(reading or "")
+            continue
+        base_parts.append(text)
+        if adjacent_readings:
+            reading_views.append("".join(adjacent_readings))
+            adjacent_readings = []
+    if adjacent_readings:
+        reading_views.append("".join(adjacent_readings))
+    return ("".join(base_parts), *reading_views)
 
 
 @dataclass(frozen=True)

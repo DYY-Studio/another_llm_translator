@@ -448,10 +448,14 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
     ("source", "term", "matched"),
     [
         ("｜漢字《かんじ》", "漢字", True),
+        ("｜漢字《かんじ》", "かんじ", True),
         ("｜漢《かん》｜字《じ》", "漢字", True),
+        ("｜漢《かん》｜字《じ》", "かんじ", True),
         ("｜漢《・》｜字《・》", "漢字", True),
         ("漢｜字《じ》", "漢字", True),
-        ("｜漢字《かんじ》", "かんじ", False),
+        ("｜漢《かん》A｜字《じ》", "かんじ", False),
+        ("｜漢字《かんじ》", "漢字かんじ", False),
+        ("｜漢《かん》｜字《", "かん", True),
         ("｜漢《かん", "漢字", False),
         ("｜漢《》字", "漢字", False),
         ("｜漢《かん｜字《じ》》", "漢字", False),
@@ -459,7 +463,7 @@ def test_term_matching_prefers_main_name_over_alias() -> None:
         ("｜漢\n字《かんじ》", "漢字", False),
     ],
 )
-def test_term_matching_uses_only_strict_aozora_ruby_base(
+def test_term_matching_uses_separate_aozora_ruby_base_and_reading_views(
     source: str,
     term: str,
     matched: bool,
@@ -479,6 +483,58 @@ def test_term_matching_uses_only_strict_aozora_ruby_base(
     )
 
     assert bool(result) is matched
+
+
+def test_term_matching_reads_names_and_aliases_from_ruby_reading() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["Aly"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    spec = TermNormalization("NFKC", True)
+
+    assert [item["source"] for item in match_terms(
+        "｜猫《Alice》出现", library, 10, spec
+    )] == ["Alice"]
+    assert [item["source"] for item in match_terms(
+        "｜猫《Aly》出现", library, 10, spec
+    )] == ["Alice"]
+
+
+def test_term_matching_deduplicates_term_hit_across_base_and_reading() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": [],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    matched = match_terms(
+        "｜Alice《Alice》出现", library, 10, TermNormalization("NFKC", True)
+    )
+    assert [item["source"] for item in matched] == ["Alice"]
+
+
+def test_term_matching_applies_normalization_to_ruby_reading() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": [],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    matched = match_terms(
+        "｜猫《ＡＬＩＣＥ》出现", library, 10, TermNormalization("NFKC", True)
+    )
+    assert [item["source"] for item in matched] == ["Alice"]
 
 
 @pytest.mark.asyncio
@@ -550,6 +606,77 @@ async def test_translation_injects_term_across_aozora_ruby_without_rewriting_sou
     assert seen_payload is not None
     assert seen_payload["segments"] == [{"id": "1", "source": source}]
     assert [item["source"] for item in seen_payload["terms"]] == ["漢字"]
+
+
+@pytest.mark.asyncio
+async def test_translation_injects_term_found_only_in_aozora_ruby_reading(
+    tmp_path: Path,
+) -> None:
+    source = "｜猫《Aoki》出现。"
+    project = await create_project(tmp_path, source)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-AOZORA-READING",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-AOZORA-READING",
+                    "source": "Aoki",
+                    "normalized": "aoki",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "青木",
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                }
+            ],
+        ),
+    )
+    seen_payload: dict | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_payload
+        seen_payload = json.loads(
+            json.loads(request.content)["messages"][1]["content"]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": "1",
+                                        "translation": "猫出现。",
+                                    }
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["completed"] == 1
+    assert seen_payload is not None
+    assert seen_payload["segments"] == [{"id": "1", "source": source}]
+    assert [item["source"] for item in seen_payload["terms"]] == ["Aoki"]
 
 
 def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
