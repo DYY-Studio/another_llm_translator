@@ -500,9 +500,58 @@ def test_term_matching_reads_names_and_aliases_from_ruby_reading() -> None:
     assert [item["source"] for item in match_terms(
         "｜猫《Alice》出现", library, 10, spec
     )] == ["Alice"]
-    assert [item["source"] for item in match_terms(
-        "｜猫《Aly》出现", library, 10, spec
-    )] == ["Alice"]
+    matched = match_terms("｜猫《Aly》出现", library, 10, spec)
+    assert [item["source"] for item in matched] == ["Alice"]
+    assert matched[0]["aliases"] == ["Aly"]
+
+
+def test_term_matching_injects_only_aliases_hit_by_the_source() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["Aly", "Zelda"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    spec = TermNormalization("NFKC", True)
+
+    alias_only = match_terms("Aly arrived", library, 10, spec)
+    assert alias_only[0]["aliases"] == ["Aly"]
+
+    main_only = match_terms("Alice arrived", library, 10, spec)
+    assert main_only[0]["aliases"] == []
+
+    both = match_terms("Alice met Aly", library, 10, spec)
+    assert both[0]["aliases"] == ["Aly"]
+
+
+def test_term_matching_group_injects_primary_without_unmatched_aliases() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["PrimeAlias"],
+                "preferred_translation": "爱丽丝",
+                "group_primary": None,
+            },
+            {
+                "source": "Alicia",
+                "aliases": ["Ally", "MemberAlias"],
+                "preferred_translation": "艾丽西亚",
+                "group_primary": "alice",
+            },
+        ]
+    }
+    matched = match_terms(
+        "Ally arrived", library, 10, TermNormalization("NFKC", True)
+    )
+
+    assert [item["source"] for item in matched] == ["Alice", "Alicia"]
+    assert matched[0]["aliases"] == []
+    assert matched[1]["aliases"] == ["Ally"]
+    assert matched[1]["primary_source"] == "Alice"
 
 
 def test_term_matching_deduplicates_term_hit_across_base_and_reading() -> None:
@@ -707,6 +756,29 @@ def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
     ]
     assert [item["source"] for item in cache.for_items(items)] == ["Alice"]
     assert calls == 2
+
+
+def test_term_match_cache_unions_aliases_across_segments() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["Aly", "Zelda"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+
+    matched = cache.for_items(
+        [
+            {"segment_id": "S1", "source": "Aly arrived"},
+            {"segment_id": "S2", "source": "Zelda arrived"},
+        ]
+    )
+
+    assert [item["source"] for item in matched] == ["Alice"]
+    assert matched[0]["aliases"] == ["Aly", "Zelda"]
 
 
 @pytest.mark.asyncio

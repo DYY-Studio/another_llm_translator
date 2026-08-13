@@ -2557,6 +2557,25 @@ class _PreparedTermMatcher:
             str(value.get("reason", "")),
         )
 
+    def _matched_aliases(
+        self,
+        term: dict[str, Any],
+        candidate_names: set[str],
+        *,
+        excluded_names: set[str] | frozenset[str] = frozenset(),
+    ) -> list[str]:
+        matched = {
+            str(alias)
+            for alias in term.get("aliases", [])
+            if (normalized := normalize_term(str(alias), self.spec))
+            and normalized in candidate_names
+            and normalized not in excluded_names
+        }
+        return sorted(
+            matched,
+            key=lambda value: (normalize_term(value, self.spec), value),
+        )
+
     def match(self, source: str, limit: int) -> list[dict]:
         candidate_names: set[str] = set()
         for view in aozora_match_views(source):
@@ -2604,8 +2623,9 @@ class _PreparedTermMatcher:
                 )
                 item = {
                     key: term.get(key)
-                    for key in ("source", "category", "description", "aliases")
+                    for key in ("source", "category", "description")
                 }
+                item["aliases"] = self._matched_aliases(term, candidate_names)
                 item["preferred_translation"] = (
                     term.get("preferred_translation") if safe_hit else None
                 )
@@ -2620,7 +2640,9 @@ class _PreparedTermMatcher:
                 )
                 bundles.append((1, len(alias_name), 0, bundle_key, payload))
 
-        grouped: dict[str, list[tuple[bool, int, dict[str, Any]]]] = {}
+        grouped: dict[
+            str, list[tuple[bool, int, dict[str, Any], list[str]]]
+        ] = {}
         candidate_term_indexes = {
             index
             for name in candidate_names
@@ -2638,17 +2660,25 @@ class _PreparedTermMatcher:
             alias_names = [
                 name for name in aliases if name not in conflicted_aliases
             ]
+            matched_alias_names = {
+                name for name in alias_names if name in candidate_names
+            }
+            matched_aliases = self._matched_aliases(
+                term,
+                candidate_names,
+                excluded_names=conflicted_aliases,
+            )
             main_hit = bool(main_name and main_name in candidate_names)
             hits = [
                 name
-                for name in ([main_name] if main_hit else alias_names)
+                for name in ([main_name] if main_hit else matched_alias_names)
                 if name and name in candidate_names
             ]
             if not hits:
                 continue
             primary = str(term.get("group_primary") or normalized)
             grouped.setdefault(primary, []).append(
-                (main_hit, max(len(name) for name in hits), term)
+                (main_hit, max(len(name) for name in hits), term, matched_aliases)
             )
 
         for primary, hits in grouped.items():
@@ -2656,6 +2686,13 @@ class _PreparedTermMatcher:
             if primary_term is None:
                 raise UsageError(f"术语组主不存在：{primary}")
             matched_terms = [value[2] for value in hits]
+            matched_aliases_by_normalized = {
+                str(
+                    value[2].get("normalized")
+                    or normalize_term(str(value[2].get("source", "")), self.spec)
+                ): value[3]
+                for value in hits
+            }
             ordered = [primary_term]
             ordered.extend(
                 sorted(
@@ -2680,9 +2717,15 @@ class _PreparedTermMatcher:
                         "category",
                         "description",
                         "preferred_translation",
-                        "aliases",
                     )
                 }
+                term_normalized = str(
+                    term.get("normalized")
+                    or normalize_term(str(term.get("source", "")), self.spec)
+                )
+                item["aliases"] = matched_aliases_by_normalized.get(
+                    term_normalized, []
+                )
                 if term is not primary_term:
                     item["primary_source"] = primary_term.get("source")
                 payload.append(item)
@@ -2711,6 +2754,7 @@ class _TermMatchCache:
         limit: int,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
+        self.spec = spec
         self.limit = limit
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
 
@@ -2727,7 +2771,35 @@ class _TermMatchCache:
                 )
                 self._cache[key] = matches
             for term in matches:
-                by_source[str(term["source"])] = term
+                source = str(term["source"])
+                current = by_source.get(source)
+                if current is None:
+                    current = dict(term)
+                    aliases = {
+                        str(alias)
+                        for alias in term.get("aliases", [])
+                        if alias
+                    }
+                    current["aliases"] = sorted(
+                        aliases,
+                        key=lambda value: (normalize_term(value, self.spec), value),
+                    )
+                    by_source[source] = current
+                    continue
+                aliases = {
+                    str(alias)
+                    for alias in current.get("aliases", [])
+                    if alias
+                }
+                aliases.update(
+                    str(alias)
+                    for alias in term.get("aliases", [])
+                    if alias
+                )
+                current["aliases"] = sorted(
+                    aliases,
+                    key=lambda value: (normalize_term(value, self.spec), value),
+                )
         return list(by_source.values())
 
 

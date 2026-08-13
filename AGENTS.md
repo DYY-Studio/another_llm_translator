@@ -75,7 +75,7 @@ git switch dev
 git switch -c feat/segment-recovery
 ```
 
-Commit each key step you have made.
+Commit **each** key step you have made.
 When creating git commits:
 - Keep current git user identity.
 - Add: Co-authored-by: Codex <codex@openai.com>
