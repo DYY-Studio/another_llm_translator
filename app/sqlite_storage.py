@@ -738,6 +738,23 @@ def append_jsonl(project: Path, path: Path, value: dict[str, Any]) -> None:
         connection.close()
 
 
+def append_stage_results(
+    project: Path, records: Iterable[dict[str, Any]]
+) -> None:
+    """Append stage-result records in one SQLite transaction."""
+    values = list(records)
+    if not values:
+        return
+    connection = _with_db(project)
+    try:
+        with connection:
+            _insert_stage(connection, values)
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法批量追加 SQLite 阶段记录：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def record_exists(project: Path, path: Path) -> bool:
     kind, key = _kind(path, project)
     connection = _with_db(project)
