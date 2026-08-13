@@ -240,7 +240,8 @@ python -m app.main files-remove PROJECT FILE_ID...
   创建项目。相对路径按当前工作目录解析，后续命令可直接使用项目绝对路径。
 - 项目目录是自包含边界；选择外部位置不会移动或复制已有项目。
 - 显式文件按参数顺序处理。
-- 目录按相对路径进行确定性的简单自然排序。
+- 目录按完整 POSIX 相对路径进行大小写不敏感、数字感知的确定性自然排序；
+  自然键相同时按完整路径字典序打破平局。
 - TXT 未传 `--recursive` 时只读取目录第一层。
 - 递归发现时忽略符号链接。
 - 显式符号链接输入直接拒绝。
@@ -255,10 +256,13 @@ python -m app.main files-remove PROJECT FILE_ID...
 - 新 File 追加到活动顺序末尾。`next_file_sequence` 单调增加；旧项目缺少该
   字段时从活动 File ID 最大值初始化。删除后重新添加不会复用 File 或 Segment
   ID。
+- Web 可提交全部活动 File ID 的唯一完整排列，将 `file_order` 规范化为从 1
+  开始的连续值。重排保留 File/Segment ID、输入副本、Adapter 状态、历史结果、
+  项目计数和 `next_file_sequence`；File ID 不表示活动顺序。
 - 活动文件的导出相对路径按大小写不敏感比较；追加产生冲突时整体拒绝。
-- 文件增删发现任意 `running` Run 时整体拒绝，不自动中断。未知或部分非法的
-  删除选择也必须在写入前整体失败。
-- 增删在项目写锁内预写新索引、元数据和输入副本；普通发布异常不得留下部分
+- 文件增删或重排发现任意 `running` Run 时整体拒绝，不自动中断。未知、重复、
+  缺失或部分非法的删除/重排选择也必须在写入前整体失败。
+- 增删和重排在项目写锁内提交；普通发布异常不得留下部分
   更新。移除会删除项目内输入副本；Run、SQLite 阶段记录、术语和既有输出保留。
 - 被移除 Segment 的历史阶段记录仍是审计数据，但不再参与 inspect、指纹差异、
   结果复用、校验警告、过期建议统计或导出。
@@ -291,10 +295,12 @@ EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
 更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
 EPUB 将整条译文写入该语义 Segment 的首个可用位置，清空其余普通槽并移除全部
 Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。使用
-`ruby_mode=aozora` 时，模型可以自由决定是否保留 Ruby；严格的
-`｜base《reading》` 会在译文区域恢复为 EPUB Ruby，reading 可翻译或转写为目标
-语言适用的字母/注音。没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML
-或跨行的形式保持普通文本。`base_only` 和 `parenthetical` 不还原 Ruby。
+`ruby_mode=aozora` 时，模型可以省略译文中的 Ruby 标记和 reading，但 base 是正文，
+必须正常翻译，不能因位于 Ruby 中而照抄。保留时须返回严格的
+`｜已翻译base《目标语言适用reading》`，系统会在译文区域恢复 EPUB Ruby；reading
+必须翻译或转写，无法适配目标语言时应去掉标记和 reading，仅返回已翻译 base。
+没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML 或跨行的形式保持普通
+文本。`base_only` 和 `parenthetical` 不还原 Ruby。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露普通内联
@@ -450,6 +456,12 @@ inject_missing_segment_every = 0
 `NFKD`，作用于术语主名称、别名与匹配文本的归一化。`terminology.case_insensitive`
 为 `false` 时不做 casefold，按原始大小写匹配。两项设置共同决定扫描候选去重、
 导入合并、alias 冲突判定与翻译时匹配；关闭归一化后仍保留首尾空白裁剪。
+翻译、校对和润色的术语匹配会为严格、非嵌套的青空 Ruby
+`｜base《reading》` 建立独立的 `base` 正文视图和 `reading` 视图：base 可跨相邻
+Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会连续组合；普通正文会切断
+reading 组合，base 与 reading 不会互相拼接。因此 `｜漢《かん》｜字《じ》` 可分别
+命中“漢字”和“かんじ”，而 `｜漢《かん》A｜字《じ》` 不会把 reading 拼成“かんじ”。
+同一术语从两个视图命中时只注入一次。不完整、嵌套、跨行或含 HTML 的形式仍按原文匹配。
 已发布术语库中的 `normalized` 键是持久化标识，配置变更后不做迁移：旧术语与
 override 继续按原键生效，新配置只影响之后的扫描、导入与匹配。术语阶段指纹包含
 全部术语配置，变更后重新扫描会自然产生新 revision；翻译、校对、润色阶段不记录
@@ -927,7 +939,9 @@ alias 与另一条术语的主 source 相同时，由
 进入人工冲突。每个成员直接指向存在且启用的组主；悬空、链式和循环指针快速失败。
 
 人工换主在单次项目写锁内重写全组。组主仍有成员时不能移除或永久删除；成员
-移除时同时脱组。将 alias 物化为成员时不复制主条目的译名、类别或说明。
+移除时同时脱组。将尚不存在的 alias 物化为成员时不复制主条目的译名、类别或说明；
+若同 normalized 的条目已有可恢复的 disabled override，则物化会恢复该条目，保留其
+source、译名、类别、说明和 aliases，并加入当前组。
 
 术语组副条目可以在组页通过“退出组”解除关系。退组只写入显式
 `group_primary = null` override，保留该条目的 source、aliases、译名、类别和说明；
@@ -1243,8 +1257,9 @@ Content-Type: application/json
 ```
 
 Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
-内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body 和
-`/choices/0/message/content`。另内置 `anthropic`、`google-gemini` 与
+内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body、正文
+路径 `/choices/0/message/content` 和可选推理路径
+`/choices/0/message/reasoning_content`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
 `endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
 声明式 Adapter 只支持非流式 JSON POST。
@@ -1301,8 +1316,9 @@ HTTP 重试：
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
 - Adapter 还可配置 `response_reasoning_content_pointer` 提取字符串或 null 的
-  结构化思考字段。规范化响应包含 `content` 和可空的 `reasoning_content`；
-  结构化字段与内嵌块同时非空时快速失败，不猜测合并顺序。
+  结构化思考字段；路径缺失时同样规范化为 null，字段存在但类型错误时快速
+  失败。规范化响应包含 `content` 和可空的 `reasoning_content`；结构化字段
+  与内嵌块同时非空时快速失败，不猜测合并顺序。
 - 思考正文只存在于当前请求生命周期，不属于 Prompt、Chunk、Segment 结果或
   进度。普通模式不持久化；debug 模式仍只在原始响应 Payload 中保存，不新增
   独立思考记录。
@@ -1611,7 +1627,13 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 加入单独文件或文件夹，并可在同一项目中混合 Adapter。文件夹输入保留内部
 相对路径，单独文件只保留 basename；大小写不敏感的重名使本次选择整体拒绝。
 文件夹内不支持的文件被忽略并汇总提示，单独选择不支持文件直接失败。项目
-概览使用同一输入队列追加文件，并可经典多选移除。
+概览使用同一输入队列追加文件，并可经典多选移除。普通浏览器的每次文件夹选择、
+桌面壳提交的服务端文件夹和 CLI 递归目录均使用相同自然排序规则。项目概览用
+独立把手进行桌面拖放重排；拖动已选文件时，全部选中文件按当前顺序组成连续块
+移动，拖动未选文件时先改为单选。窄屏或粗指针设备提供单文件排序模式，通过
+置顶、上移、下移和置底按钮操作，不实现触屏长按拖动。每次放置或按钮移动后
+立即提交完整 File ID 顺序，失败恢复操作前顺序。`POST /api/v1/projects/{name}/files/reorder`
+接受非空 `file_ids` 数组并返回 `reordered_file_ids` 与 `file_count`；不提供 CLI 重排。
 
 保存父目录和打开项目目录默认填入服务端绝对 `projects` 路径，用户可直接修改，
 也可通过服务端目录浏览器逐层选择。目录浏览器只列当前层目录，不递归扫描或返回
@@ -1783,8 +1805,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 - 原始 JSONL、CRLF、BOM、空行、受支持 Markdown 围栏和已知开头思考块均可解析。
 - 未闭合、重复、嵌套或不在开头的思考标签会进入格式修正，JSON 字段内标签文本
   保持原样。
-- 结构化思考 Pointer 的字符串/null、缺失路径、非法类型及其与内嵌思考块冲突
-  均按规范化边界处理；普通模式不新增思考持久化记录。
+- 结构化思考 Pointer 的字符串正常提取，null 或缺失路径归一化为 null，非法
+  类型及其与内嵌思考块冲突快速失败；普通模式不新增思考持久化记录。
 - 缺失、重复或提前 end、非法行、重复或未知 ID 会进入格式修正。
 - 旧顶层 JSON 对象或数组不再接受。
 - 格式修正和校验修复只请求连续分组后的未决 Segment。
@@ -1848,7 +1870,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。
 - Document Adapter 扩展名按大小写不敏感保持唯一；Web 待输入列表支持混合
-  文件、文件夹相对路径、批次冲突阻止和不支持文件汇总。
+  文件、文件夹相对路径自然排序、批次冲突阻止和不支持文件汇总；项目文件拖放
+  重排持久生效，非法排列或运行中 Run 不改变原顺序。
 - Web 只接受本机 Host/Origin，与 CLI 共用项目记录；同项目第二个写任务明确
   失败，取消后的 Run 有正确收尾。
 - Web 项目配置表单覆盖完整配置 schema；非法类型或组合不改变原 TOML，保存

@@ -12,6 +12,7 @@
     "stream": "${stream}"
   },
   "response_content_pointer": "/choices/0/message/content",
+  "response_reasoning_content_pointer": "/choices/0/message/reasoning_content",
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",

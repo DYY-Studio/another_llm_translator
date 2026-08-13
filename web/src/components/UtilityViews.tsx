@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type RefObject,
+} from "react";
 import { api } from "../api";
 import {
   nativeBridgeAvailable,
@@ -6,6 +12,12 @@ import {
   pickNativeFolder,
   saveExport,
 } from "../native";
+import {
+  moveFileBlock,
+  moveFileByCommand,
+  type DropPosition,
+  type FileMoveCommand,
+} from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { translate, type Language } from "../i18n";
@@ -68,10 +80,77 @@ interface DirectoryListing {
 }
 
 type DirectoryPickerMode = "parent" | "project";
+type ProjectFile = ProjectOverview["files"][number];
+
+interface OptimisticFileOrder {
+  project: string;
+  before: string[];
+  after: string[];
+}
+
+interface ButtonReorderState {
+  project: string;
+  focusedFileId: string;
+}
+
+const NATURAL_NUMBER = /^[0-9]+$/;
+const NATURAL_PARTS = /([0-9]+)/;
 
 function extensionOf(path: string) {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase();
+}
+
+function compareText(left: string, right: string) {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) {
+      return leftPoints[index] - rightPoints[index];
+    }
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareNaturalPaths(left: string, right: string) {
+  const leftFolded = left.toLowerCase();
+  const rightFolded = right.toLowerCase();
+  const leftParts = leftFolded.split(NATURAL_PARTS);
+  const rightParts = rightFolded.split(NATURAL_PARTS);
+  const length = Math.min(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index];
+    const rightPart = rightParts[index];
+    const leftIsNumber = NATURAL_NUMBER.test(leftPart);
+    const rightIsNumber = NATURAL_NUMBER.test(rightPart);
+    if (leftIsNumber && rightIsNumber) {
+      const difference = BigInt(leftPart) - BigInt(rightPart);
+      if (difference !== 0n) return difference < 0n ? -1 : 1;
+      continue;
+    }
+    if (leftIsNumber !== rightIsNumber) return leftIsNumber ? -1 : 1;
+    const comparison = compareText(leftPart, rightPart);
+    if (comparison) return comparison;
+  }
+  if (leftParts.length !== rightParts.length) {
+    return leftParts.length - rightParts.length;
+  }
+  return compareText(left, right);
+}
+
+function sameOrder(left: string[], right: string[]) {
+  return left.length === right.length
+    && left.every((fileId, index) => fileId === right[index]);
+}
+
+function filesInOrder(files: ProjectFile[], fileIds: string[]) {
+  const byId = new Map(files.map((item) => [item.file_id, item]));
+  const ordered = fileIds.flatMap((fileId) => {
+    const item = byId.get(fileId);
+    return item ? [item] : [];
+  });
+  return ordered.length === files.length ? ordered : files;
 }
 
 function driveTypeLabel(type: string, language: Language) {
@@ -151,6 +230,9 @@ function InputQueue({
     if (!incoming.length) {
       setMessage(translate("inputQueue.noSupported", language));
       return;
+    }
+    if (kind === "folder") {
+      incoming.sort((left, right) => compareNaturalPaths(left.path, right.path));
     }
     const known = new Set(
       [...existingPaths, ...value.map((item) => item.path)]
@@ -309,16 +391,6 @@ export function Overview({
   onDeleted: (path: string) => Promise<void>;
   language: Language;
 }) {
-  if (!value) {
-    return (
-      <div className="page">
-        <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
-        <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
-      </div>
-    );
-  }
-  const completed = value.completed_segments;
-  const projectPath = value.path;
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -326,7 +398,57 @@ export function Overview({
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const fileIds = value.files.map((item) => item.file_id);
+  const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
+  const [draggedFileIds, setDraggedFileIds] = useState<string[]>([]);
+  const [buttonReorder, setButtonReorder] = useState<ButtonReorderState | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    fileId: string;
+    position: DropPosition;
+  } | null>(null);
+
+  useEffect(() => {
+    if (
+      buttonReorder
+      && (
+        buttonReorder.project !== project
+        || !value
+        || (
+          buttonReorder.focusedFileId
+          && !value.files.some((item) => item.file_id === buttonReorder.focusedFileId)
+        )
+      )
+    ) setButtonReorder(null);
+  }, [buttonReorder, project, value]);
+
+  function changeProject(nextProject: string) {
+    setButtonReorder(null);
+    setDraggedFileIds([]);
+    setDropTarget(null);
+    selection.reset();
+    onProject(nextProject);
+  }
+
+  if (!value) {
+    return (
+      <div className="page">
+        <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
+        <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
+      </div>
+    );
+  }
+  const completed = value.completed_segments;
+  const projectPath = value.path;
+  const serverFileIds = value.files.map((item) => item.file_id);
+  const orderedFiles = optimisticOrder?.project === project
+    && sameOrder(serverFileIds, optimisticOrder.before)
+    ? filesInOrder(value.files, optimisticOrder.after)
+    : value.files;
+  const fileIds = orderedFiles.map((item) => item.file_id);
+  const draggedFileIdSet = new Set(draggedFileIds);
+  const buttonReorderMode = buttonReorder?.project === project;
+  const focusedFileId = buttonReorderMode ? buttonReorder.focusedFileId : "";
+  const focusedFileIndex = fileIds.indexOf(focusedFileId);
+  const focusedFile = focusedFileIndex >= 0 ? orderedFiles[focusedFileIndex] : null;
 
   async function upload() {
     if (!pendingInputs.length) return;
@@ -381,6 +503,121 @@ export function Overview({
     }
   }
 
+  async function saveFileOrder(before: string[], after: string[]) {
+    setOptimisticOrder({ project, before, after });
+    setBusy(true);
+    setError("");
+    let saved = false;
+    try {
+      await api(`/api/v1/projects/${project}/files/reorder`, {
+        method: "POST",
+        body: JSON.stringify({ file_ids: after }),
+      });
+      saved = true;
+      await onFilesChanged();
+    } catch (reason) {
+      if (!saved) setOptimisticOrder(null);
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleButtonReorder() {
+    if (buttonReorderMode) {
+      setButtonReorder(null);
+      return;
+    }
+    selection.reset();
+    setDraggedFileIds([]);
+    setDropTarget(null);
+    setError("");
+    setButtonReorder({ project, focusedFileId: "" });
+  }
+
+  function moveFocusedFile(command: FileMoveCommand) {
+    if (busy || focusedFileIndex < 0) return;
+    const nextFileIds = moveFileByCommand(fileIds, focusedFileId, command);
+    if (sameOrder(fileIds, nextFileIds)) return;
+    void saveFileOrder(fileIds, nextFileIds);
+  }
+
+  function reorderHandleLabel(item: ProjectFile) {
+    return selection.selectedKeys.has(item.file_id) && selection.selectedKeys.size > 1
+      ? translate("overview.reorderGroupHandle", language, {
+          count: selection.selectedKeys.size,
+          name: item.name,
+        })
+      : translate("overview.reorderHandle", language, { name: item.name });
+  }
+
+  function startFileDrag(event: ReactDragEvent<HTMLButtonElement>, fileId: string) {
+    if (busy || buttonReorderMode || orderedFiles.length < 2) {
+      event.preventDefault();
+      return;
+    }
+    event.stopPropagation();
+    const movingFileIds = selection.selectedKeys.has(fileId)
+      ? fileIds.filter((candidate) => selection.selectedKeys.has(candidate))
+      : [fileId];
+    if (!selection.selectedKeys.has(fileId)) selection.reset(fileId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/x-minimal-llm-file-ids",
+      JSON.stringify(movingFileIds),
+    );
+    event.dataTransfer.setData("text/plain", fileId);
+    setDraggedFileIds(movingFileIds);
+    setDropTarget(null);
+  }
+
+  function updateDropTarget(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
+    if (busy || buttonReorderMode || orderedFiles.length < 2) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (draggedFileIdSet.has(fileId)) {
+      setDropTarget(null);
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < bounds.top + bounds.height / 2
+      ? "before"
+      : "after";
+    setDropTarget((current) => (
+      current?.fileId === fileId && current.position === position
+        ? current
+        : { fileId, position }
+    ));
+  }
+
+  function dropFile(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
+    event.preventDefault();
+    if (buttonReorderMode) return;
+    let movingFileIds = draggedFileIds;
+    if (movingFileIds.length === 0) {
+      try {
+        const payload = JSON.parse(
+          event.dataTransfer.getData("application/x-minimal-llm-file-ids"),
+        );
+        if (Array.isArray(payload) && payload.every((item) => typeof item === "string")) {
+          movingFileIds = payload;
+        }
+      } catch {
+        const fallbackFileId = event.dataTransfer.getData("text/plain");
+        movingFileIds = fallbackFileId ? [fallbackFileId] : [];
+      }
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < bounds.top + bounds.height / 2
+      ? "before"
+      : "after";
+    setDraggedFileIds([]);
+    setDropTarget(null);
+    const nextFileIds = moveFileBlock(fileIds, movingFileIds, fileId, position);
+    if (sameOrder(fileIds, nextFileIds)) return;
+    void saveFileOrder(fileIds, nextFileIds);
+  }
+
   async function deleteProject() {
     setBusy(true);
     setError("");
@@ -390,6 +627,7 @@ export function Overview({
         body: JSON.stringify({ confirm: true }),
       });
       setDeleting(false);
+      setButtonReorder(null);
       await onDeleted(projectPath);
     } catch (reason) {
       setError(String(reason));
@@ -400,7 +638,7 @@ export function Overview({
 
   return (
     <div className="page">
-      <ProjectBar projects={projects} project={project} onProject={onProject} onCreate={onCreate} language={language} />
+      <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
         <div><h1>{value.name}</h1><p>{value.path}</p></div>
         <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
@@ -412,17 +650,41 @@ export function Overview({
       </div>
       <div className="section-heading">
         <div><h2>{translate("overview.fileHeading", language)}</h2><p>{translate("overview.fileHint", language)}</p></div>
-        <div className="section-actions">
-          <button className="primary-button" disabled={busy || !pendingInputs.length} onClick={() => void upload()}>
+        <div className="section-actions overview-file-actions">
+          <button className="primary-button" disabled={busy || buttonReorderMode || !pendingInputs.length} onClick={() => void upload()}>
             {translate("overview.add", language)}
           </button>
-          <button className="danger-button" disabled={busy || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
+          <button className="danger-button" disabled={busy || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             {translate("overview.remove", language)}
+          </button>
+          <button
+            type="button"
+            className="quiet-button mobile-reorder-toggle"
+            aria-pressed={buttonReorderMode}
+            disabled={busy || (!buttonReorderMode && orderedFiles.length < 2)}
+            onClick={toggleButtonReorder}
+          >
+            {translate(buttonReorderMode ? "overview.reorderDone" : "overview.reorderStart", language)}
           </button>
         </div>
       </div>
-      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
+      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy || buttonReorderMode} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
       {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+      {buttonReorderMode && (
+        <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
+          <span aria-live="polite">
+            {focusedFile
+              ? translate("overview.reorderFocused", language, { name: focusedFile.name })
+              : translate("overview.reorderChoose", language)}
+          </span>
+          <div className="mobile-reorder-actions">
+            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("top")}>{translate("overview.moveTop", language)}</button>
+            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("up")}>{translate("overview.moveUp", language)}</button>
+            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("down")}>{translate("overview.moveDown", language)}</button>
+            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("bottom")}>{translate("overview.moveBottom", language)}</button>
+          </div>
+        </div>
+      )}
       <div className="file-list overview-file-list">
         {value.files.length === 0 && (
           <div className="empty-file-state">
@@ -430,15 +692,47 @@ export function Overview({
             <span>{translate("overview.addHint", language)}</span>
           </div>
         )}
-        {value.files.map((item) => (
-          <button
-            type="button"
+        {orderedFiles.map((item) => (
+          <div
             key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}`}
-            onClick={(event) => selection.select(item.file_id, fileIds, event)}
+            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${focusedFileId === item.file_id ? " reorder-active" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
+            onDragOver={(event) => updateDropTarget(event, item.file_id)}
+            onDrop={(event) => dropFile(event, item.file_id)}
           >
-            <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-          </button>
+            <button
+              type="button"
+              className="file-row-drag"
+              draggable={!busy && !buttonReorderMode && orderedFiles.length > 1}
+              disabled={busy || buttonReorderMode || orderedFiles.length < 2}
+              aria-label={reorderHandleLabel(item)}
+              title={reorderHandleLabel(item)}
+              onClick={(event) => event.stopPropagation()}
+              onDragStart={(event) => startFileDrag(event, item.file_id)}
+              onDragEnd={() => {
+                setDraggedFileIds([]);
+                setDropTarget(null);
+              }}
+            >
+              <span aria-hidden="true">⠿</span>
+            </button>
+            <button
+              type="button"
+              className="file-row-select"
+              disabled={buttonReorderMode && busy}
+              aria-pressed={buttonReorderMode
+                ? focusedFileId === item.file_id
+                : selection.selectedKeys.has(item.file_id)}
+              onClick={(event) => {
+                if (buttonReorderMode) {
+                  setButtonReorder({ project, focusedFileId: item.file_id });
+                  return;
+                }
+                selection.select(item.file_id, fileIds, event);
+              }}
+            >
+              <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+            </button>
+          </div>
         ))}
       </div>
       {removing && (
@@ -575,9 +869,7 @@ export function ExportView({
 
   function downloadAll() {
     if (!files.length) return;
-    const url = `/api/v1/projects/${project}/exports/download-all?${files
-      .map((item) => `file=${encodeURIComponent(item.path)}`)
-      .join("&")}`;
+    const url = `/api/v1/projects/${project}/exports/download-all`;
     if (!native) {
       const anchor = document.createElement("a");
       anchor.href = url;

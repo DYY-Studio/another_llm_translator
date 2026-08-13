@@ -665,6 +665,13 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     (staging / "temp.txt").write_text("temp", encoding="utf-8")
     (project / "output" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
     (project / "output" / "translated" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+    symlink_path = project / "output" / "translated" / "link.txt"
+    symlink_created = False
+    try:
+        symlink_path.symlink_to(output_file)
+        symlink_created = True
+    except OSError:
+        pass
 
     listing = client.get("/api/v1/projects/sample/exports")
     assert listing.status_code == 200
@@ -697,34 +704,39 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     assert unicode_download.content == b"epub"
     unicode_file.unlink()
 
+    nested_file = project / "output" / "proofread" / "nested.txt"
+    nested_file.parent.mkdir(parents=True, exist_ok=True)
+    nested_file.write_bytes(b"proofread")
+
     bundle = client.get(
-        "/api/v1/projects/sample/exports/download-all",
-        params={"file": ["translated/input.txt"]},
+        "/api/v1/projects/sample/exports/download-all"
     )
     assert bundle.status_code == 200
     assert bundle.headers["content-type"].startswith("application/zip")
     with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
-        assert archive.namelist() == ["translated/input.txt"]
+        assert archive.namelist() == [
+            "proofread/nested.txt",
+            "translated/input.txt",
+        ]
         assert archive.read("translated/input.txt") == expected_bytes
-
-    deduped = client.get(
-        "/api/v1/projects/sample/exports/download-all",
-        params={"file": ["translated/input.txt", "translated/input.txt"]},
-    )
-    with zipfile.ZipFile(io.BytesIO(deduped.content)) as archive:
-        assert archive.namelist() == ["translated/input.txt"]
-    assert client.get(
-        "/api/v1/projects/sample/exports/download-all"
-    ).status_code == 400
+        assert archive.read("proofread/nested.txt") == b"proofread"
 
     removed = client.post(
         "/api/v1/projects/sample/exports/remove",
-        json={"files": ["translated/input.txt"]},
+        json={"files": ["translated/input.txt", "proofread/nested.txt"]},
     )
     assert removed.status_code == 200
-    assert removed.json()["removed"] == ["translated/input.txt"]
+    assert removed.json()["removed"] == [
+        "translated/input.txt",
+        "proofread/nested.txt",
+    ]
     assert not output_file.exists()
+    if symlink_created:
+        symlink_path.unlink()
     assert client.get("/api/v1/projects/sample/exports").json()["files"] == []
+    assert client.get(
+        "/api/v1/projects/sample/exports/download-all"
+    ).status_code == 400
 
     again = client.post(
         "/api/v1/projects/sample/exports/remove",
@@ -758,10 +770,6 @@ def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
         assert client.get(
             "/api/v1/projects/sample/exports/download",
             params={"file": raw},
-        ).status_code == 400
-        assert client.get(
-            "/api/v1/projects/sample/exports/download-all",
-            params={"file": [raw]},
         ).status_code == 400
         assert client.post(
             "/api/v1/projects/sample/exports/remove",
@@ -1098,6 +1106,50 @@ def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
     assert read_files(project) == before
 
 
+def test_web_reorders_all_project_files_and_rejects_invalid_permutations(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    added = client.post(
+        "/api/v1/projects/sample/files",
+        files=[
+            ("files", ("second.txt", b"second", "text/plain")),
+            ("files", ("third.txt", b"third", "text/plain")),
+        ],
+    )
+    assert added.status_code == 200
+
+    reordered = client.post(
+        "/api/v1/projects/sample/files/reorder",
+        json={"file_ids": ["F0003", "F0001", "F0002"]},
+    )
+    assert reordered.status_code == 200
+    assert reordered.json() == {
+        "reordered_file_ids": ["F0003", "F0001", "F0002"],
+        "file_count": 3,
+    }
+    overview = client.get("/api/v1/projects/sample").json()
+    assert [item["file_id"] for item in overview["files"]] == [
+        "F0003",
+        "F0001",
+        "F0002",
+    ]
+    before = read_files(project)
+
+    for file_ids in (
+        ["F0003", "F0001"],
+        ["F0003", "F0001", "F0001"],
+        ["F0003", "F0001", "F9999"],
+    ):
+        response = client.post(
+            "/api/v1/projects/sample/files/reorder",
+            json={"file_ids": file_ids},
+        )
+        assert response.status_code == 400
+        assert read_files(project) == before
+
+
 def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
@@ -1296,6 +1348,50 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     rows = {item["normalized"]: item for item in switched.json()["terms"]}
     assert rows["alicia"]["group_primary"] is None
     assert rows["alice"]["group_primary"] == "alicia"
+
+
+def test_web_materializes_alias_by_restoring_removed_matching_entry(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    for payload in (
+        {
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+        {
+            "source": "Alicia",
+            "preferred_translation": "艾丽西亚",
+            "category": "别名条目",
+            "description": "已有人物资料",
+            "aliases": ["Alicia Jr"],
+            "disabled": False,
+        },
+    ):
+        assert client.post("/api/v1/projects/sample/terms", json=payload).status_code == 200
+    removed = client.post(
+        "/api/v1/projects/sample/terms/remove",
+        json={"normalized": ["alicia"]},
+    )
+    assert removed.status_code == 200
+    restored = client.post(
+        "/api/v1/projects/sample/terms/materialize",
+        json={"normalized": "alice", "alias": "Alicia"},
+    )
+    assert restored.status_code == 200
+    rows = {item["normalized"]: item for item in restored.json()["terms"]}
+    assert rows["alicia"]["disabled"] is False
+    assert rows["alicia"]["group_primary"] == "alice"
+    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
+    assert rows["alicia"]["category"] == "别名条目"
+    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["aliases"] == ["Alicia Jr"]
+    assert rows["alice"]["aliases"] == []
 
 
 def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
@@ -2388,9 +2484,11 @@ def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
     single.write_text("one\ntwo", encoding="utf-8")
     folder = tmp_path / "book"
     folder.mkdir()
-    (folder / "chapter1.txt").write_text("three", encoding="utf-8")
+    (folder / "chapter10.txt").write_text("ten", encoding="utf-8")
+    (folder / "chapter2.txt").write_text("two", encoding="utf-8")
+    (folder / "chapter02.txt").write_text("zero two", encoding="utf-8")
     (folder / "nested").mkdir()
-    (folder / "nested" / "chapter2.txt").write_text("four", encoding="utf-8")
+    (folder / "nested" / "chapter1.txt").write_text("nested", encoding="utf-8")
     (folder / "notes.md").write_text("ignored", encoding="utf-8")
 
     created = client.post(
@@ -2406,8 +2504,13 @@ def test_web_creates_project_from_server_paths(tmp_path: Path) -> None:
     )
     assert created.status_code == 200, created.text
     overview = client.get("/api/v1/projects/server-path-project").json()
-    names = {item["name"] for item in overview["files"]}
-    assert names == {"single.txt", "chapter1.txt", "nested/chapter2.txt"}
+    assert [item["name"] for item in overview["files"]] == [
+        "single.txt",
+        "chapter02.txt",
+        "chapter2.txt",
+        "chapter10.txt",
+        "nested/chapter1.txt",
+    ]
 
 
 def test_web_server_paths_reject_invalid_inputs(tmp_path: Path) -> None:

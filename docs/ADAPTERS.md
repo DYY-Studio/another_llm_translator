@@ -37,7 +37,8 @@
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义未配置。
+该字段可省略；内置 OpenAI-compatible 定义已配置上述路径，并兼容不返回该
+扩展字段的合法响应。
 
 需要把规范化的 system/user/assistant 消息转换为 Provider 原生形状时，可设置
 `messages_format`（可选，默认 `openai` 原样透传）：
@@ -77,8 +78,8 @@ JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`
 最后一个元素、`-2` 为倒数第二。当思考块总是排在最前、文本块在最后时
 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。
 越界、空数组与普通缺失路径同样快速失败。
-可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。任一路径
-不存在或类型错误时当前请求失败，不猜测备用字段。
+可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。推理路径
+不存在时规范化为 null；字段存在但类型错误时当前请求失败，不猜测备用字段。
 
 Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一
 严格规则从 content 开头剥离一个完整已知思考 Tag；若结构化字段与内嵌块同时
@@ -150,20 +151,21 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 ### 内置 Adapter 定义
 
-- `openai-compatible`：Bearer API Key，Chat Completions body，
-  `/choices/0/message/content`。
+- `openai-compatible`：Bearer API Key，Chat Completions body，正文 pointer
+  `/choices/0/message/content`，推理 pointer
+  `/choices/0/message/reasoning_content`。
 - `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层
   `system`，pointer `/content/-1/text`。未启用 thinking 时 content 首块即
   文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。
   不配置 reasoning 指针；需要思考正文时可复制定义并设
-  `/content/-2/thinking`，但仅当启用 thinking 且思考块存在时可用，否则该
-  请求快速失败（预期行为，非静默降级）。
+  `/content/-2/thinking`。未启用 thinking 或思考块缺失时结果为 null；字段
+  存在但不是字符串或 null 时快速失败。
 - `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset
   `endpoint` 的 `${model}` 占位符进入请求路径，pointer
   `/candidates/0/content/parts/-1/text`。不内置 thinkingConfig，思考模型
   默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配
-  `/candidates/0/content/parts/-2/text`，仅思考模型且思考块存在时可用，
-  否则快速失败。
+  `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是
+  字符串或 null 时快速失败。
 - `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），
   body 含 `"store": false`，pointer `/output/-1/content/-1/text`。宿主直接
   解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明
@@ -309,11 +311,19 @@ PUBLIC 标识都会快速失败。
 （`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
 位置快速失败。纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余
 普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个
-Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以自由决定是否在译文、
-校对或润色结果中保留 Ruby；严格闭合的 `｜base《reading》` 会在纯译文和双语
-译文区域恢复为 EPUB Ruby，reading 可由模型翻译或转写为目标语言适用的字母/注音。
-没有返回 Ruby 不会触发重试；不完整、嵌套、含 HTML 或跨行的形式按普通文本保留。
+Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略译文、校对或润色
+结果中的 Ruby 标记和 reading，但必须翻译属于正文的 base，不能因其位于 Ruby 中
+而照抄。保留时须返回严格闭合的 `｜已翻译base《目标语言适用reading》`，系统会在
+纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉
+标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
+含 HTML 或跨行的形式按普通文本保留。
 `base_only` 和 `parenthetical` 不执行 Ruby 还原。
+确定性术语注入使用同一严格青空语法：匹配视图分别保留 base 正文和 reading，
+不把二者拼接。base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
+连续组合，普通正文会切断 reading 组合。因此 `｜漢《かん》｜字《じ》` 可命中
+“漢字”和“かんじ”，而 `｜漢《かん》A｜字《じ》` 不会把 reading 拼成“かんじ”；
+同一术语从两个视图命中时只注入一次。该匹配规则不改写 Segment 原文或发送给
+模型的 `source`。
 
 当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是

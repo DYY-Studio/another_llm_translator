@@ -23,6 +23,7 @@ import httpx
 from .config import load_project_config
 from .documents import (
     DocumentExportJob,
+    aozora_match_views,
     publish_document_exports,
 )
 from .errors import (
@@ -2557,8 +2558,10 @@ class _PreparedTermMatcher:
         )
 
     def match(self, source: str, limit: int) -> list[dict]:
-        normalized_source = normalize_term(source, self.spec)
-        candidate_names = self._candidate_names(normalized_source)
+        candidate_names: set[str] = set()
+        for view in aozora_match_views(source):
+            normalized_view = normalize_term(view, self.spec)
+            candidate_names.update(self._candidate_names(normalized_view))
         bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
         disputed: set[str] = set()
         for related_keys, related_claims in self._claim_components:

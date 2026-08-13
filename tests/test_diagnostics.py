@@ -104,9 +104,12 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
         abs=0.02,
     )
     assert "reasoning" not in snapshot
-    assert snapshot["requests"] == [
+    assert snapshot["requests"]["reset"] is True
+    assert snapshot["requests"]["total"] == 1
+    assert snapshot["requests"]["items"] == [
         {
-            "timestamp": snapshot["requests"][0]["timestamp"],
+            "timestamp": snapshot["requests"]["items"][0]["timestamp"],
+            "finished_at": snapshot["requests"]["items"][0]["finished_at"],
             "project": "sample",
             "stage": "translation",
             "request_id": "REQ-1",
@@ -118,9 +121,10 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "has_content": True,
             "has_reasoning": True,
             "error": None,
+            "detail_available": True,
         }
     ]
-    assert "messages" not in snapshot["requests"][0]
+    assert "messages" not in snapshot["requests"]["items"][0]
     detail = diagnostics.request_detail("REQ-1")
     assert detail["messages"][0]["content"] == "private source"
     assert detail["response_content"] == "private response"
@@ -218,28 +222,40 @@ async def test_rate_limit_waiting_requests_track_queue_and_cancellation(
     assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 0
 
 
-def test_request_exchanges_are_bounded_truncated_and_cleared(tmp_path: Path) -> None:
+def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
     with diagnostics.activate("sample", "translation"):
-        for index in range(51):
+        for index in range(201):
             request_id = f"REQ-{index}"
             diagnostics.begin_request(
                 request_id=request_id,
                 model="model",
-                messages=[{"role": "user", "content": "m" * 100_001}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "m" * 100_001 if index == 200 else "message",
+                    }
+                ],
                 max_attempts=1,
             )
             diagnostics.complete_request(
                 request_id,
-                content="c" * 100_001,
-                reasoning_content="r" * 20_001,
+                content="c" * 100_001 if index == 200 else "content",
+                reasoning_content=(
+                    "r" * 20_001 if index == 200 else "reasoning"
+                ),
             )
 
-    assert len(diagnostics.snapshot()["requests"]) == 50
-    with pytest.raises(ValueError, match="REQ-0"):
+    feed = diagnostics.snapshot()["requests"]
+    assert feed["total"] == 201
+    assert len(feed["items"]) == 201
+    assert sum(item["detail_available"] for item in feed["items"]) == 200
+    assert feed["items"][0]["has_content"] is True
+    assert feed["items"][0]["has_reasoning"] is True
+    with pytest.raises(ValueError, match="已从内存释放.*REQ-0"):
         diagnostics.request_detail("REQ-0")
-    detail = diagnostics.request_detail("REQ-50")
+    detail = diagnostics.request_detail("REQ-200")
     assert len(detail["messages"][0]["content"]) == 100_000
     assert detail["messages"][0]["truncated"] is True
     assert len(detail["response_content"]) == 100_000
@@ -248,17 +264,99 @@ def test_request_exchanges_are_bounded_truncated_and_cleared(tmp_path: Path) -> 
     assert detail["reasoning_content_truncated"] is True
 
     with diagnostics.activate("next", "proofreading"):
-        assert diagnostics.snapshot()["requests"] == []
+        assert diagnostics.snapshot()["requests"]["items"] == []
         diagnostics.begin_request(
             request_id="REQ-INTERRUPTED",
             model="model",
             messages=[],
             max_attempts=1,
         )
-    assert diagnostics.snapshot()["requests"][0]["status"] == "interrupted"
+    assert diagnostics.snapshot()["requests"]["items"][0]["status"] == "interrupted"
 
     with diagnostics.activate("third", "polishing"):
-        assert diagnostics.snapshot()["requests"] == []
+        assert diagnostics.snapshot()["requests"]["items"] == []
+
+
+def test_request_summary_feed_is_incremental_and_resets_per_run(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-1",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        initial = diagnostics.snapshot()["requests"]
+        assert initial["reset"] is True
+        assert [item["request_id"] for item in initial["items"]] == ["REQ-1"]
+
+        unchanged = diagnostics.snapshot(
+            request_session=initial["session_id"],
+            request_after=initial["cursor"],
+        )["requests"]
+        assert unchanged["reset"] is False
+        assert unchanged["items"] == []
+
+        diagnostics.complete_request(
+            "REQ-1", content="response", reasoning_content=None
+        )
+        changed = diagnostics.snapshot(
+            request_session=initial["session_id"],
+            request_after=initial["cursor"],
+        )["requests"]
+        assert changed["reset"] is False
+        assert changed["items"][0]["status"] == "completed"
+
+    with diagnostics.activate("next", "proofreading"):
+        reset = diagnostics.snapshot(
+            request_session=initial["session_id"],
+            request_after=changed["cursor"],
+        )["requests"]
+        assert reset["reset"] is True
+        assert reset["items"] == []
+
+
+def test_running_request_detail_is_not_pruned_by_terminal_limit(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-ACTIVE",
+            model="model",
+            messages=[{"role": "user", "content": "active"}],
+            max_attempts=1,
+        )
+        for index in range(201):
+            request_id = f"REQ-DONE-{index}"
+            diagnostics.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            diagnostics.complete_request(
+                request_id, content="done", reasoning_content=None
+            )
+
+        assert diagnostics.request_detail("REQ-ACTIVE")["status"] == "running"
+        active_summary = next(
+            item
+            for item in diagnostics.snapshot()["requests"]["items"]
+            if item["request_id"] == "REQ-ACTIVE"
+        )
+        assert active_summary["detail_available"] is True
+
+        diagnostics.complete_request(
+            "REQ-ACTIVE", content="active done", reasoning_content=None
+        )
+        assert diagnostics.request_detail("REQ-ACTIVE")["response_content"] == (
+            "active done"
+        )
 
 
 @pytest.mark.asyncio
@@ -326,8 +424,8 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     assert snapshot["metrics"]["retry_count"] == 1
     assert snapshot["metrics"]["rate_limit_waiting_requests"] == 0
     assert snapshot["metrics"]["usage_available"] is True
-    assert len(snapshot["requests"]) == 1
-    request_summary = snapshot["requests"][0]
+    assert snapshot["requests"]["total"] == 1
+    request_summary = snapshot["requests"]["items"][0]
     assert request_summary["status"] == "completed"
     assert request_summary["attempt_count"] == 2
     assert request_summary["has_content"] is True
@@ -527,7 +625,7 @@ async def test_llm_runtime_reports_safe_failure_categories(
         del os.environ["LLM_API_KEY"]
         await client.aclose()
 
-    summary = diagnostics.snapshot()["requests"][0]
+    summary = diagnostics.snapshot()["requests"]["items"][0]
     assert summary["status"] == "failed"
     assert summary["error"] == expected_error
     detail = diagnostics.request_detail(summary["request_id"])
@@ -550,9 +648,25 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert [item["message"] for item in response.json()["logs"]] == [
         "visible api log"
     ]
+    feed = response.json()["requests"]
+    delta = client.get(
+        "/api/v1/diagnostics",
+        params={
+            "request_session": feed["session_id"],
+            "request_after": feed["cursor"],
+        },
+    )
+    assert delta.status_code == 200
+    assert delta.json()["requests"]["reset"] is False
+    assert delta.json()["requests"]["items"] == []
     rejected = client.get("/api/v1/diagnostics", params={"level": "trace"})
     assert rejected.status_code == 400
     assert "未知日志级别" in rejected.json()["error"]
+    negative_cursor = client.get(
+        "/api/v1/diagnostics", params={"request_after": -1}
+    )
+    assert negative_cursor.status_code == 400
+    assert "request_after" in negative_cursor.json()["error"]
 
 
 def test_diagnostics_request_detail_api_uses_existing_error_contract(

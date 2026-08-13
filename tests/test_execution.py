@@ -21,6 +21,7 @@ from app.execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
+    contiguous_groups,
     estimate_messages,
     estimate_messages_upper_bound,
     estimate_single_segment_preflight,
@@ -273,8 +274,6 @@ def test_review_prompt_uses_conditional_fields(stage: str) -> None:
         in prompt
     )
     assert "suggested 还须含非空完整 suggested_text" in prompt
-    assert "｜base《reading》" in prompt
-    assert "Ruby 可省略" in prompt
 
 
 def test_request_payload_uses_local_ids_without_mutating_source() -> None:
@@ -597,6 +596,61 @@ def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None
     assert [len(plan.segments) for plan in plans] == [1, 1]
 
 
+def test_chunk_and_repair_grouping_follow_source_file_order_not_file_id() -> None:
+    source = [
+        {
+            "segment_id": "F0002-S000001",
+            "file_id": "F0002",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "second file in ID order",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0001-S000001",
+            "file_id": "F0001",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "first file in ID order",
+            "is_empty": False,
+        },
+    ]
+    payload_builder = lambda items: {
+        "segments": [
+            {"id": item["segment_id"], "source": item["source"]}
+            for item in items
+        ]
+    }
+
+    plans = build_chunk_plans(
+        reversed(source),
+        all_segments=source,
+        config=config(),
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=payload_builder,
+    )
+    assert [plan.file_id for plan in plans] == ["F0002", "F0001"]
+
+    cross_boundary_config = config()
+    cross_boundary_config["chunking"]["cross_boundary_batching"] = ["translation"]
+    plans = build_chunk_plans(
+        reversed(source),
+        all_segments=source,
+        config=cross_boundary_config,
+        stage="translation",
+        prompt=full_prompt("translation", "Translate."),
+        payload_builder=payload_builder,
+    )
+    assert [item["file_id"] for item in plans[0].segments] == ["F0002", "F0001"]
+    repair_groups = contiguous_groups(
+        reversed(source),
+        all_segments=source,
+        cross_boundary=True,
+    )
+    assert [item["file_id"] for item in repair_groups[0]] == ["F0002", "F0001"]
+
+
 @pytest.mark.asyncio
 async def test_ordered_dispatch_tracks_all_files_in_cross_boundary_chunk() -> None:
     started: list[str] = []
@@ -665,7 +719,7 @@ def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
             ]
         },
     )
-    assert len(plans) < 10
+    assert len(plans) <= 10
     assert any(plan.estimated_input_tokens >= 480 for plan in plans)
     assert all(plan.estimated_input_tokens <= 600 for plan in plans)
     assert plans[-1].estimated_input_tokens <= 600

@@ -21,7 +21,7 @@ from urllib.parse import quote
 import httpx
 import psutil
 import uvicorn
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -68,8 +68,10 @@ from .project import (
     add_project_files,
     delete_project,
     init_project,
+    natural_path_key,
     prompt_file,
     remove_project_files,
+    reorder_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
@@ -190,6 +192,29 @@ def _resolve_export_file(root: Path, raw: str) -> Path:
     return resolved
 
 
+def _export_files(root: Path) -> list[Path]:
+    """Return sorted regular files that are eligible for export downloads."""
+    output_root = (root / "output").resolve()
+    if not output_root.is_dir():
+        return []
+    files: list[Path] = []
+    for path in sorted(output_root.rglob("*")):
+        try:
+            is_symlink = path.is_symlink()
+            is_file = path.is_file()
+        except OSError:
+            continue
+        if is_symlink or not is_file:
+            continue
+        relative = path.relative_to(output_root)
+        if any(part == ".staging" for part in relative.parts):
+            continue
+        if path.name == ".DS_Store":
+            continue
+        files.append(path)
+    return files
+
+
 def _attachment_header(filename: str) -> str:
     encoded = quote(filename)
     if encoded == filename:
@@ -280,8 +305,8 @@ def create_app(
                     for dirpath, dirnames, filenames in os.walk(
                         current, followlinks=False
                     ):
-                        dirnames.sort()
-                        for filename in sorted(filenames):
+                        dirnames.sort(key=natural_path_key)
+                        for filename in filenames:
                             full = Path(dirpath) / filename
                             relative = full.relative_to(current).as_posix()
                             try:
@@ -289,6 +314,7 @@ def create_app(
                             except UsageError:
                                 continue
                             found.append((relative, full))
+                    found.sort(key=lambda item: natural_path_key(item[0]))
                     if not found:
                         raise UsageError(f"目录中没有受支持的输入文件：{raw}")
                     server_entries.extend(found)
@@ -1178,6 +1204,21 @@ def create_app(
         with project_write_lock(root):
             return remove_project_files(root, file_ids)
 
+    @app.post("/api/v1/projects/{name}/files/reorder")
+    async def reorder_files(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        file_ids = payload.get("file_ids")
+        if (
+            not isinstance(file_ids, list)
+            or not file_ids
+            or not all(isinstance(value, str) and value for value in file_ids)
+        ):
+            raise UsageError("file_ids 必须是非空字符串数组")
+        root = project(name)
+        with project_write_lock(root):
+            return reorder_project_files(root, file_ids)
+
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")
     async def segment(name: str, segment_id: str) -> dict[str, Any]:
         return WebStore(project(name)).segment_detail(segment_id)
@@ -1533,6 +1574,8 @@ def create_app(
         project: str | None = None,
         stage: str | None = None,
         q: str | None = None,
+        request_session: str | None = None,
+        request_after: int | None = None,
     ) -> dict[str, Any]:
         try:
             return app.state.diagnostics.snapshot(
@@ -1540,6 +1583,8 @@ def create_app(
                 project=project or None,
                 stage=stage or None,
                 query=q or None,
+                request_session=request_session or None,
+                request_after=request_after,
             )
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
@@ -1611,30 +1656,18 @@ def create_app(
     @app.get("/api/v1/projects/{name}/exports")
     async def exports(name: str) -> dict[str, Any]:
         root = project(name)
-        output_root = root / "output"
+        output_root = (root / "output").resolve()
         files: list[dict[str, Any]] = []
-        if output_root.is_dir():
-            for path in sorted(output_root.rglob("*")):
-                try:
-                    is_symlink = path.is_symlink()
-                    is_file = path.is_file()
-                except OSError:
-                    continue
-                if is_symlink or not is_file:
-                    continue
-                relative = path.relative_to(output_root)
-                if any(part == ".staging" for part in relative.parts):
-                    continue
-                if path.name == ".DS_Store":
-                    continue
-                stat = path.stat()
-                files.append(
-                    {
-                        "path": relative.as_posix(),
-                        "size": stat.st_size,
-                        "mtime": int(stat.st_mtime),
-                    }
-                )
+        for path in _export_files(root):
+            relative = path.relative_to(output_root)
+            stat = path.stat()
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                }
+            )
         return {"files": files}
 
     @app.get("/api/v1/projects/{name}/exports/download")
@@ -1650,14 +1683,11 @@ def create_app(
         )
 
     @app.get("/api/v1/projects/{name}/exports/download-all")
-    async def download_export_all(
-        name: str, file: list[str] = Query(default=[])
-    ) -> Response:
+    async def download_export_all(name: str) -> Response:
         root = project(name)
-        if not file:
+        paths = _export_files(root)
+        if not paths:
             raise UsageError("至少需要一个导出文件")
-        files = list(dict.fromkeys(file))
-        paths = [_resolve_export_file(root, raw) for raw in files]
         output_root = (root / "output").resolve()
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:

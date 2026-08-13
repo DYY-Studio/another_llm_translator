@@ -9,12 +9,13 @@ from pathlib import Path
 import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
-from app.execution import Scope, stage_result_path
+from app.execution import Scope, select_scope, stage_result_path
 from app.main import build_parser, parse_adapter_option_args
 from app.project import (
     add_project_files,
     init_project,
     remove_project_files,
+    reorder_project_files,
 )
 from app.stages import (
     export_project,
@@ -139,6 +140,135 @@ def test_empty_project_can_open_inspect_and_add_txt_files(
         for item in read_segments(project)
     } == {"document"}
     assert read_json(project, project / "project.json")["next_file_sequence"] == 3
+
+
+def test_reorder_project_files_preserves_ids_history_and_adapter_state(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    chapter10 = tmp_path / "chapter10.txt"
+    book2 = tmp_path / "book2.epub"
+    chapter1 = tmp_path / "chapter1.txt"
+    chapter10.write_text("ten", encoding="utf-8")
+    make_epub(book2)
+    chapter1.write_text("one", encoding="utf-8")
+    add_project_files(project, [str(chapter10), str(book2), str(chapter1)])
+
+    metadata_before = read_json(project, project / "project.json")
+    files_before = {str(item["file_id"]): item for item in read_files(project)}
+    segments_before = read_segments(project)
+    segment_ids_before = [str(item["segment_id"]) for item in segments_before]
+    epub_state_path = project / str(files_before["F0002"]["document_adapter_state"])
+    epub_state_before = read_json(project, epub_state_path)
+    history_path = stage_result_path(project, "translation")
+    append_jsonl(
+        project,
+        history_path,
+        record_header(
+            "stage_result",
+            str(metadata_before["project_id"]),
+            stage="translation",
+            segment_id=segment_ids_before[0],
+            status="completed",
+            text="十",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=None,
+            run_id="RUN-OLD",
+            request_id="REQ-OLD",
+        ),
+    )
+    history_before = read_jsonl(project, history_path)
+
+    result = reorder_project_files(project, ["F0003", "F0001", "F0002"])
+
+    assert result == {
+        "reordered_file_ids": ["F0003", "F0001", "F0002"],
+        "file_count": 3,
+    }
+    files_after = read_files(project)
+    assert [item["file_id"] for item in files_after] == ["F0003", "F0001", "F0002"]
+    assert [item["file_order"] for item in files_after] == [1, 2, 3]
+    for item in files_after:
+        previous = dict(files_before[str(item["file_id"])])
+        previous["file_order"] = item["file_order"]
+        assert item == previous
+        assert (project / "input" / str(item["stored_name"])).is_file()
+    segments_after = read_segments(project)
+    assert list(dict.fromkeys(item["file_id"] for item in segments_after)) == [
+        "F0003",
+        "F0001",
+        "F0002",
+    ]
+    assert {item["segment_id"] for item in segments_after} == set(segment_ids_before)
+    selected = select_scope(
+        segments_after,
+        files_after,
+        Scope(from_file="F0001"),
+    )
+    assert list(dict.fromkeys(item["file_id"] for item in selected)) == [
+        "F0001",
+        "F0002",
+    ]
+    assert read_json(project, epub_state_path) == epub_state_before
+    assert read_jsonl(project, history_path) == history_before
+    assert read_json(project, project / "project.json") == metadata_before
+
+    exported = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=True,
+        output_format="txt",
+    )
+    assert [Path(path).name for path in exported["written"]] == [
+        "chapter1.txt",
+        "chapter10.txt",
+        "book2.txt",
+    ]
+
+
+def test_reorder_project_files_rejects_invalid_order_and_running_run(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(first), str(second)])
+    files_before = read_files(project)
+    segments_before = read_segments(project)
+
+    for file_ids in (
+        ["F0001"],
+        ["F0001", "F0001"],
+        ["F0001", "F9999"],
+    ):
+        with pytest.raises(UsageError):
+            reorder_project_files(project, file_ids)
+        assert read_files(project) == files_before
+        assert read_segments(project) == segments_before
+
+    metadata = read_json(project, project / "project.json")
+    write_json(
+        project,
+        project / "runs" / "RUN-ACTIVE" / "manifest.json",
+        record_header(
+            "run",
+            str(metadata["project_id"]),
+            record_id="RUN-ACTIVE",
+            run_id="RUN-ACTIVE",
+            stage="translation",
+            status="running",
+            started_at="2026-08-12T00:00:00Z",
+        ),
+    )
+    with pytest.raises(UsageError, match="未完成 Run"):
+        reorder_project_files(project, ["F0002", "F0001"])
+    assert read_files(project) == files_before
+    assert read_segments(project) == segments_before
 
 
 def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:

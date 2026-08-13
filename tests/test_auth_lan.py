@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.credentials import save_lan_password
 from app.server_config import load_server_config, save_server_config
+from app.user_config import user_root
 from app.web import create_app
 from tests.conftest import FakeKeyring
 
@@ -25,7 +26,13 @@ def make_client(
     server_config: dict | None = None,
     client: tuple[str, int] = LOOPBACK,
 ) -> TestClient:
-    return TestClient(create_app(server_config=server_config), client=client)
+    return TestClient(
+        create_app(
+            projects_root=user_root() / "projects",
+            server_config=server_config,
+        ),
+        client=client,
+    )
 
 
 def lan_config(*, lan: dict | None = None, auth: dict | None = None) -> dict:

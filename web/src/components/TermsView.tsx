@@ -515,23 +515,25 @@ export function TermsView({
 
   async function materializeAlias(alias: string) {
     if (!selected) return;
+    const selectedNormalized = selected.normalized;
     setSaving(true);
     setMessage("");
     try {
       const value = await api<TermsResponse & { materialized: string }>(
         `/api/v1/projects/${project}/terms/materialize`,
-        { method: "POST", body: JSON.stringify({ normalized: selected.normalized, alias }) },
+        { method: "POST", body: JSON.stringify({ normalized: selectedNormalized, alias }) },
       );
       setData(value);
       const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
-      const groupPrimary = termByKey.get(selected.group_primary ?? selected.normalized) ?? selected;
+      const restored = Boolean(data?.terms.find((term) => term.normalized === value.materialized)?.disabled);
+      const groupPrimary = termByKey.get(selected.group_primary ?? selectedNormalized) ?? selected;
       selection.reset(member?.normalized ?? "");
-      setForm(member ? {
+      setForm(member ? restored ? formFor(member) : {
         ...formFor(member),
         category: groupPrimary.category ?? "",
         description: groupPrimary.description ?? "",
       } : emptyForm);
-      setMessage(translate("terms.materializedUnsaved", language));
+      setMessage(translate(restored ? "terms.materializedRestored" : "terms.materializedUnsaved", language));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -689,6 +691,7 @@ export function TermsView({
   async function leaveGroup() {
     if (!pendingGroupMemberLeave) return;
     const normalized = pendingGroupMemberLeave.normalized;
+    const focusedNormalized = selected?.normalized ?? "";
     setSaving(true);
     setMessage("");
     try {
@@ -700,9 +703,9 @@ export function TermsView({
         },
       );
       setData(value);
-      const left = value.terms.find((term) => term.normalized === normalized) ?? null;
-      selection.reset(left?.normalized ?? "");
-      setForm(left ? formFor(left) : emptyForm);
+      const focused = value.terms.find((term) => term.normalized === focusedNormalized) ?? null;
+      selection.reset(focused?.normalized ?? focusedNormalized);
+      setForm(focused ? formFor(focused) : emptyForm);
       setPendingGroupMemberLeave(null);
       setMessage(translate("terms.groupMemberLeft", language));
     } catch (error) {

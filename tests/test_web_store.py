@@ -63,6 +63,82 @@ def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> 
     assert removed["removed"] == 1
 
 
+def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "Alice Alicia Alicia Jr")
+    store = WebStore(project)
+    store.save_term(
+        {
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+        }
+    )
+    store.save_term(
+        {
+            "source": "Alicia",
+            "preferred_translation": "艾丽西亚",
+            "category": "别名条目",
+            "description": "已有人物资料",
+            "aliases": ["Alicia Jr"],
+        }
+    )
+    removed = store.remove_terms({"normalized": ["alicia"]})
+    before = removed["terms_revision"]
+    assert next(item for item in removed["terms"] if item["normalized"] == "alicia")[
+        "disabled"
+    ]
+
+    restored = store.materialize_term({"normalized": "alice", "alias": "Alicia"})
+    rows = {item["normalized"]: item for item in restored["terms"]}
+    assert restored["terms_revision"] == before + 1
+    assert rows["alice"]["aliases"] == []
+    assert rows["alicia"]["source"] == "Alicia"
+    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
+    assert rows["alicia"]["category"] == "别名条目"
+    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["aliases"] == ["Alicia Jr"]
+    assert rows["alicia"]["group_primary"] == "alice"
+    assert rows["alicia"]["disabled"] is False
+    matched = match_terms(
+        "Alicia arrived",
+        load_terms(project),
+        10,
+        TermNormalization("NFKC", True),
+    )
+    assert any(
+        item["source"] == "Alicia" and item["preferred_translation"] == "艾丽西亚"
+        for item in matched
+    )
+
+
+def test_materialize_alias_restores_removed_entry_into_owner_group(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "Alice Prime Alice Alicia")
+    store = WebStore(project)
+    store.save_term({"source": "Alice Prime"})
+    store.save_term({"source": "Alice", "aliases": ["Alicia"]})
+    store.save_term({"source": "Alicia", "preferred_translation": "艾丽西亚"})
+    store.group_related_terms(
+        {
+            "normalized": "alice prime",
+            "related_normalized": "alice",
+            "primary_normalized": "alice prime",
+            "confirm": True,
+        }
+    )
+    store.remove_terms({"normalized": ["alicia"]})
+
+    restored = store.materialize_term({"normalized": "alice", "alias": "Alicia"})
+    rows = {item["normalized"]: item for item in restored["terms"]}
+    assert rows["alicia"]["group_primary"] == "alice prime"
+    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
+
+
 def _group_three_terms(store: WebStore) -> None:
     for source in ("John", "Johnny", "John Jr"):
         store.save_term({"source": source})
@@ -543,6 +619,27 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
         "Ally sings",
         "Alice and Alicia",
     ]
+
+
+def test_term_hits_include_matches_found_in_aozora_ruby_reading(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "｜猫《Aoki》出现")
+    store = WebStore(project)
+    store.save_term(
+        {
+            "source": "Aoki",
+            "category": "人名",
+            "description": None,
+            "preferred_translation": "青木",
+            "aliases": [],
+        }
+    )
+
+    hits = store.term_hits("aoki")
+
+    assert hits["total"] == 1
+    assert hits["hits"][0]["source"] == "｜猫《Aoki》出现"
 
 
 def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
