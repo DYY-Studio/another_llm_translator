@@ -1350,6 +1350,50 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     assert rows["alice"]["group_primary"] == "alicia"
 
 
+def test_web_materializes_alias_by_restoring_removed_matching_entry(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    for payload in (
+        {
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+        {
+            "source": "Alicia",
+            "preferred_translation": "艾丽西亚",
+            "category": "别名条目",
+            "description": "已有人物资料",
+            "aliases": ["Alicia Jr"],
+            "disabled": False,
+        },
+    ):
+        assert client.post("/api/v1/projects/sample/terms", json=payload).status_code == 200
+    removed = client.post(
+        "/api/v1/projects/sample/terms/remove",
+        json={"normalized": ["alicia"]},
+    )
+    assert removed.status_code == 200
+    restored = client.post(
+        "/api/v1/projects/sample/terms/materialize",
+        json={"normalized": "alice", "alias": "Alicia"},
+    )
+    assert restored.status_code == 200
+    rows = {item["normalized"]: item for item in restored.json()["terms"]}
+    assert rows["alicia"]["disabled"] is False
+    assert rows["alicia"]["group_primary"] == "alice"
+    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
+    assert rows["alicia"]["category"] == "别名条目"
+    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["aliases"] == ["Alicia Jr"]
+    assert rows["alice"]["aliases"] == []
+
+
 def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))

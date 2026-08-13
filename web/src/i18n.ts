@@ -205,6 +205,7 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.resolveAsPrimary": "以此条目裁决",
     "terms.materialize": "物化为条目",
     "terms.materializedUnsaved": "已物化为组成员；类别和说明已从组主预填，保存后才会生效。",
+    "terms.materializedRestored": "已恢复原条目并加入术语组；原有译名、类别、说明和别名已保留。",
     "terms.addAlias": "+ 添加别名",
     "terms.removeAlias": "删除别名",
     "terms.relatedTitle": "可能相关的术语",
@@ -826,6 +827,7 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.resolveAsPrimary": "Resolve with this primary",
     "terms.materialize": "Materialize",
     "terms.materializedUnsaved": "Materialized as a group member. Category and description are prefilled from the primary and take effect only after saving.",
+    "terms.materializedRestored": "The removed entry was restored and added to the term group. Its existing translation, category, description, and aliases were preserved.",
     "terms.addAlias": "+ Add alias",
     "terms.removeAlias": "Remove alias",
     "terms.relatedTitle": "Possibly related terms",
@@ -1287,7 +1289,6 @@ const termGroupReasons: Record<Language, Record<string, string>> = {
   "zh-CN": {
     primary_has_members: "组主仍有成员，不能移除或删除",
     cross_group: "目标条目属于其他术语组",
-    target_disabled: "目标条目已移除，不能加入术语组",
     candidate_has_members: "候选仍属于术语组，不能转为别名",
     group_claim: "术语组存在未裁决争用",
     stale_recommendation: "相关推荐已过期，请刷新后重试",
@@ -1299,7 +1300,6 @@ const termGroupReasons: Record<Language, Record<string, string>> = {
   en: {
     primary_has_members: "A primary with members cannot be removed or deleted",
     cross_group: "The target belongs to another term group",
-    target_disabled: "A removed target cannot join a term group",
     candidate_has_members: "A candidate in a term group cannot be converted to an alias",
     group_claim: "The term group has an unresolved claim",
     stale_recommendation: "The related recommendation is stale; refresh and try again",

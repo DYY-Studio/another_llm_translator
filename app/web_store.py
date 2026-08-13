@@ -1367,27 +1367,23 @@ class WebStore:
             target_normalized = normalize_term(alias_value, spec)
             primary = owner.get("group_primary") or normalized
             target = rows.get(target_normalized)
+            target_is_disabled = bool(target and target["disabled"])
             if target is not None:
-                if target["disabled"]:
-                    raise TermGroupError(
-                        "目标条目已移除，不能加入术语组",
-                        reason="target_disabled",
-                        normalized=target_normalized,
+                if not target_is_disabled:
+                    target_primary = target.get("group_primary") or target_normalized
+                    target_has_members = any(
+                        item.get("group_primary") == target_normalized
+                        for item in rows.values()
                     )
-                target_primary = target.get("group_primary") or target_normalized
-                target_has_members = any(
-                    item.get("group_primary") == target_normalized
-                    for item in rows.values()
-                )
-                if target_primary != primary and (
-                    target.get("group_primary") is not None or target_has_members
-                ):
-                    raise TermGroupError(
-                        "目标条目属于其他术语组",
-                        reason="cross_group",
-                        normalized=target_normalized,
-                        group_primary=target_primary,
-                    )
+                    if target_primary != primary and (
+                        target.get("group_primary") is not None or target_has_members
+                    ):
+                        raise TermGroupError(
+                            "目标条目属于其他术语组",
+                            reason="cross_group",
+                            normalized=target_normalized,
+                            group_primary=target_primary,
+                        )
 
             library = load_terms(self.project)
             current = {
@@ -1430,6 +1426,28 @@ class WebStore:
                     "description": None,
                     "preferred_translation": None,
                     "aliases": [],
+                    "group_primary": primary,
+                    "disabled": False,
+                }
+            elif target_is_disabled:
+                current[target_normalized] = {
+                    "source": target["source"],
+                    "normalized": target_normalized,
+                    "category": target.get("category"),
+                    "description": target.get("description") or "",
+                    "preferred_translation": target.get("preferred_translation"),
+                    "aliases": list(target.get("aliases", [])),
+                    "group_primary": primary,
+                    "conflicts": dict(target.get("conflicts") or {}),
+                }
+                target_override = overrides.get(
+                    target_normalized,
+                    {"normalized": target_normalized, "source": target["source"]},
+                )
+                overrides[target_normalized] = {
+                    **target_override,
+                    "normalized": target_normalized,
+                    "source": target["source"],
                     "group_primary": primary,
                     "disabled": False,
                 }
