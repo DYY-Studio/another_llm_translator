@@ -3,24 +3,25 @@ from __future__ import annotations
 import contextvars
 import copy
 import logging
+import math
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterator
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .logging_utils import (
+    _HANDLER_MARKER,
+    _PROJECT,
     LOGGER_NAME,
     _ContextFilter,
-    _HANDLER_MARKER,
     _MemoryHandler,
-    _PROJECT,
     _now,
     _remove_handler,
 )
-
 
 _ACTIVE: contextvars.ContextVar[Diagnostics | None] = contextvars.ContextVar(
     "diagnostics", default=None
@@ -56,7 +57,8 @@ class Diagnostics:
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
-        self.latest_latency_seconds: float | None = None
+        self._latency_samples_seconds: list[float] = []
+        self._latency_total_seconds = 0.0
         self.usage: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
         self._elapsed_seconds = 0.0
@@ -103,7 +105,8 @@ class Diagnostics:
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
-        self.latest_latency_seconds = None
+        self._latency_samples_seconds.clear()
+        self._latency_total_seconds = 0.0
         self.usage = None
         self.requests.clear()
         self._retained_terminal_details.clear()
@@ -227,7 +230,8 @@ class Diagnostics:
         error: bool,
     ) -> None:
         self.active_requests = max(0, self.active_requests - 1)
-        self.latest_latency_seconds = latency_seconds
+        self._latency_samples_seconds.append(latency_seconds)
+        self._latency_total_seconds += latency_seconds
         if error or (status is not None and status >= 400):
             self.http_errors += 1
         request = self._request(request_id)
@@ -346,6 +350,17 @@ class Diagnostics:
             throughput_input = round(input_tokens / elapsed, 2)
             throughput_output = round(output_tokens / elapsed, 2)
             throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
+        latency_count = len(self._latency_samples_seconds)
+        average_latency_ms = None
+        p95_latency_ms = None
+        if latency_count:
+            average_latency_ms = round(
+                self._latency_total_seconds / latency_count * 1000, 1
+            )
+            p95_rank = math.ceil(0.95 * latency_count)
+            p95_latency_ms = round(
+                sorted(self._latency_samples_seconds)[p95_rank - 1] * 1000, 1
+            )
         return {
             "metrics": {
                 "project": self.project,
@@ -355,11 +370,8 @@ class Diagnostics:
                 "http_errors": self.http_errors,
                 "retry_count": self.retry_count,
                 "rate_limit_waiting_requests": self.rate_limit_waiting_requests,
-                "latest_latency_ms": (
-                    round(self.latest_latency_seconds * 1000, 1)
-                    if self.latest_latency_seconds is not None
-                    else None
-                ),
+                "average_latency_ms": average_latency_ms,
+                "p95_latency_ms": p95_latency_ms,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usage_available": usage_available,

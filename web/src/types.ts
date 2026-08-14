@@ -145,7 +145,8 @@ export interface DiagnosticsResponse {
     http_errors: number;
     retry_count: number;
     rate_limit_waiting_requests: number;
-    latest_latency_ms: number | null;
+    average_latency_ms: number | null;
+    p95_latency_ms: number | null;
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
