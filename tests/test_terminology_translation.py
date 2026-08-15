@@ -987,7 +987,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )
@@ -1153,7 +1153,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )

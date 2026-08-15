@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig } from "../types";
+import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -62,6 +62,7 @@ export function SettingsView({ project, language }: { project: string; language:
 function ConfigSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
+  const [validators, setValidators] = useState<TranslationValidatorSummary[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -70,13 +71,15 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
 
   async function load() {
     const revision = ++loadRevision.current;
-    const [configResponse, presetResponse] = await Promise.all([
+    const [configResponse, presetResponse, validatorResponse] = await Promise.all([
       api<{ config: Record<string, unknown> }>(configPath),
       api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets"),
+      api<{ validators: TranslationValidatorSummary[] }>("/api/v1/translation-validators"),
     ]);
     if (revision !== loadRevision.current) return;
     setConfig(configResponse.config as unknown as ProjectConfig);
     setPresets(presetResponse.presets);
+    setValidators(validatorResponse.validators);
   }
 
   useEffect(() => {
@@ -134,6 +137,19 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || translate("settings.loadingConfig", language)}</p></section>;
 
   const presetOptions = presets.filter((item) => item.valid);
+  const configuredValidatorIds = new Set(config.validation.translation.validators);
+  const validatorRows = [
+    ...validators,
+    ...config.validation.translation.validators
+      .filter((validatorId) => !validators.some((item) => item.validator_id === validatorId))
+      .map((validatorId) => ({
+        validator_id: validatorId,
+        version: "",
+        label: validatorId,
+        plugin_id: "",
+        plugin_version: "",
+      })),
+  ].sort((left, right) => left.validator_id.localeCompare(right.validator_id));
   const contextLabels: Array<[ContextStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["translation", translate("stage.translation", language)],
@@ -193,8 +209,31 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
           <Field label={translate("settings.aliasCollision", language)}><select value={config.terminology.alias_primary_collision} onChange={(event) => update((draft) => { draft.terminology.alias_primary_collision = event.target.value as ProjectConfig["terminology"]["alias_primary_collision"]; })}><option value="conflict">{translate("settings.requireReview", language)}</option><option value="merge">{translate("settings.deterministicMerge", language)}</option></select></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.validation", language)} description={translate("settings.validationHint", language)}>
-          <ToggleField label={translate("settings.japaneseKana", language)} checked={config.validation.translation.japanese_kana} onChange={(value) => update((draft) => { draft.validation.translation.japanese_kana = value; })} />
-          <ToggleField label={translate("settings.koreanHangul", language)} checked={config.validation.translation.korean_hangul} onChange={(value) => update((draft) => { draft.validation.translation.korean_hangul = value; })} />
+          {validatorRows.map((validator) => {
+            const installed = Boolean(validator.plugin_id);
+            const label = validator.validator_id === "japanese_kana"
+              ? translate("settings.japaneseKana", language)
+              : validator.validator_id === "korean_hangul"
+                ? translate("settings.koreanHangul", language)
+                : validator.validator_id === "source_text_residual"
+                  ? translate("settings.sourceTextResidual", language)
+                  : validator.label;
+            const help = installed
+              ? `${validator.validator_id} · ${validator.plugin_id} ${validator.plugin_version}`
+              : translate("settings.validatorUnavailable", language);
+            return <ToggleField
+              key={validator.validator_id}
+              label={label}
+              checked={configuredValidatorIds.has(validator.validator_id)}
+              help={help}
+              onChange={(value) => update((draft) => {
+                const selected = new Set(draft.validation.translation.validators);
+                if (value) selected.add(validator.validator_id);
+                else selected.delete(validator.validator_id);
+                draft.validation.translation.validators = [...selected].sort();
+              })}
+            />;
+          })}
           <NumberField label={translate("settings.repairAttempts", language)} value={config.validation.translation.max_retry_attempts} min={0} step={1} onChange={(value) => update((draft) => { draft.validation.translation.max_retry_attempts = value; })} />
           <Field label={translate("settings.exhaustedMode", language)}><select value={config.validation.translation.exhausted_mode} onChange={(event) => update((draft) => { draft.validation.translation.exhausted_mode = event.target.value as ProjectConfig["validation"]["translation"]["exhausted_mode"]; })}><option value="fail">{translate("settings.markFailed", language)}</option><option value="warning">{translate("settings.acceptWarning", language)}</option></select></Field>
           <NumberField label={translate("settings.httpMaxAttempts", language)} value={config.retry.http_max_attempts} min={1} step={1} onChange={(value) => update((draft) => { draft.retry.http_max_attempts = value; })} />

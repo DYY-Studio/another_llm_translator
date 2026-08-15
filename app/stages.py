@@ -5,7 +5,6 @@ import csv
 import hashlib
 import io
 import json
-import re
 import shlex
 import sys
 import time
@@ -74,7 +73,12 @@ from .project import (
     load_source_files,
     prompt_file,
 )
-from .plugins import get_document_adapter, normalize_model_text
+from .plugins import (
+    get_document_adapter,
+    get_translation_validators,
+    normalize_model_text,
+)
+from .translation_validation import validate_translation_text
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
@@ -87,14 +91,6 @@ from .sqlite_storage import (
     write_json,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
-
-JAPANESE_RE = re.compile(
-    "[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
-    "\U0001b000-\U0001b0ff\U0001b100-\U0001b12f"
-    "\U0001b130-\U0001b16f\U0001aff0-\U0001afff]"
-)
-KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
-
 
 def _project_context(
     project: Path, *, stage: str | None = None
@@ -2814,30 +2810,6 @@ def match_terms(
     return _PreparedTermMatcher(library, spec).match(source, limit)
 
 
-def validate_translation_text(
-    text: str, validation: dict[str, Any]
-) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    validators = []
-    if validation["japanese_kana"]:
-        validators.append(("japanese_kana", JAPANESE_RE))
-    if validation["korean_hangul"]:
-        validators.append(("korean_hangul", KOREAN_RE))
-    for name, pattern in validators:
-        for match in pattern.finditer(text):
-            character = match.group()
-            findings.append(
-                {
-                    "validator": name,
-                    "character": character,
-                    "code_point": f"U+{ord(character):04X}",
-                    "start": match.start(),
-                    "end": match.end(),
-                }
-            )
-    return findings
-
-
 def _split_source_once(source: str) -> tuple[str, str]:
     if len(source) < 2:
         raise ConfigError("固定 Prompt 与单字符输入仍超过模型硬限制")
@@ -2964,6 +2936,9 @@ async def run_translation(
         len(segments),
     )
     _require_nonempty_segments(segments)
+    translation_validators = get_translation_validators(
+        config["validation"]["translation"]["validators"]
+    )
     language = _prompt_language(project, "translation", prompt_language)
     prompt = _prompt(project, "translation", language)
     library = load_terms(project)
@@ -3256,7 +3231,7 @@ async def run_translation(
         original_id = part_original.get(segment_id)
         if original_id is None:
             findings = validate_translation_text(
-                text, config["validation"]["translation"]
+                str(by_id[segment_id]["source"]), text, translation_validators
             )
             if findings:
                 validation_pending[segment_id] = {
@@ -3275,7 +3250,7 @@ async def run_translation(
         combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
         combined_request_id = part_results[original_id][expected_parts[-1]][1]
         findings = validate_translation_text(
-            combined, config["validation"]["translation"]
+            str(by_id[original_id]["source"]), combined, translation_validators
         )
         if findings:
             validation_pending[original_id] = {
@@ -3412,8 +3387,9 @@ async def run_translation(
                         "segment": part,
                         "candidate": candidate_part,
                         "findings": validate_translation_text(
+                            str(part["source"]),
                             candidate_part,
-                            config["validation"]["translation"],
+                            translation_validators,
                         ),
                         "request_id": subset[segment_id]["request_id"],
                     }
@@ -3500,8 +3476,9 @@ async def run_translation(
                         request_id,
                         validation_status="warning",
                         findings=validate_translation_text(
+                            str(by_id[original_id]["source"]),
                             combined,
-                            config["validation"]["translation"],
+                            translation_validators,
                         ),
                     )
                     for part_id in expected:

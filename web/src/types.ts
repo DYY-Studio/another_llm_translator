@@ -90,6 +90,14 @@ export interface ProjectSummary {
   segment_count: number;
 }
 
+export interface TranslationValidatorSummary {
+  validator_id: string;
+  version: string;
+  label: string;
+  plugin_id: string;
+  plugin_version: string;
+}
+
 export interface TaskState {
   task_id: string;
   project: string;
@@ -368,8 +376,7 @@ export interface ProjectConfig {
   };
   validation: {
     translation: {
-      japanese_kana: boolean;
-      korean_hangul: boolean;
+      validators: string[];
       max_retry_attempts: number;
       exhausted_mode: "fail" | "warning";
     };

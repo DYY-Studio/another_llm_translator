@@ -53,8 +53,7 @@ SCHEMA: dict[str, Any] = {
     },
     "validation": {
         "translation": {
-            "japanese_kana": None,
-            "korean_hangul": None,
+            "validators": None,
             "max_retry_attempts": None,
             "exhausted_mode": None,
         }
@@ -229,9 +228,16 @@ def validate_config(config: dict[str, Any]) -> None:
         "warning",
     }:
         raise ConfigError("validation.translation.exhausted_mode 必须是 fail 或 warning")
-    for key in ("japanese_kana", "korean_hangul"):
-        if not isinstance(config["validation"]["translation"][key], bool):
-            raise ConfigError(f"validation.translation.{key} 必须是布尔值")
+    validators = config["validation"]["translation"]["validators"]
+    if not isinstance(validators, list) or any(
+        not isinstance(validator_id, str) or not validator_id.strip()
+        for validator_id in validators
+    ):
+        raise ConfigError(
+            "validation.translation.validators 必须是非空字符串数组"
+        )
+    if len(validators) != len(set(validators)):
+        raise ConfigError("validation.translation.validators 不能包含重复校验器")
     validation_attempts = config["validation"]["translation"]["max_retry_attempts"]
     if (
         not isinstance(validation_attempts, int)
@@ -370,6 +376,33 @@ def load_config(path: Path) -> dict[str, Any]:
     project = config.get("project")
     if isinstance(project, dict):
         project.setdefault("target_language_tag", "")
+    validation = config.get("validation")
+    translation_validation = (
+        validation.get("translation")
+        if isinstance(validation, dict)
+        else None
+    )
+    if (
+        isinstance(translation_validation, dict)
+        and "validators" not in translation_validation
+    ):
+        legacy_keys = ("japanese_kana", "korean_hangul")
+        if all(key in translation_validation for key in legacy_keys):
+            if any(
+                type(translation_validation[key]) is not bool
+                for key in legacy_keys
+            ):
+                raise ConfigError(
+                    "旧版 validation.translation.japanese_kana 和 "
+                    "korean_hangul 必须是布尔值"
+                )
+            translation_validation["validators"] = [
+                key
+                for key in legacy_keys
+                if translation_validation[key] is True
+            ]
+            for key in legacy_keys:
+                del translation_validation[key]
     validate_config(config)
     return config
 
@@ -395,6 +428,11 @@ def _resolve_config(
     error_kind: str,
 ) -> dict[str, Any]:
     config = deepcopy(config)
+    from .plugins import translation_validator_summaries
+
+    config["_translation_validators"] = translation_validator_summaries(
+        config["validation"]["translation"]["validators"]
+    )
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
     preset = load_llm_preset(

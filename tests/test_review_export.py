@@ -668,7 +668,7 @@ async def test_applied_export_reports_translation_validation_warning(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8")
-        .replace("japanese_kana = false", "japanese_kana = true")
+        .replace("validators = []", 'validators = ["japanese_kana"]')
         .replace('exhausted_mode = "fail"', 'exhausted_mode = "warning"')
         .replace("max_retry_attempts = 2", "max_retry_attempts = 0"),
         encoding="utf-8",

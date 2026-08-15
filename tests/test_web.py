@@ -425,6 +425,14 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert next(item for item in adapters if item["adapter_id"] == "epub")[
         "import_options"
     ][0]["default"] == "aozora"
+    validators = client.get("/api/v1/translation-validators").json()[
+        "validators"
+    ]
+    assert [item["validator_id"] for item in validators] == [
+        "japanese_kana",
+        "korean_hangul",
+        "source_text_residual",
+    ]
 
 
 def test_web_creates_mixed_project_from_queued_folder_inputs(

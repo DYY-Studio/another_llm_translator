@@ -8,7 +8,7 @@ from .config import load_project_config
 from .errors import TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
-from .plugins import normalize_model_text
+from .plugins import get_translation_validators, normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
@@ -37,8 +37,8 @@ from .stages import (
     normalize_term,
     prompt_middle_digests,
     term_normalization,
-    validate_translation_text,
 )
+from .translation_validation import validate_translation_text
 
 REVIEW_STAGES = {"proofreading", "polishing"}
 
@@ -51,6 +51,9 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
+        self.translation_validators = get_translation_validators(
+            self.config["validation"]["translation"]["validators"]
+        )
 
     @property
     def project_id(self) -> str:
@@ -457,7 +460,9 @@ class WebStore:
         segment = self._require_segment(segment_id)
         text = normalize_model_text(self.files, segment, text, "translation")
         findings = validate_translation_text(
-            text, self.config["validation"]["translation"]
+            str(segment["source"]),
+            text,
+            self.translation_validators,
         )
         record = record_header(
             "stage_result",

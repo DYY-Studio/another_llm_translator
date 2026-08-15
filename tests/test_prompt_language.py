@@ -367,7 +367,7 @@ async def test_english_validation_repair_defines_candidate_scope(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )

@@ -431,8 +431,7 @@ max_terms_per_segment = 100
 alias_primary_collision = "merge"
 
 [validation.translation]
-japanese_kana = false
-korean_hangul = false
+validators = []
 max_retry_attempts = 2
 exhausted_mode = "fail"
 
@@ -608,7 +607,8 @@ failed
 - LLM Adapter ID 与定义内容 Hash
 - LLM Preset ID 与定义内容 Hash
 
-翻译还包含启用的文字校验器及 `exhausted_mode`。最大校验重试次数只影响执行，不进入指纹。
+翻译还包含启用的文字校验器 ID、插件及 Validator 版本和 `exhausted_mode`。
+最大校验重试次数只影响执行，不进入指纹。
 
 上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
 
@@ -1063,10 +1063,13 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 
 ### 翻译文字校验
 
-两个校验器可独立启用：
+校验器通过 ID 列表独立启用；内置校验器也通过可信 Python 插件注册：
 
 - `japanese_kana`：Hiragana、Katakana、Katakana Extensions、半角片假名及 Kana 扩展块。
 - `korean_hangul`：Hangul Syllables、Jamo、Compatibility Jamo 和扩展块。
+- `source_text_residual`：先检查去首尾空白后的完整原文，再检查经 NFKC 和空白折叠后的保守长片段残留。
+
+长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母；纯数字和标点不触发。该校验器默认关闭。
 
 校验发生在结构解析成功之后、写 completed 之前。
 
