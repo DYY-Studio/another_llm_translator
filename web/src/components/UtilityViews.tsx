@@ -16,7 +16,7 @@ import {
 } from "../native";
 import {
   moveFileBlock,
-  moveFileByCommand,
+  moveFilesByCommand,
   type DropPosition,
   type FileMoveCommand,
 } from "../fileOrder";
@@ -92,7 +92,6 @@ interface OptimisticFileOrder {
 
 interface ButtonReorderState {
   project: string;
-  focusedFileId: string;
 }
 
 const NATURAL_NUMBER = /^[0-9]+$/;
@@ -610,18 +609,8 @@ export function Overview({
   } | null>(null);
 
   useEffect(() => {
-    if (
-      buttonReorder
-      && (
-        buttonReorder.project !== project
-        || !value
-        || (
-          buttonReorder.focusedFileId
-          && !value.files.some((item) => item.file_id === buttonReorder.focusedFileId)
-        )
-      )
-    ) setButtonReorder(null);
-  }, [buttonReorder, project, value]);
+    if (buttonReorder && buttonReorder.project !== project) setButtonReorder(null);
+  }, [buttonReorder, project]);
 
   function closeAddFiles() {
     if (busy) return;
@@ -663,9 +652,12 @@ export function Overview({
   const fileIds = orderedFiles.map((item) => item.file_id);
   const draggedFileIdSet = new Set(draggedFileIds);
   const buttonReorderMode = buttonReorder?.project === project;
-  const focusedFileId = buttonReorderMode ? buttonReorder.focusedFileId : "";
-  const focusedFileIndex = fileIds.indexOf(focusedFileId);
-  const focusedFile = focusedFileIndex >= 0 ? orderedFiles[focusedFileIndex] : null;
+  const selectedReorderFileIds = buttonReorderMode
+    ? fileIds.filter((fileId) => selection.selectedKeys.has(fileId))
+    : [];
+  const selectedReorderFiles = buttonReorderMode
+    ? orderedFiles.filter((item) => selection.selectedKeys.has(item.file_id))
+    : [];
 
   async function upload() {
     if (!pendingInputs.length) return;
@@ -744,20 +736,27 @@ export function Overview({
   function toggleButtonReorder() {
     if (buttonReorderMode) {
       setButtonReorder(null);
+      selection.reset();
       return;
     }
     selection.reset();
     setDraggedFileIds([]);
     setDropTarget(null);
     setError("");
-    setButtonReorder({ project, focusedFileId: "" });
+    setButtonReorder({ project });
   }
 
-  function moveFocusedFile(command: FileMoveCommand) {
-    if (busy || focusedFileIndex < 0) return;
-    const nextFileIds = moveFileByCommand(fileIds, focusedFileId, command);
+  function moveSelectedFiles(command: FileMoveCommand) {
+    if (busy || selectedReorderFileIds.length === 0) return;
+    const nextFileIds = moveFilesByCommand(fileIds, selectedReorderFileIds, command);
     if (sameOrder(fileIds, nextFileIds)) return;
     void saveFileOrder(fileIds, nextFileIds);
+  }
+
+  function moveCommandDisabled(command: FileMoveCommand) {
+    return busy
+      || selectedReorderFileIds.length === 0
+      || sameOrder(fileIds, moveFilesByCommand(fileIds, selectedReorderFileIds, command));
   }
 
   function reorderHandleLabel(item: ProjectFile) {
@@ -891,15 +890,17 @@ export function Overview({
         {buttonReorderMode && (
           <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
             <span aria-live="polite">
-              {focusedFile
-                ? translate("overview.reorderFocused", language, { name: focusedFile.name })
-                : translate("overview.reorderChoose", language)}
+              {selectedReorderFiles.length === 0
+                ? translate("overview.reorderChoose", language)
+                : selectedReorderFiles.length === 1
+                  ? translate("overview.reorderFocused", language, { name: selectedReorderFiles[0].name })
+                  : translate("overview.reorderSelected", language, { count: selectedReorderFiles.length })}
             </span>
             <div className="mobile-reorder-actions">
-              <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("top")}>{translate("overview.moveTop", language)}</button>
-              <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("up")}>{translate("overview.moveUp", language)}</button>
-              <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("down")}>{translate("overview.moveDown", language)}</button>
-              <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("bottom")}>{translate("overview.moveBottom", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("top")} onClick={() => moveSelectedFiles("top")}>{translate("overview.moveTop", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("up")} onClick={() => moveSelectedFiles("up")}>{translate("overview.moveUp", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("down")} onClick={() => moveSelectedFiles("down")}>{translate("overview.moveDown", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("bottom")} onClick={() => moveSelectedFiles("bottom")}>{translate("overview.moveBottom", language)}</button>
             </div>
           </div>
         )}
@@ -913,7 +914,7 @@ export function Overview({
           {orderedFiles.map((item) => (
             <div
               key={item.file_id}
-              className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${focusedFileId === item.file_id ? " reorder-active" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
+              className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
               onDragOver={(event) => updateDropTarget(event, item.file_id)}
               onDrop={(event) => dropFile(event, item.file_id)}
             >
@@ -935,19 +936,26 @@ export function Overview({
               </button>
               <button
                 type="button"
-                className="file-row-select"
-                disabled={buttonReorderMode && busy}
-                aria-pressed={buttonReorderMode
-                  ? focusedFileId === item.file_id
-                  : selection.selectedKeys.has(item.file_id)}
+                className={`file-row-select${buttonReorderMode ? " reorder-select" : ""}`}
+                disabled={busy}
+                aria-pressed={selection.selectedKeys.has(item.file_id)}
                 onClick={(event) => {
                   if (buttonReorderMode) {
-                    setButtonReorder({ project, focusedFileId: item.file_id });
+                    selection.select(item.file_id, fileIds, {
+                      ctrlKey: true,
+                      metaKey: false,
+                      shiftKey: false,
+                    });
                     return;
                   }
                   selection.select(item.file_id, fileIds, event);
                 }}
               >
+                {buttonReorderMode && (
+                  <span className="file-row-reorder-check" aria-hidden="true">
+                    {selection.selectedKeys.has(item.file_id) ? "✓" : ""}
+                  </span>
+                )}
                 <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
               </button>
             </div>

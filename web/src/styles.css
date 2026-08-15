@@ -246,6 +246,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .file-row-drag:active { cursor: grabbing; }
 .file-row-drag:disabled { cursor: default; opacity: .45; }
 .file-row-select { min-width: 0; display: grid; grid-template-columns: 80px minmax(0, 1fr) auto; gap: 10px; padding: 14px 10px 14px 0; border: 0; background: transparent; color: inherit; text-align: left; }
+.file-row-select.reorder-select { grid-template-columns: 22px 80px minmax(0, 1fr) auto; align-items: center; }
+.file-row-reorder-check { width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--input-border); border-radius: 50%; background: var(--surface); color: var(--on-accent); font-size: 12px; line-height: 1; }
+.file-row.selected .file-row-reorder-check { border-color: var(--accent); background: var(--accent); }
 .file-row strong { overflow-wrap: anywhere; }
 .file-row small { color: var(--muted); }
 .file-list span { color: var(--muted); }
@@ -800,4 +803,5 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .overview-file-list .file-row { grid-template-columns: minmax(0, 1fr); }
   .overview-file-list .file-row-drag { display: none; }
   .overview-file-list .file-row-select { padding-left: 10px; }
+  .overview-file-list .file-row-select.reorder-select { grid-template-columns: 22px 64px minmax(0, 1fr) auto; gap: 8px; }
 }
