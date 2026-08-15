@@ -428,10 +428,16 @@ def _resolve_config(
     error_kind: str,
 ) -> dict[str, Any]:
     config = deepcopy(config)
-    from .plugins import translation_validator_summaries
+    from .plugins import resolve_translation_validators
 
-    config["_translation_validators"] = translation_validator_summaries(
+    validator_bindings = resolve_translation_validators(
         config["validation"]["translation"]["validators"]
+    )
+    config["_translation_validators"] = [
+        summary for _, summary in validator_bindings
+    ]
+    config["_translation_validator_instances"] = tuple(
+        validator for validator, _ in validator_bindings
     )
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
