@@ -1967,6 +1967,13 @@ async def run_terminology(
         len(work),
         len(completed_ids),
     )
+    reopen_completed_task = (
+        resume_run_id is None
+        and not scope.force
+        and bool(work)
+        and active is not None
+        and active.get("status") == "completed"
+    )
     usage: dict[str, Any] | None = None
     warnings = _assemble_warnings(
         stage="terminology",
@@ -2021,6 +2028,10 @@ async def run_terminology(
         },
         warnings=warnings,
     )
+
+    if reopen_completed_task:
+        active = {**active, "status": "active"}
+        write_json(project, active_path, active)
 
     preflight = _split_oversized_preflight(
         work,
@@ -4537,7 +4548,9 @@ async def run_all(
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
 ) -> dict[str, Any]:
-    _require_nonempty_segments(load_segments(project))
+    segments = load_segments(project)
+    _require_nonempty_segments(segments)
+    files = load_source_files(project)
     stages = ("terminology", "translation", "proofreading", "polishing")
     configs = {
         stage: load_project_config(project, stage=stage) for stage in stages
@@ -4569,9 +4582,23 @@ async def run_all(
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
         active = read_json(project, active_path) if record_exists(project, active_path) else None
-        if scope.force or terms is None or (
-            active and active.get("status") == "active"
-        ):
+        run_terminology_stage = scope.force or terms is None
+        if active and active.get("status") == "active":
+            run_terminology_stage = True
+        elif active and active.get("status") == "completed":
+            selected = select_scope(segments, files, scope)
+            selected_ids = {
+                str(segment["segment_id"])
+                for segment in selected
+                if not segment["is_empty"]
+            }
+            completed_ids, _ = terminology_scan_state(
+                project,
+                str(active.get("active_task_id", "")),
+                selected_ids,
+            )
+            run_terminology_stage = bool(selected_ids - completed_ids)
+        if run_terminology_stage:
             term_summary = await run_terminology(
                 project,
                 scope,
