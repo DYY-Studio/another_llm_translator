@@ -81,6 +81,35 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_compacts_project_storage_and_blocks_running_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+    blocked = client.post("/api/v1/projects/sample/storage/compact")
+    assert blocked.status_code == 400
+
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: False)
+    called: list[Path] = []
+
+    def fake_compact(project: Path) -> dict[str, int]:
+        called.append(project)
+        return {"before_bytes": 100, "after_bytes": 64, "reclaimed_bytes": 36}
+
+    monkeypatch.setattr(web_module, "compact_project_database", fake_compact)
+    response = client.post("/api/v1/projects/sample/storage/compact")
+    assert response.status_code == 200
+    assert response.json() == {
+        "before_bytes": 100,
+        "after_bytes": 64,
+        "reclaimed_bytes": 36,
+    }
+    assert called == [projects_root / "sample"]
+
+
 def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     client = TestClient(create_app(projects_root=tmp_path / "projects"))
 
