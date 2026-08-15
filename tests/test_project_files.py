@@ -56,8 +56,8 @@ def init_empty(
 def rewrite_segment_payload(project: Path, segment: dict[str, object]) -> None:
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
-            "UPDATE segments SET payload_json = ? WHERE segment_id = ?",
-            (json.dumps(segment, ensure_ascii=False), segment["segment_id"]),
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            (segment.get("part_id"), segment["segment_id"]),
         )
 
 
@@ -277,7 +277,7 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
     source.write_text("one", encoding="utf-8")
     add_project_files(project, [str(source)])
     segments = read_segments(project)
-    segments[0].pop("part_id")
+    segments[0]["part_id"] = ""
     rewrite_segment_payload(project, segments[0])
 
     with pytest.raises(ProjectError, match="part_id.*重新创建"):

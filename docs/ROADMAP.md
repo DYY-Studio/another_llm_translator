@@ -42,7 +42,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 | 15 | EPUB 普通内联格式与 Adapter 输出契约 |
 | 16 | 移除独立开发者 Editor |
 | 17 | 按需 Chunk 规划与请求内短 ID |
-| 18 | SQLite 标准项目存储（schema v1，旧 JSONL 不迁移） |
+| 18 | SQLite 标准项目存储（schema v3，v1/v2 原地迁移，旧 JSONL 不迁移） |
 | 19 | 20,000+ Segment Web 性能（窗口化查询与虚拟化） |
 | 20 | 中文与英文国际化（界面、CLI、Prompt 分语言） |
 | 20.1 | 跨边界 Chunk 与 Run 诊断指标 |

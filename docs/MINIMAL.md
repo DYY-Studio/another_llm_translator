@@ -1345,10 +1345,13 @@ HTTP 重试：
 ## 5.4 持久化与中断恢复
 
 项目内进度记录使用 `project.sqlite` 的事务、外键、唯一约束和 WAL。项目数据库
-包含明确的 `schema_version`；缺失或未知版本快速失败并提示重新创建项目，不提供
-JSONL 到 SQLite 的迁移、双写或旧格式读取。Run 的可读 `manifest.json`、配置和
+包含明确的 `schema_version`；当前项目存储 schema 为 v3：File、阶段、术语和 Run
+索引字段保存在关系列中，`payload_json` 只保留无法由关系列重建的业务字段，Segment
+完全关系化且不再有 `payload_json`。缺失或未知版本快速失败；v1/v2 项目会在打开时
+事务迁移到 v3，不提供 JSONL 到 SQLite 的迁移或双写。Run 的可读 `manifest.json`、配置和
 Prompt/Preset/Adapter 快照仍保存在对应 Run 目录，数据库中的 Run 索引负责活动任务
-发现和恢复判断。
+发现和恢复判断。迁移不会自动执行 `VACUUM`；需要回收 SQLite 空闲页时，使用 CLI
+`optimize`、Web 项目操作或对应 API 显式压缩单个项目。
 
 项目外的普通 JSON（全局配置、Preset、导出交换文件等）使用同目录临时文件写完后
 原子替换。`--dry-run` 不写入项目数据库，以保持零写入。
