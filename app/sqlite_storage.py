@@ -562,7 +562,20 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 str(row["stage"]),
                 str(row["status"]),
                 started_at,
-                _residual(value, ("schema_version", "record_type", "record_id", "project_id", "run_id", "stage", "status", "created_at")),
+                _residual(
+                    value,
+                    (
+                        "schema_version",
+                        "record_type",
+                        "record_id",
+                        "project_id",
+                        "run_id",
+                        "stage",
+                        "status",
+                        "started_at",
+                        "created_at",
+                    ),
+                ),
             )
         )
 
@@ -1286,6 +1299,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                                 "run_id",
                                 "stage",
                                 "status",
+                                "started_at",
                                 "created_at",
                             ),
                         ),
@@ -1925,15 +1939,18 @@ def latest_stage_states(
             completed_payload = row["completed_payload"]
             completed = None
             if completed_payload is not None:
-                completed = _hydrate_stage(
-                    {
-                        "record_id": row["completed_record_id"],
-                        "stage": row["completed_stage"],
-                        "segment_id": row["completed_segment_id"],
-                        "status": row["completed_status"],
-                        "payload_json": completed_payload,
-                    },
-                    _project_id(connection),
+                completed = _validate_record(
+                    _hydrate_stage(
+                        {
+                            "record_id": row["completed_record_id"],
+                            "stage": row["completed_stage"],
+                            "segment_id": row["completed_segment_id"],
+                            "status": row["completed_status"],
+                            "payload_json": completed_payload,
+                        },
+                        _project_id(connection),
+                    ),
+                    f"stage={stage} segment={row['segment_id']}",
                 )
             result[str(row["segment_id"])] = {
                 "completed": completed,

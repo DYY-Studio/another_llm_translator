@@ -21,6 +21,7 @@ from app.sqlite_storage import (
     read_segments,
     read_segment_sources,
     record_header,
+    write_json,
 )
 from tests.test_foundation import make_app_root
 
@@ -258,6 +259,33 @@ def test_compact_project_database_reclaims_deleted_pages(tmp_path: Path) -> None
     )
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_v3_run_payload_does_not_duplicate_sql_timestamps(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    run = record_header(
+        "run",
+        project_id,
+        record_id="RUN-TEST",
+        run_id="RUN-TEST",
+        stage="translation",
+        status="completed",
+        started_at="2026-08-16T12:00:00+08:00",
+        detail="kept",
+    )
+    manifest_path = project / "runs" / "RUN-TEST" / "manifest.json"
+
+    write_json(project, manifest_path, run)
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        payload = json.loads(
+            database.execute(
+                "SELECT payload_json FROM runs WHERE run_id = 'RUN-TEST'"
+            ).fetchone()[0]
+        )
+    assert payload == {"detail": "kept"}
+    assert read_json(project, manifest_path)["created_at"] == run["started_at"]
 
 
 def test_v1_project_migrates_file_order_and_drops_dead_indexes(
