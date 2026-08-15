@@ -136,7 +136,7 @@ export function AppShell({
           )}
         </div>}
       </aside>
-      <main className="main">
+      <main className={`main${stage === "overview" ? " main-overview" : ""}`}>
         {canRun && (
           <div className="mobile-run-bar">
             {canRun && (
