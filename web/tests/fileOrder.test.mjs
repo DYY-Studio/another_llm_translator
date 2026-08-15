@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { moveFileBlock, moveFileByCommand, moveFilesByCommand } from "../src/fileOrder.ts";
+import { moveFileBlock, moveFilesByCommand } from "../src/fileOrder.ts";
 
 const ORDER = ["A", "B", "C", "D", "E"];
 
@@ -43,18 +43,18 @@ test("rejects empty, duplicate, unknown, and missing move inputs", () => {
 });
 
 test("moves one file with top, up, down, and bottom commands", () => {
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "top"), ["C", "A", "B", "D", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "up"), ["A", "C", "B", "D", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "down"), ["A", "B", "D", "C", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "bottom"), ["A", "B", "D", "E", "C"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "top"), ["C", "A", "B", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "up"), ["A", "C", "B", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "down"), ["A", "B", "D", "C", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "bottom"), ["A", "B", "D", "E", "C"]);
 });
 
 test("keeps the current order for command boundaries and unknown files", () => {
-  assert.strictEqual(moveFileByCommand(ORDER, "A", "top"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "A", "up"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "E", "down"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "E", "bottom"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "X", "top"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "top"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "up"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "down"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "bottom"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["X"], "top"), ORDER);
 });
 
 test("moves a contiguous selection as a block with every command", () => {

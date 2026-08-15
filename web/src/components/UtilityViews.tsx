@@ -147,11 +147,7 @@ function sameOrder(left: string[], right: string[]) {
 
 function filesInOrder(files: ProjectFile[], fileIds: string[]) {
   const byId = new Map(files.map((item) => [item.file_id, item]));
-  const ordered = fileIds.flatMap((fileId) => {
-    const item = byId.get(fileId);
-    return item ? [item] : [];
-  });
-  return ordered.length === files.length ? ordered : files;
+  return fileIds.map((fileId) => byId.get(fileId)!);
 }
 
 function driveTypeLabel(type: string, language: Language) {
