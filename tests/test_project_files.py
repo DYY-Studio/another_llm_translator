@@ -10,7 +10,7 @@ import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, select_scope, stage_result_path
-from app.main import build_parser, parse_adapter_option_args
+from app.main import build_parser, parse_adapter_option_args, run
 from app.project import (
     add_project_files,
     init_project,
@@ -51,6 +51,21 @@ def init_empty(
     assert summary["file_count"] == summary["segment_count"] == 0
     assert (project / "input").is_dir()
     return project
+
+
+def test_optimize_cli_reports_project_storage_sizes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = init_empty(tmp_path)
+
+    assert run(["optimize", str(project)]) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert set(summary) == {"before_bytes", "after_bytes", "reclaimed_bytes"}
+    assert summary["before_bytes"] >= summary["after_bytes"]
+    assert summary["reclaimed_bytes"] == (
+        summary["before_bytes"] - summary["after_bytes"]
+    )
 
 
 def rewrite_segment_payload(project: Path, segment: dict[str, object]) -> None:

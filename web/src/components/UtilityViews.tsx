@@ -594,6 +594,8 @@ export function Overview({
   const [addFilesOpen, setAddFilesOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [storageMessage, setStorageMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
@@ -627,6 +629,7 @@ export function Overview({
     setDraggedFileIds([]);
     setDropTarget(null);
     selection.reset();
+    setStorageMessage("");
     onProject(nextProject);
   }
 
@@ -743,7 +746,7 @@ export function Overview({
   }
 
   function moveSelectedFiles(command: FileMoveCommand) {
-    if (busy || selectedReorderFileIds.length === 0) return;
+    if (busy || compacting || selectedReorderFileIds.length === 0) return;
     const nextFileIds = moveFilesByCommand(fileIds, selectedReorderFileIds, command);
     if (sameOrder(fileIds, nextFileIds)) return;
     void saveFileOrder(fileIds, nextFileIds);
@@ -751,6 +754,7 @@ export function Overview({
 
   function moveCommandDisabled(command: FileMoveCommand) {
     return busy
+      || compacting
       || selectedReorderFileIds.length === 0
       || sameOrder(fileIds, moveFilesByCommand(fileIds, selectedReorderFileIds, command));
   }
@@ -765,7 +769,7 @@ export function Overview({
   }
 
   function startFileDrag(event: ReactDragEvent<HTMLButtonElement>, fileId: string) {
-    if (busy || buttonReorderMode || orderedFiles.length < 2) {
+    if (busy || compacting || buttonReorderMode || orderedFiles.length < 2) {
       event.preventDefault();
       return;
     }
@@ -785,7 +789,7 @@ export function Overview({
   }
 
   function updateDropTarget(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
-    if (busy || buttonReorderMode || orderedFiles.length < 2) return;
+    if (busy || compacting || buttonReorderMode || orderedFiles.length < 2) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     if (draggedFileIdSet.has(fileId)) {
@@ -805,7 +809,7 @@ export function Overview({
 
   function dropFile(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
     event.preventDefault();
-    if (buttonReorderMode) return;
+    if (busy || compacting || buttonReorderMode) return;
     let movingFileIds = draggedFileIds;
     if (movingFileIds.length === 0) {
       try {
@@ -849,6 +853,28 @@ export function Overview({
     }
   }
 
+  async function compactStorage() {
+    if (!window.confirm(translate("overview.compactConfirm", language))) return;
+    setCompacting(true);
+    setError("");
+    setStorageMessage("");
+    try {
+      const result = await api<{ reclaimed_bytes: number }>(
+        `/api/v1/projects/${project}/storage/compact`,
+        { method: "POST" },
+      );
+      setStorageMessage(
+        translate("overview.compactDone", language, {
+          size: formatSize(result.reclaimed_bytes),
+        }),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setCompacting(false);
+    }
+  }
+
   return (
     <div className="page overview-page">
       <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
@@ -859,23 +885,28 @@ export function Overview({
           <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
           <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
         </div>
-        <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+        <div className="overview-project-actions">
+          <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
+            {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
+          </button>
+          <button className="danger-button" disabled={busy || compacting} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+        </div>
       </div>
       <div className="overview-file-section">
         <div className="section-heading">
         <div><h2>{translate("overview.fileHeading", language)}</h2><p>{translate("overview.fileHint", language)}</p></div>
         <div className="section-actions overview-file-actions">
-          <button className="primary-button" disabled={busy || buttonReorderMode} onClick={openAddFiles}>
+          <button className="primary-button" disabled={busy || compacting || buttonReorderMode} onClick={openAddFiles}>
             {translate("overview.addFiles", language)}
           </button>
-          <button className="danger-button" disabled={busy || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
+          <button className="danger-button" disabled={busy || compacting || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             {translate("overview.remove", language)}
           </button>
           <button
             type="button"
             className="quiet-button mobile-reorder-toggle"
             aria-pressed={buttonReorderMode}
-            disabled={busy || (!buttonReorderMode && orderedFiles.length < 2)}
+            disabled={busy || compacting || (!buttonReorderMode && orderedFiles.length < 2)}
             onClick={toggleButtonReorder}
           >
             {translate(buttonReorderMode ? "overview.reorderDone" : "overview.reorderStart", language)}
@@ -883,6 +914,7 @@ export function Overview({
         </div>
         </div>
         {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+        {storageMessage && <button className="success-banner" onClick={() => setStorageMessage("")}>{storageMessage}</button>}
         {buttonReorderMode && (
           <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
             <span aria-live="polite">
@@ -917,8 +949,8 @@ export function Overview({
               <button
                 type="button"
                 className="file-row-drag"
-                draggable={!busy && !buttonReorderMode && orderedFiles.length > 1}
-                disabled={busy || buttonReorderMode || orderedFiles.length < 2}
+                draggable={!busy && !compacting && !buttonReorderMode && orderedFiles.length > 1}
+                disabled={busy || compacting || buttonReorderMode || orderedFiles.length < 2}
                 aria-label={reorderHandleLabel(item)}
                 title={reorderHandleLabel(item)}
                 onClick={(event) => event.stopPropagation()}
@@ -933,7 +965,7 @@ export function Overview({
               <button
                 type="button"
                 className={`file-row-select${buttonReorderMode ? " reorder-select" : ""}`}
-                disabled={busy}
+                disabled={busy || compacting}
                 aria-pressed={selection.selectedKeys.has(item.file_id)}
                 onClick={(event) => {
                   if (buttonReorderMode) {
