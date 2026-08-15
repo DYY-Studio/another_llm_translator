@@ -75,7 +75,6 @@ from .project import (
 )
 from .plugins import (
     get_document_adapter,
-    get_translation_validators,
     normalize_model_text,
 )
 from .translation_validation import validate_translation_text
@@ -2936,9 +2935,7 @@ async def run_translation(
         len(segments),
     )
     _require_nonempty_segments(segments)
-    translation_validators = get_translation_validators(
-        config["validation"]["translation"]["validators"]
-    )
+    translation_validators = config["_translation_validator_instances"]
     language = _prompt_language(project, "translation", prompt_language)
     prompt = _prompt(project, "translation", language)
     library = load_terms(project)

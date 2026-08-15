@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from app.config import load_project_config
 from app.errors import ConfigError, ProjectError
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
     load_plugins,
-    translation_validator_summaries,
+    resolve_translation_validators,
 )
+from app.project import init_project
 from app.translation_validation import (
     SourceTextResidualValidator,
     TranslationValidationMatch,
     validate_translation_text,
 )
+from app.web_store import WebStore
+from tests.test_foundation import make_app_root
 
 
 class FakeEntryPoint:
@@ -121,7 +127,8 @@ def test_plugin_host_rejects_duplicate_translation_validator(
 
 
 def test_builtin_translation_validator_summaries_are_complete() -> None:
-    summaries = translation_validator_summaries()
+    bindings = resolve_translation_validators()
+    summaries = [summary for _, summary in bindings]
     assert [item["validator_id"] for item in summaries] == [
         "japanese_kana",
         "korean_hangul",
@@ -155,7 +162,7 @@ def test_external_translation_validator_is_discoverable(
 
     summary = next(
         item
-        for item in translation_validator_summaries()
+        for _, item in resolve_translation_validators()
         if item["validator_id"] == "external_example"
     )
     assert summary == {
@@ -165,3 +172,120 @@ def test_external_translation_validator_is_discoverable(
         "plugin_id": "external-validator-plugin",
         "plugin_version": "3",
     }
+
+
+def test_translation_validator_resolution_loads_entry_point_once_and_reuses_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExternalValidator:
+        validator_id = "external_example"
+        version = "2"
+        label = "External example"
+
+        def validate(self, source: str, translation: str) -> tuple[()]:
+            del source, translation
+            return ()
+
+    validator = ExternalValidator()
+    descriptor = PluginDescriptor(
+        plugin_id="external-validator-plugin",
+        version="3",
+        protocol_version=PLUGIN_PROTOCOL_VERSION,
+        translation_validators=(validator,),
+    )
+    load_count = 0
+
+    class CountingEntryPoint:
+        name = "validator-fixture"
+
+        def load(self) -> object:
+            nonlocal load_count
+            load_count += 1
+            return descriptor
+
+    monkeypatch.setattr(
+        "app.plugins.entry_points",
+        lambda **_: [CountingEntryPoint()],
+    )
+
+    bindings = resolve_translation_validators(["external_example"])
+
+    assert load_count == 1
+    assert len(bindings) == 1
+    instance, summary = bindings[0]
+    assert instance is validator
+    assert summary["validator_id"] == "external_example"
+    assert summary["plugin_version"] == "3"
+
+
+def test_project_config_and_web_store_reuse_one_validator_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="validator-project",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "validators = []", 'validators = ["external_example"]'
+        ),
+        encoding="utf-8",
+    )
+
+    class ExternalValidator:
+        validator_id = "external_example"
+        version = "2"
+        label = "External example"
+
+        def validate(self, source: str, translation: str) -> tuple[()]:
+            del source, translation
+            return ()
+
+    validator = ExternalValidator()
+    descriptor = PluginDescriptor(
+        plugin_id="external-validator-plugin",
+        version="3",
+        protocol_version=PLUGIN_PROTOCOL_VERSION,
+        translation_validators=(validator,),
+    )
+    load_count = 0
+
+    class CountingEntryPoint:
+        name = "validator-fixture"
+
+        def load(self) -> object:
+            nonlocal load_count
+            load_count += 1
+            return descriptor
+
+    monkeypatch.setattr(
+        "app.plugins.entry_points",
+        lambda **_: [CountingEntryPoint()],
+    )
+
+    config = load_project_config(project, presets_root=app_root)
+
+    assert load_count == 1
+    assert config["_translation_validators"] == [
+        {
+            "validator_id": "external_example",
+            "version": "2",
+            "label": "External example",
+            "plugin_id": "external-validator-plugin",
+            "plugin_version": "3",
+        }
+    ]
+    assert config["_translation_validator_instances"] == (validator,)
+    assert config["_translation_validator_instances"][0] is validator
+
+    load_count = 0
+    store = WebStore(project)
+    assert load_count == 1
+    assert store.config["_translation_validator_instances"][0] is validator

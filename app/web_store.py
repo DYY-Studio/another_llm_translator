@@ -8,7 +8,7 @@ from .config import load_project_config
 from .errors import TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
-from .plugins import get_translation_validators, normalize_model_text
+from .plugins import normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
@@ -51,9 +51,6 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
-        self.translation_validators = get_translation_validators(
-            self.config["validation"]["translation"]["validators"]
-        )
 
     @property
     def project_id(self) -> str:
@@ -462,7 +459,7 @@ class WebStore:
         findings = validate_translation_text(
             str(segment["source"]),
             text,
-            self.translation_validators,
+            self.config["_translation_validator_instances"],
         )
         record = record_header(
             "stage_result",

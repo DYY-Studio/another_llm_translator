@@ -202,48 +202,34 @@ def get_document_adapter(adapter_id: str) -> DocumentAdapter:
     raise UsageError(f"未安装 Document Adapter：{adapter_id}")
 
 
-def translation_validator_summaries(
+def resolve_translation_validators(
     validator_ids: list[str] | tuple[str, ...] | None = None,
-) -> list[dict[str, str]]:
+) -> tuple[tuple[TranslationValidator, dict[str, str]], ...]:
     requested = set(validator_ids) if validator_ids is not None else None
-    values: list[dict[str, str]] = []
+    values: list[tuple[TranslationValidator, dict[str, str]]] = []
     for plugin in load_plugins():
         for validator in plugin.translation_validators:
             if requested is not None and validator.validator_id not in requested:
                 continue
             values.append(
-                {
-                    "validator_id": validator.validator_id,
-                    "version": validator.version,
-                    "label": validator.label,
-                    "plugin_id": plugin.plugin_id,
-                    "plugin_version": plugin.version,
-                }
+                (
+                    validator,
+                    {
+                        "validator_id": validator.validator_id,
+                        "version": validator.version,
+                        "label": validator.label,
+                        "plugin_id": plugin.plugin_id,
+                        "plugin_version": plugin.version,
+                    },
+                )
             )
-    values.sort(key=lambda value: value["validator_id"])
+    values.sort(key=lambda value: value[1]["validator_id"])
     if requested is not None:
-        found = {value["validator_id"] for value in values}
+        found = {summary["validator_id"] for _, summary in values}
         missing = sorted(requested - found)
         if missing:
-            raise ConfigError(
-                "未安装翻译校验器：" + ", ".join(missing)
-            )
-    return values
-
-
-def get_translation_validators(
-    validator_ids: list[str] | tuple[str, ...],
-) -> tuple[TranslationValidator, ...]:
-    requested = set(validator_ids)
-    found: dict[str, TranslationValidator] = {}
-    for plugin in load_plugins():
-        for validator in plugin.translation_validators:
-            if validator.validator_id in requested:
-                found[validator.validator_id] = validator
-    missing = sorted(requested - found.keys())
-    if missing:
-        raise ConfigError("未安装翻译校验器：" + ", ".join(missing))
-    return tuple(found[validator_id] for validator_id in sorted(requested))
+            raise ConfigError("未安装翻译校验器：" + ", ".join(missing))
+    return tuple(values)
 
 
 def normalize_model_text(

@@ -58,7 +58,7 @@ from .logging_utils import get_logger
 from .plugins import (
     document_adapter_summaries,
     get_document_adapter_for_extension,
-    translation_validator_summaries,
+    resolve_translation_validators,
 )
 from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
@@ -638,7 +638,8 @@ def create_app(
 
     @app.get("/api/v1/translation-validators")
     async def translation_validators() -> dict[str, Any]:
-        return {"validators": translation_validator_summaries()}
+        bindings = resolve_translation_validators()
+        return {"validators": [summary for _, summary in bindings]}
 
     def validate_preset_payload(
         preset_id: str, payload: dict[str, Any]

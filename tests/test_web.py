@@ -1306,7 +1306,7 @@ def test_web_rejects_terminology_clear_while_project_task_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    projects_root, project = make_project(tmp_path)
+    projects_root, _ = make_project(tmp_path)
     app = create_app(projects_root=projects_root)
     monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _root: True)
     client = TestClient(app)
