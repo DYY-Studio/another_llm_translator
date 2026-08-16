@@ -51,11 +51,6 @@ def parse_aozora_text(
     return fragments, found_ruby
 
 
-def aozora_base_text(value: str) -> str:
-    """Return strict Aozora ruby as its base text for semantic matching."""
-    return aozora_match_views(value)[0]
-
-
 def aozora_match_views(value: str) -> tuple[str, ...]:
     """Return independent base and adjacent-reading views for term matching."""
     fragments, found_ruby = parse_aozora_text(value)

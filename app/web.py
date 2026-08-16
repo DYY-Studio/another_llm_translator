@@ -58,6 +58,7 @@ from .logging_utils import get_logger
 from .plugins import (
     document_adapter_summaries,
     get_document_adapter_for_extension,
+    resolve_translation_validators,
 )
 from .project import (
     APP_ROOT as DEFAULT_APP_ROOT,
@@ -80,6 +81,7 @@ from .server_config import load_server_config, save_server_config
 from .sqlite_storage import (
     atomic_write_json,
     atomic_write_text,
+    compact_project_database,
     database_path,
     read_json,
 )
@@ -635,6 +637,11 @@ def create_app(
     async def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
 
+    @app.get("/api/v1/translation-validators")
+    async def translation_validators() -> dict[str, Any]:
+        bindings = resolve_translation_validators()
+        return {"validators": [summary for _, summary in bindings]}
+
     def validate_preset_payload(
         preset_id: str, payload: dict[str, Any]
     ) -> LLMPreset:
@@ -1139,6 +1146,14 @@ def create_app(
             search=params.get("q") or None,
             stage=params.get("stage", "translation"),
         )
+
+    @app.post("/api/v1/projects/{name}/storage/compact")
+    async def compact_project_route(name: str) -> dict[str, int]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，结束或取消后才能压缩存储")
+        with project_write_lock(root):
+            return compact_project_database(root)
 
     @app.get("/api/v1/projects/{name}/segments/ids")
     async def segment_index(name: str, request: Request) -> dict[str, Any]:

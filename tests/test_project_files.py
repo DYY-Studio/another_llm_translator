@@ -10,7 +10,7 @@ import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, select_scope, stage_result_path
-from app.main import build_parser, parse_adapter_option_args
+from app.main import build_parser, parse_adapter_option_args, run
 from app.project import (
     add_project_files,
     init_project,
@@ -53,11 +53,26 @@ def init_empty(
     return project
 
 
+def test_optimize_cli_reports_project_storage_sizes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = init_empty(tmp_path)
+
+    assert run(["optimize", str(project)]) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert set(summary) == {"before_bytes", "after_bytes", "reclaimed_bytes"}
+    assert summary["before_bytes"] >= summary["after_bytes"]
+    assert summary["reclaimed_bytes"] == (
+        summary["before_bytes"] - summary["after_bytes"]
+    )
+
+
 def rewrite_segment_payload(project: Path, segment: dict[str, object]) -> None:
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
-            "UPDATE segments SET payload_json = ? WHERE segment_id = ?",
-            (json.dumps(segment, ensure_ascii=False), segment["segment_id"]),
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            (segment.get("part_id"), segment["segment_id"]),
         )
 
 
@@ -277,7 +292,7 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
     source.write_text("one", encoding="utf-8")
     add_project_files(project, [str(source)])
     segments = read_segments(project)
-    segments[0].pop("part_id")
+    segments[0]["part_id"] = ""
     rewrite_segment_payload(project, segments[0])
 
     with pytest.raises(ProjectError, match="part_id.*重新创建"):

@@ -47,12 +47,13 @@ function clock(value: string, language: Language) {
 function layoutDetailsColumns(bar: HTMLDivElement) {
   const spans = Array.from(bar.querySelectorAll<HTMLElement>(":scope > span"));
   if (!spans.length) return;
-  bar.style.gridTemplateColumns = "repeat(6, max-content)";
+  const maxColumns = spans.length;
+  bar.style.gridTemplateColumns = `repeat(${maxColumns}, max-content)`;
   const widths = spans.map((span) => span.getBoundingClientRect().width);
   const inner = bar.clientWidth - 32;
   const gap = 24;
   let columns = 1;
-  for (let k = 6; k >= 1; k--) {
+  for (let k = maxColumns; k >= 1; k--) {
     const tracks = new Array<number>(k).fill(0);
     for (let index = 0; index < widths.length; index++) {
       tracks[index % k] = Math.max(tracks[index % k], widths[index]);
@@ -355,7 +356,8 @@ export function DiagnosticsView({ language }: { language: Language }) {
 
       <div className="diagnostics-details" ref={detailsRef} aria-label={translate("diagnostics.requestSummary", language)}>
         <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : translate("diagnostics.unavailable", language)}</strong></span>
-        <span>{translate("diagnostics.latency", language)} <strong>{number(metrics?.latest_latency_ms ?? null, language, " ms")}</strong></span>
+        <span>{translate("diagnostics.averageLatency", language)} <strong>{number(metrics?.average_latency_ms ?? null, language, " ms")}</strong></span>
+        <span>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.httpErrors", language)} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
         <span>{translate("diagnostics.retries", language)} <strong>{number(metrics?.retry_count ?? 0, language)}</strong></span>
         <span>{translate("diagnostics.rateLimitWaits", language)} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>

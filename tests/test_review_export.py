@@ -14,6 +14,7 @@ from app.config import load_project_config
 from app.errors import IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
+from app.project import add_project_files
 from app.stages import (
     export_project,
     inspect_full,
@@ -280,6 +281,47 @@ async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> No
     assert read_jsonl(project, project / "stages" / "polishing.jsonl")
     assert not (project / "stages" / "proofreading_applied.jsonl").exists()
     assert not (project / "stages" / "polishing_applied.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_run_all_scans_terms_for_new_files_after_completed_task(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
+    try:
+        first = await run_all(project, Scope(), http_client=client)
+        second = await run_all(project, Scope(), http_client=client)
+        source = tmp_path / "second.txt"
+        source.write_text("two", encoding="utf-8")
+        add_project_files(project, [str(source)])
+        third = await run_all(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert [step["stage"] for step in first["steps"]] == [
+        "terminology",
+        "translation",
+        "proofreading",
+        "polishing",
+    ]
+    assert [step["stage"] for step in second["steps"]] == [
+        "translation",
+        "proofreading",
+        "polishing",
+    ]
+    assert [step["stage"] for step in third["steps"]] == [
+        "terminology",
+        "translation",
+        "proofreading",
+        "polishing",
+    ]
 
 
 @pytest.mark.asyncio
@@ -668,7 +710,7 @@ async def test_applied_export_reports_translation_validation_warning(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8")
-        .replace("japanese_kana = false", "japanese_kana = true")
+        .replace("validators = []", 'validators = ["japanese_kana"]')
         .replace('exhausted_mode = "fail"', 'exhausted_mode = "warning"')
         .replace("max_retry_attempts = 2", "max_retry_attempts = 0"),
         encoding="utf-8",

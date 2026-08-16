@@ -91,10 +91,8 @@ max_terms_per_segment = 100
 alias_primary_collision = "merge"
 
 [validation.translation]
-# 是否检查翻译结果中残留的日语平假名、片假名及相关 Kana Unicode 区块。
-japanese_kana = false
-# 是否检查翻译结果中残留的韩语音节、Jamo 及兼容/扩展 Unicode 区块。
-korean_hangul = false
+# 启用的翻译校验器 ID；可由可信 Python 插件扩展。原文残留默认关闭。
+validators = []
 # 初始翻译通过结构校验后，文字校验失败时最多执行多少轮定向修复。
 # 设为 0 表示不发起文字修复，直接按 exhausted_mode 处理首次失败候选。
 max_retry_attempts = 2

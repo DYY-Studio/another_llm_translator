@@ -1112,7 +1112,6 @@ export function TermsView({
       {pendingRelatedGroup && selected && (
         <RelatedGroupDialog
           language={language}
-          selected={selected}
           candidate={pendingRelatedGroup}
           primary={relatedPrimary}
           selectedRoot={selected.group_primary ?? selected.normalized}
@@ -1266,7 +1265,6 @@ function ConfirmDialog({
 
 function RelatedGroupDialog({
   language,
-  selected,
   candidate,
   primary,
   selectedRoot,
@@ -1277,7 +1275,6 @@ function RelatedGroupDialog({
   onConfirm,
 }: {
   language: Language;
-  selected: Term;
   candidate: RelatedTerm;
   primary: string;
   selectedRoot: string;

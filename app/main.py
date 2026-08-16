@@ -12,6 +12,7 @@ from .errors import AppError, UsageError
 from .i18n import cli_language
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .locking import project_write_lock
+from .sqlite_storage import compact_project_database
 from .project import (
     add_project_files,
     init_project,
@@ -96,6 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser("inspect", help="检查项目状态")
     inspect.add_argument("project")
     inspect.add_argument("--dry-run", action="store_true")
+
+    subparsers.add_parser("optimize", help="压缩项目 SQLite 存储").add_argument(
+        "project"
+    )
 
     for name, help_text in (
         ("terminology", "提取并发布术语"),
@@ -298,6 +303,16 @@ def run(argv: list[str] | None = None) -> int:
             "command complete command=inspect files=%d segments=%d",
             summary["files"],
             summary["segments"],
+        )
+        return 0
+    if args.command == "optimize":
+        project = _resolve_project(args)
+        with project_write_lock(project):
+            summary = compact_project_database(project)
+        emit_summary(summary)
+        logger.info(
+            "command complete command=optimize reclaimed_bytes=%d",
+            summary["reclaimed_bytes"],
         )
         return 0
     if args.command in {

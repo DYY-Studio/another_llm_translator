@@ -487,9 +487,21 @@ def stage_fingerprint(
             data["terminology"] = config["terminology"]
         if stage == "translation":
             data["validation"] = {
-                key: value
-                for key, value in config["validation"]["translation"].items()
-                if key != "max_retry_attempts"
+                "validators": [
+                    {
+                        key: summary[key]
+                        for key in (
+                            "validator_id",
+                            "version",
+                            "plugin_id",
+                            "plugin_version",
+                        )
+                    }
+                    for summary in config.get("_translation_validators", [])
+                ],
+                "exhausted_mode": config["validation"]["translation"][
+                    "exhausted_mode"
+                ],
             }
     encoded = json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -995,6 +1007,7 @@ def create_run(
         reused_segment_count=reused_count,
         document_adapters=config.get("_document_adapters", {}),
         document_adapter_options=config.get("_document_adapter_options", {}),
+        translation_validators=config.get("_translation_validators", []),
         **(details or {}),
         started_at=utc_now(),
         completed_at=None,

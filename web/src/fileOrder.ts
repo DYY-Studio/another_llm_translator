@@ -28,29 +28,37 @@ export function moveFileBlock(
   ];
 }
 
-export function moveFileByCommand(
+export function moveFilesByCommand(
   fileIds: string[],
-  fileId: string,
+  movedFileIds: string[],
   command: FileMoveCommand,
 ) {
-  const index = fileIds.indexOf(fileId);
-  if (index < 0) return fileIds;
+  const moved = new Set(movedFileIds);
+  if (
+    moved.size === 0
+    || moved.size !== movedFileIds.length
+    || movedFileIds.some((fileId) => !fileIds.includes(fileId))
+  ) return fileIds;
+
+  const orderedMoved = fileIds.filter((fileId) => moved.has(fileId));
+  const remaining = fileIds.filter((fileId) => !moved.has(fileId));
+  if (remaining.length === 0) return fileIds;
+
   if (command === "top") {
-    return index === 0
-      ? fileIds
-      : moveFileBlock(fileIds, [fileId], fileIds[0], "before");
+    return moveFileBlock(fileIds, orderedMoved, remaining[0], "before");
   }
+  if (command === "bottom") {
+    return moveFileBlock(fileIds, orderedMoved, remaining[remaining.length - 1], "after");
+  }
+
+  const firstSelectedIndex = fileIds.indexOf(orderedMoved[0]);
+  const lastSelectedIndex = fileIds.indexOf(orderedMoved[orderedMoved.length - 1]);
   if (command === "up") {
-    return index === 0
+    return firstSelectedIndex <= 0
       ? fileIds
-      : moveFileBlock(fileIds, [fileId], fileIds[index - 1], "before");
+      : moveFileBlock(fileIds, orderedMoved, fileIds[firstSelectedIndex - 1], "before");
   }
-  if (command === "down") {
-    return index === fileIds.length - 1
-      ? fileIds
-      : moveFileBlock(fileIds, [fileId], fileIds[index + 1], "after");
-  }
-  return index === fileIds.length - 1
+  return lastSelectedIndex >= fileIds.length - 1
     ? fileIds
-    : moveFileBlock(fileIds, [fileId], fileIds[fileIds.length - 1], "after");
+    : moveFileBlock(fileIds, orderedMoved, fileIds[lastSelectedIndex + 1], "after");
 }

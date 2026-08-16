@@ -4,10 +4,20 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any
 
-from .documents import DocumentAdapter, DocumentChoiceOption, normalize_document_output
+from .documents import (
+    DocumentAdapter,
+    DocumentChoiceOption,
+    normalize_document_output,
+)
 from .errors import ConfigError, ProjectError, UsageError
+from .translation_validation import (
+    JapaneseKanaValidator,
+    KoreanHangulValidator,
+    SourceTextResidualValidator,
+    TranslationValidator,
+)
 
-PLUGIN_PROTOCOL_VERSION = 7
+PLUGIN_PROTOCOL_VERSION = 8
 PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
 
 
@@ -17,6 +27,7 @@ class PluginDescriptor:
     version: str
     protocol_version: int
     document_adapters: tuple[DocumentAdapter, ...] = ()
+    translation_validators: tuple[TranslationValidator, ...] = ()
 
 
 def _builtin_plugins() -> tuple[PluginDescriptor, ...]:
@@ -29,6 +40,16 @@ def _builtin_plugins() -> tuple[PluginDescriptor, ...]:
             version="1",
             protocol_version=PLUGIN_PROTOCOL_VERSION,
             document_adapters=(TXTDocumentAdapter(), EPUBDocumentAdapter()),
+        ),
+        PluginDescriptor(
+            plugin_id="builtin-translation-validation",
+            version="1",
+            protocol_version=PLUGIN_PROTOCOL_VERSION,
+            translation_validators=(
+                JapaneseKanaValidator(),
+                KoreanHangulValidator(),
+                SourceTextResidualValidator(),
+            ),
         ),
     )
 
@@ -46,6 +67,7 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
     seen_plugins: set[str] = set()
     seen_adapters: set[str] = set()
     seen_extensions: dict[str, str] = {}
+    seen_validators: set[str] = set()
     for plugin in plugins:
         if plugin.protocol_version != PLUGIN_PROTOCOL_VERSION:
             raise ConfigError(
@@ -145,6 +167,30 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     )
                 seen_options.add(option.option_id)
             seen_adapters.add(adapter.adapter_id)
+        validators = getattr(plugin, "translation_validators", None)
+        if not isinstance(validators, tuple):
+            raise ConfigError(
+                f"翻译校验器声明无效：{plugin.plugin_id}"
+            )
+        for validator in validators:
+            validator_id = getattr(validator, "validator_id", None)
+            version = getattr(validator, "version", None)
+            label = getattr(validator, "label", None)
+            validate = getattr(validator, "validate", None)
+            if (
+                not isinstance(validator_id, str)
+                or not validator_id.strip()
+                or validator_id in seen_validators
+                or not isinstance(version, str)
+                or not version.strip()
+                or not isinstance(label, str)
+                or not label.strip()
+                or not callable(validate)
+            ):
+                raise ConfigError(
+                    f"翻译校验器描述不完整：{plugin.plugin_id}.{validator_id}"
+                )
+            seen_validators.add(validator_id)
     return tuple(plugins)
 
 
@@ -154,6 +200,36 @@ def get_document_adapter(adapter_id: str) -> DocumentAdapter:
             if adapter.adapter_id == adapter_id:
                 return adapter
     raise UsageError(f"未安装 Document Adapter：{adapter_id}")
+
+
+def resolve_translation_validators(
+    validator_ids: list[str] | tuple[str, ...] | None = None,
+) -> tuple[tuple[TranslationValidator, dict[str, str]], ...]:
+    requested = set(validator_ids) if validator_ids is not None else None
+    values: list[tuple[TranslationValidator, dict[str, str]]] = []
+    for plugin in load_plugins():
+        for validator in plugin.translation_validators:
+            if requested is not None and validator.validator_id not in requested:
+                continue
+            values.append(
+                (
+                    validator,
+                    {
+                        "validator_id": validator.validator_id,
+                        "version": validator.version,
+                        "label": validator.label,
+                        "plugin_id": plugin.plugin_id,
+                        "plugin_version": plugin.version,
+                    },
+                )
+            )
+    values.sort(key=lambda value: value[1]["validator_id"])
+    if requested is not None:
+        found = {summary["validator_id"] for _, summary in values}
+        missing = sorted(requested - found)
+        if missing:
+            raise ConfigError("未安装翻译校验器：" + ", ".join(missing))
+    return tuple(values)
 
 
 def normalize_model_text(

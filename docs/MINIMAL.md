@@ -431,8 +431,7 @@ max_terms_per_segment = 100
 alias_primary_collision = "merge"
 
 [validation.translation]
-japanese_kana = false
-korean_hangul = false
+validators = []
 max_retry_attempts = 2
 exhausted_mode = "fail"
 
@@ -608,7 +607,8 @@ failed
 - LLM Adapter ID 与定义内容 Hash
 - LLM Preset ID 与定义内容 Hash
 
-翻译还包含启用的文字校验器及 `exhausted_mode`。最大校验重试次数只影响执行，不进入指纹。
+翻译还包含启用的文字校验器 ID、插件及 Validator 版本和 `exhausted_mode`。
+最大校验重试次数只影响执行，不进入指纹。
 
 上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
 
@@ -1006,8 +1006,12 @@ BOM 的 UTF-8。
 4. 有推荐译名者优先。
 5. 每个 Segment 最多 `max_terms_per_segment` 个术语组。
 
-命中成员时注入组主和实际命中的成员，成员额外携带 `primary_source`。截断先按组
-执行再展开，因此不会拆散组；同组多个成员命中时组主只出现一次。
+命中成员时注入组主和实际命中的成员，成员额外携带 `primary_source`。翻译、校对和
+润色请求中，每个注入条目的 `aliases` 只包含当前请求覆盖的 Segment 中实际命中的
+alias；主名称命中但没有命中 alias 时为空。未直接命中的组主不携带 alias，同组多个
+成员命中时组主只出现一次。
+批量请求中同一条目的多个 alias 命中时，`aliases` 使用去重并集。术语库中保存的完整
+aliases 不受影响。截断先按组执行再展开，因此不会拆散组。
 
 不持久化 occurrence 文件或逐 Segment 术语 Hash。每次构建翻译请求时重新确定匹配术语。
 
@@ -1059,10 +1063,13 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 
 ### 翻译文字校验
 
-两个校验器可独立启用：
+校验器通过 ID 列表独立启用；内置校验器也通过可信 Python 插件注册：
 
 - `japanese_kana`：Hiragana、Katakana、Katakana Extensions、半角片假名及 Kana 扩展块。
 - `korean_hangul`：Hangul Syllables、Jamo、Compatibility Jamo 和扩展块。
+- `source_text_residual`：先检查去首尾空白后的完整原文，再检查经 NFKC 和空白折叠后的保守长片段残留。
+
+长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母；纯数字和标点不触发。该校验器默认关闭。
 
 校验发生在结构解析成功之后、写 completed 之前。
 
@@ -1338,10 +1345,13 @@ HTTP 重试：
 ## 5.4 持久化与中断恢复
 
 项目内进度记录使用 `project.sqlite` 的事务、外键、唯一约束和 WAL。项目数据库
-包含明确的 `schema_version`；缺失或未知版本快速失败并提示重新创建项目，不提供
-JSONL 到 SQLite 的迁移、双写或旧格式读取。Run 的可读 `manifest.json`、配置和
+包含明确的 `schema_version`；当前项目存储 schema 为 v3：File、阶段、术语和 Run
+索引字段保存在关系列中，`payload_json` 只保留无法由关系列重建的业务字段，Segment
+完全关系化且不再有 `payload_json`。缺失或未知版本快速失败；v1/v2 项目会在打开时
+事务迁移到 v3，不提供 JSONL 到 SQLite 的迁移或双写。Run 的可读 `manifest.json`、配置和
 Prompt/Preset/Adapter 快照仍保存在对应 Run 目录，数据库中的 Run 索引负责活动任务
-发现和恢复判断。
+发现和恢复判断。迁移不会自动执行 `VACUUM`；需要回收 SQLite 空闲页时，使用 CLI
+`optimize`、Web 项目操作或对应 API 显式压缩单个项目。
 
 项目外的普通 JSON（全局配置、Preset、导出交换文件等）使用同目录临时文件写完后
 原子替换。`--dry-run` 不写入项目数据库，以保持零写入。
@@ -1372,6 +1382,10 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 规范化 messages、解析后的 Content 和 Reasoning、模型、状态、HTTP 尝试次数、
 状态码与延迟。单条 message 和 Content 最多 100,000 字符，Reasoning 最多
 20,000 字符，超限时在详情中明确标记截断。
+
+仪表盘全局延迟指标按当前 Run 内已完成的全部 HTTP 尝试计算，包括成功、429、
+其他 HTTP 错误和网络错误；平均延迟为算术平均，P95 使用确定性的 nearest-rank
+规则。请求列表中的 `latest_latency_ms` 仍表示该逻辑请求最后一次尝试的延迟。
 
 这些请求详情可能包含 Prompt 和源文，只能通过当前进程的详情接口按请求 ID
 读取；诊断摘要轮询不返回正文。新 Run 开始时清空，应用重启后丢失，不经过
@@ -1664,8 +1678,8 @@ Web 顶部的全局任务状态条在项目概览、导出、设置和窄屏布�
 当前阶段的错误筛选；错误行只显示稳定的安全错误分类和摘要。完成、失败和取消
 状态只保留在当前页面会话，刷新后不从已结束 Run 重建。
 
-Web 仪表盘不依赖当前项目，可查看全局日志和当前运行的请求并发数、请求延迟、
-HTTP 错误、重试、当前限流等待请求数、累计输入/输出 Tokens 与总吞吐量。当前
+Web 仪表盘不依赖当前项目，可查看全局日志和当前运行的请求并发数、平均请求延迟、
+P95 请求延迟、HTTP 错误、重试、当前限流等待请求数、累计输入/输出 Tokens 与总吞吐量。当前
 等待数包含本地 RPM/ITPM 额度、RPM 发起许可排队以及 HTTP 429 的 Retry-After
 或退避；网络错误、408 和 5xx 的普通重试退避不计入。日志支持级别、
 项目、阶段和文本过滤，并可暂停自动滚动。吞吐量只使用完整端点 usage 除以当前

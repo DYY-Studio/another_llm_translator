@@ -1,8 +1,10 @@
 import {
+  useId,
   useEffect,
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
 import { api } from "../api";
@@ -14,7 +16,7 @@ import {
 } from "../native";
 import {
   moveFileBlock,
-  moveFileByCommand,
+  moveFilesByCommand,
   type DropPosition,
   type FileMoveCommand,
 } from "../fileOrder";
@@ -90,7 +92,6 @@ interface OptimisticFileOrder {
 
 interface ButtonReorderState {
   project: string;
-  focusedFileId: string;
 }
 
 const NATURAL_NUMBER = /^[0-9]+$/;
@@ -146,11 +147,7 @@ function sameOrder(left: string[], right: string[]) {
 
 function filesInOrder(files: ProjectFile[], fileIds: string[]) {
   const byId = new Map(files.map((item) => [item.file_id, item]));
-  const ordered = fileIds.flatMap((fileId) => {
-    const item = byId.get(fileId);
-    return item ? [item] : [];
-  });
-  return ordered.length === files.length ? ordered : files;
+  return fileIds.map((fileId) => byId.get(fileId)!);
 }
 
 function driveTypeLabel(type: string, language: Language) {
@@ -363,11 +360,211 @@ function ProjectBar({
 }) {
   return (
     <div className="overview-project-bar">
-      <select value={project} onChange={(event) => onProject(event.target.value)} aria-label={translate("project.select", language)}>
-        <option value="">{translate("project.select", language)}</option>
-        {projects.map((item) => <option key={item.selector} value={item.selector}>{item.external ? `${item.name} · ${item.path}` : item.name}</option>)}
-      </select>
+      <ProjectPicker projects={projects} project={project} onProject={onProject} language={language} />
       <button className="quiet-button" onClick={onCreate}>{translate("project.create", language)}</button>
+    </div>
+  );
+}
+
+function ProjectPicker({
+  projects,
+  project,
+  onProject,
+  language,
+}: {
+  projects: ProjectSummary[];
+  project: string;
+  onProject: (value: string) => void;
+  language: Language;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const selected = projects.find((item) => item.selector === project) ?? null;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredProjects = normalizedQuery
+    ? projects.filter((item) => (
+      item.name.toLocaleLowerCase().includes(normalizedQuery)
+      || item.path.toLocaleLowerCase().includes(normalizedQuery)
+    ))
+    : projects;
+
+  useEffect(() => {
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) closePicker();
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const selectedIndex = filteredProjects.findIndex((item) => item.selector === project);
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : filteredProjects.length > 0 ? 0 : -1);
+  }, [open, query, project, projects]);
+
+  function closePicker() {
+    setOpen(false);
+    setQuery("");
+  }
+
+  function openPicker() {
+    setOpen(true);
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+  }
+
+  function choose(item: ProjectSummary) {
+    onProject(item.selector);
+    closePicker();
+  }
+
+  function moveActive(direction: 1 | -1) {
+    if (!open) openPicker();
+    if (!filteredProjects.length) return;
+    setActiveIndex((current) => {
+      const start = current < 0 ? (direction > 0 ? -1 : 0) : current;
+      return (start + direction + filteredProjects.length) % filteredProjects.length;
+    });
+  }
+
+  function handleKeys(event: ReactKeyboardEvent<HTMLInputElement | HTMLButtonElement>) {
+    if (event.key === "Escape") {
+      closePicker();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      moveActive(event.key === "ArrowDown" ? 1 : -1);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Enter" && open && activeIndex >= 0) {
+      const item = filteredProjects[activeIndex];
+      if (item) choose(item);
+      event.preventDefault();
+    }
+  }
+
+  const activeOptionId = open && activeIndex >= 0
+    ? `${listId}-option-${activeIndex}`
+    : undefined;
+
+  return (
+    <div className="project-picker" ref={rootRef}>
+      <button
+        type="button"
+        className="project-picker-trigger"
+        role="combobox"
+        aria-label={translate("project.select", language)}
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-activedescendant={activeOptionId}
+        onClick={() => (open ? closePicker() : openPicker())}
+        onKeyDown={handleKeys}
+      >
+        <span className="project-picker-value">
+          <strong>{selected?.name ?? translate("project.select", language)}</strong>
+          {selected && <small>{selected.path}</small>}
+        </span>
+        <span className="project-picker-chevron" aria-hidden="true">⌄</span>
+      </button>
+      {open && (
+        <div className="project-picker-popover">
+          <div className="project-search">
+            <input
+              ref={searchRef}
+              aria-label={translate("project.search", language)}
+              placeholder={translate("project.searchPlaceholder", language)}
+              value={query}
+              onKeyDown={handleKeys}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
+          <div className="project-options" id={listId} role="listbox" aria-label={translate("project.select", language)}>
+            {filteredProjects.length === 0 && (
+              <div className="project-picker-state" role="status">{translate("project.noMatch", language)}</div>
+            )}
+            {filteredProjects.map((item, index) => (
+              <button
+                type="button"
+                key={item.selector}
+                id={`${listId}-option-${index}`}
+                role="option"
+                aria-selected={item.selector === project}
+                className={`project-option${index === activeIndex ? " active" : ""}${item.selector === project ? " selected" : ""}`}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => choose(item)}
+              >
+                <span>
+                  <strong>{item.name}</strong>
+                  <small title={item.path}>{item.path}</small>
+                </span>
+                {item.selector === project && <span className="project-option-check" aria-hidden="true">✓</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddFilesDialog({
+  pendingInputs,
+  onPendingInputsChange,
+  adapterOptions,
+  onAdapterOptionsChange,
+  existingPaths,
+  busy,
+  error,
+  onClose,
+  onSubmit,
+  language,
+}: {
+  pendingInputs: PendingInput[];
+  onPendingInputsChange: (value: PendingInput[]) => void;
+  adapterOptions: AdapterOptions;
+  onAdapterOptionsChange: (value: AdapterOptions) => void;
+  existingPaths: string[];
+  busy: boolean;
+  error: string;
+  onClose: () => void;
+  onSubmit: () => void;
+  language: Language;
+}) {
+  return (
+    <div className="modal-backdrop add-files-backdrop" onMouseDown={onClose}>
+      <div
+        className="modal add-files-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="overview-add-files-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="add-files-heading">
+          <h2 id="overview-add-files-title">{translate("overview.addFilesTitle", language)}</h2>
+          <p>{translate("overview.addFilesHint", language)}</p>
+        </div>
+        <div className="add-files-content">
+          <InputQueue
+            value={pendingInputs}
+            onChange={onPendingInputsChange}
+            existingPaths={existingPaths}
+            disabled={busy}
+            options={adapterOptions}
+            onOptionsChange={onAdapterOptionsChange}
+            language={language}
+          />
+          {error && <div className="error-banner" role="alert">{error}</div>}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="quiet-button" disabled={busy} onClick={onClose}>{translate("dialog.cancel", language)}</button>
+          <button type="button" className="primary-button" disabled={busy || !pendingInputs.length} onClick={onSubmit}>{translate("overview.add", language)}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -394,8 +591,11 @@ export function Overview({
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
+  const [addFilesOpen, setAddFilesOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [storageMessage, setStorageMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
@@ -407,24 +607,29 @@ export function Overview({
   } | null>(null);
 
   useEffect(() => {
-    if (
-      buttonReorder
-      && (
-        buttonReorder.project !== project
-        || !value
-        || (
-          buttonReorder.focusedFileId
-          && !value.files.some((item) => item.file_id === buttonReorder.focusedFileId)
-        )
-      )
-    ) setButtonReorder(null);
-  }, [buttonReorder, project, value]);
+    if (buttonReorder && buttonReorder.project !== project) setButtonReorder(null);
+  }, [buttonReorder, project]);
+
+  function closeAddFiles() {
+    if (busy) return;
+    setAddFilesOpen(false);
+    setPendingInputs([]);
+    setAdapterOptions({});
+    setError("");
+  }
+
+  function openAddFiles() {
+    setError("");
+    setAddFilesOpen(true);
+  }
 
   function changeProject(nextProject: string) {
+    closeAddFiles();
     setButtonReorder(null);
     setDraggedFileIds([]);
     setDropTarget(null);
     selection.reset();
+    setStorageMessage("");
     onProject(nextProject);
   }
 
@@ -446,9 +651,12 @@ export function Overview({
   const fileIds = orderedFiles.map((item) => item.file_id);
   const draggedFileIdSet = new Set(draggedFileIds);
   const buttonReorderMode = buttonReorder?.project === project;
-  const focusedFileId = buttonReorderMode ? buttonReorder.focusedFileId : "";
-  const focusedFileIndex = fileIds.indexOf(focusedFileId);
-  const focusedFile = focusedFileIndex >= 0 ? orderedFiles[focusedFileIndex] : null;
+  const selectedReorderFileIds = buttonReorderMode
+    ? fileIds.filter((fileId) => selection.selectedKeys.has(fileId))
+    : [];
+  const selectedReorderFiles = buttonReorderMode
+    ? orderedFiles.filter((item) => selection.selectedKeys.has(item.file_id))
+    : [];
 
   async function upload() {
     if (!pendingInputs.length) return;
@@ -475,6 +683,7 @@ export function Overview({
       });
       setPendingInputs([]);
       setAdapterOptions({});
+      setAddFilesOpen(false);
       if (result.warnings.length) setError(result.warnings.join("；"));
       selection.reset();
       await onFilesChanged();
@@ -526,20 +735,28 @@ export function Overview({
   function toggleButtonReorder() {
     if (buttonReorderMode) {
       setButtonReorder(null);
+      selection.reset();
       return;
     }
     selection.reset();
     setDraggedFileIds([]);
     setDropTarget(null);
     setError("");
-    setButtonReorder({ project, focusedFileId: "" });
+    setButtonReorder({ project });
   }
 
-  function moveFocusedFile(command: FileMoveCommand) {
-    if (busy || focusedFileIndex < 0) return;
-    const nextFileIds = moveFileByCommand(fileIds, focusedFileId, command);
+  function moveSelectedFiles(command: FileMoveCommand) {
+    if (busy || compacting || selectedReorderFileIds.length === 0) return;
+    const nextFileIds = moveFilesByCommand(fileIds, selectedReorderFileIds, command);
     if (sameOrder(fileIds, nextFileIds)) return;
     void saveFileOrder(fileIds, nextFileIds);
+  }
+
+  function moveCommandDisabled(command: FileMoveCommand) {
+    return busy
+      || compacting
+      || selectedReorderFileIds.length === 0
+      || sameOrder(fileIds, moveFilesByCommand(fileIds, selectedReorderFileIds, command));
   }
 
   function reorderHandleLabel(item: ProjectFile) {
@@ -552,7 +769,7 @@ export function Overview({
   }
 
   function startFileDrag(event: ReactDragEvent<HTMLButtonElement>, fileId: string) {
-    if (busy || buttonReorderMode || orderedFiles.length < 2) {
+    if (busy || compacting || buttonReorderMode || orderedFiles.length < 2) {
       event.preventDefault();
       return;
     }
@@ -572,7 +789,7 @@ export function Overview({
   }
 
   function updateDropTarget(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
-    if (busy || buttonReorderMode || orderedFiles.length < 2) return;
+    if (busy || compacting || buttonReorderMode || orderedFiles.length < 2) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     if (draggedFileIdSet.has(fileId)) {
@@ -592,7 +809,7 @@ export function Overview({
 
   function dropFile(event: ReactDragEvent<HTMLDivElement>, fileId: string) {
     event.preventDefault();
-    if (buttonReorderMode) return;
+    if (busy || compacting || buttonReorderMode) return;
     let movingFileIds = draggedFileIds;
     if (movingFileIds.length === 0) {
       try {
@@ -636,105 +853,157 @@ export function Overview({
     }
   }
 
+  async function compactStorage() {
+    if (!window.confirm(translate("overview.compactConfirm", language))) return;
+    setCompacting(true);
+    setError("");
+    setStorageMessage("");
+    try {
+      const result = await api<{ reclaimed_bytes: number }>(
+        `/api/v1/projects/${project}/storage/compact`,
+        { method: "POST" },
+      );
+      setStorageMessage(
+        translate("overview.compactDone", language, {
+          size: formatSize(result.reclaimed_bytes),
+        }),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setCompacting(false);
+    }
+  }
+
   return (
-    <div className="page">
+    <div className="page overview-page">
       <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
-        <div><h1>{value.name}</h1><p>{value.path}</p></div>
-        <button className="danger-button" disabled={busy} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+        <div className="overview-identity"><h1>{value.name}</h1><p>{value.path}</p></div>
+        <div className="summary-strip">
+          <div><strong>{value.files.length}</strong><span>{translate("overview.files", language)}</span></div>
+          <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
+          <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
+        </div>
+        <div className="overview-project-actions">
+          <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
+            {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
+          </button>
+          <button className="danger-button" disabled={busy || compacting} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+        </div>
       </div>
-      <div className="summary-strip">
-        <div><strong>{value.files.length}</strong><span>{translate("overview.files", language)}</span></div>
-        <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
-        <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
-      </div>
-      <div className="section-heading">
+      <div className="overview-file-section">
+        <div className="section-heading">
         <div><h2>{translate("overview.fileHeading", language)}</h2><p>{translate("overview.fileHint", language)}</p></div>
         <div className="section-actions overview-file-actions">
-          <button className="primary-button" disabled={busy || buttonReorderMode || !pendingInputs.length} onClick={() => void upload()}>
-            {translate("overview.add", language)}
+          <button className="primary-button" disabled={busy || compacting || buttonReorderMode} onClick={openAddFiles}>
+            {translate("overview.addFiles", language)}
           </button>
-          <button className="danger-button" disabled={busy || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
+          <button className="danger-button" disabled={busy || compacting || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             {translate("overview.remove", language)}
           </button>
           <button
             type="button"
             className="quiet-button mobile-reorder-toggle"
             aria-pressed={buttonReorderMode}
-            disabled={busy || (!buttonReorderMode && orderedFiles.length < 2)}
+            disabled={busy || compacting || (!buttonReorderMode && orderedFiles.length < 2)}
             onClick={toggleButtonReorder}
           >
             {translate(buttonReorderMode ? "overview.reorderDone" : "overview.reorderStart", language)}
           </button>
         </div>
-      </div>
-      <InputQueue value={pendingInputs} onChange={setPendingInputs} existingPaths={value.files.map((item) => item.name)} disabled={busy || buttonReorderMode} options={adapterOptions} onOptionsChange={setAdapterOptions} language={language} />
-      {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
-      {buttonReorderMode && (
-        <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
-          <span aria-live="polite">
-            {focusedFile
-              ? translate("overview.reorderFocused", language, { name: focusedFile.name })
-              : translate("overview.reorderChoose", language)}
-          </span>
-          <div className="mobile-reorder-actions">
-            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("top")}>{translate("overview.moveTop", language)}</button>
-            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex <= 0} onClick={() => moveFocusedFile("up")}>{translate("overview.moveUp", language)}</button>
-            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("down")}>{translate("overview.moveDown", language)}</button>
-            <button type="button" className="quiet-button" disabled={busy || focusedFileIndex < 0 || focusedFileIndex >= fileIds.length - 1} onClick={() => moveFocusedFile("bottom")}>{translate("overview.moveBottom", language)}</button>
-          </div>
         </div>
-      )}
-      <div className="file-list overview-file-list">
-        {value.files.length === 0 && (
-          <div className="empty-file-state">
-            <strong>{translate("overview.noFiles", language)}</strong>
-            <span>{translate("overview.addHint", language)}</span>
+        {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+        {storageMessage && <button className="success-banner" onClick={() => setStorageMessage("")}>{storageMessage}</button>}
+        {buttonReorderMode && (
+          <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
+            <span aria-live="polite">
+              {selectedReorderFiles.length === 0
+                ? translate("overview.reorderChoose", language)
+                : selectedReorderFiles.length === 1
+                  ? translate("overview.reorderFocused", language, { name: selectedReorderFiles[0].name })
+                  : translate("overview.reorderSelected", language, { count: selectedReorderFiles.length })}
+            </span>
+            <div className="mobile-reorder-actions">
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("top")} onClick={() => moveSelectedFiles("top")}>{translate("overview.moveTop", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("up")} onClick={() => moveSelectedFiles("up")}>{translate("overview.moveUp", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("down")} onClick={() => moveSelectedFiles("down")}>{translate("overview.moveDown", language)}</button>
+              <button type="button" className="quiet-button" disabled={moveCommandDisabled("bottom")} onClick={() => moveSelectedFiles("bottom")}>{translate("overview.moveBottom", language)}</button>
+            </div>
           </div>
         )}
-        {orderedFiles.map((item) => (
-          <div
-            key={item.file_id}
-            className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${focusedFileId === item.file_id ? " reorder-active" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
-            onDragOver={(event) => updateDropTarget(event, item.file_id)}
-            onDrop={(event) => dropFile(event, item.file_id)}
-          >
-            <button
-              type="button"
-              className="file-row-drag"
-              draggable={!busy && !buttonReorderMode && orderedFiles.length > 1}
-              disabled={busy || buttonReorderMode || orderedFiles.length < 2}
-              aria-label={reorderHandleLabel(item)}
-              title={reorderHandleLabel(item)}
-              onClick={(event) => event.stopPropagation()}
-              onDragStart={(event) => startFileDrag(event, item.file_id)}
-              onDragEnd={() => {
-                setDraggedFileIds([]);
-                setDropTarget(null);
-              }}
+        <div className="file-list overview-file-list">
+          {value.files.length === 0 && (
+            <div className="empty-file-state">
+              <strong>{translate("overview.noFiles", language)}</strong>
+              <span>{translate("overview.addHint", language)}</span>
+            </div>
+          )}
+          {orderedFiles.map((item) => (
+            <div
+              key={item.file_id}
+              className={`file-row${selection.selectedKeys.has(item.file_id) ? " selected" : ""}${draggedFileIdSet.has(item.file_id) ? " dragging" : ""}${dropTarget?.fileId === item.file_id ? ` drop-${dropTarget.position}` : ""}`}
+              onDragOver={(event) => updateDropTarget(event, item.file_id)}
+              onDrop={(event) => dropFile(event, item.file_id)}
             >
-              <span aria-hidden="true">⠿</span>
-            </button>
-            <button
-              type="button"
-              className="file-row-select"
-              disabled={buttonReorderMode && busy}
-              aria-pressed={buttonReorderMode
-                ? focusedFileId === item.file_id
-                : selection.selectedKeys.has(item.file_id)}
-              onClick={(event) => {
-                if (buttonReorderMode) {
-                  setButtonReorder({ project, focusedFileId: item.file_id });
-                  return;
-                }
-                selection.select(item.file_id, fileIds, event);
-              }}
-            >
-              <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
-            </button>
-          </div>
-        ))}
+              <button
+                type="button"
+                className="file-row-drag"
+                draggable={!busy && !compacting && !buttonReorderMode && orderedFiles.length > 1}
+                disabled={busy || compacting || buttonReorderMode || orderedFiles.length < 2}
+                aria-label={reorderHandleLabel(item)}
+                title={reorderHandleLabel(item)}
+                onClick={(event) => event.stopPropagation()}
+                onDragStart={(event) => startFileDrag(event, item.file_id)}
+                onDragEnd={() => {
+                  setDraggedFileIds([]);
+                  setDropTarget(null);
+                }}
+              >
+                <span aria-hidden="true">⠿</span>
+              </button>
+              <button
+                type="button"
+                className={`file-row-select${buttonReorderMode ? " reorder-select" : ""}`}
+                disabled={busy || compacting}
+                aria-pressed={selection.selectedKeys.has(item.file_id)}
+                onClick={(event) => {
+                  if (buttonReorderMode) {
+                    selection.select(item.file_id, fileIds, {
+                      ctrlKey: true,
+                      metaKey: false,
+                      shiftKey: false,
+                    });
+                    return;
+                  }
+                  selection.select(item.file_id, fileIds, event);
+                }}
+              >
+                {buttonReorderMode && (
+                  <span className="file-row-reorder-check" aria-hidden="true">
+                    {selection.selectedKeys.has(item.file_id) ? "✓" : ""}
+                  </span>
+                )}
+                <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+              </button>
+            </div>
+          ))}
+        </div>
       </div>
+      {addFilesOpen && (
+        <AddFilesDialog
+          pendingInputs={pendingInputs}
+          onPendingInputsChange={setPendingInputs}
+          adapterOptions={adapterOptions}
+          onAdapterOptionsChange={setAdapterOptions}
+          existingPaths={value.files.map((item) => item.name)}
+          busy={busy}
+          error={error}
+          onClose={closeAddFiles}
+          onSubmit={() => void upload()}
+          language={language}
+        />
+      )}
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>

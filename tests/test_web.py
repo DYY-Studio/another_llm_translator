@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
@@ -14,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.web as web_module
-from app.web_store import WebStore
+from app import sqlite_storage
 from app.config import load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import UsageError
@@ -26,15 +27,16 @@ from app.sqlite_storage import (
     read_files,
     read_json,
     read_jsonl,
-    record_header,
     record_exists,
+    record_header,
     write_json,
 )
 from app.web import create_app
+from app.web_store import WebStore
 from app.web_tasks import WebTaskManager
 from tests.test_documents import RUBY_XHTML, make_epub
-from tests.test_web_store import seed_conflicted_terms
 from tests.test_foundation import make_app_root
+from tests.test_web_store import seed_conflicted_terms
 
 
 def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
@@ -77,6 +79,35 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
         ).status_code
         == 403
     )
+
+
+def test_web_compacts_project_storage_and_blocks_running_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+    blocked = client.post("/api/v1/projects/sample/storage/compact")
+    assert blocked.status_code == 400
+
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: False)
+    called: list[Path] = []
+
+    def fake_compact(project: Path) -> dict[str, int]:
+        called.append(project)
+        return {"before_bytes": 100, "after_bytes": 64, "reclaimed_bytes": 36}
+
+    monkeypatch.setattr(web_module, "compact_project_database", fake_compact)
+    response = client.post("/api/v1/projects/sample/storage/compact")
+    assert response.status_code == 200
+    assert response.json() == {
+        "before_bytes": 100,
+        "after_bytes": 64,
+        "reclaimed_bytes": 36,
+    }
+    assert called == [projects_root / "sample"]
 
 
 def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
@@ -423,6 +454,14 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert next(item for item in adapters if item["adapter_id"] == "epub")[
         "import_options"
     ][0]["default"] == "aozora"
+    validators = client.get("/api/v1/translation-validators").json()[
+        "validators"
+    ]
+    assert [item["validator_id"] for item in validators] == [
+        "japanese_kana",
+        "korean_hangul",
+        "source_text_residual",
+    ]
 
 
 def test_web_creates_mixed_project_from_queued_folder_inputs(
@@ -1296,7 +1335,7 @@ def test_web_rejects_terminology_clear_while_project_task_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    projects_root, project = make_project(tmp_path)
+    projects_root, _ = make_project(tmp_path)
     app = create_app(projects_root=projects_root)
     monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _root: True)
     client = TestClient(app)
@@ -1926,6 +1965,128 @@ def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> Non
     overview = client.get("/api/v1/projects/sample").json()
     assert overview["segments"][0]["reviews"]["proofreading"]["suggestion"] is None
     assert overview["segments"][0]["reviews"]["proofreading"]["applied"] is None
+
+
+def test_web_batches_translation_resets_and_deduplicates_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, project = make_project(tmp_path, "one\ntwo\nthree")
+    store = WebStore(project)
+    segment_ids = [
+        "F0001-S000001",
+        "F0001-S000002",
+    ]
+    for segment_id in segment_ids:
+        store.save_translation({"segment_id": segment_id, "text": segment_id})
+
+    connect_calls = 0
+    original_connect = sqlite_storage._connect
+
+    def counted_connect(path: Path) -> sqlite3.Connection:
+        nonlocal connect_calls
+        connect_calls += 1
+        return original_connect(path)
+
+    monkeypatch.setattr(sqlite_storage, "_connect", counted_connect)
+    reset = store.reset_results(
+        {"stage": "translation", "segment_ids": [segment_ids[0], *segment_ids]}
+    )
+
+    assert reset["stage"] == "translation"
+    assert reset["selected"] == 2
+    assert reset["cleared"] == 2
+    assert reset["unchanged"] == 0
+    assert reset["reset_records"] == 2
+    assert reset["reset_batch_id"]
+    assert connect_calls == 3
+    pending = WebStore(project).segment_index(stage="translation", status="pending")
+    assert pending["total"] == 3
+
+
+def test_web_reset_without_results_does_not_write_stage_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, project = make_project(tmp_path)
+    store = WebStore(project)
+    path = project / "stages" / "translation.jsonl"
+    before = read_jsonl(project, path)
+
+    connect_calls = 0
+    original_connect = sqlite_storage._connect
+
+    def counted_connect(path: Path) -> sqlite3.Connection:
+        nonlocal connect_calls
+        connect_calls += 1
+        return original_connect(path)
+
+    monkeypatch.setattr(sqlite_storage, "_connect", counted_connect)
+    reset = store.reset_results(
+        {"stage": "translation", "segment_ids": ["F0001-S000001"]}
+    )
+
+    assert reset["cleared"] == 0
+    assert reset["reset_records"] == 0
+    assert reset["reset_batch_id"] is None
+    assert connect_calls == 2
+    assert read_jsonl(project, path) == before
+
+
+def test_web_reset_invalid_segment_fails_before_writing_any_reset(
+    tmp_path: Path,
+) -> None:
+    _, project = make_project(tmp_path)
+    store = WebStore(project)
+    store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "translated"}
+    )
+    path = project / "stages" / "translation.jsonl"
+    before = read_jsonl(project, path)
+
+    with pytest.raises(UsageError, match="未知或空 Segment"):
+        store.reset_results(
+            {
+                "stage": "translation",
+                "segment_ids": ["F0001-S000001", "missing"],
+            }
+        )
+
+    assert read_jsonl(project, path) == before
+
+
+def test_web_reset_polishing_batches_suggestion_and_applied_records(
+    tmp_path: Path,
+) -> None:
+    _, project = make_project(tmp_path)
+    store = WebStore(project)
+    segment_id = "F0001-S000001"
+    store.save_translation({"segment_id": segment_id, "text": "translated"})
+    store.save_review(
+        {
+            "stage": "proofreading",
+            "segment_id": segment_id,
+            "review_status": "accepted",
+            "apply": True,
+        }
+    )
+    store.save_review(
+        {
+            "stage": "polishing",
+            "segment_id": segment_id,
+            "review_status": "accepted",
+            "apply": True,
+        }
+    )
+
+    reset = store.reset_results(
+        {"stage": "polishing", "segment_ids": [segment_id]}
+    )
+
+    assert reset["cleared"] == 1
+    assert reset["reset_records"] == 2
+    overview = store.overview(stage="polishing", offset=0, limit=1)
+    review = overview["segments"][0]["reviews"]["polishing"]
+    assert review["suggestion"] is None
+    assert review["applied"] is None
 
 
 def test_web_adapter_validation_preview_and_secret_redaction(

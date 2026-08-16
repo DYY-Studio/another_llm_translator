@@ -319,7 +319,10 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
         encoding="utf-8",
     )
     source = tmp_path / "terms.json"
-    write_exchange(source, [term("Alpha", aliases=["Beta"]), term("Beta")])
+    write_exchange(
+        source,
+        [term("Alpha", aliases=["Beta", "UnmatchedAlias"]), term("Beta")],
+    )
     import_terms(project, source, dry_run=False)
     library = load_terms(project)
     assert library is not None
@@ -329,6 +332,8 @@ def test_alias_primary_conflict_is_reported_and_not_matched_as_alias(
     ]
     matched = match_terms("Beta", library, 10, TermNormalization("NFKC", True))
     assert [item["source"] for item in matched] == ["Alpha", "Beta"]
+    assert matched[0]["aliases"] == ["Beta"]
+    assert matched[1]["aliases"] == []
     assert all(item["preferred_translation"] is None for item in matched)
     assert all(item["group_claims"] for item in matched)
 

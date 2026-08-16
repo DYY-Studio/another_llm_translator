@@ -5,7 +5,6 @@ import csv
 import hashlib
 import io
 import json
-import re
 import shlex
 import sys
 import time
@@ -74,7 +73,11 @@ from .project import (
     load_source_files,
     prompt_file,
 )
-from .plugins import get_document_adapter, normalize_model_text
+from .plugins import (
+    get_document_adapter,
+    normalize_model_text,
+)
+from .translation_validation import validate_translation_text
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
@@ -87,14 +90,6 @@ from .sqlite_storage import (
     write_json,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
-
-JAPANESE_RE = re.compile(
-    "[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
-    "\U0001b000-\U0001b0ff\U0001b100-\U0001b12f"
-    "\U0001b130-\U0001b16f\U0001aff0-\U0001afff]"
-)
-KOREAN_RE = re.compile("[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
-
 
 def _project_context(
     project: Path, *, stage: str | None = None
@@ -1877,6 +1872,29 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     }
 
 
+def _terminology_scan_selection(
+    project: Path,
+    segments: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+    scope: Scope,
+    task_id: str,
+    *,
+    force_all: bool = False,
+) -> tuple[list[dict[str, Any]], set[str], set[str], set[str]]:
+    selected = (
+        [segment for segment in segments if not segment["is_empty"]]
+        if force_all
+        else select_scope(segments, files, scope)
+    )
+    selected_ids = {str(segment["segment_id"]) for segment in selected}
+    completed_ids, fingerprints = terminology_scan_state(
+        project,
+        task_id,
+        selected_ids,
+    )
+    return selected, selected_ids, completed_ids, fingerprints
+
+
 async def run_terminology(
     project: Path,
     scope: Scope,
@@ -1946,15 +1964,19 @@ async def run_terminology(
     else:
         task_id = str(active.get("active_task_id", "none")) if active else "none"
 
-    selected = select_scope(segments, files, scope)
-    if scope.force:
-        # A forced terminology run rescans the full project and merges at publish.
-        selected = [segment for segment in segments if not segment["is_empty"]]
-    selected_ids = {str(segment["segment_id"]) for segment in selected}
-    completed_ids, existing_fingerprints = terminology_scan_state(
-        project,
-        task_id,
+    # A forced terminology run rescans the full project and merges at publish.
+    (
+        selected,
         selected_ids,
+        completed_ids,
+        existing_fingerprints,
+    ) = _terminology_scan_selection(
+        project,
+        segments,
+        files,
+        scope,
+        task_id,
+        force_all=scope.force,
     )
     work = (
         selected
@@ -1971,6 +1993,13 @@ async def run_terminology(
         len(selected),
         len(work),
         len(completed_ids),
+    )
+    reopen_completed_task = (
+        resume_run_id is None
+        and not scope.force
+        and bool(work)
+        and active is not None
+        and active.get("status") == "completed"
     )
     usage: dict[str, Any] | None = None
     warnings = _assemble_warnings(
@@ -2026,6 +2055,10 @@ async def run_terminology(
         },
         warnings=warnings,
     )
+
+    if reopen_completed_task:
+        active = {**active, "status": "active"}
+        write_json(project, active_path, active)
 
     preflight = _split_oversized_preflight(
         work,
@@ -2557,6 +2590,25 @@ class _PreparedTermMatcher:
             str(value.get("reason", "")),
         )
 
+    def _matched_aliases(
+        self,
+        term: dict[str, Any],
+        candidate_names: set[str],
+        *,
+        excluded_names: set[str] | frozenset[str] = frozenset(),
+    ) -> list[str]:
+        matched = {
+            str(alias)
+            for alias in term.get("aliases", [])
+            if (normalized := normalize_term(str(alias), self.spec))
+            and normalized in candidate_names
+            and normalized not in excluded_names
+        }
+        return sorted(
+            matched,
+            key=lambda value: (normalize_term(value, self.spec), value),
+        )
+
     def match(self, source: str, limit: int) -> list[dict]:
         candidate_names: set[str] = set()
         for view in aozora_match_views(source):
@@ -2604,8 +2656,9 @@ class _PreparedTermMatcher:
                 )
                 item = {
                     key: term.get(key)
-                    for key in ("source", "category", "description", "aliases")
+                    for key in ("source", "category", "description")
                 }
+                item["aliases"] = self._matched_aliases(term, candidate_names)
                 item["preferred_translation"] = (
                     term.get("preferred_translation") if safe_hit else None
                 )
@@ -2620,7 +2673,9 @@ class _PreparedTermMatcher:
                 )
                 bundles.append((1, len(alias_name), 0, bundle_key, payload))
 
-        grouped: dict[str, list[tuple[bool, int, dict[str, Any]]]] = {}
+        grouped: dict[
+            str, list[tuple[bool, int, dict[str, Any], list[str]]]
+        ] = {}
         candidate_term_indexes = {
             index
             for name in candidate_names
@@ -2638,17 +2693,25 @@ class _PreparedTermMatcher:
             alias_names = [
                 name for name in aliases if name not in conflicted_aliases
             ]
+            matched_alias_names = {
+                name for name in alias_names if name in candidate_names
+            }
+            matched_aliases = self._matched_aliases(
+                term,
+                candidate_names,
+                excluded_names=conflicted_aliases,
+            )
             main_hit = bool(main_name and main_name in candidate_names)
             hits = [
                 name
-                for name in ([main_name] if main_hit else alias_names)
+                for name in ([main_name] if main_hit else matched_alias_names)
                 if name and name in candidate_names
             ]
             if not hits:
                 continue
             primary = str(term.get("group_primary") or normalized)
             grouped.setdefault(primary, []).append(
-                (main_hit, max(len(name) for name in hits), term)
+                (main_hit, max(len(name) for name in hits), term, matched_aliases)
             )
 
         for primary, hits in grouped.items():
@@ -2656,6 +2719,13 @@ class _PreparedTermMatcher:
             if primary_term is None:
                 raise UsageError(f"术语组主不存在：{primary}")
             matched_terms = [value[2] for value in hits]
+            matched_aliases_by_normalized = {
+                str(
+                    value[2].get("normalized")
+                    or normalize_term(str(value[2].get("source", "")), self.spec)
+                ): value[3]
+                for value in hits
+            }
             ordered = [primary_term]
             ordered.extend(
                 sorted(
@@ -2680,9 +2750,15 @@ class _PreparedTermMatcher:
                         "category",
                         "description",
                         "preferred_translation",
-                        "aliases",
                     )
                 }
+                term_normalized = str(
+                    term.get("normalized")
+                    or normalize_term(str(term.get("source", "")), self.spec)
+                )
+                item["aliases"] = matched_aliases_by_normalized.get(
+                    term_normalized, []
+                )
                 if term is not primary_term:
                     item["primary_source"] = primary_term.get("source")
                 payload.append(item)
@@ -2711,6 +2787,7 @@ class _TermMatchCache:
         limit: int,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
+        self.spec = spec
         self.limit = limit
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
 
@@ -2727,7 +2804,35 @@ class _TermMatchCache:
                 )
                 self._cache[key] = matches
             for term in matches:
-                by_source[str(term["source"])] = term
+                source = str(term["source"])
+                current = by_source.get(source)
+                if current is None:
+                    current = dict(term)
+                    aliases = {
+                        str(alias)
+                        for alias in term.get("aliases", [])
+                        if alias
+                    }
+                    current["aliases"] = sorted(
+                        aliases,
+                        key=lambda value: (normalize_term(value, self.spec), value),
+                    )
+                    by_source[source] = current
+                    continue
+                aliases = {
+                    str(alias)
+                    for alias in current.get("aliases", [])
+                    if alias
+                }
+                aliases.update(
+                    str(alias)
+                    for alias in term.get("aliases", [])
+                    if alias
+                )
+                current["aliases"] = sorted(
+                    aliases,
+                    key=lambda value: (normalize_term(value, self.spec), value),
+                )
         return list(by_source.values())
 
 
@@ -2740,30 +2845,6 @@ def match_terms(
     if library is None:
         return []
     return _PreparedTermMatcher(library, spec).match(source, limit)
-
-
-def validate_translation_text(
-    text: str, validation: dict[str, Any]
-) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    validators = []
-    if validation["japanese_kana"]:
-        validators.append(("japanese_kana", JAPANESE_RE))
-    if validation["korean_hangul"]:
-        validators.append(("korean_hangul", KOREAN_RE))
-    for name, pattern in validators:
-        for match in pattern.finditer(text):
-            character = match.group()
-            findings.append(
-                {
-                    "validator": name,
-                    "character": character,
-                    "code_point": f"U+{ord(character):04X}",
-                    "start": match.start(),
-                    "end": match.end(),
-                }
-            )
-    return findings
 
 
 def _split_source_once(source: str) -> tuple[str, str]:
@@ -2892,6 +2973,7 @@ async def run_translation(
         len(segments),
     )
     _require_nonempty_segments(segments)
+    translation_validators = config["_translation_validator_instances"]
     language = _prompt_language(project, "translation", prompt_language)
     prompt = _prompt(project, "translation", language)
     library = load_terms(project)
@@ -3184,7 +3266,7 @@ async def run_translation(
         original_id = part_original.get(segment_id)
         if original_id is None:
             findings = validate_translation_text(
-                text, config["validation"]["translation"]
+                str(by_id[segment_id]["source"]), text, translation_validators
             )
             if findings:
                 validation_pending[segment_id] = {
@@ -3203,7 +3285,7 @@ async def run_translation(
         combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
         combined_request_id = part_results[original_id][expected_parts[-1]][1]
         findings = validate_translation_text(
-            combined, config["validation"]["translation"]
+            str(by_id[original_id]["source"]), combined, translation_validators
         )
         if findings:
             validation_pending[original_id] = {
@@ -3340,8 +3422,9 @@ async def run_translation(
                         "segment": part,
                         "candidate": candidate_part,
                         "findings": validate_translation_text(
+                            str(part["source"]),
                             candidate_part,
-                            config["validation"]["translation"],
+                            translation_validators,
                         ),
                         "request_id": subset[segment_id]["request_id"],
                     }
@@ -3428,8 +3511,9 @@ async def run_translation(
                         request_id,
                         validation_status="warning",
                         findings=validate_translation_text(
+                            str(by_id[original_id]["source"]),
                             combined,
-                            config["validation"]["translation"],
+                            translation_validators,
                         ),
                     )
                     for part_id in expected:
@@ -4491,7 +4575,9 @@ async def run_all(
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
 ) -> dict[str, Any]:
-    _require_nonempty_segments(load_segments(project))
+    segments = load_segments(project)
+    _require_nonempty_segments(segments)
+    files = load_source_files(project)
     stages = ("terminology", "translation", "proofreading", "polishing")
     configs = {
         stage: load_project_config(project, stage=stage) for stage in stages
@@ -4523,9 +4609,24 @@ async def run_all(
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
         active = read_json(project, active_path) if record_exists(project, active_path) else None
-        if scope.force or terms is None or (
-            active and active.get("status") == "active"
-        ):
+        run_terminology_stage = scope.force or terms is None
+        if active and active.get("status") == "active":
+            run_terminology_stage = True
+        elif active and active.get("status") == "completed":
+            (
+                _selected,
+                selected_ids,
+                completed_ids,
+                _fingerprints,
+            ) = _terminology_scan_selection(
+                project,
+                segments,
+                files,
+                scope,
+                str(active.get("active_task_id", "")),
+            )
+            run_terminology_stage = bool(selected_ids - completed_ids)
+        if run_terminology_stage:
             term_summary = await run_terminology(
                 project,
                 scope,

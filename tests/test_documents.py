@@ -1469,7 +1469,7 @@ class FakeEntryPoint:
 
 
 @pytest.mark.parametrize(
-    "incompatible_version", [5, 6, PLUGIN_PROTOCOL_VERSION + 1]
+    "incompatible_version", [5, 6, 7, PLUGIN_PROTOCOL_VERSION + 1]
 )
 def test_plugin_host_rejects_protocol_and_duplicate_adapter(
     monkeypatch: pytest.MonkeyPatch, incompatible_version: int

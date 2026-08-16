@@ -91,7 +91,8 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert metrics["http_errors"] == 1
     assert metrics["retry_count"] == 1
     assert metrics["rate_limit_waiting_requests"] == 0
-    assert metrics["latest_latency_ms"] == 100.0
+    assert metrics["average_latency_ms"] == 175.0
+    assert metrics["p95_latency_ms"] == 250.0
     assert metrics["usage_available"] is True
     assert metrics["input_tokens"] == 12
     assert metrics["output_tokens"] == 3
@@ -162,8 +163,76 @@ def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:
             max_attempts=1,
         )
         assert diagnostics.snapshot()["metrics"]["total_requests"] == 1
+        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] is None
+        assert diagnostics.snapshot()["metrics"]["p95_latency_ms"] is None
     with diagnostics.activate("second", "translation"):
         assert diagnostics.snapshot()["metrics"]["total_requests"] == 0
+        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] is None
+        assert diagnostics.snapshot()["metrics"]["p95_latency_ms"] is None
+
+
+def test_latency_metrics_aggregate_all_attempts_and_use_nearest_rank_p95(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    with diagnostics.activate("sample", "translation"):
+        for request_id in ("REQ-429", "REQ-HTTP", "REQ-NETWORK", "REQ-OK"):
+            diagnostics.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=2 if request_id == "REQ-429" else 1,
+            )
+
+        # Complete attempts in an order that differs from their latency order.
+        diagnostics.request_finished(
+            request_id="REQ-429",
+            attempt=1,
+            latency_seconds=0.4,
+            status=429,
+            error=True,
+        )
+        diagnostics.request_finished(
+            request_id="REQ-429",
+            attempt=2,
+            latency_seconds=0.1,
+            status=200,
+            error=False,
+        )
+        diagnostics.complete_request(
+            "REQ-429", content="ok", reasoning_content=None
+        )
+        diagnostics.request_finished(
+            request_id="REQ-HTTP",
+            attempt=1,
+            latency_seconds=0.2,
+            status=500,
+            error=True,
+        )
+        diagnostics.request_finished(
+            request_id="REQ-NETWORK",
+            attempt=1,
+            latency_seconds=0.3,
+            status=None,
+            error=True,
+        )
+        diagnostics.request_finished(
+            request_id="REQ-OK",
+            attempt=1,
+            latency_seconds=0.05,
+            status=200,
+            error=False,
+        )
+        diagnostics.complete_request("REQ-OK", content="ok", reasoning_content=None)
+
+        metrics = diagnostics.snapshot()["metrics"]
+        assert metrics["average_latency_ms"] == 210.0
+        assert metrics["p95_latency_ms"] == 400.0
+        assert metrics["http_errors"] == 3
+        assert diagnostics.snapshot()["requests"]["items"][0][
+            "latest_latency_ms"
+        ] == 100.0
 
 
 @pytest.mark.asyncio
@@ -648,6 +717,10 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert [item["message"] for item in response.json()["logs"]] == [
         "visible api log"
     ]
+    metrics = response.json()["metrics"]
+    assert metrics["average_latency_ms"] is None
+    assert metrics["p95_latency_ms"] is None
+    assert "latest_latency_ms" not in metrics
     feed = response.json()["requests"]
     delta = client.get(
         "/api/v1/diagnostics",

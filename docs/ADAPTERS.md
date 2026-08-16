@@ -357,14 +357,31 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=7,
+        protocol_version=8,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
 
-宿主拒绝重复/空插件 ID、重复/空 Adapter ID、未知协议版本和不完整 Adapter
-描述。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示信任。插件不得
-自行操作 Run、限速器、项目 JSONL 或正式输出目录。
+宿主拒绝重复/空插件 ID、重复/空 Adapter 或 Translation Validator ID、未知协议
+版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
+信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
+
+翻译校验器通过 `translation_validators` 注册。每个校验器声明唯一的
+`validator_id`、`version`、`label`，并实现 `validate(source, translation)`，返回
+带 `match_type`、匹配文本和译文位置的 `TranslationValidationMatch`。宿主会
+校验匹配边界，并把校验器及插件版本写入翻译阶段指纹。
+
+```python
+from app.translation_validation import TranslationValidationMatch
+
+class MyValidator:
+    validator_id = "my_validator"
+    version = "1.0.0"
+    label = "My validator"
+
+    def validate(self, source: str, translation: str):
+        return ()
+```
 
 导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或
 运行期设置。不要依赖未文档化的内部对象。

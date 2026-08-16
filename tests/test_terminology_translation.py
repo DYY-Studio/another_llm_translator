@@ -10,7 +10,7 @@ import pytest
 
 from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
-from app.project import init_project
+from app.project import add_project_files, init_project
 from app.stages import (
     TermNormalization,
     _TermMatchCache,
@@ -306,7 +306,12 @@ async def test_completed_terminology_command_does_not_republish(tmp_path: Path) 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         first = await run_terminology(project, Scope(), http_client=client)
-        second = await run_terminology(project, Scope(), http_client=client)
+        second = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -314,6 +319,208 @@ async def test_completed_terminology_command_does_not_republish(tmp_path: Path) 
     assert second["published"] is False
     assert second["terms_revision"] == 1
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_terminology_task_publishes_new_file_results(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    source = tmp_path / "second.txt"
+    source.write_text("Bob", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        sources = list(payload["source_segments"])
+        calls.append(sources)
+        records = [
+            {
+                "type": "term",
+                "source": source,
+                "category": "人物",
+                "description": "人物",
+                "preferred_translation": f"译-{source}",
+                "aliases": [],
+            }
+            for source in sources
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first = await run_terminology(project, Scope(), http_client=client)
+        add_project_files(project, [str(source)])
+        second = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert first["published"] is True
+    assert second["published"] is True
+    assert second["terms_revision"] == 2
+    assert calls == [["Alice"], ["Bob"]]
+    library = load_terms(project)
+    assert library is not None
+    assert {item["source"] for item in library["terms"]} == {"Alice", "Bob"}
+    assert library["published_run_id"] == second["run_id"]
+    active = read_json(project, project / "terminology" / "active_task.json")
+    assert active["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_incremental_terminology_failure_keeps_task_active_for_retry(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    source = tmp_path / "second.txt"
+    source.write_text("Bob", encoding="utf-8")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        re.sub(
+            r'(?m)^http_max_attempts =.*$',
+            "http_max_attempts = 1",
+            re.sub(
+                r'(?m)^base_delay_seconds =.*$',
+                "base_delay_seconds = 0",
+                re.sub(
+                    r'(?m)^max_delay_seconds =.*$',
+                    "max_delay_seconds = 0",
+                    re.sub(
+                        r'(?m)^jitter_seconds =.*$',
+                        "jitter_seconds = 0",
+                        config_path.read_text(encoding="utf-8"),
+                    ),
+                ),
+            ),
+        ),
+        encoding="utf-8",
+    )
+    fail_incremental = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if fail_incremental:
+            return httpx.Response(500, text="temporary failure")
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {
+                "type": "term",
+                "source": item,
+                "category": "人物",
+                "description": "人物",
+                "preferred_translation": f"译-{item}",
+                "aliases": [],
+            }
+            for item in payload["source_segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_terminology(project, Scope(), http_client=client)
+        add_project_files(project, [str(source)])
+        fail_incremental = True
+        failed = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+        failed_active_status = read_json(
+            project, project / "terminology" / "active_task.json"
+        )["status"]
+        fail_incremental = False
+        retried = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert failed["failed"] == 1
+    assert failed["published"] is False
+    assert failed["terms_revision"] == 1
+    assert failed_active_status == "active"
+    assert retried["failed"] == 0
+    assert retried["published"] is True
+    assert load_terms(project)["terms_revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_incremental_terminology_scope_publishes_after_all_new_files(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    first_new = tmp_path / "second.txt"
+    second_new = tmp_path / "third.txt"
+    first_new.write_text("Bob", encoding="utf-8")
+    second_new.write_text("Carol", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {
+                "type": "term",
+                "source": item,
+                "category": "人物",
+                "description": "人物",
+                "preferred_translation": f"译-{item}",
+                "aliases": [],
+            }
+            for item in payload["source_segments"]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_terminology(project, Scope(), http_client=client)
+        add_project_files(project, [str(first_new), str(second_new)])
+        first_scope = await run_terminology(
+            project,
+            Scope(only_file="F0002"),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+        first_scope_active_status = read_json(
+            project, project / "terminology" / "active_task.json"
+        )["status"]
+        second_scope = await run_terminology(
+            project,
+            Scope(only_file="F0003"),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert first_scope["published"] is False
+    assert first_scope["pending"] == 1
+    assert first_scope_active_status == "active"
+    assert second_scope["published"] is True
+    assert second_scope["terms_revision"] == 2
+    assert {item["source"] for item in load_terms(project)["terms"]} == {
+        "Alice",
+        "Bob",
+        "Carol",
+    }
 
 
 @pytest.mark.asyncio
@@ -500,9 +707,58 @@ def test_term_matching_reads_names_and_aliases_from_ruby_reading() -> None:
     assert [item["source"] for item in match_terms(
         "｜猫《Alice》出现", library, 10, spec
     )] == ["Alice"]
-    assert [item["source"] for item in match_terms(
-        "｜猫《Aly》出现", library, 10, spec
-    )] == ["Alice"]
+    matched = match_terms("｜猫《Aly》出现", library, 10, spec)
+    assert [item["source"] for item in matched] == ["Alice"]
+    assert matched[0]["aliases"] == ["Aly"]
+
+
+def test_term_matching_injects_only_aliases_hit_by_the_source() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["Aly", "Zelda"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    spec = TermNormalization("NFKC", True)
+
+    alias_only = match_terms("Aly arrived", library, 10, spec)
+    assert alias_only[0]["aliases"] == ["Aly"]
+
+    main_only = match_terms("Alice arrived", library, 10, spec)
+    assert main_only[0]["aliases"] == []
+
+    both = match_terms("Alice met Aly", library, 10, spec)
+    assert both[0]["aliases"] == ["Aly"]
+
+
+def test_term_matching_group_injects_primary_without_unmatched_aliases() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["PrimeAlias"],
+                "preferred_translation": "爱丽丝",
+                "group_primary": None,
+            },
+            {
+                "source": "Alicia",
+                "aliases": ["Ally", "MemberAlias"],
+                "preferred_translation": "艾丽西亚",
+                "group_primary": "alice",
+            },
+        ]
+    }
+    matched = match_terms(
+        "Ally arrived", library, 10, TermNormalization("NFKC", True)
+    )
+
+    assert [item["source"] for item in matched] == ["Alice", "Alicia"]
+    assert matched[0]["aliases"] == []
+    assert matched[1]["aliases"] == ["Ally"]
+    assert matched[1]["primary_source"] == "Alice"
 
 
 def test_term_matching_deduplicates_term_hit_across_base_and_reading() -> None:
@@ -707,6 +963,29 @@ def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
     ]
     assert [item["source"] for item in cache.for_items(items)] == ["Alice"]
     assert calls == 2
+
+
+def test_term_match_cache_unions_aliases_across_segments() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["Aly", "Zelda"],
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+    }
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+
+    matched = cache.for_items(
+        [
+            {"segment_id": "S1", "source": "Aly arrived"},
+            {"segment_id": "S2", "source": "Zelda arrived"},
+        ]
+    )
+
+    assert [item["source"] for item in matched] == ["Alice"]
+    assert matched[0]["aliases"] == ["Aly", "Zelda"]
 
 
 @pytest.mark.asyncio
@@ -915,7 +1194,7 @@ async def test_kana_validation_repairs_contiguous_failures(tmp_path: Path) -> No
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )
@@ -1081,7 +1360,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )

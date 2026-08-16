@@ -572,3 +572,35 @@ def test_noninteractive_template_sync_preserves_seen_hash(tmp_path: Path) -> Non
 def test_persisted_record_rejects_unsupported_enum() -> None:
     with pytest.raises(StorageError, match="不支持的 status"):
         _validate_record({"schema_version": 1, "status": "unknown"}, "test")
+
+
+def test_load_config_migrates_legacy_translation_validator_flags(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    content = CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(
+        "validators = []",
+        "japanese_kana = true\nkorean_hangul = false",
+    )
+    path.write_text(content, encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config["validation"]["translation"]["validators"] == [
+        "japanese_kana"
+    ]
+    assert "japanese_kana" not in config["validation"]["translation"]
+
+
+def test_load_config_rejects_mixed_translation_validator_formats(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    content = CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(
+        "validators = []",
+        'validators = []\njapanese_kana = true',
+    )
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="未知配置键"):
+        load_config(path)

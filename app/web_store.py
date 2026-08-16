@@ -12,10 +12,11 @@ from .plugins import normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
+    append_stage_results,
     clear_terminology_state,
     get_segment,
-    list_runs,
     latest_stage_results,
+    list_runs,
     new_record_id,
     query_segment_neighbors,
     query_segments,
@@ -36,8 +37,8 @@ from .stages import (
     normalize_term,
     prompt_middle_digests,
     term_normalization,
-    validate_translation_text,
 )
+from .translation_validation import validate_translation_text
 
 REVIEW_STAGES = {"proofreading", "polishing"}
 
@@ -456,7 +457,9 @@ class WebStore:
         segment = self._require_segment(segment_id)
         text = normalize_model_text(self.files, segment, text, "translation")
         findings = validate_translation_text(
-            text, self.config["validation"]["translation"]
+            str(segment["source"]),
+            text,
+            self.config["_translation_validator_instances"],
         )
         record = record_header(
             "stage_result",
@@ -565,23 +568,23 @@ class WebStore:
                 or not all(isinstance(value, str) for value in raw_ids)
             ):
                 raise UsageError("segment_ids 必须是非空字符串数组")
-            segment_ids = tuple(dict.fromkeys(raw_ids))
-            for segment_id in segment_ids:
-                self._require_segment(segment_id)
+            selected_ids = tuple(dict.fromkeys(raw_ids))
+            valid_ids = set(segment_ids(self.project))
+            for segment_id in selected_ids:
+                if segment_id not in valid_ids:
+                    raise UsageError(f"未知或空 Segment：{segment_id}")
             stages = [str(stage)]
             if stage in REVIEW_STAGES:
                 stages.append(f"{stage}_applied")
             batch_id = new_record_id("RESET")
             cleared_ids: set[str] = set()
-            reset_records = 0
+            reset_records: list[dict[str, Any]] = []
             for target_stage in stages:
-                current = self._history(target_stage, list(segment_ids))
-                for segment_id in segment_ids:
+                current = self._history(target_stage, list(selected_ids))
+                for segment_id in selected_ids:
                     if segment_id not in current:
                         continue
-                    append_jsonl(
-                        self.project,
-                        stage_result_path(self.project, target_stage),
+                    reset_records.append(
                         record_header(
                             "stage_reset",
                             self.project_id,
@@ -590,16 +593,16 @@ class WebStore:
                             status="reset",
                             reset_batch_id=batch_id,
                             origin="web",
-                        ),
+                        )
                     )
                     cleared_ids.add(segment_id)
-                    reset_records += 1
+            append_stage_results(self.project, reset_records)
             return {
                 "stage": stage,
-                "selected": len(segment_ids),
+                "selected": len(selected_ids),
                 "cleared": len(cleared_ids),
-                "unchanged": len(segment_ids) - len(cleared_ids),
-                "reset_records": reset_records,
+                "unchanged": len(selected_ids) - len(cleared_ids),
+                "reset_records": len(reset_records),
                 "reset_batch_id": batch_id if cleared_ids else None,
             }
 

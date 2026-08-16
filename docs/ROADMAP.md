@@ -42,7 +42,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 | 15 | EPUB 普通内联格式与 Adapter 输出契约 |
 | 16 | 移除独立开发者 Editor |
 | 17 | 按需 Chunk 规划与请求内短 ID |
-| 18 | SQLite 标准项目存储（schema v1，旧 JSONL 不迁移） |
+| 18 | SQLite 标准项目存储（schema v3，v1/v2 原地迁移，旧 JSONL 不迁移） |
 | 19 | 20,000+ Segment Web 性能（窗口化查询与虚拟化） |
 | 20 | 中文与英文国际化（界面、CLI、Prompt 分语言） |
 | 20.1 | 跨边界 Chunk 与 Run 诊断指标 |
@@ -100,8 +100,8 @@ Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升�
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
 - 维护至少一个独立发行的真实 Python Document 插件。
 
-Stage 15 只在 Document Adapter 边界增加可选结果契约，不建立独立校验器插件、
-通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；
+翻译校验器现在通过独立的可信 Python Validator 契约扩展；它只接收源文和译文，
+不建立通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；
 外部插件仍按版本不匹配快速失败。
 
 Python LLM Adapter 只有 provisional 边界。只有出现 JSON POST 无法表达的真实
@@ -122,7 +122,7 @@ Adapter 必须等待 OpenAI-compatible JSON Adapter 之外的真实特殊协议�
 ## 明确不规划
 
 当前不建设远程插件、多语言进程协议、在线市场、自动安装、插件沙箱、自动
-Provider 判断、静默 fallback、通用 DOM/排版树、通用校验器注册中心或通用
-工作流引擎。桌面端不另建业务后端，不改用 Electron，不面向公网部署，也不在
+Provider 判断、静默 fallback、通用 DOM/排版树或通用工作流引擎。桌面端不另建
+业务后端，不改用 Electron，不面向公网部署，也不在
 公开 Beta 前建设自动更新、TLS 证书、多账号权限或远程遥测。超大列表不自制
 虚拟滚动算法，SQLite 不引入 ORM，未经过真实剖析不加入 `orjson` 或 `lxml`。

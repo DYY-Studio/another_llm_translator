@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { moveFileBlock, moveFileByCommand } from "../src/fileOrder.ts";
+import { moveFileBlock, moveFilesByCommand } from "../src/fileOrder.ts";
 
 const ORDER = ["A", "B", "C", "D", "E"];
 
@@ -43,16 +43,43 @@ test("rejects empty, duplicate, unknown, and missing move inputs", () => {
 });
 
 test("moves one file with top, up, down, and bottom commands", () => {
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "top"), ["C", "A", "B", "D", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "up"), ["A", "C", "B", "D", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "down"), ["A", "B", "D", "C", "E"]);
-  assert.deepEqual(moveFileByCommand(ORDER, "C", "bottom"), ["A", "B", "D", "E", "C"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "top"), ["C", "A", "B", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "up"), ["A", "C", "B", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "down"), ["A", "B", "D", "C", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "bottom"), ["A", "B", "D", "E", "C"]);
 });
 
 test("keeps the current order for command boundaries and unknown files", () => {
-  assert.strictEqual(moveFileByCommand(ORDER, "A", "top"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "A", "up"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "E", "down"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "E", "bottom"), ORDER);
-  assert.strictEqual(moveFileByCommand(ORDER, "X", "top"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "top"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "up"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "down"), ORDER);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "bottom"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["X"], "top"), ORDER);
+});
+
+test("moves a contiguous selection as a block with every command", () => {
+  assert.deepEqual(moveFilesByCommand(ORDER, ["B", "C"], "top"), ["B", "C", "A", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["B", "C"], "up"), ["B", "C", "A", "D", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["B", "C"], "down"), ["A", "D", "B", "C", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["B", "C"], "bottom"), ["A", "D", "E", "B", "C"]);
+});
+
+test("collapses a non-contiguous selection while preserving visual order", () => {
+  assert.deepEqual(moveFilesByCommand(ORDER, ["D", "B"], "top"), ["B", "D", "A", "C", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["D", "B"], "up"), ["B", "D", "A", "C", "E"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["B", "D"], "down"), ["A", "C", "E", "B", "D"]);
+  assert.deepEqual(moveFilesByCommand(ORDER, ["D", "B"], "bottom"), ["A", "C", "E", "B", "D"]);
+});
+
+test("keeps a multi-file order at its command boundary", () => {
+  assert.strictEqual(moveFilesByCommand(ORDER, ["A", "C"], "up"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["C", "E"], "down"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "top"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "bottom"), ORDER);
+});
+
+test("rejects duplicate, unknown, and empty multi-file commands", () => {
+  assert.strictEqual(moveFilesByCommand(ORDER, [], "top"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["B", "B"], "top"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["X"], "top"), ORDER);
 });

@@ -815,10 +815,6 @@ def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
                 "UPDATE files SET file_order = ?, payload_json = ? WHERE file_id = ?",
                 (payload["file_order"], json.dumps(payload, ensure_ascii=False), file_id),
             )
-            database.execute(
-                "UPDATE segments SET file_order = ? WHERE file_id = ?",
-                (payload["file_order"], file_id),
-            )
         database.commit()
     finally:
         database.close()
@@ -946,7 +942,7 @@ def test_web_store_translation_records_enabled_validator_warning(tmp_path: Path)
     config_path = project / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            "japanese_kana = false", "japanese_kana = true"
+            "validators = []", 'validators = ["japanese_kana"]'
         ),
         encoding="utf-8",
     )

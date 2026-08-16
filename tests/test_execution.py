@@ -64,6 +64,20 @@ def _finalize_project(tmp_path: Path) -> Path:
     return project
 
 
+def _run_manifest(project: Path, **fields: object) -> dict[str, object]:
+    metadata = read_json(project, project / "project.json")
+    return record_header(
+        "run",
+        str(metadata["project_id"]),
+        record_id="RUN-TEST",
+        run_id="RUN-TEST",
+        stage="translation",
+        status="running",
+        started_at="2026-08-16T12:00:00+08:00",
+        **fields,
+    )
+
+
 def config() -> dict:
     return load_global_config(ROOT)
 
@@ -1462,7 +1476,7 @@ def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
         write_json(
             project,
             run_dir / "manifest.json",
-            {"schema_version": 1, "status": "running"},
+            _run_manifest(project),
         )
 
     usage = {
@@ -1492,17 +1506,16 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
     write_json(
         project,
         run_dir / "manifest.json",
-        {
-            "schema_version": 1,
-            "status": "running",
-            "usage_invocation_count": 1,
-            "usage": {
+        _run_manifest(
+            project,
+            usage_invocation_count=1,
+            usage={
                 "input_tokens": 10,
                 "output_tokens": 4,
                 "total_tokens": 14,
                 "available": True,
             },
-        },
+        ),
     )
 
     combined = finalize_run(
@@ -1551,17 +1564,16 @@ def test_finalize_run_marks_incomplete_or_legacy_continuation_usage_unavailable(
     write_json(
         project,
         run_dir / "manifest.json",
-        {
-            "schema_version": 1,
-            "status": "running",
-            "continuations": [{"started_at": "now"}],
-            "usage": {
+        _run_manifest(
+            project,
+            continuations=[{"started_at": "now"}],
+            usage={
                 "input_tokens": 10,
                 "output_tokens": 4,
                 "total_tokens": 14,
                 "available": True,
             },
-        },
+        ),
     )
 
     usage = finalize_run(
