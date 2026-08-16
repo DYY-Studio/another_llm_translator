@@ -13,7 +13,7 @@ from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import IncompleteError, ProjectError, UsageError
 
 _SRT_EXTENSIONS = frozenset({".srt"})
-_SEQUENCE_RE = re.compile(r"^[1-9][0-9]*$")
+_SEQUENCE_RE = re.compile(r"^[0-9]+$")
 _TIMING_RE = re.compile(
     r"^(?P<start>[0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3})"
     r"(?P<before>[ \t]*)-->"
@@ -159,7 +159,7 @@ def _decode_input(
 
 
 def _parse_sequence(value: str, *, context: str) -> str:
-    if not _SEQUENCE_RE.fullmatch(value):
+    if not _SEQUENCE_RE.fullmatch(value) or int(value) <= 0:
         raise UsageError(f"SRT cue 序号无效：{context}")
     return value
 

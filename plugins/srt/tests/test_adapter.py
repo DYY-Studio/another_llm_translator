@@ -77,6 +77,25 @@ def test_imports_bom_crlf_multiline_and_non_contiguous_cues(tmp_path: Path) -> N
     }
 
 
+def test_import_preserves_positive_sequence_with_leading_zero(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "leading-zero.srt"
+    source.write_text("0001\n00:00:00,000 --> 00:00:01,000\ntext\n", encoding="utf-8")
+
+    imported = _import_one(SRTDocumentAdapter(), source)
+
+    assert imported.opaque_state == {
+        "schema_version": 1,
+        "cues": [
+            {
+                "sequence": "0001",
+                "timing": "00:00:00,000 --> 00:00:01,000",
+            }
+        ],
+    }
+
+
 def test_imports_utf16_bom(tmp_path: Path) -> None:
     source = tmp_path / "utf16.srt"
     source.write_text("1\n00:00:00,000 --> 00:00:01,000\n字幕\n", encoding="utf-16")
