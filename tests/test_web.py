@@ -447,7 +447,7 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
         "second.txt",
     ]
     adapters = client.get("/api/v1/document-adapters").json()["adapters"]
-    assert [item["adapter_id"] for item in adapters] == ["epub", "txt"]
+    assert [item["adapter_id"] for item in adapters] == ["epub", "srt", "txt"]
     assert next(item for item in adapters if item["adapter_id"] == "txt")[
         "extensions"
     ] == [".text", ".txt"]
