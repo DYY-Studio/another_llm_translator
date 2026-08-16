@@ -19,6 +19,14 @@ npm run build --prefix web
 python -m app.web
 ```
 
+需要处理 SRT 时，另行安装独立插件：
+
+```bash
+python -m pip install minimal-llm-translator-srt
+```
+
+从本仓库源码开发时可使用 `python -m pip install -e . -e plugins/srt`。官方桌面构建会在构建时装配该插件；已发布桌面应用暂不提供运行时插件安装。
+
 打开 `http://127.0.0.1:8765`。使用 `python -m app.web --port PORT` 可以更换端口。前端构建完成后，日常启动只需激活虚拟环境并运行 `python -m app.web`。
 
 ### macOS 桌面壳
@@ -73,7 +81,7 @@ python -m app.web
 
 - Web 浏览器模式通过上传或服务端目录浏览器添加文件。
 - macOS 桌面壳可使用原生文件或文件夹选择器。
-- 一个项目可以包含多个 TXT 和 EPUB 文件。
+- 一个项目可以包含多个 TXT、EPUB 和已安装插件支持的文件。
 - 文件夹内按保留的相对路径自然排序，例如 `chapter2.txt` 位于
   `chapter10.txt` 之前；分批选择和单独文件的顺序保持不变。
 - 运行阶段任务期间不能添加、移除或重排文件。
@@ -155,7 +163,7 @@ EPUB 青空 Ruby 中的 base 和 reading 会分别参与术语匹配；直接相
 - 文件范围：全部文件或指定 File。
 - 单语或双语对照。
 
-TXT 和 EPUB 会按各自 Document Adapter 重建。EPUB 导出会保留导航、元数据、图片、CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
+TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留导航、元数据、图片、CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
 
 导出不会把多个 File 合并为一个文件，也不支持单独导出某个 Segment。Web 可以逐个下载输出，也可以下载 zip；桌面壳还可以选择本机保存位置。
 
@@ -174,6 +182,14 @@ TXT 和 EPUB 会按各自 Document Adapter 重建。EPUB 导出会保留导航�
 - 保留文档 part 边界及未翻译资源。
 - 支持 `aozora`、`base_only` 和 `parenthetical` Ruby 导入模式。
 - 导入选项在文件加入项目时确定；修改选项需要移除并重新导入。
+
+### SRT（独立插件）
+
+- 支持 `.srt`；每个字幕 cue 是一个 Segment，序号和时间行会在导出时保留。
+- 接受唯一正整数序号和 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行，序号不要求连续。
+- 单语导出替换 cue 正文；双语导出在同一 cue 中按“原文、换行、译文”排列。
+- 首版不解析 HTML/ASS 样式标记，模型可能改变这些标记；cue 内不得出现空白分隔行。
+- 不兼容缺序号、点号毫秒或时间行尾定位参数等非核心变体。
 
 当前不支持 PDF、DOCX、Markdown 或任意格式互转，也不提供自动翻译质量评分。
 
