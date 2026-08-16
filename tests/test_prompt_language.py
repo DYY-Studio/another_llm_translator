@@ -240,11 +240,11 @@ async def test_run_translation_uses_requested_language_and_records_it(
     assert manifest["prompt_language"] == "en"
 
 
-def test_cli_language_follows_minimal_llm_language(
+def test_cli_language_follows_another_llm_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     use_llm_preset(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINIMAL_LLM_LANGUAGE", "en")
+    monkeypatch.setenv("ANOTHER_LLM_LANGUAGE", "en")
     project = create_project_sync(tmp_path)
     assert _prompt_language(project, "translation", None) == "en"
 

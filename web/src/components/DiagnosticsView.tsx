@@ -8,11 +8,12 @@ import type {
   DiagnosticsResponse,
 } from "../types";
 import { translate, type Language } from "../i18n";
+import { STORAGE_KEYS } from "../storageMigration";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 type ThroughputMetric = "input" | "output" | "total";
 
-const THROUGHPUT_STORAGE_KEY = "minimal-llm-translator.throughput.v1";
+const THROUGHPUT_STORAGE_KEY = STORAGE_KEYS.throughput;
 
 function readThroughputMetric(): ThroughputMetric {
   try {

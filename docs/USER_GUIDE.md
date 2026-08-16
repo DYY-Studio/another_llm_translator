@@ -22,10 +22,13 @@ python -m app.web
 需要处理 SRT 时，另行安装独立插件：
 
 ```bash
-python -m pip install minimal-llm-translator-srt
+python -m pip install another-llm-translator-srt
 ```
 
 从本仓库源码开发时可使用 `python -m pip install -e . -e plugins/srt`。官方桌面构建会在构建时装配该插件；已发布桌面应用暂不提供运行时插件安装。
+
+Another LLM Translator 不再提供旧开发名称对应的命令、环境变量或插件入口。首次启动时，
+若新的默认数据目录不存在，程序会一次性迁移旧默认目录；新目录已存在时保留两者并以新目录为准。
 
 打开 `http://127.0.0.1:8765`。使用 `python -m app.web --port PORT` 可以更换端口。前端构建完成后，日常启动只需激活虚拟环境并运行 `python -m app.web`。
 
@@ -200,10 +203,10 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 项目、用户设置、Preset、Adapter、凭据索引和日志默认存放在平台用户数据目录。macOS 默认路径是：
 
 ```text
-~/Library/Application Support/minimal-llm-translator/
+~/Library/Application Support/another-llm-translator/
 ```
 
-开发或特殊部署可以用 `MINIMAL_LLM_USER_ROOT` 指向其他用户数据根目录。项目数据库是项目元数据、File、Segment、术语、阶段结果和 Run 索引的权威存储。
+开发或特殊部署可以用 `ANOTHER_LLM_USER_ROOT` 指向其他用户数据根目录。项目数据库是项目元数据、File、Segment、术语、阶段结果和 Run 索引的权威存储。
 
 ### 日志与敏感内容
 
@@ -223,7 +226,7 @@ Web 默认只允许本机回环访问，并限制 Host 和 Origin。局域网共
 
 ## 8. CLI（高级用法）
 
-CLI 与 Web 共用项目存储、阶段执行、写锁、限速和恢复逻辑。以下示例在源码目录执行；安装包用户也可以使用 `minimal-llm-translator` 替代 `python -m app.main`。
+CLI 与 Web 共用项目存储、阶段执行、写锁、限速和恢复逻辑。以下示例在源码目录执行；安装包用户也可以使用 `another-llm-translator` 替代 `python -m app.main`。
 
 ### 安装和帮助
 

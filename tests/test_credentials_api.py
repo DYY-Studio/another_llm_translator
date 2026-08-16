@@ -24,7 +24,7 @@ def test_web_credentials_crud_and_test(tmp_path: Path, fake_keyring: FakeKeyring
     )
     assert created.status_code == 200
     assert created.json() == {"saved": True}
-    assert fake_keyring.values[("minimal-llm-translator", "openai-main")] == "s3cret"
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret"
 
     listed = client.get("/api/v1/credentials").json()
     assert [item["id"] for item in listed["credentials"]] == ["openai-main"]
@@ -39,7 +39,7 @@ def test_web_credentials_crud_and_test(tmp_path: Path, fake_keyring: FakeKeyring
         json={"secret": "s3cret-2"},
     )
     assert updated.status_code == 200
-    assert fake_keyring.values[("minimal-llm-translator", "openai-main")] == "s3cret-2"
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret-2"
 
     missing_test = client.post("/api/v1/credentials/nope/test")
     assert missing_test.status_code == 400

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from minimal_llm_translator_srt.adapter import SRTDocumentAdapter
+from another_llm_translator_srt.adapter import SRTDocumentAdapter
 
 from app.errors import IncompleteError, ProjectError, UsageError
 
@@ -113,7 +113,7 @@ def test_decode_uses_configured_fallback_once(
     source = tmp_path / "fallback.srt"
     source.write_bytes("1\n00:00:00,000 --> 00:00:01,000\né\n".encode("latin-1"))
     monkeypatch.setattr(
-        "minimal_llm_translator_srt.adapter.chardet.detect",
+        "another_llm_translator_srt.adapter.chardet.detect",
         lambda _data: {"encoding": "utf-8", "confidence": 1.0},
     )
     adapter = SRTDocumentAdapter()

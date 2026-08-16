@@ -1,4 +1,4 @@
-"""SRT Document Adapter plugin for minimal-llm-translator."""
+"""SRT Document Adapter plugin for Another LLM Translator."""
 
 from .adapter import SRTDocumentAdapter
 from .plugin import descriptor

@@ -20,10 +20,12 @@ import type {
   ThemeMode,
 } from "./types";
 import { detectLanguage, setUiLanguage, translate, type Language } from "./i18n";
+import { migrateLegacyLocalStorage, STORAGE_KEYS } from "./storageMigration";
 import "./styles.css";
 
-const THEME_STORAGE_KEY = "minimal-llm-translator.theme.v1";
-const RECENT_PROJECTS_STORAGE_KEY = "minimal-llm-translator.recent-projects.v1";
+const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
+const RECENT_PROJECTS_STORAGE_KEY = STORAGE_KEYS.recentProjects;
+migrateLegacyLocalStorage(window.localStorage);
 const runnable: Partial<Record<Stage, LLMStage>> = {
   terminology: "terminology",
   translation: "translation",
@@ -119,7 +121,7 @@ export default function App() {
     document.documentElement.lang = language;
     document.title = translate("brand", language);
     try {
-      window.localStorage.setItem("minimal-llm-translator.language.v1", language);
+      window.localStorage.setItem(STORAGE_KEYS.language, language);
     } catch {
       // The selected language still applies for this page when storage is unavailable.
     }
@@ -324,7 +326,7 @@ export default function App() {
         onLanguage={() => setLanguage((current) => {
           const next = current === "zh-CN" ? "en" : "zh-CN";
           try {
-            window.localStorage.setItem("minimal-llm-translator.language.v1", next);
+      window.localStorage.setItem(STORAGE_KEYS.language, next);
           } catch {
             // The selected language still applies for this page when storage is unavailable.
           }

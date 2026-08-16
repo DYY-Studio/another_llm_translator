@@ -36,6 +36,7 @@ from .config import (
 from .credentials import (
     credential_summaries,
     delete_credential,
+    migrate_legacy_credentials,
     read_credential,
     read_lan_password,
     resolve_api_key,
@@ -101,7 +102,7 @@ WEB_DIST = (
     if Path(__file__).with_name("web_dist").is_dir()
     else Path(sys.prefix) / "app" / "web_dist"
 )
-SESSION_COOKIE = "minimal_llm_session"
+SESSION_COOKIE = "another_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
@@ -232,11 +233,12 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    migrate_legacy_credentials()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
-    app = FastAPI(title="Minimal LLM Translator", version="1")
+    app = FastAPI(title="Another LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
     app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")

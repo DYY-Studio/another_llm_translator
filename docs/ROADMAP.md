@@ -17,6 +17,8 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
   编辑逻辑均由 Web 内部职责提供。
 - 本地 Web 已覆盖项目、术语、结果审校、阶段决策、apply、export 和诊断，并
   保持回环访问与显式 LAN 共享的安全边界。
+- 发布品牌已统一为 Another LLM Translator；旧开发名称的公共入口删除，默认用户
+  数据目录、钥匙串和浏览器存储提供一次性迁移。
 - 产品路线 Stage 1 至 Stage 23.3 已完成；下一阶段是 Stage 23 Windows Tauri
   公开 Beta 与 Stage 24 多 API Key。
 - 已完成 Stage 的行为验收见 `docs/MINIMAL.md`（§7 核心验收矩阵）；逐 Stage

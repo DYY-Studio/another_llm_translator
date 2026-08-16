@@ -3,7 +3,7 @@ requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "minimal-llm-translator"
+name = "another-llm-translator"
 version = "0.3.0"
 description = "Local resumable LLM translation workbench"
 readme = "README.md"
@@ -19,8 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
-minimal-llm-translator = "app.main:main"
-minimal-llm-translator-web = "app.web:main"
+another-llm-translator = "app.main:main"
+another-llm-translator-web = "app.web:main"
 
 [tool.setuptools]
 packages = ["app"]

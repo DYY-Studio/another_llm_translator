@@ -1,11 +1,11 @@
-# minimal-llm-translator SRT 插件
+# Another LLM Translator SRT 插件
 
 这是一个独立发行的 SRT `Document Adapter`，通过
-`minimal_llm_translator.plugins` entry point 注册到宿主。安装宿主后可显式
+`another_llm_translator.plugins` entry point 注册到宿主。安装宿主后可显式
 安装插件：
 
 ```bash
-python -m pip install minimal-llm-translator minimal-llm-translator-srt
+python -m pip install another-llm-translator another-llm-translator-srt
 ```
 
 插件把每个字幕 cue 映射为一个 Segment，保留序号和时间行，并支持纯译文与

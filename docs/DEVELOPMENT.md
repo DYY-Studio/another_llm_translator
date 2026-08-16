@@ -90,12 +90,16 @@ bash scripts/desktop-dev.sh
 
 `desktop-dev.sh` 设置仓库根目录和 Python 解释器后执行 Tauri 开发壳。可用环境变量：
 
-- `MINIMAL_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
-- `MINIMAL_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
+- `ANOTHER_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
+- `ANOTHER_LLM_REPO_ROOT`：桌面开发壳使用的仓库根目录，由脚本自动设置。
+- `ANOTHER_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
 
 `scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
-`minimal_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
+`another_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
 entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时安装任意插件。
+
+发布改名不保留旧包名、命令、环境变量或插件组。默认用户数据目录由旧名称迁移到
+`another-llm-translator`：只有新目录不存在时才迁移；新目录存在则跳过且不覆盖旧目录。
 
 桌面壳启动时优先拉起 bundle 内的冻结 sidecar，找不到时使用开发环境中的 `python -m app.web`，健康探测成功后加载 `http://127.0.0.1:<port>`。退出桌面应用时会终止由本次进程启动的 sidecar。异常退出后如果端口上仍有兼容服务，再次启动可能继续使用该服务；必要时应手动结束残留进程。
 
@@ -112,7 +116,7 @@ bash scripts/build-app.sh
 脚本生成未签名的 ad-hoc `.app` 和 zip，输出目录为：
 
 ```text
-dist/minimal-llm-translator-<版本>-macos-arm64/
+dist/another-llm-translator-<版本>-macos-arm64/
 ```
 
 构建产物内含配置、Prompt、Adapter、Preset 和 Web 静态资源。当前脚本面向 macOS arm64；签名、公证和公开发行流程尚未建立，仓库也没有可直接下载的 GitHub Release。
@@ -126,10 +130,10 @@ dist/minimal-llm-translator-<版本>-macos-arm64/
 macOS 默认用户数据根目录：
 
 ```text
-~/Library/Application Support/minimal-llm-translator/
+~/Library/Application Support/another-llm-translator/
 ```
 
-开发时可以用 `MINIMAL_LLM_USER_ROOT` 覆盖。典型项目目录包含：
+开发时可以用 `ANOTHER_LLM_USER_ROOT` 覆盖。典型项目目录包含：
 
 ```text
 projects/<name>/

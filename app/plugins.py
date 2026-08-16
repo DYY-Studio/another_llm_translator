@@ -18,7 +18,7 @@ from .translation_validation import (
 )
 
 PLUGIN_PROTOCOL_VERSION = 8
-PLUGIN_ENTRY_POINT = "minimal_llm_translator.plugins"
+PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 
 @dataclass(frozen=True)

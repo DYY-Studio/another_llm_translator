@@ -38,6 +38,10 @@ python -m pip install -e . -e plugins/srt
 
 官方桌面构建会在构建时装配该插件；已发布桌面应用暂不支持运行时安装任意插件。
 
+本发行版使用 Another LLM Translator 的新包名、命令、环境变量和数据目录。首次启动时，
+若默认的新数据目录不存在，会将旧版本的默认数据目录一次性迁移；新目录已存在时不会覆盖或合并旧目录。
+显式设置 `ANOTHER_LLM_USER_ROOT` 时，以该目录为准。
+
 Windows PowerShell 使用：
 
 ```powershell
@@ -70,7 +74,7 @@ python -m app.web
 
 ## 数据、安全与限制
 
-- 项目、设置和日志默认保存在平台用户数据目录；macOS 路径为 `~/Library/Application Support/minimal-llm-translator/`。
+- 项目、设置和日志默认保存在平台用户数据目录；macOS 路径为 `~/Library/Application Support/another-llm-translator/`。
 - API Key 只从显式配置的环境变量或系统钥匙串读取。普通日志不保存完整 Prompt、源文或鉴权 Header；Debug 模式可能保存敏感请求内容。
 - Web 默认只允许本机访问。局域网共享必须在设置中显式开启，首版使用 HTTP，不适合公网暴露。
 - 基础安装支持 TXT 和 EPUB；SRT 由独立可信插件提供。不支持 PDF、DOCX、Markdown 或任意格式互转。

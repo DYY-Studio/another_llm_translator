@@ -708,7 +708,7 @@ async def test_llm_runtime_reports_safe_failure_categories(
 
 def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> None:
     app = create_app(projects_root=tmp_path / "projects", app_root=tmp_path)
-    logger = logging.getLogger("minimal_llm_translator.api-test")
+    logger = logging.getLogger("another_llm_translator.api-test")
     logger.info("visible api log")
     client = TestClient(app)
 

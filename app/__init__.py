@@ -1,2 +1,1 @@
-"""Minimal LLM translator."""
-
+"""Another LLM Translator."""
