@@ -195,11 +195,16 @@ Run 的配置和 Prompt 快照放在对应 Run 目录。启用调试模式时，
 
 内置只读资源位于应用目录；用户内容（全局配置修改、自定义 Prompt/Adapter/
 Preset、默认项目和诊断日志）写入平台用户数据根目录，可用
-`MINIMAL_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
-`~/Library/Application Support/minimal-llm-translator`，POSIX 默认
-`~/.local/share/minimal-llm-translator`，Windows 默认
-`%LOCALAPPDATA%\minimal-llm-translator`）。用户根存在同名文件时优先读取：
+`ANOTHER_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
+`~/Library/Application Support/another-llm-translator`，POSIX 默认
+`~/.local/share/another-llm-translator`，Windows 默认
+`%LOCALAPPDATA%\another-llm-translator`）。用户根存在同名文件时优先读取：
 config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
+
+发布改名时，若新的默认用户根不存在，启动阶段将旧开发名称对应的默认用户根原子迁移到
+新路径；若新路径已存在，则跳过且不覆盖、不合并旧路径。显式设置
+`ANOTHER_LLM_USER_ROOT` 时不执行默认路径扫描。旧钥匙串条目只在新服务缺少对应账户时复制，
+旧服务不删除；旧命令、旧环境变量和旧插件 entry point 不再提供。
 
 ```text
 config/config.toml
@@ -790,7 +795,7 @@ middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景
 不自动覆盖既有项目副本；代码内 Prefix/Suffix 更新对所有项目生效。
 
 Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
-`--language`/`MINIMAL_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
+`--language`/`ANOTHER_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
 回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
 
 阶段指纹不包含提示词文本；它记录 `prompt_rules_version` 和全部语言中段的哈希，
@@ -1769,8 +1774,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 对 `/api/v1/server/status` 做健康探测，通过后加载 `http://127.0.0.1:8765`，
 退出时关闭 sidecar。原生文件与文件夹选择器经 `window.__TAURI__` 桥接为
 `select_file` / `select_folder`，把服务端路径随创建/追加请求提交；普通浏览器
-和 LAN 客户端继续使用上传与服务端目录浏览。`MINIMAL_LLM_PYTHON`、
-`MINIMAL_LLM_REPO_ROOT`、`MINIMAL_LLM_WEB_PORT` 仅开发模式生效。
+和 LAN 客户端继续使用上传与服务端目录浏览。`ANOTHER_LLM_PYTHON`、
+`ANOTHER_LLM_REPO_ROOT`、`ANOTHER_LLM_WEB_PORT` 仅开发模式生效。
 
 ---
 

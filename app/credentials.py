@@ -12,7 +12,12 @@ import keyring
 
 from .errors import ConfigError, ExternalError
 from .sqlite_storage import atomic_write_json
-from .user_config import USER_ROOT_OVERRIDE_ENV, legacy_user_root, user_root
+from .user_config import (
+    USER_ROOT_OVERRIDE_ENV,
+    default_user_root,
+    legacy_user_root,
+    user_root,
+)
 
 SERVICE = "another-llm-translator"
 LEGACY_SERVICE = "minimal-llm-translator"
@@ -43,12 +48,16 @@ def _indexed_ids(path: Path) -> set[str]:
     }
 
 
-def migrate_legacy_credentials() -> int:
+def migrate_legacy_credentials(*, base: Path | None = None) -> int:
     """Copy legacy keyring entries without overwriting release entries."""
-    if os.environ.get(USER_ROOT_OVERRIDE_ENV):
+    if base is None and os.environ.get(USER_ROOT_OVERRIDE_ENV):
         return 0
-    current_index = _index_path()
-    old_index = legacy_user_root() / "credentials" / "index.json"
+    current_index = (
+        _index_path()
+        if base is None
+        else default_user_root(base=base) / "credentials" / "index.json"
+    )
+    old_index = legacy_user_root(base=base) / "credentials" / "index.json"
     accounts = _indexed_ids(current_index) | _indexed_ids(old_index) | {LAN_ACCOUNT}
     copied = 0
     for account in sorted(accounts):

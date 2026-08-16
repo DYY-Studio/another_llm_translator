@@ -182,7 +182,7 @@ Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前
 ## 2. Document Adapter（Beta）
 
 Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；独立发行的
-`minimal-llm-translator-srt` 插件提供 `srt` Adapter：
+`another-llm-translator-srt` 插件提供 `srt` Adapter：
 
 ```python
 class DocumentAdapter(Protocol):
@@ -274,8 +274,8 @@ Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都
 
 ### SRT 0.1（外部插件示例）
 
-SRT 插件位于 `plugins/srt/`，发行包名为 `minimal-llm-translator-srt`，通过
-`minimal_llm_translator.plugins` entry point 注册。每个 cue 是一个 Segment，所有
+SRT 插件位于 `plugins/srt/`，发行包名为 `another-llm-translator-srt`，通过
+`another_llm_translator.plugins` entry point 注册。每个 cue 是一个 Segment，所有
 cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
 
 插件严格接受唯一正整数序号及 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行，序号不要求
@@ -357,11 +357,11 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 
 ## 3. 可信 Python 插件宿主（Beta）
 
-插件包在 entry-point 组 `minimal_llm_translator.plugins` 注册一个
+插件包在 entry-point 组 `another_llm_translator.plugins` 注册一个
 `PluginDescriptor` 实例或返回该实例的无参函数：
 
 ```toml
-[project.entry-points."minimal_llm_translator.plugins"]
+[project.entry-points."another_llm_translator.plugins"]
 my_plugin = "my_package.plugin:descriptor"
 ```
 

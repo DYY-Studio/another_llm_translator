@@ -5,6 +5,7 @@ import pytest
 from app.credentials import (
     credential_summaries,
     delete_credential,
+    migrate_legacy_credentials,
     read_credential,
     resolve_api_key,
     save_credential,
@@ -18,7 +19,7 @@ def test_credential_crud_updates_index_and_never_exposes_secret(
 ) -> None:
     save_credential("openai-main", "secret-1")
     assert read_credential("openai-main") == "secret-1"
-    assert fake_keyring.values[("minimal-llm-translator", "openai-main")] == (
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == (
         "secret-1"
     )
     assert [item["id"] for item in credential_summaries()] == ["openai-main"]
@@ -66,3 +67,18 @@ def test_resolve_keychain_credential() -> None:
 def test_resolve_rejects_unknown_kind() -> None:
     with pytest.raises(ExternalError, match="未知凭据类型"):
         resolve_api_key({"kind": "file", "name": "x"})
+
+
+def test_legacy_keyring_entries_migrate_without_overwriting(
+    tmp_path, fake_keyring: FakeKeyring
+) -> None:
+    index = tmp_path / "minimal-llm-translator" / "credentials" / "index.json"
+    index.parent.mkdir(parents=True)
+    index.write_text('{"openai-main": {"updated_at": 1}}', encoding="utf-8")
+    fake_keyring.values[("minimal-llm-translator", "openai-main")] = "legacy"
+    fake_keyring.values[("minimal-llm-translator", "lan-auth")] = "legacy-lan"
+    fake_keyring.values[("another-llm-translator", "lan-auth")] = "current-lan"
+
+    assert migrate_legacy_credentials(base=tmp_path) == 1
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "legacy"
+    assert fake_keyring.values[("another-llm-translator", "lan-auth")] == "current-lan"
