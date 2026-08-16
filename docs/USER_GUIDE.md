@@ -25,7 +25,13 @@ python -m app.web
 python -m pip install another-llm-translator-srt
 ```
 
-从本仓库源码开发时可使用 `python -m pip install -e . -e plugins/srt`。官方桌面构建会在构建时装配该插件；已发布桌面应用暂不提供运行时插件安装。
+需要使用建议级术语校验时，另行安装示范插件：
+
+```bash
+python -m pip install another-llm-translator-term-validation
+```
+
+从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`。官方桌面构建会在构建时装配这两个官方示例插件；已发布桌面应用暂不提供运行时插件安装。
 
 Another LLM Translator 不再提供旧开发名称对应的命令、环境变量或插件入口。首次启动时，
 若新的默认数据目录不存在，程序会一次性迁移旧默认目录；新目录已存在时保留两者并以新目录为准。
@@ -135,6 +141,10 @@ EPUB 青空 Ruby 中的 base 和 reading 会分别参与术语匹配；直接相
 程序不会替用户自动决定，也不会因为设置变化静默清空历史结果。
 
 翻译页面支持逐个查看和编辑 Segment。人工保存的译文会成为当前可用的翻译结果。
+
+设置中的“翻译校验”可以选择已安装的校验器。`preferred_term_usage` 是可选的建议级
+术语校验：匹配到带推荐译名的术语但候选未采用时只发起一次修复，仍不适用则接受译文
+并显示 warning；它默认关闭，不会强制替换过于通用的匹配。
 
 ### 4.3 校对与应用
 

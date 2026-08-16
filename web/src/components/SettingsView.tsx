@@ -217,7 +217,9 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
                 ? translate("settings.koreanHangul", language)
                 : validator.validator_id === "source_text_residual"
                   ? translate("settings.sourceTextResidual", language)
-                  : validator.label;
+                  : validator.validator_id === "preferred_term_usage"
+                    ? translate("settings.preferredTermUsage", language)
+                    : validator.label;
             const help = installed
               ? `${validator.validator_id} · ${validator.plugin_id} ${validator.plugin_version}`
               : translate("settings.validatorUnavailable", language);

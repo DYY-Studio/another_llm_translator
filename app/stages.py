@@ -44,14 +44,14 @@ from .execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
-    continue_run,
     contiguous_groups,
+    continue_run,
     create_run,
     dispatch_chunks,
     estimate_messages,
     estimate_single_segment_preflight,
-    find_running_runs,
     finalize_run,
+    find_running_runs,
     full_prompt,
     iter_chunk_plans,
     load_stage_history,
@@ -59,37 +59,42 @@ from .execution import (
     materialize_chunk_stream,
     parse_jsonl_document,
     render_messages,
-    segment_model_source,
     save_debug_chunks,
-    select_scope,
     scope_from_run,
+    segment_model_source,
+    select_scope,
     stage_fingerprint,
     stage_result_path,
 )
+from .i18n import SUPPORTED_LANGUAGES, resolve_language
 from .logging_utils import get_logger
+from .plugins import (
+    get_document_adapter,
+    normalize_model_text,
+)
 from .project import (
     PROMPT_LANGUAGES,
     load_segments,
     load_source_files,
     prompt_file,
 )
-from .plugins import (
-    get_document_adapter,
-    normalize_model_text,
-)
-from .translation_validation import validate_translation_text
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
+    latest_stage_states,
     read_json,
     read_jsonl,
     record_exists,
     record_header,
-    latest_stage_states,
     terminology_scan_state,
     write_json,
 )
-from .i18n import SUPPORTED_LANGUAGES, resolve_language
+from .translation_validation import (
+    TranslationTermMatch,
+    TranslationValidationContext,
+    validate_translation_text,
+)
+
 
 def _project_context(
     project: Path, *, stage: str | None = None
@@ -893,13 +898,23 @@ _FORMAT_CORRECTION = {
 _VALIDATION_REPAIR = {
     "zh-CN": (
         "以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
-        "返回完整且格式合规的译文。"
+        "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
+        "是否适合当前语境；适用时采用，不适用时可以保留原候选。"
     ),
     "en": (
         "Use failed_candidate as the base, fix only the issues in "
-        "validation_matches, and return a complete, format-compliant translation."
+        "validation_matches, and return a complete, format-compliant translation. "
+        "For advisory terminology suggestions, first decide whether the "
+        "recommended translation fits this context; use it when it does, but "
+        "you may keep the candidate when it does not."
     ),
 }
+
+
+def _has_hard_validation_findings(findings: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("severity", "error")) == "error" for item in findings
+    )
 
 
 def _correction_with_errors(
@@ -2581,6 +2596,13 @@ class _PreparedTermMatcher:
         )
         return {name for name in candidates if name in normalized_source}
 
+    def _candidate_names_for_source(self, source: str) -> set[str]:
+        candidate_names: set[str] = set()
+        for view in aozora_match_views(source):
+            normalized_view = normalize_term(view, self.spec)
+            candidate_names.update(self._candidate_names(normalized_view))
+        return candidate_names
+
     @staticmethod
     def _claim_sort_key(value: dict[str, Any]) -> tuple[str, str, str, str]:
         return (
@@ -2610,10 +2632,7 @@ class _PreparedTermMatcher:
         )
 
     def match(self, source: str, limit: int) -> list[dict]:
-        candidate_names: set[str] = set()
-        for view in aozora_match_views(source):
-            normalized_view = normalize_term(view, self.spec)
-            candidate_names.update(self._candidate_names(normalized_view))
+        candidate_names = self._candidate_names_for_source(source)
         bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
         disputed: set[str] = set()
         for related_keys, related_claims in self._claim_components:
@@ -2778,6 +2797,55 @@ class _PreparedTermMatcher:
         bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
         return [term for bundle in bundles[:limit] for term in bundle[4]]
 
+    def validation_matches(
+        self, source: str, payload_terms: list[dict[str, Any]]
+    ) -> tuple[TranslationTermMatch, ...]:
+        """Return only actual, non-disputed matches represented in the payload."""
+        candidate_names = self._candidate_names_for_source(source)
+        matches: list[TranslationTermMatch] = []
+        seen: set[tuple[str, str, str]] = set()
+        for term in payload_terms:
+            preferred = term.get("preferred_translation")
+            if not isinstance(preferred, str) or not preferred.strip():
+                continue
+            term_source = str(term.get("source", ""))
+            normalized_source = normalize_term(term_source, self.spec)
+            if normalized_source and normalized_source in candidate_names:
+                key = (term_source, term_source, "source")
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(
+                        TranslationTermMatch(
+                            source=term_source,
+                            matched_text=term_source,
+                            match_type="source",
+                            preferred_translation=preferred,
+                        )
+                    )
+                continue
+            aliases = [
+                str(alias)
+                for alias in term.get("aliases", [])
+                if normalize_term(str(alias), self.spec) in candidate_names
+            ]
+            for alias in sorted(
+                aliases,
+                key=lambda value: (normalize_term(value, self.spec), value),
+            ):
+                key = (term_source, alias, "alias")
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(
+                    TranslationTermMatch(
+                        source=term_source,
+                        matched_text=alias,
+                        match_type="alias",
+                        preferred_translation=preferred,
+                    )
+                )
+        return tuple(matches)
+
 
 class _TermMatchCache:
     def __init__(
@@ -2791,18 +2859,31 @@ class _TermMatchCache:
         self.limit = limit
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
 
+    def _matches_for_item(self, item: dict[str, Any]) -> tuple[dict, ...]:
+        key = (str(item["segment_id"]), str(item["source"]))
+        matches = self._cache.get(key)
+        if matches is None:
+            matches = tuple(
+                self.matcher.match(str(item["source"]), self.limit)
+                if self.matcher is not None
+                else []
+            )
+            self._cache[key] = matches
+        return matches
+
+    def validation_matches_for_item(
+        self, item: dict[str, Any]
+    ) -> tuple[TranslationTermMatch, ...]:
+        if self.matcher is None:
+            return ()
+        return self.matcher.validation_matches(
+            str(item["source"]), list(self._matches_for_item(item))
+        )
+
     def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
         by_source: dict[str, dict] = {}
         for item in items:
-            key = (str(item["segment_id"]), str(item["source"]))
-            matches = self._cache.get(key)
-            if matches is None:
-                matches = tuple(
-                    self.matcher.match(str(item["source"]), self.limit)
-                    if self.matcher is not None
-                    else []
-                )
-                self._cache[key] = matches
+            matches = self._matches_for_item(item)
             for term in matches:
                 source = str(term["source"])
                 current = by_source.get(source)
@@ -2845,6 +2926,19 @@ def match_terms(
     if library is None:
         return []
     return _PreparedTermMatcher(library, spec).match(source, limit)
+
+
+def match_term_validation(
+    source: str,
+    library: dict[str, Any] | None,
+    limit: int,
+    spec: TermNormalization,
+) -> tuple[TranslationTermMatch, ...]:
+    if library is None:
+        return ()
+    matcher = _PreparedTermMatcher(library, spec)
+    payload_terms = matcher.match(source, limit)
+    return matcher.validation_matches(source, payload_terms)
 
 
 def _split_source_once(source: str) -> tuple[str, str]:
@@ -3153,6 +3247,7 @@ async def run_translation(
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
+    advisory_repair_attempted: set[str] = set()
     failed_ids: set[str] = set()
     failure_counts: Counter[str] = Counter()
     completed_ids: set[str] = set()
@@ -3161,6 +3256,17 @@ async def run_translation(
         {str(item["segment_id"]): item for item in request_segments}
     )
     part_results: dict[str, dict[str, tuple[str, str]]] = {}
+
+    def validation_context(
+        segment_id: str, translation: str
+    ) -> TranslationValidationContext:
+        original_id = part_original.get(segment_id)
+        item = by_id[original_id or segment_id]
+        return TranslationValidationContext(
+            source=str(item["source"]),
+            translation=translation,
+            terms=term_match_cache.validation_matches_for_item(item),
+        )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -3266,7 +3372,7 @@ async def run_translation(
         original_id = part_original.get(segment_id)
         if original_id is None:
             findings = validate_translation_text(
-                str(by_id[segment_id]["source"]), text, translation_validators
+                validation_context(segment_id, text), translation_validators
             )
             if findings:
                 validation_pending[segment_id] = {
@@ -3285,7 +3391,7 @@ async def run_translation(
         combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
         combined_request_id = part_results[original_id][expected_parts[-1]][1]
         findings = validate_translation_text(
-            str(by_id[original_id]["source"]), combined, translation_validators
+            validation_context(original_id, combined), translation_validators
         )
         if findings:
             validation_pending[original_id] = {
@@ -3422,8 +3528,7 @@ async def run_translation(
                         "segment": part,
                         "candidate": candidate_part,
                         "findings": validate_translation_text(
-                            str(part["source"]),
-                            candidate_part,
+                            validation_context(part_id, candidate_part),
                             translation_validators,
                         ),
                         "request_id": subset[segment_id]["request_id"],
@@ -3457,26 +3562,65 @@ async def run_translation(
 
     async def before_finalize() -> None:
         max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-        for repair_attempt in range(1, max_repairs + 1):
-            if not validation_pending:
+        hard_repairs = 0
+        while validation_pending:
+            hard_pending = {
+                segment_id: item
+                for segment_id, item in validation_pending.items()
+                if _has_hard_validation_findings(item["findings"])
+            }
+            if hard_pending:
+                if hard_repairs >= max_repairs:
+                    break
+                hard_repairs += 1
+                for segment_id in hard_pending:
+                    validation_pending.pop(segment_id, None)
+                groups = contiguous_groups(
+                    (item["segment"] for item in hard_pending.values()),
+                    all_segments=segments,
+                    cross_boundary="translation"
+                    in config["chunking"]["cross_boundary_batching"],
+                )
+                logger.warning(
+                    "validation repair attempt=%d segments=%d chunks=%d",
+                    hard_repairs,
+                    len(hard_pending),
+                    len(groups),
+                )
+                for group in groups:
+                    subset = {
+                        str(item["segment_id"]): hard_pending[
+                            str(item["segment_id"])
+                        ]
+                        for item in group
+                    }
+                    await repair_group(group, subset)
+                continue
+
+            advisory_pending = {
+                segment_id: item
+                for segment_id, item in validation_pending.items()
+                if segment_id not in advisory_repair_attempted
+            }
+            if not advisory_pending:
                 break
-            current_pending = dict(validation_pending)
-            validation_pending.clear()
+            for segment_id in advisory_pending:
+                advisory_repair_attempted.add(segment_id)
+                validation_pending.pop(segment_id, None)
             groups = contiguous_groups(
-                (item["segment"] for item in current_pending.values()),
+                (item["segment"] for item in advisory_pending.values()),
                 all_segments=segments,
                 cross_boundary="translation"
                 in config["chunking"]["cross_boundary_batching"],
             )
             logger.warning(
-                "validation repair attempt=%d segments=%d chunks=%d",
-                repair_attempt,
-                len(current_pending),
+                "advisory validation repair segments=%d chunks=%d",
+                len(advisory_pending),
                 len(groups),
             )
             for group in groups:
                 subset = {
-                    str(item["segment_id"]): current_pending[
+                    str(item["segment_id"]): advisory_pending[
                         str(item["segment_id"])
                     ]
                     for item in group
@@ -3511,15 +3655,17 @@ async def run_translation(
                         request_id,
                         validation_status="warning",
                         findings=validate_translation_text(
-                            str(by_id[original_id]["source"]),
-                            combined,
+                            validation_context(original_id, combined),
                             translation_validators,
                         ),
                     )
                     for part_id in expected:
                         validation_pending.pop(part_id, None)
         for segment_id, item in validation_pending.items():
-            if exhausted_mode == "warning":
+            if (
+                not _has_hard_validation_findings(item["findings"])
+                or exhausted_mode == "warning"
+            ):
                 await save_completed(
                     segment_id,
                     item["candidate"],

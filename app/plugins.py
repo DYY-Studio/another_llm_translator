@@ -17,7 +17,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 8
+PLUGIN_PROTOCOL_VERSION = 9
 PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 

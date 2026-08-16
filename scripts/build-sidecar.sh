@@ -9,7 +9,7 @@ if [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 
-"$PYTHON" -c 'from importlib.metadata import entry_points; matches = [entry_point for entry_point in entry_points(group="another_llm_translator.plugins") if entry_point.name == "srt" and entry_point.value == "another_llm_translator_srt.plugin:descriptor"]; raise SystemExit("缺少官方 SRT 插件 entry point，请先安装 requirements-dev.txt" if not matches else 0)'
+"$PYTHON" -c 'from importlib.metadata import entry_points; expected = {"srt": "another_llm_translator_srt.plugin:descriptor", "term-validation": "another_llm_translator_term_validation.plugin:descriptor"}; found = {entry_point.name: entry_point.value for entry_point in entry_points(group="another_llm_translator.plugins")}; missing = [name for name, value in expected.items() if found.get(name) != value]; raise SystemExit("缺少官方插件 entry point：" + ", ".join(missing) + "，请先安装 requirements-dev.txt" if missing else 0)'
 
 rm -rf build sidecar-dist
 "$PYTHON" -m PyInstaller --noconfirm --clean --distpath sidecar-dist packaging/translator.spec

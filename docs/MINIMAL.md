@@ -1086,34 +1086,45 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 - `japanese_kana`：Hiragana、Katakana、Katakana Extensions、半角片假名及 Kana 扩展块。
 - `korean_hangul`：Hangul Syllables、Jamo、Compatibility Jamo 和扩展块。
 - `source_text_residual`：先检查去首尾空白后的完整原文，再检查经 NFKC 和空白折叠后的保守长片段残留。
+- `preferred_term_usage`：由独立的可信术语校验插件提供；只检查宿主实际匹配且带
+  推荐译名的术语是否至少在候选译文中出现一次。该校验是 advisory，默认关闭。
 
 长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母；纯数字和标点不触发。该校验器默认关闭。
 
 校验发生在结构解析成功之后、写 completed 之前。
 
+校验器上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中；
+不向插件暴露项目路径、术语库对象或 Run。术语命中包含术语主名称、实际命中形式、
+主名称/alias 类型和推荐译名。普通翻译请求中的 `terms` 形状和内容不因校验器改变。
+
 命中时记录：
 
-- 校验器名称。
-- 命中字符和 Unicode code point。
-- 字符位置。
-- 候选文本。
+- 校验器名称和 `error`/`advisory` 强度。
+- 硬校验的命中字符、Unicode code point、字符位置和候选文本（若有）。
+- advisory 术语建议的术语主名称、实际命中形式和推荐译名。
 
 普通模式只在最终 failed 或 warning 结果中保存必要校验信息；调试模式保存每轮候选和请求血缘。
 
 修复流程：
 
-1. 汇总当前轮校验失败 Segment。
+1. 汇总当前轮校验失败或建议 Segment。
 2. 按当前阶段的 Chunk 边界配置分组；默认限制在同一 `file_id + part_id`，启用
    跨边界合并时遵守不同 File 直连、同 File 跨 part 中间区间全为空的规则。
 3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
-6. 每轮修复后重新执行全部已启用校验器。
+6. 每轮修复后重新执行全部已启用校验器。硬校验使用配置的最大修复次数；每个
+   Segment 的 advisory 术语建议最多只发起一轮修复，模型可以因语境不适用而保留
+   原候选。
 
 耗尽后：
 
 - `fail`：保存 failed，候选不成为当前翻译。
 - `warning`：保存 completed 和 `validation_status = "warning"`，允许进入下游，但 inspect 和导出必须报告。
+
+术语 advisory 即使 `exhausted_mode = "fail"` 也不会单独把 Segment 标记为 failed；
+一次建议修复仍未采用时保存 completed 和 warning。若同一候选同时存在硬校验问题，
+硬校验仍按原有 fail/warning 规则处理。
 
 ## 4.4 校对
 

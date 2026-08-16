@@ -13,8 +13,14 @@ def test_release_branding_is_used_by_public_metadata_and_runtime(tmp_path) -> No
     assert create_app(projects_root=tmp_path / "projects").title == (
         "Another LLM Translator"
     )
-    assert [
+    assert sorted([
         (entry.name, entry.value)
         for entry in entry_points(group=PLUGIN_ENTRY_POINT)
-        if entry.name == "srt"
-    ] == [("srt", "another_llm_translator_srt.plugin:descriptor")]
+        if entry.name in {"srt", "term-validation"}
+    ]) == [
+        ("srt", "another_llm_translator_srt.plugin:descriptor"),
+        (
+            "term-validation",
+            "another_llm_translator_term_validation.plugin:descriptor",
+        ),
+    ]

@@ -33,12 +33,16 @@ from .sqlite_storage import (
 from .stages import (
     build_term_library_rows,
     load_terms,
+    match_term_validation,
     match_terms,
     normalize_term,
     prompt_middle_digests,
     term_normalization,
 )
-from .translation_validation import validate_translation_text
+from .translation_validation import (
+    TranslationValidationContext,
+    validate_translation_text,
+)
 
 REVIEW_STAGES = {"proofreading", "polishing"}
 
@@ -70,6 +74,22 @@ class WebStore:
     def _terms_revision(self) -> int | None:
         library = load_terms(self.project)
         return int(library["terms_revision"]) if library else None
+
+    def _translation_validation_context(
+        self, segment: dict[str, Any], text: str
+    ) -> TranslationValidationContext:
+        library = load_terms(self.project)
+        terms = match_term_validation(
+            str(segment["source"]),
+            library,
+            int(self.config["terminology"]["max_terms_per_segment"]),
+            term_normalization(self.config),
+        )
+        return TranslationValidationContext(
+            source=str(segment["source"]),
+            translation=text,
+            terms=terms,
+        )
 
     def _fingerprint(self, stage: str) -> str:
         if stage.endswith("_applied"):
@@ -457,8 +477,7 @@ class WebStore:
         segment = self._require_segment(segment_id)
         text = normalize_model_text(self.files, segment, text, "translation")
         findings = validate_translation_text(
-            str(segment["source"]),
-            text,
+            self._translation_validation_context(segment, text),
             self.config["_translation_validator_instances"],
         )
         record = record_header(

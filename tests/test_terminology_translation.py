@@ -11,16 +11,17 @@ import pytest
 from app.errors import RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
+from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
 from app.stages import (
     TermNormalization,
-    _TermMatchCache,
     _restore_leading_whitespace,
+    _TermMatchCache,
     load_terms,
+    match_term_validation,
     match_terms,
     run_terminology,
     run_translation,
 )
-from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_foundation import make_app_root
 
@@ -759,6 +760,205 @@ def test_term_matching_group_injects_primary_without_unmatched_aliases() -> None
     assert matched[0]["aliases"] == []
     assert matched[1]["aliases"] == ["Ally"]
     assert matched[1]["primary_source"] == "Alice"
+
+
+def test_term_validation_matches_only_actual_preferred_term_hits() -> None:
+    library = {
+        "terms": [
+            {
+                "source": "Alice",
+                "aliases": ["PrimeAlias"],
+                "preferred_translation": "爱丽丝",
+                "group_primary": None,
+            },
+            {
+                "source": "Alicia",
+                "aliases": ["Ally"],
+                "preferred_translation": "艾丽西亚",
+                "group_primary": "alice",
+            },
+        ]
+    }
+    matches = match_term_validation(
+        "Ally arrived", library, 10, TermNormalization("NFKC", True)
+    )
+    assert [
+        (item.source, item.matched_text, item.match_type, item.preferred_translation)
+        for item in matches
+    ] == [("Alicia", "Ally", "alias", "艾丽西亚")]
+
+
+@pytest.mark.asyncio
+async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice arrived.")
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-USAGE",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-ALICE",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                }
+            ],
+        ),
+    )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        .replace("validators = []", 'validators = ["preferred_term_usage"]')
+        .replace("max_retry_attempts = 2", "max_retry_attempts = 0"),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        calls.append(payload)
+        repaired = "validation_repair" in payload
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": item["id"],
+                                        "translation": (
+                                            "译文：爱丽丝"
+                                            if repaired
+                                            else "译文"
+                                        ),
+                                    }
+                                    for item in payload["segments"]
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["completed"] == 1
+    assert summary["failed"] == 0
+    assert len(calls) == 2
+    assert calls[0]["terms"] == calls[1]["terms"]
+    assert calls[1]["segments"][0]["validation_matches"][0] == {
+        "validator": "preferred_term_usage",
+        "match_type": "preferred_term_missing",
+        "severity": "advisory",
+        "start": None,
+        "end": None,
+        "term_source": "Alice",
+        "matched_source": "Alice",
+        "expected_translation": "爱丽丝",
+    }
+    record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
+    assert record["validation_status"] == "passed"
+    assert record["validation_findings"] == []
+
+
+@pytest.mark.asyncio
+async def test_advisory_term_usage_accepts_warning_after_one_repair(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice arrived.")
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-USAGE-WARNING",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-ALICE-WARNING",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": [],
+                    "group_primary": None,
+                    "conflicts": {},
+                }
+            ],
+        ),
+    )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "validators = []", 'validators = ["preferred_term_usage"]'
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": item["id"],
+                                        "translation": "译文",
+                                    }
+                                    for item in payload["segments"]
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["completed"] == 1
+    assert summary["failed"] == 0
+    assert calls == 2
+    record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
+    assert record["validation_status"] == "warning"
+    assert record["validation_findings"][0]["severity"] == "advisory"
 
 
 def test_term_matching_deduplicates_term_hit_across_base_and_reading() -> None:

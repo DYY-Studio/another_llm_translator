@@ -201,7 +201,7 @@ class DocumentAdapter(Protocol):
 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的
 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，
 或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言行为。更新该导出参数
-后，Document Adapter 插件协议版本为 `8`；旧协议插件会快速失败。
+后，Document Adapter 插件协议版本为 `9`；旧协议插件会快速失败。
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
@@ -372,7 +372,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=8,
+        protocol_version=9,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -381,20 +381,31 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。每个校验器声明唯一的
-`validator_id`、`version`、`label`，并实现 `validate(source, translation)`，返回
-带 `match_type`、匹配文本和译文位置的 `TranslationValidationMatch`。宿主会
-校验匹配边界，并把校验器及插件版本写入翻译阶段指纹。
+翻译校验器通过 `translation_validators` 注册。翻译校验器插件协议当前为版本 `9`；
+每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收
+`TranslationValidationContext` 的 `validate(context)`。上下文只包含当前 Segment
+的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或
+Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+
+`TranslationValidationMatch.severity` 为 `error` 或 `advisory`。`error` 必须指向
+候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的
+建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为
+warning。首个真实外部示例是可选的
+`another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查
+实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
-from app.translation_validation import TranslationValidationMatch
+from app.translation_validation import (
+    TranslationValidationContext,
+    TranslationValidationMatch,
+)
 
 class MyValidator:
     validator_id = "my_validator"
     version = "1.0.0"
     label = "My validator"
 
-    def validate(self, source: str, translation: str):
+    def validate(self, context: TranslationValidationContext):
         return ()
 ```
 
