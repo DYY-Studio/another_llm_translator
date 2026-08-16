@@ -1872,6 +1872,29 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
     }
 
 
+def _terminology_scan_selection(
+    project: Path,
+    segments: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+    scope: Scope,
+    task_id: str,
+    *,
+    force_all: bool = False,
+) -> tuple[list[dict[str, Any]], set[str], set[str], set[str]]:
+    selected = (
+        [segment for segment in segments if not segment["is_empty"]]
+        if force_all
+        else select_scope(segments, files, scope)
+    )
+    selected_ids = {str(segment["segment_id"]) for segment in selected}
+    completed_ids, fingerprints = terminology_scan_state(
+        project,
+        task_id,
+        selected_ids,
+    )
+    return selected, selected_ids, completed_ids, fingerprints
+
+
 async def run_terminology(
     project: Path,
     scope: Scope,
@@ -1941,15 +1964,19 @@ async def run_terminology(
     else:
         task_id = str(active.get("active_task_id", "none")) if active else "none"
 
-    selected = select_scope(segments, files, scope)
-    if scope.force:
-        # A forced terminology run rescans the full project and merges at publish.
-        selected = [segment for segment in segments if not segment["is_empty"]]
-    selected_ids = {str(segment["segment_id"]) for segment in selected}
-    completed_ids, existing_fingerprints = terminology_scan_state(
-        project,
-        task_id,
+    # A forced terminology run rescans the full project and merges at publish.
+    (
+        selected,
         selected_ids,
+        completed_ids,
+        existing_fingerprints,
+    ) = _terminology_scan_selection(
+        project,
+        segments,
+        files,
+        scope,
+        task_id,
+        force_all=scope.force,
     )
     work = (
         selected
@@ -4586,16 +4613,17 @@ async def run_all(
         if active and active.get("status") == "active":
             run_terminology_stage = True
         elif active and active.get("status") == "completed":
-            selected = select_scope(segments, files, scope)
-            selected_ids = {
-                str(segment["segment_id"])
-                for segment in selected
-                if not segment["is_empty"]
-            }
-            completed_ids, _ = terminology_scan_state(
-                project,
-                str(active.get("active_task_id", "")),
+            (
+                _selected,
                 selected_ids,
+                completed_ids,
+                _fingerprints,
+            ) = _terminology_scan_selection(
+                project,
+                segments,
+                files,
+                scope,
+                str(active.get("active_task_id", "")),
             )
             run_terminology_stage = bool(selected_ids - completed_ids)
         if run_terminology_stage:
