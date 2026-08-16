@@ -149,7 +149,6 @@ def initialize(project: Path) -> None:
     try:
         connection = _connect(path)
         with connection:
-            _create_tables(connection)
             _ensure_schema(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法初始化项目 SQLite：{path}: {exc}") from exc
@@ -265,6 +264,70 @@ def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
     return _json(residual)
 
 
+_FILE_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "file_id",
+    "file_order",
+)
+_ADAPTER_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "file_id",
+)
+_STAGE_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "stage",
+    "segment_id",
+    "status",
+)
+_SCAN_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "stage",
+    "active_task_id",
+    "segment_id",
+    "status",
+)
+_CANDIDATE_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "stage",
+    "status",
+    "active_task_id",
+)
+_RUN_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "run_id",
+    "stage",
+    "status",
+    "started_at",
+    "created_at",
+)
+_CHUNK_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "run_id",
+)
+_TERMS_RESIDUAL_FIELDS = ("schema_version", "record_type", "project_id")
+
+
 def _check_mirrors(
     value: dict[str, Any], expected: dict[str, Any], location: str
 ) -> None:
@@ -311,42 +374,28 @@ def _terms_record_type(key: str) -> str:
     }[key]
 
 
-def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
-    columns = {
-        str(item["name"])
-        for item in connection.execute("PRAGMA table_info(segments)")
-    }
-    if "file_order" not in columns:
-        connection.execute(
-            "ALTER TABLE segments ADD COLUMN file_order INTEGER NOT NULL DEFAULT 0"
-        )
-        connection.execute(
-            """
-            UPDATE segments
-            SET file_order = (
-                SELECT file_order FROM files
-                WHERE files.file_id = segments.file_id
-            )
-            """
-        )
-    connection.execute("DROP INDEX IF EXISTS segments_file_order")
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS segments_file_order "
-        "ON segments(file_order, line_index)"
-    )
-
-
-def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
-    """Validate and rewrite v2 rows into the relation-first v3 layout."""
+def _migrate_legacy_to_v3(connection: sqlite3.Connection) -> None:
+    """Validate and rewrite v1/v2 rows into the relation-first v3 layout."""
     project_id = _project_id(connection)
     files = connection.execute(
         "SELECT file_id, file_order, payload_json FROM files"
     ).fetchall()
+    segment_columns = {
+        str(item["name"])
+        for item in connection.execute("PRAGMA table_info(segments)")
+    }
+    segment_file_order = (
+        "segments.file_order"
+        if "file_order" in segment_columns
+        else "files.file_order"
+    )
     segments = connection.execute(
-        """SELECT segment_id, file_id, file_order, line_index, part_id,
-                  source, is_empty, model_source, payload_json
-           FROM segments"""
+        f"""SELECT segments.segment_id, segments.file_id,
+                  {segment_file_order} AS file_order, segments.line_index,
+                  segments.part_id, segments.source, segments.is_empty,
+                  segments.model_source, segments.payload_json
+           FROM segments
+           JOIN files ON files.file_id = segments.file_id"""
     ).fetchall()
     adapter_states = connection.execute(
         "SELECT file_id, payload_json FROM adapter_states"
@@ -392,7 +441,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             f"files/{file_id}",
         )
         file_payloads.append(
-            (file_id, _residual(value, ("schema_version", "record_type", "record_id", "project_id", "file_id", "file_order")))
+            (file_id, _residual(value, _FILE_RESIDUAL_FIELDS))
         )
 
     segment_rows: list[tuple[Any, ...]] = []
@@ -445,7 +494,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             f"adapter_states/{file_id}",
         )
         adapter_payloads.append(
-            (file_id, _residual(value, ("schema_version", "record_type", "record_id", "project_id", "file_id")))
+            (file_id, _residual(value, _ADAPTER_RESIDUAL_FIELDS))
         )
 
     stage_payloads: list[tuple[Any, ...]] = []
@@ -475,7 +524,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 stage,
                 row["segment_id"],
                 status,
-                _residual(value, ("schema_version", "record_type", "record_id", "project_id", "stage", "segment_id", "status")),
+                _residual(value, _STAGE_RESIDUAL_FIELDS),
             )
         )
 
@@ -505,7 +554,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 str(row["active_task_id"]),
                 row["segment_id"],
                 row["status"],
-                _residual(value, ("schema_version", "record_type", "record_id", "project_id", "stage", "active_task_id", "segment_id", "status")),
+                _residual(value, _SCAN_RESIDUAL_FIELDS),
             )
         )
 
@@ -532,7 +581,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 int(row["sequence"]),
                 record_id,
                 str(row["active_task_id"]),
-                _residual(value, ("schema_version", "record_type", "record_id", "project_id", "stage", "status", "active_task_id")),
+                _residual(value, _CANDIDATE_RESIDUAL_FIELDS),
             )
         )
 
@@ -562,20 +611,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 str(row["stage"]),
                 str(row["status"]),
                 started_at,
-                _residual(
-                    value,
-                    (
-                        "schema_version",
-                        "record_type",
-                        "record_id",
-                        "project_id",
-                        "run_id",
-                        "stage",
-                        "status",
-                        "started_at",
-                        "created_at",
-                    ),
-                ),
+                _residual(value, _RUN_RESIDUAL_FIELDS),
             )
         )
 
@@ -600,7 +636,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
                 int(row["sequence"]),
                 record_id,
                 str(row["run_id"]),
-                _residual(value, ("schema_version", "record_type", "record_id", "project_id", "run_id")),
+                _residual(value, _CHUNK_RESIDUAL_FIELDS),
             )
         )
 
@@ -614,11 +650,9 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             f"terms_state/{key}",
         )
         term_payloads.append(
-            (key, _residual(value, ("schema_version", "record_type", "project_id")))
+            (key, _residual(value, _TERMS_RESIDUAL_FIELDS))
         )
 
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
-    connection.execute("DROP TABLE IF EXISTS segments_v3")
     connection.execute(
         """CREATE TABLE segments_v3 (
             segment_id TEXT PRIMARY KEY,
@@ -641,13 +675,6 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE segments")
     connection.execute("ALTER TABLE segments_v3 RENAME TO segments")
 
-    for table in (
-        "stage_results",
-        "terminology_scans",
-        "terminology_candidates",
-        "run_chunks",
-    ):
-        connection.execute(f"DROP TABLE IF EXISTS {table}_v3")
     connection.execute(
         """CREATE TABLE stage_results_v3 (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -762,17 +789,13 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         version = SCHEMA_VERSION
     else:
         version = int(row[0])
-        if version == 1:
-            _migrate_v1_to_v2(connection)
-            version = 2
-        if version == 2:
-            _migrate_v2_to_v3(connection)
+        if version in {1, 2}:
+            _migrate_legacy_to_v3(connection)
             version = 3
         elif version != SCHEMA_VERSION:
             raise ProjectError(
                 f"不支持的项目 SQLite schema_version：{row[0]}；请重新创建项目"
             )
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
     connection.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -862,7 +885,7 @@ def _hydrate_file(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
 
 
 def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
-    value = _with_common_header(
+    return _with_common_header(
         {},
         project_id=project_id,
         record_type="source_segment",
@@ -878,7 +901,6 @@ def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]
             "created_at": row["created_at"],
         },
     )
-    return value
 
 
 def _hydrate_adapter_state(
@@ -940,22 +962,19 @@ def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, An
 
 
 def _hydrate_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
-    stage = row["stage"] if row["stage"] != "unknown" else None
-    status = row["status"] if row["status"] != "unknown" else None
-    value = _with_common_header(
+    return _with_common_header(
         _load(str(row["payload_json"])),
         project_id=project_id,
         record_type="run",
         record_id=str(row["run_id"]),
         fields={
             "run_id": str(row["run_id"]),
-            "stage": str(stage) if stage is not None else None,
-            "status": str(status) if status is not None else None,
+            "stage": str(row["stage"]),
+            "status": str(row["status"]),
             "started_at": row["started_at"],
             "created_at": row["started_at"],
         },
     )
-    return value
 
 
 def _hydrate_chunk(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
@@ -1017,17 +1036,7 @@ def replace_source(
                     (
                         str(item["file_id"]),
                         int(item["file_order"]),
-                        _residual(
-                            item,
-                            (
-                                "schema_version",
-                                "record_type",
-                                "record_id",
-                                "project_id",
-                                "file_id",
-                                "file_order",
-                            ),
-                        ),
+                        _residual(item, _FILE_RESIDUAL_FIELDS),
                     )
                     for item in file_values
                 ],
@@ -1058,16 +1067,7 @@ def replace_source(
                 [
                     (
                         str(item["file_id"]),
-                        _residual(
-                            item,
-                            (
-                                "schema_version",
-                                "record_type",
-                                "record_id",
-                                "project_id",
-                                "file_id",
-                            ),
-                        ),
+                        _residual(item, _ADAPTER_RESIDUAL_FIELDS),
                     )
                     for item in state_values
                 ],
@@ -1252,16 +1252,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(file_id) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         str(value.get("file_id") or key),
-                        _residual(
-                            value,
-                            (
-                                "schema_version",
-                                "record_type",
-                                "record_id",
-                                "project_id",
-                                "file_id",
-                            ),
-                        ),
+                        _residual(value, _ADAPTER_RESIDUAL_FIELDS),
                     ),
                 )
             elif kind in {"terms", "overrides", "active_task"}:
@@ -1270,9 +1261,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         kind,
-                        _residual(
-                            value, ("schema_version", "record_type", "project_id")
-                        ),
+                        _residual(value, _TERMS_RESIDUAL_FIELDS),
                     ),
                 )
             elif kind == "run_manifest":
@@ -1285,24 +1274,11 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                         started_at=excluded.started_at, payload_json=excluded.payload_json
                     """,
                     (
-                        str(value.get("run_id") or key),
-                        str(value.get("stage") or "unknown"),
-                        str(value.get("status") or "unknown"),
+                        str(key),
+                        str(value["stage"]),
+                        str(value["status"]),
                         value.get("started_at"),
-                        _residual(
-                            value,
-                            (
-                                "schema_version",
-                                "record_type",
-                                "record_id",
-                                "project_id",
-                                "run_id",
-                                "stage",
-                                "status",
-                                "started_at",
-                                "created_at",
-                            ),
-                        ),
+                        _residual(value, _RUN_RESIDUAL_FIELDS),
                     ),
                 )
             else:
@@ -1337,9 +1313,7 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                 (
                     "overrides",
-                    _residual(
-                        overrides, ("schema_version", "record_type", "project_id")
-                    ),
+                    _residual(overrides, _TERMS_RESIDUAL_FIELDS),
                 ),
             )
     except sqlite3.Error as exc:
@@ -1422,18 +1396,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item.get("stage")),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(
-                    item,
-                    (
-                        "schema_version",
-                        "record_type",
-                        "record_id",
-                        "project_id",
-                        "stage",
-                        "segment_id",
-                        "status",
-                    ),
-                ),
+                _residual(item, _STAGE_RESIDUAL_FIELDS),
             )
             for item in records
         ],
@@ -1449,19 +1412,7 @@ def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item["active_task_id"]),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(
-                    item,
-                    (
-                        "schema_version",
-                        "record_type",
-                        "record_id",
-                        "project_id",
-                        "stage",
-                        "active_task_id",
-                        "segment_id",
-                        "status",
-                    ),
-                ),
+                _residual(item, _SCAN_RESIDUAL_FIELDS),
             )
             for item in records
         ],
@@ -1475,18 +1426,7 @@ def _insert_candidates(connection: sqlite3.Connection, records: Iterable[dict[st
             (
                 str(item["record_id"]),
                 str(item["active_task_id"]),
-                _residual(
-                    item,
-                    (
-                        "schema_version",
-                        "record_type",
-                        "record_id",
-                        "project_id",
-                        "stage",
-                        "status",
-                        "active_task_id",
-                    ),
-                ),
+                _residual(item, _CANDIDATE_RESIDUAL_FIELDS),
             )
             for item in records
         ],
@@ -1500,10 +1440,7 @@ def _insert_chunks(connection: sqlite3.Connection, records: Iterable[dict[str, A
             (
                 str(item["record_id"]),
                 str(item.get("run_id") or run_id),
-                _residual(
-                    item,
-                    ("schema_version", "record_type", "record_id", "project_id", "run_id"),
-                ),
+                _residual(item, _CHUNK_RESIDUAL_FIELDS),
             )
             for item in records
         ],
@@ -1568,7 +1505,10 @@ def record_exists(project: Path, path: Path) -> bool:
 def list_runs(project: Path, stage: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
-        query = "SELECT payload_json FROM runs WHERE 1=1"
+        query = (
+            "SELECT run_id, stage, status, started_at, payload_json "
+            "FROM runs WHERE 1=1"
+        )
         params: list[Any] = []
         if stage is not None:
             query += " AND stage = ?"
@@ -1580,10 +1520,7 @@ def list_runs(project: Path, stage: str | None = None, status: str | None = None
         project_id = _project_id(connection)
         return [
             _hydrate_run(row, project_id)
-            for row in connection.execute(
-                query.replace("SELECT payload_json", "SELECT run_id, stage, status, started_at, payload_json"),
-                params,
-            ).fetchall()
+            for row in connection.execute(query, params).fetchall()
         ]
     finally:
         connection.close()

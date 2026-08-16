@@ -288,6 +288,188 @@ def test_v3_run_payload_does_not_duplicate_sql_timestamps(tmp_path: Path) -> Non
     assert read_json(project, manifest_path)["created_at"] == run["started_at"]
 
 
+def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    file_id = str(read_files(project)[0]["file_id"])
+
+    write_json(
+        project,
+        project / "source" / "adapters" / f"{file_id}.json",
+        record_header(
+            "document_adapter_state",
+            project_id,
+            record_id=f"DOCUMENT-{file_id}",
+            file_id=file_id,
+            state={"kept": True},
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "stages" / "translation.jsonl",
+        record_header(
+            "stage_result",
+            project_id,
+            stage="translation",
+            segment_id=f"{file_id}-S000001",
+            status="completed",
+            text="translated",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            project_id,
+            stage="terminology",
+            active_task_id="TERM-TASK-TEST",
+            segment_id=f"{file_id}-S000001",
+            status="completed",
+            detail="scan detail",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            project_id,
+            stage="terminology",
+            status="completed",
+            active_task_id="TERM-TASK-TEST",
+            terms=[{"source": "term"}],
+        ),
+    )
+    write_json(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-TEST",
+            terms=[{"source": "term"}],
+        ),
+    )
+    write_json(
+        project,
+        project / "terminology" / "overrides.json",
+        record_header(
+            "terminology_overrides",
+            project_id,
+            record_id="OVERRIDES-TEST",
+            overrides={"term": "译文"},
+        ),
+    )
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            project_id,
+            record_id="TERM-TASK-TEST",
+            active_task_id="TERM-TASK-TEST",
+            status="active",
+        ),
+    )
+    run_id = "RUN-PAYLOAD-TEST"
+    manifest_path = project / "runs" / run_id / "manifest.json"
+    write_json(
+        project,
+        manifest_path,
+        record_header(
+            "run",
+            project_id,
+            record_id=run_id,
+            run_id=run_id,
+            stage="translation",
+            status="running",
+            started_at="2026-08-16T12:00:00+08:00",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "runs" / run_id / "chunks.jsonl",
+        record_header(
+            "chunk_manifest",
+            project_id,
+            record_id="CHK-PAYLOAD-TEST",
+            run_id=run_id,
+            segments=[f"{file_id}-S000001"],
+        ),
+    )
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        payloads = {
+            "files": json.loads(
+                database.execute("SELECT payload_json FROM files").fetchone()[0]
+            ),
+            "adapter_states": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM adapter_states"
+                ).fetchone()[0]
+            ),
+            "stage_results": json.loads(
+                database.execute("SELECT payload_json FROM stage_results").fetchone()[0]
+            ),
+            "terminology_scans": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM terminology_scans"
+                ).fetchone()[0]
+            ),
+            "terminology_candidates": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM terminology_candidates"
+                ).fetchone()[0]
+            ),
+            "terms": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM terms_state WHERE key='terms'"
+                ).fetchone()[0]
+            ),
+            "overrides": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM terms_state WHERE key='overrides'"
+                ).fetchone()[0]
+            ),
+            "active_task": json.loads(
+                database.execute(
+                    "SELECT payload_json FROM terms_state WHERE key='active_task'"
+                ).fetchone()[0]
+            ),
+            "runs": json.loads(
+                database.execute("SELECT payload_json FROM runs").fetchone()[0]
+            ),
+            "run_chunks": json.loads(
+                database.execute("SELECT payload_json FROM run_chunks").fetchone()[0]
+            ),
+        }
+
+    for kind in (
+        "files",
+        "adapter_states",
+        "stage_results",
+        "terminology_scans",
+        "terminology_candidates",
+        "runs",
+        "run_chunks",
+    ):
+        assert "schema_version" not in payloads[kind]
+        assert "record_type" not in payloads[kind]
+        assert "project_id" not in payloads[kind]
+    assert "record_id" not in payloads["files"]
+    assert "file_id" not in payloads["files"]
+    assert "stage" not in payloads["stage_results"]
+    assert "run_id" not in payloads["runs"]
+    assert payloads["stage_results"]["text"] == "translated"
+    assert payloads["adapter_states"]["state"] == {"kept": True}
+    for kind in ("terms", "overrides", "active_task"):
+        assert "schema_version" not in payloads[kind]
+        assert "record_type" not in payloads[kind]
+        assert "project_id" not in payloads[kind]
+    assert payloads["terms"]["record_id"] == "TERMS-TEST"
+
+
 def test_v1_project_migrates_file_order_and_drops_dead_indexes(
     tmp_path: Path,
 ) -> None:
