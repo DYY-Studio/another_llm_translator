@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     files_add.add_argument("--recursive", action="store_true")
     files_add.add_argument(
         "--document-adapter",
-        help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
+        help="显式指定 Adapter；省略时按已安装 Adapter 的扩展名识别",
     )
     files_add.add_argument(
         "--adapter-option",
