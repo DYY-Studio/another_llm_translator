@@ -26,7 +26,9 @@ python -m pip check
 
 `requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 在此基础上增加测试和构建依赖。API Key 必须通过 Preset 引用的环境变量或系统钥匙串提供，不要写入仓库文件。
 
-开发依赖会以 editable 方式安装宿主和 `plugins/srt`，因此测试与桌面构建可以发现 SRT entry point。独立使用时也可以单独构建并安装 `plugins/srt`；插件代码与宿主同进程运行，安装即表示信任。
+开发依赖会以 editable 方式安装宿主、`plugins/srt` 和
+`plugins/term_validation`，因此测试与桌面构建可以发现官方 SRT 与术语校验
+entry point。两个插件都可以单独构建并安装；插件代码与宿主同进程运行，安装即表示信任。
 
 ## 2. 仓库结构
 
@@ -37,6 +39,7 @@ python -m pip check
 - `tests/`：使用模拟 LLM 响应的确定性工作流测试。
 - `packaging/`：冻结 Python/FastAPI sidecar 的 PyInstaller 配置。
 - `plugins/srt/`：可单独构建和发行的 SRT Document Adapter 示例插件。
+- `plugins/term_validation/`：可单独构建和发行的术语使用 Translation Validator 示例插件。
 - `scripts/`：前端、sidecar 和桌面构建辅助脚本。
 - `docs/`：产品规范、Adapter 契约、用户与开发文档。
 
@@ -96,7 +99,8 @@ bash scripts/desktop-dev.sh
 
 `scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
 `another_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
-entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时安装任意插件。
+和术语校验 entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时
+安装任意插件。
 
 发布改名不保留旧包名、命令、环境变量或插件组。默认用户数据目录由旧名称迁移到
 `another-llm-translator`：只有新目录不存在时才迁移；新目录存在则跳过且不覆盖旧目录。

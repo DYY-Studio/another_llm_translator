@@ -96,18 +96,20 @@ Preset 与规范化思考响应已落地。Stage 22 公开 Beta 后，已发布 
 ### Document Adapter 与可信 Python 插件（Beta）
 
 内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。SRT 已作为
-`plugins/srt/` 独立发行包示例接入，并通过 entry point、宿主集成和冻结 sidecar
-装配验证。外部 Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）
+`plugins/srt/` 独立发行包示例和
+`plugins/term_validation/` 独立 Translation Validator 示例均已接入，并通过
+entry point、宿主集成和冻结 sidecar 装配验证。外部 Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）
 与 Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
 `docs/ADAPTERS.md` §2）已落地。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
 - 用真实字幕样本持续验证 SRT 核心语法边界与模型标记兼容性；
-- 在出现第二个真实外部插件后再决定 Document Adapter 的兼容范围与运行时安装策略。
+- 在出现第二个真实外部 Document Adapter 后再决定 Document Adapter 的兼容范围与运行时安装策略。
 
-翻译校验器现在通过独立的可信 Python Validator 契约扩展；它只接收源文和译文，
-不建立通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；
-外部插件仍按版本不匹配快速失败。
+翻译校验器现在通过独立的可信 Python Validator 契约扩展；协议版本为 `9`，接收源文、
+译文和宿主确定的逐 Segment 术语命中，不建立通用 DOM 或自由 HTML 协议。独立的
+`another-llm-translator-term-validation` 是首个真实外部 Validator 示例；官方桌面在
+构建时装配它但默认关闭，基础 Python 包可选安装，外部插件仍按版本不匹配快速失败。
 
 Python LLM Adapter 只有 provisional 边界。只有出现 JSON POST 无法表达的真实
 端点后才实现首个适配器，不用模拟需求扩张协议。

@@ -34,9 +34,13 @@ python -m app.web
 
 ```bash
 python -m pip install -e . -e plugins/srt
+# 可选：安装术语使用校验示范插件
+python -m pip install -e plugins/term_validation
 ```
 
 官方桌面构建会在构建时装配该插件；已发布桌面应用暂不支持运行时安装任意插件。
+术语使用校验插件同样在官方桌面构建时装配，但默认关闭；它只提供一次建议级修复，
+仍未采用推荐译名时保留译文并记录 warning。
 
 本发行版使用 Another LLM Translator 的新包名、命令、环境变量和数据目录。首次启动时，
 若默认的新数据目录不存在，会将旧版本的默认数据目录一次性迁移；新目录已存在时不会覆盖或合并旧目录。
