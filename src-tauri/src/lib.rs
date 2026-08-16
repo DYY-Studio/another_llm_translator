@@ -10,7 +10,7 @@ use tauri::WebviewUrl;
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
 fn web_port() -> String {
-    std::env::var("MINIMAL_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
+    std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
 }
 
 fn bundled_sidecar() -> Option<PathBuf> {
@@ -34,10 +34,10 @@ fn start_sidecar() -> Option<Child> {
             .ok();
     }
     let python =
-        std::env::var("MINIMAL_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
+        std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
     let mut command = Command::new(python);
     command.args(["-m", "app.web", "--port", &port]);
-    if let Ok(root) = std::env::var("MINIMAL_LLM_REPO_ROOT") {
+    if let Ok(root) = std::env::var("ANOTHER_LLM_REPO_ROOT") {
         command.current_dir(root);
     }
     command.spawn().ok()

@@ -7,10 +7,19 @@
     <title>译工坊</title>
     <script>
       (() => {
-        const key = "minimal-llm-translator.theme.v1";
+        const key = "another-llm-translator.theme.v1";
+        const legacyKey = "minimal-llm-translator.theme.v1";
         let mode = "system";
         try {
-          const stored = localStorage.getItem(key);
+          let stored = localStorage.getItem(key);
+          if (stored === null) {
+            const legacy = localStorage.getItem(legacyKey);
+            if (legacy !== null) {
+              localStorage.setItem(key, legacy);
+              localStorage.removeItem(legacyKey);
+              stored = legacy;
+            }
+          }
           if (stored === "light" || stored === "dark" || stored === "system") mode = stored;
         } catch {}
         const theme = mode === "system"

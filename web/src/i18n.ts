@@ -1364,7 +1364,7 @@ export function errorMessage(reason: unknown, language: Language): string {
 
 export function detectLanguage(): Language {
   try {
-    const value = window.localStorage.getItem("minimal-llm-translator.language.v1");
+    const value = window.localStorage.getItem("another-llm-translator.language.v1");
     if (value === "zh-CN" || value === "en") return value;
   } catch {
     // Browser storage is optional; use the navigator below.

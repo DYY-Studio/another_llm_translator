@@ -15,7 +15,7 @@ from PyInstaller.utils.hooks import collect_entry_point, collect_submodules
 
 ROOT = Path(SPECPATH) if "SPECPATH" in globals() else Path.cwd()
 plugin_datas, plugin_hiddenimports = collect_entry_point(
-    "minimal_llm_translator.plugins"
+    "another_llm_translator.plugins"
 )
 hiddenimports = collect_submodules("uvicorn") + plugin_hiddenimports
 

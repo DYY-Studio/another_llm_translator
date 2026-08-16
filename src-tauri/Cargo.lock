@@ -42,6 +42,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "another-llm-translator"
+version = "0.3.0"
+dependencies = [
+ "rfd",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-mcp-bridge",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2039,16 +2049,6 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
-
-[[package]]
-name = "minimal-llm-translator"
-version = "0.3.0"
-dependencies = [
- "rfd",
- "tauri",
- "tauri-build",
- "tauri-plugin-mcp-bridge",
-]
 
 [[package]]
 name = "miniz_oxide"

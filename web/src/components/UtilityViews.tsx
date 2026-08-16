@@ -780,7 +780,7 @@ export function Overview({
     if (!selection.selectedKeys.has(fileId)) selection.reset(fileId);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
-      "application/x-minimal-llm-file-ids",
+      "application/x-another-llm-file-ids",
       JSON.stringify(movingFileIds),
     );
     event.dataTransfer.setData("text/plain", fileId);
@@ -814,7 +814,7 @@ export function Overview({
     if (movingFileIds.length === 0) {
       try {
         const payload = JSON.parse(
-          event.dataTransfer.getData("application/x-minimal-llm-file-ids"),
+          event.dataTransfer.getData("application/x-another-llm-file-ids"),
         );
         if (Array.isArray(payload) && payload.every((item) => typeof item === "string")) {
           movingFileIds = payload;

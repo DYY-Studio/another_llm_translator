@@ -578,7 +578,7 @@ def _new_xml_id(root: ElementTree.Element) -> str:
         for element in root.iter()
         if (value := element.get("id"))
     }
-    base = "minimal-translator-publication-id"
+    base = "another-translator-publication-id"
     candidate = base
     suffix = 2
     while candidate in used:

@@ -14,9 +14,9 @@ if [ -z "$APP" ]; then
   exit 1
 fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo unknown)"
-DIST="dist/minimal-llm-translator-${VERSION}-macos-arm64"
+DIST="dist/another-llm-translator-${VERSION}-macos-arm64"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 cp -R "$APP" "$DIST/"
-ditto -c -k --keepParent "$APP" "$DIST/minimal-llm-translator-${VERSION}-macos-arm64.zip"
+ditto -c -k --keepParent "$APP" "$DIST/another-llm-translator-${VERSION}-macos-arm64.zip"
 echo "产物：$PWD/$DIST"
