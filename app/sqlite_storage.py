@@ -149,7 +149,6 @@ def initialize(project: Path) -> None:
     try:
         connection = _connect(path)
         with connection:
-            _create_tables(connection)
             _ensure_schema(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法初始化项目 SQLite：{path}: {exc}") from exc
@@ -329,14 +328,6 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
             )
             """
         )
-    connection.execute("DROP INDEX IF EXISTS segments_file_order")
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS segments_file_order "
-        "ON segments(file_order, line_index)"
-    )
-
-
 def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     """Validate and rewrite v2 rows into the relation-first v3 layout."""
     project_id = _project_id(connection)
@@ -617,8 +608,6 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             (key, _residual(value, ("schema_version", "record_type", "project_id")))
         )
 
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
-    connection.execute("DROP TABLE IF EXISTS segments_v3")
     connection.execute(
         """CREATE TABLE segments_v3 (
             segment_id TEXT PRIMARY KEY,
@@ -641,13 +630,6 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE segments")
     connection.execute("ALTER TABLE segments_v3 RENAME TO segments")
 
-    for table in (
-        "stage_results",
-        "terminology_scans",
-        "terminology_candidates",
-        "run_chunks",
-    ):
-        connection.execute(f"DROP TABLE IF EXISTS {table}_v3")
     connection.execute(
         """CREATE TABLE stage_results_v3 (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -772,7 +754,6 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             raise ProjectError(
                 f"不支持的项目 SQLite schema_version：{row[0]}；请重新创建项目"
             )
-    connection.execute("DROP INDEX IF EXISTS segments_source_search")
     connection.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -862,7 +843,7 @@ def _hydrate_file(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
 
 
 def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
-    value = _with_common_header(
+    return _with_common_header(
         {},
         project_id=project_id,
         record_type="source_segment",
@@ -878,7 +859,6 @@ def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]
             "created_at": row["created_at"],
         },
     )
-    return value
 
 
 def _hydrate_adapter_state(
@@ -942,7 +922,7 @@ def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, An
 def _hydrate_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
     stage = row["stage"] if row["stage"] != "unknown" else None
     status = row["status"] if row["status"] != "unknown" else None
-    value = _with_common_header(
+    return _with_common_header(
         _load(str(row["payload_json"])),
         project_id=project_id,
         record_type="run",
@@ -955,7 +935,6 @@ def _hydrate_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
             "created_at": row["started_at"],
         },
     )
-    return value
 
 
 def _hydrate_chunk(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
@@ -1568,7 +1547,10 @@ def record_exists(project: Path, path: Path) -> bool:
 def list_runs(project: Path, stage: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
-        query = "SELECT payload_json FROM runs WHERE 1=1"
+        query = (
+            "SELECT run_id, stage, status, started_at, payload_json "
+            "FROM runs WHERE 1=1"
+        )
         params: list[Any] = []
         if stage is not None:
             query += " AND stage = ?"
@@ -1580,10 +1562,7 @@ def list_runs(project: Path, stage: str | None = None, status: str | None = None
         project_id = _project_id(connection)
         return [
             _hydrate_run(row, project_id)
-            for row in connection.execute(
-                query.replace("SELECT payload_json", "SELECT run_id, stage, status, started_at, payload_json"),
-                params,
-            ).fetchall()
+            for row in connection.execute(query, params).fetchall()
         ]
     finally:
         connection.close()
