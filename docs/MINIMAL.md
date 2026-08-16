@@ -8,7 +8,7 @@
 
 运行方式：单机、本地 CLI/Web、异步并发
 
-存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB
+存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB，以及可选的外部 SRT 插件
 
 LLM 接口：声明式非流式 JSON POST Adapter
 
@@ -21,7 +21,7 @@ LLM 接口：声明式非流式 JSON POST Adapter
 本项目只验证下面这条工程化翻译链路是否可行：
 
 ```text
-TXT/EPUB 导入
+TXT/EPUB 导入（安装 SRT 插件时也支持 SRT）
 → Segment 化
 → 术语提取
 → 翻译
@@ -34,7 +34,7 @@ TXT/EPUB 导入
 
 MVP 需要回答：
 
-1. TXT 与 EPUB 能否稳定导入、处理并按原格式导出。
+1. TXT、EPUB 与已安装外部 Adapter 支持的格式能否稳定导入、处理并按原格式导出。
 2. 文档的可翻译单元能否稳定映射为 Segment，TXT 空行是否保持可见结构。
 3. 长文本能否在模型 Token 限制内动态分块。
 4. 术语能否从项目文本提取、合并并注入相关翻译请求。
@@ -65,6 +65,9 @@ Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻�
 Ruby 是同一文本流中的内联语义成员，与前后普通文本共同组成一个语义单元；只有
 没有相邻文本的独立 Ruby 才保持旧的独立定位形状。术语扫描、翻译、校对和润色的完成结果、
 失败记录和恢复判断全部绑定 `segment_id`。
+
+外部 SRT Adapter 将每个字幕 cue 映射为一个 Segment，整个 SRT File 使用
+`part_id = "document"`；序号和时间行由 Adapter 状态保存，不成为 Segment 正文。
 
 非空 Segment 的连续前导 Unicode 空白以源文为准。模型仍接收完整文本，但翻译、
 校对建议、润色建议、apply 和导出在本地移除模型生成的前导空白，并恢复源
@@ -164,7 +167,7 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 
 - CLI 和配置加载。
 - 项目初始化及模板同步。
-- TXT/EPUB Document Adapter 与 Segment 化。
+- TXT/EPUB Document Adapter、外部 Document Adapter 与 Segment 化。
 - SQLite 项目持久化与项目外 JSON 交换文件。
 - Prompt 渲染、Token 估算和 Chunk 生成。
 - 声明式 LLM Adapter、HTTP 调用、限流和重试。
@@ -216,7 +219,8 @@ Web 编辑全局资源只写入用户根；内置资源删除明确失败，编�
 
 ## 2.3 初始化与文件发现
 
-TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。项目也可先创建
+TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。已安装的外部 Adapter
+也参与扩展名发现；SRT Adapter 支持 `.srt` 文件和目录。项目也可先创建
 不预设格式的空项目：
 
 ```bash
@@ -224,6 +228,7 @@ python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --adapter-option epub.ruby_mode=aozora --name PROJECT_NAME
+python -m app.main init SUBTITLES.srt --document-adapter srt --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
@@ -312,6 +317,14 @@ EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露
 关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留
 原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新
 导入；运行选项随 Adapter 状态和阶段指纹保存。
+
+SRT 外部 Adapter 只接受核心字幕结构：唯一正整数序号、严格的
+`HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行和非空正文；序号不要求连续，正文可跨多行。
+每个 cue 是一个 Segment，序号和时间行写入 `opaque_state`。单语导出替换 cue 正文，
+双语导出在同一 cue 中追加换行和译文；cue 之间使用空行并保留文件末尾换行。输入
+换行统一为 LF，BOM、原换行风格和输入字节不进入项目契约。HTML/ASS 标记作为普通
+正文交给模型，插件不解析或保证保留；译文包含空白分隔行时导出失败。缺序号、点号
+毫秒和时间行尾定位参数等非核心变体会被拒绝。
 
 项目创建后，`project.sqlite` 是项目元数据、File、Segment、Adapter 状态、术语、
 阶段结果和 Run 索引的唯一真相；原始输入、配置、Prompt、Run 快照、调试 Payload
@@ -1597,13 +1610,17 @@ XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写�
 槽，单语移除该 Segment 的全部 Ruby，双语在完整源句末尾追加译文。只有旧的
 独立 Ruby locator 继续按其专用定位规则导出。
 
+SRT Adapter 按 cue 序号和时间行重建 `.srt`，单语替换正文，双语在正文末尾追加
+换行和译文；所有 cue 独立保留在同一 File 中。输出使用项目的
+`output_encoding` 严格编码，无法表示结果字符时失败。
+
 ```bash
 python -m app.main export PROJECT --stage translated --format original
 python -m app.main export PROJECT --stage translated --format txt
 python -m app.main export PROJECT --stage translated --file F0001 --file F0003
 ```
 
-除各 File 来源格式和 TXT 外，不提供任意格式转换。
+除各 File 来源格式（包括已安装的外部 Adapter）和 TXT 外，不提供任意格式转换。
 文件范围同时适用于原格式和 TXT；只校验所选 File 的阶段结果。宿主保持
 `file_order`，不提供按 Segment 导出或跨 File 合并；跨 File 合并只属于启用配置的
 LLM Chunk 请求规划。
@@ -1880,6 +1897,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
   Adapter 状态。
 - EPUB ZIP 路径、符号链接、压缩炸弹、非法版本化 DOCTYPE 和 XML 实体输入明确
   拒绝；普通内联文本合并、混合 Ruby 复合定位和旧独立 Ruby locator 均保持可导出。
+- 独立 SRT 插件按 cue 建立 Segment，严格校验序号和时间行，纯译文与双语导出均
+  保留 cue 元数据；HTML/ASS 标记不由插件解析，破坏 cue 边界的译文被拒绝。
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。
@@ -1904,7 +1923,7 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 # 8. 最终最小架构
 
 ```text
-TXT / EPUB
+TXT / EPUB / 外部 Adapter（示例：SRT）
    │
    ▼
 稳定 File / Segment
@@ -1936,5 +1955,5 @@ Chunk 只是当前请求包装。
 Run 记录一次执行。
 设置变化不使旧结果失效；复用或重做由用户明确决定。
 普通模式保存最小结果，调试模式增加请求审计。
-TXT 保持逻辑行；EPUB 保持原包资源和格式定位。
+TXT 保持逻辑行；EPUB 保持原包资源和格式定位；SRT 保持 cue 序号、时间行和正文边界。
 ```

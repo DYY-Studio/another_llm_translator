@@ -11,7 +11,8 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 
 ## 当前基线
 
-- TXT/EPUB、File/Segment/Chunk/Run、SQLite 项目存储、CLI 和完整翻译流程已经实现。
+- TXT/EPUB、独立发行的 SRT Document Adapter、File/Segment/Chunk/Run、SQLite
+  项目存储、CLI 和完整翻译流程已经实现。
 - CLI 与本地 Web 共享阶段、Run、限速、恢复和项目持久化代码；项目视图与人工
   编辑逻辑均由 Web 内部职责提供。
 - 本地 Web 已覆盖项目、术语、结果审校、阶段决策、apply、export 和诊断，并
@@ -92,13 +93,15 @@ Preset 与规范化思考响应已落地。Stage 22 公开 Beta 后，已发布 
 
 ### Document Adapter 与可信 Python 插件（Beta）
 
-内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。外部
-Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）与
-Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
+内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。SRT 已作为
+`plugins/srt/` 独立发行包示例接入，并通过 entry point、宿主集成和冻结 sidecar
+装配验证。外部 Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）
+与 Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
 `docs/ADAPTERS.md` §2）已落地。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
-- 维护至少一个独立发行的真实 Python Document 插件。
+- 用真实字幕样本持续验证 SRT 核心语法边界与模型标记兼容性；
+- 在出现第二个真实外部插件后再决定 Document Adapter 的兼容范围与运行时安装策略。
 
 翻译校验器现在通过独立的可信 Python Validator 契约扩展；它只接收源文和译文，
 不建立通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；

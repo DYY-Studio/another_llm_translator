@@ -181,7 +181,8 @@ Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前
 
 ## 2. Document Adapter（Beta）
 
-Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`：
+Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；独立发行的
+`minimal-llm-translator-srt` 插件提供 `srt` Adapter：
 
 ```python
 class DocumentAdapter(Protocol):
@@ -200,14 +201,14 @@ class DocumentAdapter(Protocol):
 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的
 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，
 或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言行为。更新该导出参数
-后，Document Adapter 插件协议版本为 `7`；旧协议插件会快速失败。
+后，Document Adapter 插件协议版本为 `8`；旧协议插件会快速失败。
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
 
 可导入 Adapter 必须声明至少一个小写、带前导点的扩展名。宿主按大小写不敏感
 匹配扩展名；不同 Adapter 声明同一扩展名时插件加载直接失败，不猜测格式。
-内置 TXT 声明 `.txt`、`.text`，EPUB 声明 `.epub`。
+内置 TXT 声明 `.txt`、`.text`，EPUB 声明 `.epub`；SRT 插件声明 `.srt`。
 
 ### 导入
 
@@ -265,11 +266,25 @@ Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 7。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 8。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
 不会自动改用 TXT，也不会删除仍可读取的项目 Segment 和阶段结果。
+
+### SRT 0.1（外部插件示例）
+
+SRT 插件位于 `plugins/srt/`，发行包名为 `minimal-llm-translator-srt`，通过
+`minimal_llm_translator.plugins` entry point 注册。每个 cue 是一个 Segment，所有
+cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
+
+插件严格接受唯一正整数序号及 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行，序号不要求
+连续，正文可以跨多行。单语导出替换 cue 正文，双语导出在同一 cue 中追加换行和译文。
+输入换行会规范化为 LF，输出换行、末尾换行和编码由插件与宿主输出契约决定。
+
+HTML/ASS 样式标记作为普通正文交给模型，不由首版插件解析或保证保留；译文不得包含
+空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
+毫秒或时间行尾定位参数等非核心变体。
 
 ### EPUB 0.3
 

@@ -26,6 +26,8 @@ python -m pip check
 
 `requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 在此基础上增加测试和构建依赖。API Key 必须通过 Preset 引用的环境变量或系统钥匙串提供，不要写入仓库文件。
 
+开发依赖会以 editable 方式安装宿主和 `plugins/srt`，因此测试与桌面构建可以发现 SRT entry point。独立使用时也可以单独构建并安装 `plugins/srt`；插件代码与宿主同进程运行，安装即表示信任。
+
 ## 2. 仓库结构
 
 - `app/`：CLI、本地 Web API、项目存储、阶段执行、LLM 请求和导出。
@@ -34,6 +36,7 @@ python -m pip check
 - `config/`、`prompts/`、`llm_adapters/`、`llm_presets/`：随应用分发的内置资源。
 - `tests/`：使用模拟 LLM 响应的确定性工作流测试。
 - `packaging/`：冻结 Python/FastAPI sidecar 的 PyInstaller 配置。
+- `plugins/srt/`：可单独构建和发行的 SRT Document Adapter 示例插件。
 - `scripts/`：前端、sidecar 和桌面构建辅助脚本。
 - `docs/`：产品规范、Adapter 契约、用户与开发文档。
 
@@ -89,6 +92,10 @@ bash scripts/desktop-dev.sh
 
 - `MINIMAL_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
 - `MINIMAL_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
+
+`scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
+`minimal_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
+entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时安装任意插件。
 
 桌面壳启动时优先拉起 bundle 内的冻结 sidecar，找不到时使用开发环境中的 `python -m app.web`，健康探测成功后加载 `http://127.0.0.1:<port>`。退出桌面应用时会终止由本次进程启动的 sidecar。异常退出后如果端口上仍有兼容服务，再次启动可能继续使用该服务；必要时应手动结束残留进程。
 
