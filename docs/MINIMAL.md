@@ -10,7 +10,7 @@
 
 存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB，以及可选的外部 SRT 插件
 
-LLM 接口：声明式非流式 JSON POST Adapter
+LLM 接口：声明式 JSON POST Adapter，支持 Preset 显式启用的 SSE 流式传输
 
 ---
 
@@ -1300,7 +1300,10 @@ Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapt
 `/choices/0/message/reasoning_content`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
 `endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
-声明式 Adapter 只支持非流式 JSON POST。
+声明式 Adapter 默认使用非流式 JSON POST。schema 2 Adapter 可声明 SSE
+`streaming` 规则；只有 Preset 的 `stream = true` 时才使用流式 Endpoint 和流式
+请求 body。普通 Preset 迁移后保持 `stream = false`，四个内置 Adapter 的非流式
+body 与此前一致。
 
 Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 在用户
 手动触发时以非流式 GET 检测连通性并读取模型列表，用于填写 Preset；不自动
@@ -1326,7 +1329,9 @@ Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset �
 
 整个命令共享一个 `httpx.AsyncClient`：
 
-- connect、read、write 和 pool timeout 都使用 `request_timeout_seconds`。
+- 非流式请求的 connect、read、write 和 pool timeout 都使用
+  `request_timeout_seconds`；流式请求把它作为连接及连续读取的空闲超时，不限制
+  整个生成总时长。
 - 连接池上限从 `max_parallel` 派生。
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
@@ -1343,6 +1348,16 @@ HTTP 重试：
 - 401、403 或明显错误端点停止当前阶段尚未发送的任务。
 - 所有 HTTP 错误共享 `http_max_attempts` 总上限。
 - 退避使用有上限的指数退避和 jitter。
+
+启用流式时，宿主要求响应为 UTF-8 SSE，并严格处理 CRLF/LF、注释、多行 `data:`
+和任意 HTTP chunk 边界。OpenAI-compatible 使用 `[DONE]`，OpenAI Responses
+使用 `response.completed`，Anthropic 使用 `message_stop`，Gemini 使用最终
+`finishReason`；每条流必须命中对应终止事件。宿主在后台聚合正文、reasoning 和
+声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件前超时、
+读取超时、EOF、流内服务错误或 HTTP 可重试错误会清空本次聚合并沿
+`http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生重复计费。
+SSE 协议损坏、UTF-8/JSON 错误、匹配事件字段缺失或类型错误属于配置/协议错误，
+立即失败。用户取消立即关闭连接且不重试。
 
 格式修正：
 
@@ -1410,16 +1425,18 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 本地 Web 将相同安全摘要写入应用级 `logs/app.log`，按大小轮转，不因项目切换
 而清空；同时在有界内存中保留当前进程的结构化日志供仪表盘读取。仪表盘还为
 当前 Run 保留最近 50 个逻辑 LLM 请求；HTTP 重试只追加到同一请求。每项保存
-规范化 messages、解析后的 Content 和 Reasoning、模型、状态、HTTP 尝试次数、
-状态码与延迟。单条 message 和 Content 最多 100,000 字符，Reasoning 最多
+规范化 messages、完整成功响应的 Content 和 Reasoning、模型、状态、HTTP 尝试次数、
+传输方式、流式事件数、接收字节数、首事件延迟、状态码和延迟。单条 message 和
+Content 最多 100,000 字符，Reasoning 最多
 20,000 字符，超限时在详情中明确标记截断。
 
 仪表盘全局延迟指标按当前 Run 内已完成的全部 HTTP 尝试计算，包括成功、429、
 其他 HTTP 错误和网络错误；平均延迟为算术平均，P95 使用确定性的 nearest-rank
 规则。请求列表中的 `latest_latency_ms` 仍表示该逻辑请求最后一次尝试的延迟。
 
-这些请求详情可能包含 Prompt 和源文，只能通过当前进程的详情接口按请求 ID
-读取；诊断摘要轮询不返回正文。新 Run 开始时清空，应用重启后丢失，不经过
+这些请求详情可能包含 Prompt 和源文；流式请求在完成前不会暴露增量正文，只能通过
+当前进程的详情接口按请求 ID 读取；诊断摘要轮询不返回正文。新 Run 开始时清空，
+应用重启后丢失，不经过
 普通 logger，也不会额外写入轮转日志、Run 文件或项目数据。内存详情不采集
 Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失败和
 终止错误只记录安全错误类别。显式启用 debug 时既有调试 Payload 仍按下述规则
@@ -1430,6 +1447,7 @@ Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失�
 - Chunk Manifest。
 - 逐 Attempt 结构化日志。
 - 完整请求、响应和错误 Payload。
+- 未校验的流式增量正文或原始 SSE 事件。
 - 中间校验候选。
 
 `debug.enabled = true` 时额外保存：
@@ -1437,6 +1455,7 @@ Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失�
 - 当前 Run 的 `chunks.jsonl`。
 - 每次 Attempt 的结构化日志。
 - 每次实际请求、响应或错误 Payload。
+- 流式 Attempt 收集到的原始 SSE `data` 事件；失败 Attempt 同时保存错误元数据。
 - 格式修正、上下文拆分和校验修复的父请求关系。
 - 每轮翻译校验候选。
 
@@ -1751,9 +1770,12 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 ### 凭据与 Preset 引用
 
-LLM Preset schema v2 使用显式单凭据引用 `credential: {kind, name}`：
+LLM Preset schema v3 使用显式单凭据引用 `credential: {kind, name}`，并以
+`stream` 与 `stream_endpoint` 控制可选 SSE：
 `environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
-不隐式 fallback。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
+不隐式 fallback。schema 2 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
+迁移并默认关闭流式；Run 内历史 v2 快照只按非流式读取，不改写审计文件。v1 的
+`api_key_env` 字段已移除，加载时明确拒绝并提示改用
 `credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
 Run 快照或阶段指纹。
 

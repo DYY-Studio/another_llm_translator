@@ -115,6 +115,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "stage": "translation",
             "request_id": "REQ-1",
             "model": "test-model",
+            "transport": "non_streaming",
             "status": "completed",
             "attempt_count": 2,
             "last_http_status": 200,
@@ -123,6 +124,9 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "has_reasoning": True,
             "error": None,
             "detail_available": True,
+            "stream_event_count": 0,
+            "stream_received_bytes": 0,
+            "stream_first_event_latency_ms": None,
         }
     ]
     assert "messages" not in snapshot["requests"]["items"][0]
@@ -151,6 +155,35 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert unavailable["throughput_input_tokens_per_second"] is None
     assert unavailable["throughput_output_tokens_per_second"] is None
     assert unavailable["throughput_tokens_per_second"] is None
+
+
+def test_stream_progress_is_visible_without_partial_response(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-SSE",
+            model="stream-model",
+            messages=[{"role": "user", "content": "source"}],
+            max_attempts=2,
+            transport="sse",
+        )
+        diagnostics.request_started("REQ-SSE")
+        diagnostics.stream_progress(
+            "REQ-SSE",
+            event_count=3,
+            received_bytes=128,
+            first_event_latency_ms=42.5,
+        )
+        summary = diagnostics.snapshot()["requests"]["items"][0]
+        assert summary["transport"] == "sse"
+        assert summary["stream_event_count"] == 3
+        assert summary["stream_received_bytes"] == 128
+        assert summary["stream_first_event_latency_ms"] == 42.5
+        detail = diagnostics.request_detail("REQ-SSE")
+        assert detail["response_content"] is None
+        assert detail["attempts"] == []
 
 
 def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:

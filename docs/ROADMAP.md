@@ -19,7 +19,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
   保持回环访问与显式 LAN 共享的安全边界。
 - 发布品牌已统一为 Another LLM Translator；旧开发名称的公共入口删除，默认用户
   数据目录、钥匙串和浏览器存储提供一次性迁移。
-- 产品路线 Stage 1 至 Stage 23.3 已完成；下一阶段是 Stage 23 Windows Tauri
+- 产品路线 Stage 1 至 Stage 23.4 已完成；下一阶段是 Stage 23 Windows Tauri
   公开 Beta 与 Stage 24 多 API Key。
 - 已完成 Stage 的行为验收见 `docs/MINIMAL.md`（§7 核心验收矩阵）；逐 Stage
   实现细节可在 git 历史检索，本文不再重复记录已完成内容。
@@ -54,6 +54,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 | 23.1 | 导出文件浏览与局域网下载（限制在项目 `output/` 内） |
 | 23.2 | 导出页标签化与列表可用性 |
 | 23.3 | 导出页标签栏稳定与双栏工作台 |
+| 23.4 | 四个内置 LLM Adapter 的 SSE 流式请求与诊断聚合 |
 | — | 发行包资源完整性：wheel/sdist 内置资源、用户根同名覆盖优先 |
 
 ## Stage 23：Windows Tauri 公开 Beta
@@ -85,13 +86,15 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 
 ### 声明式 JSON LLM Adapter（已实现）
 
-当前 schema 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
+当前 schema 2 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
 JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system}` 与
 `${model}` 占位符。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主
 管理；API Key 不进入 URL、请求正文、Run 快照或阶段指纹。
 
-Preset 与规范化思考响应已落地。Stage 22 公开 Beta 后，已发布 Preset schema
-变更必须提供明确迁移或主版本边界。
+Preset schema 3 的 `stream`/`stream_endpoint` 与四个内置 Adapter 的 SSE 规则
+已落地；普通 Preset 迁移后仍为非流式。宿主聚合完整正文，流中断丢弃半成品并
+沿既有尝试次数重试，不隐式 fallback；诊断只展示事件、字节和首事件延迟。Stage
+22 公开 Beta 后，已发布 Preset/Adapter schema 变更必须提供明确迁移或主版本边界。
 
 ### Document Adapter 与可信 Python 插件（Beta）
 

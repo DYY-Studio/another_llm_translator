@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,9 +20,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config, load_run_config
-from .llm_preset import endpoint_url
 from .credentials import resolve_api_key
-from .i18n import SUPPORTED_LANGUAGES
 from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
@@ -33,8 +31,10 @@ from .errors import (
     StorageError,
     UsageError,
 )
-from .logging_utils import get_logger
+from .i18n import SUPPORTED_LANGUAGES
 from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
+from .llm_preset import endpoint_url
+from .logging_utils import get_logger
 from .sqlite_storage import (
     append_jsonl,
     append_jsonl_file,
@@ -45,7 +45,6 @@ from .sqlite_storage import (
     utc_now,
     write_json,
 )
-
 
 STAGE_FILES = {
     "translation": "translation.jsonl",
@@ -63,6 +62,109 @@ STAGE_CODES = {
     "proofreading_applied": "PRA",
     "polishing_applied": "POA",
 }
+
+
+class _StreamRetryable(Exception):
+    """A stream ended or reported an error before a complete response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        events: list[str] | None = None,
+        event_count: int = 0,
+        received_bytes: int = 0,
+        first_event_latency_ms: float | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.events = events or []
+        self.event_count = event_count
+        self.received_bytes = received_bytes
+        self.first_event_latency_ms = first_event_latency_ms
+        self.status = status
+
+
+class _StreamProtocolError(ExternalError):
+    """A malformed successful SSE response that must not be retried."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        events: list[str],
+        event_count: int,
+        received_bytes: int,
+        first_event_latency_ms: float | None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.events = events
+        self.event_count = event_count
+        self.received_bytes = received_bytes
+        self.first_event_latency_ms = first_event_latency_ms
+
+
+async def _iter_sse_data(
+    response: httpx.Response,
+) -> AsyncIterator[tuple[str, int]]:
+    """Yield complete SSE data blocks while preserving exact byte counts."""
+    pending = bytearray()
+    data_lines: list[str] = []
+    received_bytes = 0
+
+    def process_line(line: str) -> tuple[str | None, bool]:
+        if line == "":
+            if not data_lines:
+                return None, True
+            value = "\n".join(data_lines)
+            data_lines.clear()
+            return value, True
+        if line.startswith(":"):
+            return None, False
+        if line.startswith("data:"):
+            value = line[5:].removeprefix(" ")
+            data_lines.append(value)
+        return None, False
+
+    byte_stream = response.aiter_bytes()
+    try:
+        while True:
+            try:
+                chunk = await byte_stream.__anext__()
+            except StopAsyncIteration:
+                break
+            pending.extend(chunk)
+            while True:
+                try:
+                    newline = pending.index(10)
+                except ValueError:
+                    break
+                raw_line = bytes(pending[:newline])
+                del pending[: newline + 1]
+                received_bytes += newline + 1
+                if raw_line.endswith(b"\r"):
+                    raw_line = raw_line[:-1]
+                line = raw_line.decode("utf-8", errors="strict")
+                value, boundary = process_line(line)
+                if boundary and value is not None:
+                    yield value, received_bytes
+        if pending:
+            received_bytes += len(pending)
+            line = bytes(pending).decode("utf-8", errors="strict")
+            value, boundary = process_line(line)
+            if boundary and value is not None:
+                yield value, received_bytes
+    except UnicodeDecodeError as exc:
+        raise ExternalError("LLM 流式 SSE 不是合法 UTF-8") from exc
+    finally:
+        close = getattr(byte_stream, "aclose", None)
+        if close is not None:
+            await close()
+    if data_lines:
+        yield "\n".join(data_lines), received_bytes
+
 
 CJK_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
@@ -1485,6 +1587,176 @@ class LLMClient:
             raise ConfigError("项目配置缺少已加载的 LLM Adapter")
         self.adapter = adapter
 
+    async def _stream_attempt(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        request_id: str,
+        started: float,
+        diagnostics: Any | None,
+    ) -> tuple[
+        int,
+        str,
+        dict[str, str],
+        LLMResponse,
+        dict[str, int],
+        list[str],
+        int,
+        int,
+        float | None,
+    ]:
+        if self.client is None:
+            raise RuntimeError("LLMClient must be used as an async context manager")
+        async with self.client.stream(
+            "POST", url, headers=headers, json=payload
+        ) as response:
+            status = response.status_code
+            if not 200 <= status < 300:
+                await response.aread()
+                return (
+                    status,
+                    response.text,
+                    dict(response.headers),
+                    LLMResponse("", None),
+                    {},
+                    [],
+                    0,
+                    0,
+                    None,
+                )
+            content_type = response.headers.get("content-type", "")
+            if content_type.split(";", 1)[0].strip().casefold() != "text/event-stream":
+                raise _StreamProtocolError(
+                    "LLM 流式响应 Content-Type 不是 text/event-stream",
+                    status=status,
+                    events=[],
+                    event_count=0,
+                    received_bytes=0,
+                    first_event_latency_ms=None,
+                )
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            usage_values: dict[str, int] = {}
+            raw_events: list[str] = []
+            event_count = 0
+            received_bytes = 0
+            first_event_latency_ms: float | None = None
+            terminal = False
+            terminal_spec = self.adapter.streaming_spec
+            if terminal_spec is None:
+                raise ConfigError("LLM Adapter 未声明 streaming 规则")
+            sentinel = terminal_spec["terminal"].get("sentinel")
+            try:
+                async for data, received_bytes in _iter_sse_data(response):
+                    if not data:
+                        continue
+                    event_count += 1
+                    if first_event_latency_ms is None:
+                        first_event_latency_ms = round(
+                            (time.monotonic() - started) * 1000, 1
+                        )
+                    if diagnostics is not None:
+                        diagnostics.stream_progress(
+                            request_id,
+                            event_count=event_count,
+                            received_bytes=received_bytes,
+                            first_event_latency_ms=first_event_latency_ms,
+                        )
+                    if sentinel is not None and data == sentinel:
+                        raw_events.append(data)
+                        terminal = True
+                        break
+                    raw_events.append(data)
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise ExternalError(
+                            "LLM 流式 SSE data 不是合法 JSON"
+                        ) from exc
+                    if not isinstance(event, dict):
+                        raise ExternalError("LLM 流式 SSE data 必须是 JSON 对象")
+                    stream_error = self.adapter.stream_error(event)
+                    if stream_error is not None:
+                        raise _StreamRetryable(
+                            stream_error,
+                            events=raw_events,
+                            event_count=event_count,
+                            received_bytes=received_bytes,
+                            first_event_latency_ms=first_event_latency_ms,
+                            status=status,
+                        )
+                    for key, value in self.adapter.extract_stream_usage(event).items():
+                        usage_values[key] = value
+                    content_parts.extend(
+                        self.adapter.stream_content_deltas(event)
+                    )
+                    reasoning_parts.extend(
+                        self.adapter.stream_reasoning_deltas(event)
+                    )
+                    if self.adapter.stream_terminal(event):
+                        terminal = True
+                        break
+            except _StreamRetryable:
+                raise
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                raise _StreamRetryable(
+                    str(exc) or "LLM 流式连接中断",
+                    events=raw_events,
+                    event_count=event_count,
+                    received_bytes=received_bytes,
+                    first_event_latency_ms=first_event_latency_ms,
+                    status=status,
+                ) from exc
+            except ExternalError as exc:
+                raise _StreamProtocolError(
+                    str(exc),
+                    status=status,
+                    events=raw_events,
+                    event_count=event_count,
+                    received_bytes=received_bytes,
+                    first_event_latency_ms=first_event_latency_ms,
+                ) from exc
+            if not terminal:
+                raise _StreamRetryable(
+                    "LLM 流式响应未正常结束",
+                    events=raw_events,
+                    event_count=event_count,
+                    received_bytes=received_bytes,
+                    first_event_latency_ms=first_event_latency_ms,
+                    status=status,
+                )
+            try:
+                normalized = normalize_llm_response(
+                    LLMResponse(
+                        content="".join(content_parts),
+                        reasoning_content=(
+                            "".join(reasoning_parts) if reasoning_parts else None
+                        ),
+                    )
+                )
+            except ExternalError as exc:
+                raise _StreamProtocolError(
+                    str(exc),
+                    status=status,
+                    events=raw_events,
+                    event_count=event_count,
+                    received_bytes=received_bytes,
+                    first_event_latency_ms=first_event_latency_ms,
+                ) from exc
+            return (
+                status,
+                "",
+                dict(response.headers),
+                normalized,
+                usage_values,
+                raw_events,
+                event_count,
+                received_bytes,
+                first_event_latency_ms,
+            )
+
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
             timeout = float(self.config["execution"]["request_timeout_seconds"])
@@ -1576,18 +1848,24 @@ class LLMClient:
             self.warnings.append(warning)
             self.logger.warning("%s request=%s", warning, request_id)
             self._reported_output_clamp = True
+        stream_enabled = bool(self.config["llm"].get("stream", False))
         headers, payload = self.adapter.build_request(
             api_key=api_key,
             model=str(self.config["llm"]["model"]),
             messages=messages,
             temperature=temperature,
             max_output_tokens=effective_output,
-            stream=False,
+            stream=stream_enabled,
             extra_body=self.config.get("_llm_extra_body"),
+        )
+        endpoint = (
+            self.config["llm"].get("stream_endpoint")
+            if stream_enabled and self.config["llm"].get("stream_endpoint")
+            else self.config["llm"]["endpoint"]
         )
         url = endpoint_url(
             self.config["llm"]["base_url"],
-            self.config["llm"]["endpoint"],
+            endpoint,
             model=self.config["llm"]["model"],
         )
         attempts = int(self.config["retry"]["http_max_attempts"])
@@ -1599,6 +1877,7 @@ class LLMClient:
                 messages=messages,
                 max_attempts=attempts,
                 segment_id_map=segment_id_map,
+                transport="sse" if stream_enabled else "non_streaming",
             )
         for attempt in range(1, attempts + 1):
             waited = await self.limiter.acquire(
@@ -1643,6 +1922,19 @@ class LLMClient:
                 )
             started = time.monotonic()
             response_status: int | None = None
+            stream_result: tuple[
+                int,
+                str,
+                dict[str, str],
+                LLMResponse,
+                dict[str, int],
+                list[str],
+                int,
+                int,
+                float | None,
+            ] | None = None
+            attempt_error = False
+            attempt_outcome: str | None = None
             if diagnostics is not None:
                 diagnostics.request_started(request_id)
             try:
@@ -1653,26 +1945,96 @@ class LLMClient:
                     and self.send_count % debug["inject_timeout_every"] == 0
                 ):
                     raise httpx.ReadTimeout("injected timeout")
-                if (
-                    debug["enabled"]
-                    and debug["inject_429_every"]
-                    and self.send_count % debug["inject_429_every"] == 0
-                ):
-                    response = httpx.Response(429, text="injected 429")
-                elif (
-                    debug["enabled"]
-                    and debug["inject_500_every"]
-                    and self.send_count % debug["inject_500_every"] == 0
-                ):
-                    response = httpx.Response(500, text="injected 500")
-                else:
-                    response = await self.client.post(
-                        url,
+                if stream_enabled:
+                    stream_result = await self._stream_attempt(
+                        url=url,
                         headers=headers,
-                        json=payload,
+                        payload=payload,
+                        request_id=request_id,
+                        started=started,
+                        diagnostics=diagnostics,
                     )
-                response_status = response.status_code
+                    response_status = stream_result[0]
+                if not stream_enabled:
+                    if (
+                        debug["enabled"]
+                        and debug["inject_429_every"]
+                        and self.send_count % debug["inject_429_every"] == 0
+                    ):
+                        response = httpx.Response(429, text="injected 429")
+                    elif (
+                        debug["enabled"]
+                        and debug["inject_500_every"]
+                        and self.send_count % debug["inject_500_every"] == 0
+                    ):
+                        response = httpx.Response(500, text="injected 500")
+                    else:
+                        response = await self.client.post(
+                            url,
+                            headers=headers,
+                            json=payload,
+                        )
+                    response_status = response.status_code
+            except _StreamRetryable as exc:
+                attempt_error = True
+                attempt_outcome = "stream_error"
+                response_status = exc.status
+                elapsed = time.monotonic() - started
+                await self._debug_attempt(
+                    request_id,
+                    attempt,
+                    payload,
+                    response={"events": exc.events},
+                    error=str(exc),
+                    status=response_status,
+                    parent_request_id=parent_request_id,
+                )
+                self.logger.warning(
+                    "stream incomplete request=%s attempt=%d elapsed=%.2fs error=%s",
+                    request_id,
+                    attempt,
+                    elapsed,
+                    exc,
+                )
+                if attempt == attempts:
+                    if diagnostics is not None:
+                        diagnostics.fail_request(request_id, "stream_error")
+                    raise ExternalError(f"LLM 流式请求重试耗尽：{exc}") from exc
+                if diagnostics is not None:
+                    diagnostics.retried()
+                await self._backoff(attempt)
+                continue
+            except asyncio.CancelledError:
+                attempt_error = True
+                attempt_outcome = "cancelled"
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "cancelled")
+                raise
+            except _StreamProtocolError as exc:
+                attempt_error = True
+                attempt_outcome = "response_parse_error"
+                response_status = exc.status
+                await self._debug_attempt(
+                    request_id,
+                    attempt,
+                    payload,
+                    response={"events": exc.events},
+                    error=str(exc),
+                    status=response_status,
+                    parent_request_id=parent_request_id,
+                )
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "response_parse_error")
+                raise
+            except ExternalError:
+                attempt_error = True
+                attempt_outcome = "response_parse_error"
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "response_parse_error")
+                raise
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                attempt_error = True
+                attempt_outcome = "network_error"
                 elapsed = time.monotonic() - started
                 self.logger.warning(
                     "request network-error request=%s attempt=%d elapsed=%.2fs kind=%s",
@@ -1703,8 +2065,74 @@ class LLMClient:
                         attempt=attempt,
                         latency_seconds=time.monotonic() - started,
                         status=response_status,
-                        error=response_status is None or response_status >= 400,
+                        error=attempt_error
+                        or response_status is None
+                        or response_status >= 400,
+                        stream_event_count=(
+                            stream_result[6] if stream_result is not None else None
+                        ),
+                        stream_received_bytes=(
+                            stream_result[7] if stream_result is not None else None
+                        ),
+                        stream_first_event_latency_ms=(
+                            stream_result[8] if stream_result is not None else None
+                        ),
+                        outcome=attempt_outcome,
                     )
+            if stream_enabled:
+                if stream_result is None:
+                    raise RuntimeError("流式请求没有返回结果")
+                (
+                    stream_status,
+                    stream_error_text,
+                    stream_headers,
+                    normalized,
+                    stream_usage,
+                    raw_events,
+                    stream_event_count,
+                    stream_received_bytes,
+                    _stream_first_event_latency_ms,
+                ) = stream_result
+                response_status = stream_status
+                if 200 <= stream_status < 300:
+                    if self.config["debug"]["enabled"]:
+                        await self._debug_attempt(
+                            request_id,
+                            attempt,
+                            payload,
+                            response={"events": raw_events},
+                            status=stream_status,
+                            parent_request_id=parent_request_id,
+                        )
+                    normalized = _apply_debug_content_injections(
+                        normalized,
+                        self.config["debug"],
+                        self.send_count,
+                    )
+                    self._record_stream_usage(stream_usage)
+                    if diagnostics is not None:
+                        diagnostics.complete_request(
+                            request_id,
+                            content=normalized.content,
+                            reasoning_content=normalized.reasoning_content,
+                        )
+                    self.logger.info(
+                        "stream complete request=%s attempt=%d status=%d events=%d bytes=%d elapsed=%.2fs",
+                        request_id,
+                        attempt,
+                        stream_status,
+                        stream_event_count,
+                        stream_received_bytes,
+                        time.monotonic() - started,
+                    )
+                    if self.on_usage is not None:
+                        self.on_usage(self.usage_summary())
+                    return normalized, request_id
+                response = httpx.Response(
+                    stream_status,
+                    headers=stream_headers,
+                    text=stream_error_text,
+                )
             elapsed = time.monotonic() - started
             try:
                 response_data = response.json()
@@ -1928,6 +2356,82 @@ class LLMClient:
             "total_tokens": self.usage.total_tokens if available else 0,
             "available": available,
         }
+
+    def _record_stream_usage(self, values: dict[str, int]) -> None:
+        if self.adapter.usage_pointers is None:
+            return
+        spec = self.adapter.streaming_spec
+        if spec is None:
+            self.usage_complete = False
+            return
+        usage_spec = spec["usage"]
+        base_pointers = self.adapter.usage_pointers
+        if base_pointers is None:
+            self.usage_complete = False
+            return
+        required = {
+            metric
+            for metric, pointer in zip(
+                ("input_tokens", "output_tokens", "total_tokens"),
+                base_pointers,
+            )
+            if pointer is not None
+        }
+        declared_stream_metrics = {
+            key.removesuffix("_pointers")
+            for key, pointers in usage_spec.items()
+            if pointers
+        }
+        if not required or not required.issubset(declared_stream_metrics):
+            self.usage_complete = False
+            return
+        if not required.issubset(values):
+            self.usage_complete = False
+            return
+        self.usage = Usage(
+            input_tokens=self.usage.input_tokens + values.get("input_tokens", 0),
+            output_tokens=self.usage.output_tokens + values.get("output_tokens", 0),
+            total_tokens=self.usage.total_tokens + values.get("total_tokens", 0),
+        )
+        self.usage_observed = True
+
+
+def _apply_debug_content_injections(
+    response: LLMResponse, debug: dict[str, Any], send_count: int
+) -> LLMResponse:
+    if (
+        debug["enabled"]
+        and debug["inject_invalid_json_every"]
+        and send_count % debug["inject_invalid_json_every"] == 0
+    ):
+        return LLMResponse("{invalid json", response.reasoning_content)
+    if not (
+        debug["enabled"]
+        and debug["inject_missing_segment_every"]
+        and send_count % debug["inject_missing_segment_every"] == 0
+    ):
+        return response
+    try:
+        lines = extract_jsonl_content(response.content).splitlines()
+        segment_indexes = []
+        for index, line in enumerate(lines):
+            value = json.loads(line)
+            if isinstance(value, dict) and value.get("type") == "segment":
+                segment_indexes.append(index)
+        if segment_indexes:
+            lines.pop(segment_indexes[-1])
+            return LLMResponse(
+                "\n".join(lines), response.reasoning_content
+            )
+    except (
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        pass
+    return response
 
 
 async def dispatch_chunks(

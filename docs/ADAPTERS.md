@@ -13,7 +13,7 @@
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "openai-compatible",
   "headers": {
     "Authorization": "Bearer ${api_key}"
@@ -60,8 +60,8 @@
 - Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
   `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
-- 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
-  重试、取消和日志由宿主负责。
+- 未声明 `streaming` 的 Adapter 只支持普通 JSON POST；声明后可由 Preset 显式
+  启用 SSE。HTTP Client、代理、超时、限速、重试、取消和日志始终由宿主负责。
 - `body` 是完整模板。可直接加入 `reasoning_effort`、`response_format` 或
   Provider 自定义嵌套字段，不存在与宿主默认字段合并的覆盖顺序。
 - body 支持 `${model}`、`${system}`、`${messages}`、`${temperature}`、
@@ -70,6 +70,46 @@
 - Header 可使用上述占位符及 `${api_key}`；嵌入字符串时结果为字符串。
 - `${api_key}` 禁止出现在 body；URL 不支持模板，因此密钥也不能进入 URL。
 - 未知字段、未知占位符、混合 body 文本占位符和非法 schema 立即失败。
+
+### SSE 流式规则（可选）
+
+schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+`streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
+
+```json
+{
+  "streaming": {
+    "transport": "sse",
+    "request_body": {"stream_options": {"include_usage": true}},
+    "content_events": [
+      {"pointer": "/choices/0/delta/content"}
+    ],
+    "reasoning_events": [],
+    "terminal": {"sentinel": "[DONE]"},
+    "error_events": [],
+    "usage": {
+      "input_tokens_pointers": ["/usage/prompt_tokens"],
+      "output_tokens_pointers": ["/usage/completion_tokens"],
+      "total_tokens_pointers": ["/usage/total_tokens"]
+    }
+  }
+}
+```
+
+`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset
+`extra_body` 的顶层字段冲突。`content_events` 必须非空；每项以
+`pointer` 指向字符串增量，可选 `when` 条件为
+`{"pointer": "...", "equals": <primitive>}` 或
+`{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
+未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
+`terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
+声明流内错误及可选字符串消息路径；`usage` 的三个候选指针数组逐事件观察，
+每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
+
+宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在收到终止事件前
+断流或遇到流内服务错误时丢弃完整聚合正文，并按既有 HTTP 尝试次数重试；不会
+隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug 模式才保存原始
+SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
 
 ### 响应边界
 
@@ -87,7 +127,7 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 周期，不进入阶段记录。debug 模式只保留原始响应，不新增思考副本。
 
 常规 HTTP 状态与网络异常不由 Adapter 分类。需要特殊签名、非 JSON body、
-非 JSON 成功响应或特殊错误解析的端点超出 schema 1 范围。
+非 JSON 成功响应或特殊错误解析的端点超出当前声明式 schema 范围。
 
 ### 指纹与密钥
 
@@ -172,7 +212,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应
   缺少该结构时快速失败。
 
-三个新定义都只存在于全局目录；示例 Preset 见
+四个内置定义都声明 `streaming` 与 `usage` 映射；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
 `openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
@@ -450,6 +490,13 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
 
+当前 Preset schema 为 3。除现有连接字段外，`stream` 明确控制是否使用所引用
+Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用
+`endpoint`，只允许 `${model}` 占位符）。schema 2 用户 Preset 在 CLI、Web 或
+桌面 sidecar 启动时原子迁移为 schema 3，并补入 `stream = false` 与空的
+`stream_endpoint`；Run 内历史 v2 快照只在内存中按非流式解释，不改写审计文件。
+启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
+
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等
 端点专属请求字段：
 
@@ -479,7 +526,8 @@ Preset 修改立即影响所有引用项目，不维护版本历史。Adapter �
 
 路线 Stage 10 的 `models` 请求与响应映射、规范化 `usage` 映射和任务内
 汇总已实现（见 §1）。模型发现只由用户手动触发，缺少 usage 时明确显示
-不可用。
+不可用。流式使用 Preset 的显式开关，不改变普通请求的 body、术语注入或
+持久化语义。
 
 路线 Stage 11 才考虑单 Preset 多 API Key。Preset 仍只记录密钥环境变量名；
 每 Key 限流、调度、失效恢复和 Run 审计必须先形成可测试规则。该能力不提供

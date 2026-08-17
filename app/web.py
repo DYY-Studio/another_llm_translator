@@ -53,6 +53,7 @@ from .errors import (
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
+from .llm_migration import migrate_llm_resources
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .logging_utils import get_logger
@@ -234,6 +235,7 @@ def create_app(
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
     migrate_legacy_credentials()
+    migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -685,7 +687,7 @@ def create_app(
                 messages=[],
                 temperature=0,
                 max_output_tokens=int(preset.definition["max_output_tokens"]),
-                stream=False,
+                stream=bool(preset.definition["stream"]),
                 extra_body=preset.definition["extra_body"],
             )
             return preset
@@ -800,6 +802,7 @@ def create_app(
                         "preset_id": preset.preset_id,
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
+                        "stream": bool(preset.definition["stream"]),
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -870,17 +873,25 @@ def create_app(
             messages=[{"role": "user", "content": "…"}],
             temperature=0.2,
             max_output_tokens=int(preset.definition["max_output_tokens"]),
-            stream=False,
+            stream=bool(preset.definition["stream"]),
             extra_body=preset.definition["extra_body"],
+        )
+        endpoint = (
+            preset.definition["stream_endpoint"]
+            if preset.definition["stream"] and preset.definition["stream_endpoint"]
+            else preset.definition["endpoint"]
         )
         return {
             "url": endpoint_url(
                 preset.definition["base_url"],
-                preset.definition["endpoint"],
+                endpoint,
                 model=preset.definition["model"],
             ),
             "headers": headers,
             "body": body,
+            "transport": "sse"
+            if preset.definition["stream"]
+            else "non_streaming",
         }
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
@@ -1532,6 +1543,7 @@ def create_app(
                         "adapter_id": adapter.adapter_id,
                         "valid": True,
                         "digest": adapter.digest,
+                        "streaming_supported": adapter.streaming_supported,
                     }
                 )
             except AppError as exc:

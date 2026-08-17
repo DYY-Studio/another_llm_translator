@@ -31,6 +31,11 @@ function number(value: number | null, language: Language, suffix = "", unavailab
   return value === null ? unavailable : `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")}${suffix}`;
 }
 
+function bytes(value: number, language: Language) {
+  if (value < 1024) return `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")} B`;
+  return `${(value / 1024).toLocaleString(language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 1 })} KiB`;
+}
+
 function waitingRequests(value: number | undefined, language: Language) {
   return value
     ? translate("diagnostics.requestsLabel", language, { count: number(value, language) })
@@ -120,6 +125,7 @@ const RequestGroup = memo(function RequestGroup({
                     {translate("diagnostics.attempts", language, { count: item.attempt_count })}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
                     {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
+                    {item.transport === "sse" ? ` · SSE ${item.stream_event_count} · ${bytes(item.stream_received_bytes, language)}${item.stream_first_event_latency_ms === null ? "" : ` · ${item.stream_first_event_latency_ms} ms first`}` : ""}
                   </span>
                 </div>
                 <button
@@ -482,6 +488,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
                 <div className="exchange-meta">
                   <span>{translate("diagnostics.model", language)} <strong>{detail.model}</strong></span>
                   <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
+                  {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">
@@ -525,6 +532,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
                         <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}</strong>
                         <span>{attempt.http_status === null ? translate("diagnostics.networkError", language) : `HTTP ${attempt.http_status}`}</span>
                         <span>{attempt.latency_ms} ms</span>
+                        {detail.transport === "sse" && <span>{attempt.stream_event_count ?? 0} events · {bytes(attempt.stream_received_bytes ?? 0, language)}{attempt.stream_first_event_latency_ms == null ? "" : ` · ${attempt.stream_first_event_latency_ms} ms first`}</span>}
                       </article>
                     )) : <div className="diagnostics-empty">{translate("diagnostics.noAttempts", language)}</div>}
                     {detail.error && <p className="error-text">{translate("diagnostics.errorCategory", language)}{detail.error}</p>}

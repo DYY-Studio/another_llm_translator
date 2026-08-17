@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "google-gemini",
   "messages_format": "gemini",
   "headers": {
@@ -31,5 +31,22 @@
     "input_tokens_pointer": "/usageMetadata/promptTokenCount",
     "output_tokens_pointer": "/usageMetadata/candidatesTokenCount",
     "total_tokens_pointer": "/usageMetadata/totalTokenCount"
+  },
+  "streaming": {
+    "transport": "sse",
+    "request_body": {},
+    "content_events": [
+      {"pointer": "/candidates/0/content/parts/-1/text"}
+    ],
+    "reasoning_events": [],
+    "terminal": {
+      "when": {"pointer": "/candidates/0/finishReason", "exists": true}
+    },
+    "error_events": [],
+    "usage": {
+      "input_tokens_pointers": ["/usageMetadata/promptTokenCount"],
+      "output_tokens_pointers": ["/usageMetadata/candidatesTokenCount"],
+      "total_tokens_pointers": ["/usageMetadata/totalTokenCount"]
+    }
   }
 }
