@@ -28,9 +28,11 @@ export function pickNativeFolder(): Promise<string | null> {
 export function saveExport(
   path: string,
   filename: string,
+  body?: string,
 ): Promise<string> {
   return window.__TAURI__!.core.invoke("save_export", {
     path,
     filename,
+    body,
   }) as Promise<string>;
 }

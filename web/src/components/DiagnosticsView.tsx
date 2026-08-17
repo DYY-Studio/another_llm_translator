@@ -184,19 +184,20 @@ export function DiagnosticsView({ language }: { language: Language }) {
 
   const load = useCallback(async () => {
     const loadId = ++summaryLoadRef.current;
-    const params = new URLSearchParams();
-    if (level) params.set("level", level);
-    if (project) params.set("project", project);
-    if (stage) params.set("stage", stage);
-    if (query) params.set("q", query);
+    const payload: Record<string, unknown> = {};
+    if (level) payload.level = level;
+    if (project) payload.project = project;
+    if (stage) payload.stage = stage;
+    if (query) payload.q = query;
     const currentFeed = requestFeedRef.current;
     if (currentFeed.sessionId) {
-      params.set("request_session", currentFeed.sessionId);
-      params.set("request_after", String(currentFeed.cursor));
+      payload.request_session = currentFeed.sessionId;
+      payload.request_after = currentFeed.cursor;
     }
     try {
       const nextValue = await api<DiagnosticsResponse>(
-        `/api/v1/diagnostics${params.size ? `?${params}` : ""}`,
+        "/api/v1/diagnostics",
+        { method: "POST", body: JSON.stringify(payload) },
       );
       if (loadId !== summaryLoadRef.current) return;
       const feed = nextValue.requests;
