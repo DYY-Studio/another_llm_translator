@@ -152,7 +152,18 @@ projects/<name>/
 
 `project.sqlite` 是项目权威存储。Run 目录提供可读的 manifest 与设置快照，但不能代替数据库判断进度。
 
-普通日志不得记录完整 Prompt、源文、鉴权 Header 或未脱敏请求正文。Debug 记录可能含敏感内容，只能用于明确的本地诊断。Document Adapter 插件是可信同进程扩展，不提供沙箱。
+普通日志不得记录完整 Prompt、源文、鉴权 Header、未脱敏请求正文或流式增量正文。
+Debug 记录可能含敏感内容；启用时会保存每个流式 Attempt 收集到的原始 SSE
+`data` 事件，只能用于明确的本地诊断。诊断 API 只返回流式事件数、接收字节数和
+首事件耗时，完整正文仍须通过格式解析与校验后才进入请求详情。Document Adapter
+和 LLM Adapter 插件是可信同进程扩展，不提供沙箱。
+
+Preset schema 3 的 `stream` 必须由用户显式开启，且只对声明 `streaming` SSE
+规则的 JSON LLM Adapter 有效。启动 CLI、Web 或桌面 sidecar 会先原子迁移用户
+schema 2 Preset 和 schema 1 Adapter；迁移失败应终止启动，不留下兼容副本。流式
+请求使用 `request_timeout_seconds` 作为连接及连续读取的空闲超时，不限制完整生成
+时间；EOF、读取超时和流内错误会丢弃半成品并沿 HTTP 尝试次数重试，不自动回退为
+非流式。
 
 ## 7. 验证
 

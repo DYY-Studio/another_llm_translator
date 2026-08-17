@@ -13,6 +13,7 @@ type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credenti
 interface AdapterRow {
   adapter_id: string;
   valid?: boolean;
+  streaming_supported?: boolean;
 }
 
 export function SettingsView({ project, language }: { project: string; language: Language }) {
@@ -419,6 +420,20 @@ function PresetSettings({ language }: { language: Language }) {
               <NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
               <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
               <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
+              <ToggleField
+                label={translate("preset.streaming", language)}
+                checked={preset.stream}
+                disabled={!adapters.find((item) => item.adapter_id === preset.adapter_id)?.streaming_supported && !preset.stream}
+                help={translate("preset.streamingHint", language)}
+                onChange={(value) => updateConnection((draft) => { draft.stream = value; })}
+              />
+              <Field label={translate("preset.streamEndpoint", language)} help={translate("preset.streamEndpointHint", language)}>
+                <input
+                  value={preset.stream_endpoint}
+                  disabled={!preset.stream}
+                  onChange={(event) => updateConnection((draft) => { draft.stream_endpoint = event.target.value; })}
+                />
+              </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
             </div>
             <h2 className="preview-heading">{translate("preset.requestPreview", language)}</h2>

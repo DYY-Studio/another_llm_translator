@@ -1114,6 +1114,8 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         **default,
         "preset_id": "openrouter",
         "endpoint": "/v1/models/${model}:generate",
+        "stream": True,
+        "stream_endpoint": "/v1/models/${model}:stream",
         "model": "provider/model",
         "extra_body": {
             "provider": {
@@ -1129,10 +1131,13 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     ).json()
     assert preview["headers"]["Authorization"] == "Bearer ***"
     assert preview["url"] == (
-        "https://example.com/v1/v1/models/provider/model:generate"
+        "https://example.com/v1/v1/models/provider/model:stream"
     )
     assert preview["body"]["provider"] == custom["extra_body"]["provider"]
     assert preview["body"]["model"] == "provider/model"
+    assert preview["transport"] == "sse"
+    assert preview["body"]["stream"] is True
+    assert preview["body"]["stream_options"] == {"include_usage": True}
 
     conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
     assert client.put(
@@ -1182,6 +1187,11 @@ def test_web_manages_global_adapters(tmp_path: Path) -> None:
         "openai-compatible",
         "alternate",
     }
+    assert all(
+        item["streaming_supported"] is True
+        for item in listed["adapters"]
+        if item["valid"]
+    )
     wrong_id = client.put(
         "/api/v1/global/adapters/alternate",
         json={**global_adapter, "adapter_id": "other"},

@@ -134,6 +134,7 @@ export interface DiagnosticsRequestSummary {
   stage: string | null;
   request_id: string;
   model: string;
+  transport: "non_streaming" | "sse";
   status: DiagnosticsRequestStatus;
   attempt_count: number;
   last_http_status: number | null;
@@ -142,6 +143,9 @@ export interface DiagnosticsRequestSummary {
   has_reasoning: boolean;
   error: string | null;
   detail_available: boolean;
+  stream_event_count: number;
+  stream_received_bytes: number;
+  stream_first_event_latency_ms: number | null;
 }
 
 export interface DiagnosticsResponse {
@@ -189,6 +193,10 @@ export interface DiagnosticsRequestDetail {
   stage: string | null;
   request_id: string;
   model: string;
+  transport: "non_streaming" | "sse";
+  stream_event_count: number;
+  stream_received_bytes: number;
+  stream_first_event_latency_ms: number | null;
   status: DiagnosticsRequestStatus;
   max_attempts: number;
   segment_id_map: Record<string, string>;
@@ -203,9 +211,13 @@ export interface DiagnosticsRequestDetail {
   reasoning_content_truncated: boolean;
   attempts: Array<{
     attempt: number;
+    transport: "non_streaming" | "sse";
     http_status: number | null;
     latency_ms: number;
-    outcome: "succeeded" | "http_error" | "network_error";
+    outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "cancelled";
+    stream_event_count?: number;
+    stream_received_bytes?: number;
+    stream_first_event_latency_ms?: number | null;
   }>;
   error: string | null;
 }
@@ -406,6 +418,7 @@ export interface LLMPresetSummary {
   preset_id: string;
   adapter_id?: string;
   model?: string;
+  stream?: boolean;
   selected: boolean;
   valid: boolean;
   digest?: string;
@@ -413,7 +426,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 2;
+  schema_version: 3;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -429,6 +442,8 @@ export interface LLMPreset {
   input_tokens_per_minute: number;
   max_parallel: number;
   request_timeout_seconds: number;
+  stream: boolean;
+  stream_endpoint: string;
   extra_body: Record<string, unknown>;
 }
 
