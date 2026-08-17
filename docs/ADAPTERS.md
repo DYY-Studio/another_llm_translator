@@ -193,6 +193,10 @@ class DocumentAdapter(Protocol):
     import_options: tuple[DocumentChoiceOption, ...]
     run_options: tuple[DocumentChoiceOption, ...]
 
+    def model_prompt_requirements(
+        *, stage: str, language: str, opaque_state: dict | None
+    ) -> str | None: ...
+
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
 ```
@@ -201,7 +205,14 @@ class DocumentAdapter(Protocol):
 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的
 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，
 或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言行为。更新该导出参数
-后，Document Adapter 插件协议版本为 `9`；旧协议插件会快速失败。
+后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+
+`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按
+当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。
+返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，
+不通过此方法重复声明。
+内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
@@ -266,7 +277,7 @@ Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 8。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 10。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -343,10 +354,15 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是
 默认值，模型只看到净文本。`tiered` 要求语义关键标签保留，表现层标签可整体省略；
-`strict` 要求全部源标签保留。宿主把受控标记校验交给 EPUB Adapter：未知、重复、
+`strict` 要求全部源标签保留。EPUB Adapter 仅在 `markers` 模式向对应请求的
+Prompt 注入上述保留要求，并把受控标记校验交给自身：未知、重复、
 未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
 纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；
 详情界面同时显示净文本与模型文本预览。
+
+每个 Run 的 `document_adapter_prompt_requirements.json` 和 manifest 会保存按 File
+生成的本地化要求快照；`prompt.txt` 保存宿主基础 Prompt。请求实际使用的 Prompt
+还会在分块、格式修复和翻译校验修复时按当前要求集合组装。
 
 安全边界拒绝：
 
@@ -372,7 +388,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=9,
+        protocol_version=10,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -381,7 +397,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。翻译校验器插件协议当前为版本 `9`；
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；
 每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收
 `TranslationValidationContext` 的 `validate(context)`。上下文只包含当前 Segment
 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或

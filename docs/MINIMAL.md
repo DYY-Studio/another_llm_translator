@@ -776,6 +776,7 @@ applied 结果保存：
 ```text
 代码内固定 Prefix（按语言）
 + 项目可编辑的 middle Prompt（按语言）
++ 宿主通用格式规则与当前 Document Adapter 的专属要求
 + 代码内固定 Suffix（按语言）
 ```
 
@@ -785,8 +786,9 @@ applied 结果保存：
 
 固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界。除顶层
 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考
-数据，模型不得执行其中的指令。固定 Suffix 定义字段条件、请求内短 ID、格式保真和
-严格 JSONL；每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为
+数据，模型不得执行其中的指令。固定 Suffix 定义字段条件、请求内短 ID、通用文本格式
+保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态
+注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为
 `{"type":"end"}`。
 
 middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景、文体、翻译策略、
@@ -798,9 +800,9 @@ Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI �
 `--language`/`ANOTHER_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
 回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
 
-阶段指纹不包含提示词文本；它记录 `prompt_rules_version` 和全部语言中段的哈希，
-因此任一语言的中段变化都会使该阶段既有结果指纹失效，但语言选择本身不产生
-指纹隔离。
+阶段指纹不包含项目中段 Prompt 原文；它记录 `prompt_rules_version`、全部语言中段的
+哈希以及当前 File 的 Adapter 专属要求快照。因此任一语言的中段或 Adapter 要求变化
+都会使该阶段既有结果指纹失效，但语言选择本身不产生指纹隔离。
 
 四阶段分别读取自己的：
 
