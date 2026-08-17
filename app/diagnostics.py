@@ -137,6 +137,7 @@ class Diagnostics:
         messages: list[dict[str, str]],
         max_attempts: int,
         segment_id_map: dict[str, str] | None = None,
+        transport: str = "non_streaming",
     ) -> None:
         self.total_requests += 1
         normalized_messages = []
@@ -158,6 +159,7 @@ class Diagnostics:
             "stage": self.stage,
             "request_id": request_id,
             "model": model,
+            "transport": transport,
             "segment_id_map": dict(segment_id_map or {}),
             "status": "running",
             "max_attempts": max_attempts,
@@ -168,6 +170,9 @@ class Diagnostics:
             "reasoning_content_truncated": False,
             "has_content": False,
             "has_reasoning": False,
+            "stream_event_count": 0,
+            "stream_received_bytes": 0,
+            "stream_first_event_latency_ms": None,
             "attempts": [],
             "error": None,
             "detail_available": True,
@@ -218,7 +223,26 @@ class Diagnostics:
         request = self._request(request_id)
         if request is not None:
             request["status"] = "running"
+            request["stream_event_count"] = 0
+            request["stream_received_bytes"] = 0
+            request["stream_first_event_latency_ms"] = None
             self._touch_request(request)
+
+    def stream_progress(
+        self,
+        request_id: str,
+        *,
+        event_count: int,
+        received_bytes: int,
+        first_event_latency_ms: float | None,
+    ) -> None:
+        request = self._request(request_id)
+        if request is None:
+            return
+        request["stream_event_count"] = event_count
+        request["stream_received_bytes"] = received_bytes
+        request["stream_first_event_latency_ms"] = first_event_latency_ms
+        self._touch_request(request)
 
     def request_finished(
         self,
@@ -228,6 +252,10 @@ class Diagnostics:
         latency_seconds: float,
         status: int | None,
         error: bool,
+        stream_event_count: int | None = None,
+        stream_received_bytes: int | None = None,
+        stream_first_event_latency_ms: float | None = None,
+        outcome: str | None = None,
     ) -> None:
         self.active_requests = max(0, self.active_requests - 1)
         self._latency_samples_seconds.append(latency_seconds)
@@ -237,7 +265,7 @@ class Diagnostics:
         request = self._request(request_id)
         if request is None:
             return
-        outcome = (
+        resolved_outcome = outcome or (
             "network_error"
             if status is None
             else "http_error"
@@ -247,16 +275,35 @@ class Diagnostics:
         request["attempts"].append(
             {
                 "attempt": attempt,
+                "transport": request["transport"],
                 "http_status": status,
                 "latency_ms": round(latency_seconds * 1000, 1),
-                "outcome": outcome,
+                "outcome": resolved_outcome,
+                "stream_event_count": (
+                    request["stream_event_count"]
+                    if stream_event_count is None
+                    else stream_event_count
+                ),
+                "stream_received_bytes": (
+                    request["stream_received_bytes"]
+                    if stream_received_bytes is None
+                    else stream_received_bytes
+                ),
+                "stream_first_event_latency_ms": (
+                    request["stream_first_event_latency_ms"]
+                    if stream_first_event_latency_ms is None
+                    else stream_first_event_latency_ms
+                ),
             }
         )
         if error:
-            if attempt < request["max_attempts"]:
+            if (
+                request["status"] not in _TERMINAL_REQUEST_STATUSES
+                and attempt < request["max_attempts"]
+            ):
                 request["status"] = "retrying"
                 self._touch_request(request)
-            else:
+            elif request["status"] not in _TERMINAL_REQUEST_STATUSES:
                 self._finish_request(request, status="failed")
         else:
             self._touch_request(request)
@@ -396,6 +443,7 @@ class Diagnostics:
                         "stage": request["stage"],
                         "request_id": request["request_id"],
                         "model": request["model"],
+                        "transport": request["transport"],
                         "status": request["status"],
                         "attempt_count": len(request["attempts"]),
                         "last_http_status": (
@@ -412,6 +460,11 @@ class Diagnostics:
                         "has_reasoning": request["has_reasoning"],
                         "error": request["error"],
                         "detail_available": request["detail_available"],
+                        "stream_event_count": request["stream_event_count"],
+                        "stream_received_bytes": request["stream_received_bytes"],
+                        "stream_first_event_latency_ms": request[
+                            "stream_first_event_latency_ms"
+                        ],
                     }
                     for request in self.requests.values()
                     if (
