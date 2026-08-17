@@ -208,6 +208,11 @@ def test_web_long_query_inputs_use_post_bodies(tmp_path: Path) -> None:
     assert client.get(
         "/api/v1/projects/sample", params={"q": long_query}
     ).status_code == 400
+    invalid_window = client.get(
+        "/api/v1/projects/sample", params={"offset": "not-an-int"}
+    )
+    assert invalid_window.status_code == 400
+    assert "窗口参数必须是整数" in invalid_window.json()["error"]
     assert client.get(
         "/api/v1/projects/sample/terms/hits", params={"normalized": long_term}
     ).status_code != 200
