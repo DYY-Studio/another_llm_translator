@@ -576,8 +576,11 @@ def create_app(
             "default_projects_path": str(projects_root.resolve()),
         }
 
-    @app.get("/api/v1/directories")
-    async def list_directories(path: str = "") -> dict[str, Any]:
+    @app.post("/api/v1/directories")
+    async def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
+        path = payload.get("path", "")
+        if not isinstance(path, str):
+            raise UsageError("目录路径必须是字符串")
         raw_path = path.strip()
         if raw_path and "\0" in raw_path:
             raise UsageError("目录路径包含无效字符")
@@ -589,8 +592,11 @@ def create_app(
             raise UsageError("目录路径无效") from exc
         if raw_path and not candidate.is_absolute():
             raise UsageError("目录路径必须是绝对路径")
-        if candidate.is_symlink():
-            raise UsageError("目录路径不能是符号链接")
+        try:
+            if candidate.is_symlink():
+                raise UsageError("目录路径不能是符号链接")
+        except OSError as exc:
+            raise UsageError("目录路径无效") from exc
         try:
             current = candidate.resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -1133,20 +1139,56 @@ def create_app(
         return result
 
     @app.get("/api/v1/projects/{name}")
-    async def overview(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
+    async def overview(
+        name: str,
+        request: Request,
+        offset: int = 0,
+        limit: int = 100,
+        stage: str = "translation",
+    ) -> dict[str, Any]:
+        if {"q", "file_id", "status"} & set(request.query_params):
+            raise UsageError(
+                "Segment 搜索和筛选必须通过 POST /segments/query 提交"
+            )
+        if offset < 0 or limit < 1:
+            raise UsageError("Segment 窗口参数无效")
         try:
-            offset = int(params.get("offset", "0"))
-            limit = int(params.get("limit", "100"))
+            return WebStore(project(name)).overview(
+                offset=offset,
+                limit=limit,
+                stage=stage,
+            )
         except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+
+    @app.post("/api/v1/projects/{name}/segments/query")
+    async def overview_query(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            offset = int(payload.get("offset", 0))
+            limit = int(payload.get("limit", 100))
+        except (TypeError, ValueError) as exc:
             raise UsageError("Segment 窗口参数必须是整数") from exc
+        file_id = payload.get("file_id")
+        status = payload.get("status")
+        search = payload.get("q")
+        stage = payload.get("stage", "translation")
+        if file_id is not None and not isinstance(file_id, str):
+            raise UsageError("file_id 必须是字符串")
+        if status is not None and not isinstance(status, str):
+            raise UsageError("status 必须是字符串")
+        if search is not None and not isinstance(search, str):
+            raise UsageError("q 必须是字符串")
+        if not isinstance(stage, str):
+            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).overview(
             offset=offset,
             limit=limit,
-            file_id=params.get("file_id") or None,
-            status=params.get("status") or None,
-            search=params.get("q") or None,
-            stage=params.get("stage", "translation"),
+            file_id=file_id or None,
+            status=status or None,
+            search=search or None,
+            stage=stage,
         )
 
     @app.post("/api/v1/projects/{name}/storage/compact")
@@ -1157,14 +1199,27 @@ def create_app(
         with project_write_lock(root):
             return compact_project_database(root)
 
-    @app.get("/api/v1/projects/{name}/segments/ids")
-    async def segment_index(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
+    @app.post("/api/v1/projects/{name}/segments/ids")
+    async def segment_index(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        file_id = payload.get("file_id")
+        status = payload.get("status")
+        search = payload.get("q")
+        stage = payload.get("stage", "translation")
+        if file_id is not None and not isinstance(file_id, str):
+            raise UsageError("file_id 必须是字符串")
+        if status is not None and not isinstance(status, str):
+            raise UsageError("status 必须是字符串")
+        if search is not None and not isinstance(search, str):
+            raise UsageError("q 必须是字符串")
+        if not isinstance(stage, str):
+            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).segment_index(
-            file_id=params.get("file_id") or None,
-            status=params.get("status") or None,
-            search=params.get("q") or None,
-            stage=params.get("stage", "translation"),
+            file_id=file_id or None,
+            status=status or None,
+            search=search or None,
+            stage=stage,
         )
 
     @app.post("/api/v1/projects/{name}/files")
@@ -1256,30 +1311,36 @@ def create_app(
     async def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
-    @app.get("/api/v1/projects/{name}/terms/hits")
-    async def term_hits(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
-        normalized = params.get("normalized")
+    @app.post("/api/v1/projects/{name}/terms/hits")
+    async def term_hits(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = payload.get("normalized")
         if not normalized:
             raise UsageError("术语命中查询必须提供 normalized")
+        if not isinstance(normalized, str):
+            raise UsageError("normalized 必须是字符串")
         try:
-            offset = int(params.get("offset", "0"))
-            limit = int(params.get("limit", "50"))
-        except ValueError as exc:
+            offset = int(payload.get("offset", 0))
+            limit = int(payload.get("limit", 50))
+        except (TypeError, ValueError) as exc:
             raise UsageError("术语命中窗口参数必须是整数") from exc
         return WebStore(project(name)).term_hits(
             normalized, offset=offset, limit=limit
         )
 
-    @app.get("/api/v1/projects/{name}/terms/related")
-    async def related_terms(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
-        normalized = params.get("normalized")
+    @app.post("/api/v1/projects/{name}/terms/related")
+    async def related_terms(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = payload.get("normalized")
         if not normalized:
             raise UsageError("术语推荐查询必须提供 normalized")
+        if not isinstance(normalized, str):
+            raise UsageError("normalized 必须是字符串")
         try:
-            limit = int(params.get("limit", "20"))
-        except ValueError as exc:
+            limit = int(payload.get("limit", 20))
+        except (TypeError, ValueError) as exc:
             raise UsageError("术语推荐数量参数必须是整数") from exc
         return WebStore(project(name)).related_terms(normalized, limit=limit)
 
@@ -1585,22 +1646,35 @@ def create_app(
     async def cancel_task(task_id: str) -> dict[str, Any]:
         return await app.state.tasks.cancel(task_id)
 
-    @app.get("/api/v1/diagnostics")
-    async def diagnostics(
-        level: str | None = None,
-        project: str | None = None,
-        stage: str | None = None,
-        q: str | None = None,
-        request_session: str | None = None,
-        request_after: int | None = None,
-    ) -> dict[str, Any]:
+    @app.post("/api/v1/diagnostics")
+    async def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+        values = {
+            key: payload.get(key)
+            for key in (
+                "level",
+                "project",
+                "stage",
+                "q",
+                "request_session",
+                "request_after",
+            )
+        }
+        for key in ("level", "project", "stage", "q", "request_session"):
+            if values[key] is not None and not isinstance(values[key], str):
+                raise UsageError(f"{key} 必须是字符串")
+        request_after = values["request_after"]
+        if request_after is not None:
+            try:
+                request_after = int(request_after)
+            except (TypeError, ValueError) as exc:
+                raise UsageError("request_after 必须是整数") from exc
         try:
             return app.state.diagnostics.snapshot(
-                level=level or None,
-                project=project or None,
-                stage=stage or None,
-                query=q or None,
-                request_session=request_session or None,
+                level=values["level"] or None,
+                project=values["project"] or None,
+                stage=values["stage"] or None,
+                query=values["q"] or None,
+                request_session=values["request_session"] or None,
                 request_after=request_after,
             )
         except ValueError as exc:
@@ -1687,8 +1761,13 @@ def create_app(
             )
         return {"files": files}
 
-    @app.get("/api/v1/projects/{name}/exports/download")
-    async def download_export(name: str, file: str) -> Response:
+    @app.post("/api/v1/projects/{name}/exports/download")
+    async def download_export(
+        name: str, payload: dict[str, Any]
+    ) -> Response:
+        file = payload.get("file")
+        if not isinstance(file, str) or not file:
+            raise UsageError("导出文件路径必须是非空字符串")
         root = project(name)
         path = _resolve_export_file(root, file)
         return Response(

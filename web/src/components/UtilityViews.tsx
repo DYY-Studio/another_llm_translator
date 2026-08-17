@@ -1117,14 +1117,22 @@ export function ExportView({
     }
   }
 
-  function downloadHref(path: string): string {
-    return `/api/v1/projects/${project}/exports/download?file=${encodeURIComponent(path)}`;
+  function downloadHref(): string {
+    return `/api/v1/projects/${project}/exports/download`;
   }
 
-  async function saveViaNative(url: string, filename: string) {
+  async function saveViaNative(
+    url: string,
+    filename: string,
+    body?: Record<string, unknown>,
+  ) {
     setError("");
     try {
-      const saved = await saveExport(url, filename);
+      const saved = await saveExport(
+        url,
+        filename,
+        body ? JSON.stringify(body) : undefined,
+      );
       if (saved) setMessage(translate("export.savedTo", language, { path: saved }));
     } catch (reason) {
       setError(String(reason));
@@ -1133,7 +1141,25 @@ export function ExportView({
 
   function download(path: string) {
     const filename = path.split("/").pop() || "export";
-    void saveViaNative(downloadHref(path), filename);
+    if (native) {
+      void saveViaNative(downloadHref(), filename, { file: path });
+      return;
+    }
+    void fetch(downloadHref(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: path }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`请求失败：${response.status}`);
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    }).catch((reason) => setError(String(reason)));
   }
 
   function downloadAll() {
@@ -1229,9 +1255,7 @@ export function ExportView({
               <strong>{item.path}</strong>
               <small>{formatSize(item.size)} · {formatTime(item.mtime)}</small>
               <span className="export-actions">
-                {native
-                  ? <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
-                  : <a className="quiet-button" href={downloadHref(item.path)}>{translate("export.download", language)}</a>}
+                <button className="quiet-button" onClick={() => download(item.path)}>{translate("export.download", language)}</button>
                 <button className="quiet-button" onClick={() => void removeFile(item.path)}>{translate("export.delete", language)}</button>
               </span>
             </div>
@@ -1359,8 +1383,10 @@ function DirectoryPicker({
     setLoading(true);
     setError("");
     try {
-      const query = normalized ? `?path=${encodeURIComponent(normalized)}` : "";
-      const result = await api<DirectoryListing>(`/api/v1/directories${query}`);
+      const result = await api<DirectoryListing>("/api/v1/directories", {
+        method: "POST",
+        body: JSON.stringify({ path: normalized }),
+      });
       if (revision !== requestRevision.current) return;
       setListing(result);
     } catch (reason) {

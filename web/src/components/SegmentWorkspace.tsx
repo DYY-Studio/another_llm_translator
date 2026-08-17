@@ -33,10 +33,12 @@ export function prefetchWorkspace(project: string) {
     if (workspaceCache.has(key)) continue;
     void Promise.all([
       api<{ segment_ids: string[]; total: number }>(
-        `/api/v1/projects/${project}/segments/ids?stage=${stage}`,
+        `/api/v1/projects/${project}/segments/ids`,
+        { method: "POST", body: JSON.stringify({ stage }) },
       ),
       api<ProjectOverview>(
-        `/api/v1/projects/${project}?stage=${stage}&offset=0&limit=${pageSize}`,
+        `/api/v1/projects/${project}/segments/query`,
+        { method: "POST", body: JSON.stringify({ stage, offset: 0, limit: pageSize }) },
       ),
     ])
       .then(([index, page]) => {
@@ -159,10 +161,12 @@ export function SegmentWorkspace({
     onJumpConsumed?.();
   }, [pendingJump]);
   const normalizedSearch = search.trim();
-  const query = new URLSearchParams({ stage });
-  if (file !== "all") query.set("file_id", file);
-  if (status !== "all") query.set("status", status === "error" ? "failed" : status);
-  if (normalizedSearch) query.set("q", normalizedSearch);
+  const filterPayload = {
+    stage,
+    ...(file !== "all" ? { file_id: file } : {}),
+    ...(status !== "all" ? { status: status === "error" ? "failed" : status } : {}),
+    ...(normalizedSearch ? { q: normalizedSearch } : {}),
+  };
   const pageQueryKey = JSON.stringify([project, stage, file, status, normalizedSearch]);
   const showContext = status !== "all" || normalizedSearch !== "";
   const resetPageCache = useCallback(() => {
@@ -242,7 +246,8 @@ export function SegmentWorkspace({
     setListError("");
     try {
       const index = await api<{ segment_ids: string[]; total: number }>(
-        `/api/v1/projects/${project}/segments/ids?${query.toString()}`,
+        `/api/v1/projects/${project}/segments/ids`,
+        { method: "POST", body: JSON.stringify(filterPayload) },
       );
       if (requestId !== indexRequestRef.current) return [];
       setOrderedIds(index.segment_ids);
@@ -339,11 +344,10 @@ export function SegmentWorkspace({
         || pageRequestsRef.current.has(requestToken)
       ) continue;
       pageRequestsRef.current.add(requestToken);
-      const params = new URLSearchParams({ stage, offset: String(offset), limit: String(pageSize) });
-      if (file !== "all") params.set("file_id", file);
-      if (status !== "all") params.set("status", status === "error" ? "failed" : status);
-      if (normalizedSearch) params.set("q", normalizedSearch);
-      void api<ProjectOverview>(`/api/v1/projects/${project}?${params.toString()}`)
+      void api<ProjectOverview>(`/api/v1/projects/${project}/segments/query`, {
+        method: "POST",
+        body: JSON.stringify({ ...filterPayload, offset, limit: pageSize }),
+      })
         .then((page) => {
           if (
             requestGeneration !== pageGenerationRef.current

@@ -131,9 +131,9 @@ def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
 
     assert projects_root.is_dir()
     default = str(projects_root.resolve())
-    assert client.get("/api/v1/directories").status_code == 200
+    assert client.post("/api/v1/directories", json={}).status_code == 200
     assert (
-        client.get("/api/v1/directories", params={"path": default}).status_code
+        client.post("/api/v1/directories", json={"path": default}).status_code
         == 200
     )
     created = client.post(
@@ -142,6 +142,82 @@ def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
     )
     assert created.status_code == 200
     assert created.json()["project_selector"] == "empty"
+
+
+def test_web_long_query_inputs_use_post_bodies(tmp_path: Path) -> None:
+    long_term = "长" * 3000
+    projects_root, project = make_project(tmp_path, f"{long_term}\nother")
+    client = TestClient(create_app(projects_root=projects_root))
+    long_query = "筛选" * 3000
+
+    index = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"stage": "translation", "q": long_query},
+    )
+    assert index.status_code == 200
+    assert index.json()["total"] == 0
+    page = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"stage": "translation", "q": long_query, "offset": 0, "limit": 10},
+    )
+    assert page.status_code == 200
+    assert page.json()["segments"] == []
+
+    terms = client.post(
+        "/api/v1/projects/sample/terms",
+        json={"source": long_term, "aliases": [], "disabled": False},
+    )
+    assert terms.status_code == 200
+    hits = client.post(
+        "/api/v1/projects/sample/terms/hits",
+        json={"normalized": long_term},
+    )
+    assert hits.status_code == 200
+    assert hits.json()["total"] == 1
+
+    diagnostics = client.post(
+        "/api/v1/diagnostics",
+        json={"q": long_query},
+    )
+    assert diagnostics.status_code == 200
+
+    nested = project / "output" / ("译" * 20) / ("文" * 20)
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_bytes(b"long-path")
+    downloaded = client.post(
+        "/api/v1/projects/sample/exports/download",
+        json={"file": nested.relative_to(project / "output").as_posix()},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"long-path"
+
+    directory = client.post(
+        "/api/v1/directories",
+        json={"path": str(nested.parent)},
+    )
+    assert directory.status_code == 200
+    assert client.post(
+        "/api/v1/directories",
+        json={"path": "/" + ("深" * 3000)},
+    ).status_code == 400
+
+    assert client.get("/api/v1/directories", params={"path": long_query}).status_code != 200
+    assert client.get(
+        "/api/v1/projects/sample/segments/ids", params={"q": long_query}
+    ).status_code != 200
+    assert client.get(
+        "/api/v1/projects/sample", params={"q": long_query}
+    ).status_code == 400
+    assert client.get(
+        "/api/v1/projects/sample/terms/hits", params={"normalized": long_term}
+    ).status_code != 200
+    assert client.get(
+        "/api/v1/projects/sample/terms/related", params={"normalized": long_term}
+    ).status_code != 200
+    assert client.get("/api/v1/diagnostics", params={"q": long_query}).status_code != 200
+    assert client.get(
+        "/api/v1/projects/sample/exports/download", params={"file": "missing"}
+    ).status_code != 200
 
 
 def test_web_deletes_project_only_after_confirmation_and_finished_runs(
@@ -291,8 +367,8 @@ def test_web_browses_server_directories_one_level_and_filters_symlinks(
         symlink_created = False
     client = TestClient(create_app(projects_root=projects_root))
 
-    root_listing = client.get(
-        "/api/v1/directories", params={"path": str(projects_root)}
+    root_listing = client.post(
+        "/api/v1/directories", json={"path": str(projects_root)}
     )
     assert root_listing.status_code == 200
     sample = next(
@@ -302,8 +378,8 @@ def test_web_browses_server_directories_one_level_and_filters_symlinks(
     )
     assert sample["is_project"] is True
 
-    listing = client.get(
-        "/api/v1/directories", params={"path": str(external)}
+    listing = client.post(
+        "/api/v1/directories", json={"path": str(external)}
     )
     assert listing.status_code == 200
     assert listing.json()["path"] == str(external.resolve())
@@ -313,24 +389,24 @@ def test_web_browses_server_directories_one_level_and_filters_symlinks(
         "nested"
     ]
 
-    project_listing = client.get(
-        "/api/v1/directories", params={"path": str(project)}
+    project_listing = client.post(
+        "/api/v1/directories", json={"path": str(project)}
     )
     assert project_listing.status_code == 200
     assert project_listing.json()["is_project"] is True
 
-    assert client.get(
-        "/api/v1/directories", params={"path": "relative/path"}
+    assert client.post(
+        "/api/v1/directories", json={"path": "relative/path"}
     ).status_code == 400
-    assert client.get(
-        "/api/v1/directories", params={"path": str(external / "note.txt")}
+    assert client.post(
+        "/api/v1/directories", json={"path": str(external / "note.txt")}
     ).status_code == 400
     if symlink_created:
         assert "project-link" not in {
             item["name"] for item in listing.json()["directories"]
         }
-        assert client.get(
-            "/api/v1/directories", params={"path": str(symlink)}
+        assert client.post(
+            "/api/v1/directories", json={"path": str(symlink)}
         ).status_code == 400
 
 
@@ -397,7 +473,7 @@ def test_web_returns_drive_entries_at_a_root(
     client = TestClient(create_app(projects_root=tmp_path / "projects"))
 
     root = Path(Path.cwd().anchor)
-    response = client.get("/api/v1/directories", params={"path": str(root)})
+    response = client.post("/api/v1/directories", json={"path": str(root)})
 
     assert response.status_code == 200
     assert response.json()["drives"] == drives
@@ -721,9 +797,9 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
     assert files[0]["size"] == len(expected_bytes)
     assert files[0]["mtime"] > 0
 
-    downloaded = client.get(
+    downloaded = client.post(
         "/api/v1/projects/sample/exports/download",
-        params={"file": "translated/input.txt"},
+        json={"file": "translated/input.txt"},
     )
     assert downloaded.status_code == 200
     assert downloaded.headers["content-disposition"] == (
@@ -733,9 +809,9 @@ def test_web_exports_list_download_zip_and_remove(tmp_path: Path) -> None:
 
     unicode_file = project / "output" / "translated" / "译文.epub"
     unicode_file.write_bytes(b"epub")
-    unicode_download = client.get(
+    unicode_download = client.post(
         "/api/v1/projects/sample/exports/download",
-        params={"file": "translated/译文.epub"},
+        json={"file": "translated/译文.epub"},
     )
     assert unicode_download.status_code == 200
     disposition = unicode_download.headers["content-disposition"]
@@ -807,9 +883,9 @@ def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
         "translated/../../secret.txt",
         str(outside),
     ):
-        assert client.get(
+        assert client.post(
             "/api/v1/projects/sample/exports/download",
-            params={"file": raw},
+            json={"file": raw},
         ).status_code == 400
         assert client.post(
             "/api/v1/projects/sample/exports/remove",
@@ -821,9 +897,9 @@ def test_web_exports_reject_paths_outside_output(tmp_path: Path) -> None:
         symlink.symlink_to(outside)
     except OSError:
         return
-    assert client.get(
+    assert client.post(
         "/api/v1/projects/sample/exports/download",
-        params={"file": "translated/link.txt"},
+        json={"file": "translated/link.txt"},
     ).status_code == 400
     assert client.post(
         "/api/v1/projects/sample/exports/remove",
@@ -1489,9 +1565,9 @@ def test_web_related_term_actions_are_exposed(tmp_path: Path) -> None:
         json={"source": "John", "aliases": [], "disabled": False},
     ).status_code == 200
 
-    related = client.get(
+    related = client.post(
         "/api/v1/projects/sample/terms/related",
-        params={"normalized": "john smith"},
+        json={"normalized": "john smith"},
     )
     assert related.status_code == 200
     assert related.json()["related"][0]["normalized"] == "john"
@@ -1544,9 +1620,9 @@ def test_web_related_quick_remove_uses_reversible_remove_route(tmp_path: Path) -
         )
         assert response.status_code == 200
 
-    related = client.get(
+    related = client.post(
         "/api/v1/projects/sample/terms/related",
-        params={"normalized": "john smith"},
+        json={"normalized": "john smith"},
     )
     assert related.status_code == 200
     candidate = related.json()["related"][0]
@@ -1712,9 +1788,9 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     )
     client = TestClient(create_app(projects_root=projects_root))
 
-    first = client.get(
+    first = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alice", "offset": 0, "limit": 1},
+        json={"normalized": "alice", "offset": 0, "limit": 1},
     )
     assert first.status_code == 200
     payload = first.json()
@@ -1723,9 +1799,9 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     assert [item["segment_id"] for item in payload["hits"]] == ["F0001-S000001"]
     assert payload["hits"][0]["source"] == "Alice walks alone"
 
-    second = client.get(
+    second = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alice", "offset": 1, "limit": 1},
+        json={"normalized": "alice", "offset": 1, "limit": 1},
     )
     assert second.status_code == 200
     assert second.json()["total"] == 2
@@ -1769,9 +1845,9 @@ def test_web_terms_hits_for_group_member_does_not_require_primary(tmp_path: Path
     )
     client = TestClient(create_app(projects_root=projects_root))
 
-    response = client.get(
+    response = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alicia"},
+        json={"normalized": "alicia"},
     )
 
     assert response.status_code == 200
@@ -1812,9 +1888,9 @@ def test_web_terms_hits_match_aliases_and_exclude_conflicted_aliases(
     )
     client = TestClient(create_app(projects_root=projects_root))
 
-    payload = client.get(
+    payload = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alice"},
+        json={"normalized": "alice"},
     ).json()
     assert payload["total"] == 2
     assert [item["segment_id"] for item in payload["hits"]] == [
@@ -1850,9 +1926,9 @@ def test_web_terms_hits_apply_casefold_and_unicode_normalization(
     )
     client = TestClient(create_app(projects_root=projects_root))
 
-    payload = client.get(
+    payload = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alice"},
+        json={"normalized": "alice"},
     ).json()
     assert payload["total"] == 2
     assert [item["segment_id"] for item in payload["hits"]] == [
@@ -1900,27 +1976,27 @@ def test_web_terms_hits_cover_disabled_terms_and_validate_parameters(
         client.get("/api/v1/projects/sample/terms").json()["terms"][0]["disabled"]
         is True
     )
-    payload = client.get(
+    payload = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alpha"},
+        json={"normalized": "alpha"},
     )
     assert payload.status_code == 200
     assert payload.json()["total"] == 1
     assert payload.json()["hits"][0]["segment_id"] == "F0001-S000001"
 
-    missing = client.get(
+    missing = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "nope"},
+        json={"normalized": "nope"},
     )
     assert missing.status_code == 400
     assert "术语不存在" in missing.json()["error"]
 
-    no_term = client.get("/api/v1/projects/sample/terms/hits")
+    no_term = client.post("/api/v1/projects/sample/terms/hits", json={})
     assert no_term.status_code == 400
 
-    invalid = client.get(
+    invalid = client.post(
         "/api/v1/projects/sample/terms/hits",
-        params={"normalized": "alpha", "offset": -1},
+        json={"normalized": "alpha", "offset": -1},
     )
     assert invalid.status_code == 400
     assert "窗口参数无效" in invalid.json()["error"]
@@ -2763,7 +2839,7 @@ def test_web_directory_browse_skips_unreadable_children(tmp_path: Path) -> None:
     blocked.chmod(0)
     try:
         client = TestClient(create_app(projects_root=projects_root))
-        response = client.get("/api/v1/directories", params={"path": str(base)})
+        response = client.post("/api/v1/directories", json={"path": str(base)})
         assert response.status_code == 200
         by_name = {item["name"]: item for item in response.json()["directories"]}
         assert "open" in by_name

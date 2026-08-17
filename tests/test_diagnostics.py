@@ -712,7 +712,7 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     logger.info("visible api log")
     client = TestClient(app)
 
-    response = client.get("/api/v1/diagnostics", params={"q": "VISIBLE"})
+    response = client.post("/api/v1/diagnostics", json={"q": "VISIBLE"})
     assert response.status_code == 200
     assert [item["message"] for item in response.json()["logs"]] == [
         "visible api log"
@@ -722,9 +722,9 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert metrics["p95_latency_ms"] is None
     assert "latest_latency_ms" not in metrics
     feed = response.json()["requests"]
-    delta = client.get(
+    delta = client.post(
         "/api/v1/diagnostics",
-        params={
+        json={
             "request_session": feed["session_id"],
             "request_after": feed["cursor"],
         },
@@ -732,11 +732,11 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert delta.status_code == 200
     assert delta.json()["requests"]["reset"] is False
     assert delta.json()["requests"]["items"] == []
-    rejected = client.get("/api/v1/diagnostics", params={"level": "trace"})
+    rejected = client.post("/api/v1/diagnostics", json={"level": "trace"})
     assert rejected.status_code == 400
     assert "未知日志级别" in rejected.json()["error"]
-    negative_cursor = client.get(
-        "/api/v1/diagnostics", params={"request_after": -1}
+    negative_cursor = client.post(
+        "/api/v1/diagnostics", json={"request_after": -1}
     )
     assert negative_cursor.status_code == 400
     assert "request_after" in negative_cursor.json()["error"]

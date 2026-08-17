@@ -215,13 +215,14 @@ export function TermsView({
   }, [focusFailures]);
 
   const hitsPageSize = 50;
-  function hitsUrl(normalized: string, offset: number) {
-    const params = new URLSearchParams({
-      normalized,
-      offset: String(offset),
-      limit: String(hitsPageSize),
-    });
-    return `/api/v1/projects/${project}/terms/hits?${params}`;
+  function loadHits(normalized: string, offset: number) {
+    return api<TermHitsResponse>(
+      `/api/v1/projects/${project}/terms/hits`,
+      {
+        method: "POST",
+        body: JSON.stringify({ normalized, offset, limit: hitsPageSize }),
+      },
+    );
   }
 
   // Hits are intentionally loaded only when the user opens the hits tab. A
@@ -242,7 +243,7 @@ export function TermsView({
     setHitsLoading(true);
     setHitsError("");
     setHits(null);
-    void api<TermHitsResponse>(hitsUrl(normalized, 0))
+    void loadHits(normalized, 0)
       .then((value) => {
         if (requestId === hitsRequestRef.current) setHits(value);
       })
@@ -277,8 +278,10 @@ export function TermsView({
     setRelated(null);
     setRelatedLoading(true);
     setRelatedError("");
-    const params = new URLSearchParams({ normalized, limit: "20" });
-    void api<RelatedTermsResponse>(`/api/v1/projects/${project}/terms/related?${params}`)
+    void api<RelatedTermsResponse>(`/api/v1/projects/${project}/terms/related`, {
+      method: "POST",
+      body: JSON.stringify({ normalized, limit: 20 }),
+    })
       .then((value) => {
         if (requestId !== relatedRequestRef.current) return;
         if (relatedCacheRef.current.size >= 50) relatedCacheRef.current.clear();
@@ -298,7 +301,7 @@ export function TermsView({
     const normalized = selected.normalized;
     const offset = hits.hits.length;
     setHitsLoading(true);
-    void api<TermHitsResponse>(hitsUrl(normalized, offset))
+    void loadHits(normalized, offset)
       .then((value) => setHits((current) => (
         current && current.normalized === normalized
           ? { ...value, hits: [...current.hits, ...value.hits] }

@@ -64,11 +64,25 @@ fn server_ready(port: &str, timeout: Duration) -> bool {
     false
 }
 
-fn http_get(port: &str, path: &str) -> Result<Vec<u8>, String> {
+fn http_request(
+    port: &str,
+    path: &str,
+    method: &str,
+    body: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .map_err(|error| format!("无法连接服务：{error}"))?;
+    let body = body.unwrap_or("");
+    let content_headers = if body.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    };
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n{content_headers}\r\n{body}"
     );
     stream
         .write_all(request.as_bytes())
@@ -90,8 +104,13 @@ fn http_get(port: &str, path: &str) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-fn save_export(path: String, filename: String) -> Result<String, String> {
-    let bytes = http_get(&web_port(), &path)?;
+fn save_export(
+    path: String,
+    filename: String,
+    body: Option<String>,
+) -> Result<String, String> {
+    let method = if body.is_some() { "POST" } else { "GET" };
+    let bytes = http_request(&web_port(), &path, method, body.as_deref())?;
     let destination = rfd::FileDialog::new()
         .set_file_name(&filename)
         .save_file();
