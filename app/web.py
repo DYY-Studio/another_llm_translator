@@ -1142,21 +1142,24 @@ def create_app(
     async def overview(
         name: str,
         request: Request,
-        offset: int = 0,
-        limit: int = 100,
-        stage: str = "translation",
     ) -> dict[str, Any]:
-        if {"q", "file_id", "status"} & set(request.query_params):
+        params = request.query_params
+        if set(params) - {"offset", "limit", "stage"}:
             raise UsageError(
                 "Segment 搜索和筛选必须通过 POST /segments/query 提交"
             )
+        try:
+            offset = int(params.get("offset", "0"))
+            limit = int(params.get("limit", "100"))
+        except ValueError as exc:
+            raise UsageError("Segment 窗口参数必须是整数") from exc
         if offset < 0 or limit < 1:
             raise UsageError("Segment 窗口参数无效")
         try:
             return WebStore(project(name)).overview(
                 offset=offset,
                 limit=limit,
-                stage=stage,
+                stage=params.get("stage", "translation"),
             )
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
