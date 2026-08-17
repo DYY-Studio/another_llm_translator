@@ -19,7 +19,6 @@ from app.llm_preset import load_llm_preset
 from app.project import init_project
 from tests.test_foundation import make_app_root
 
-
 ROOT = Path(__file__).parents[1]
 
 
@@ -104,6 +103,35 @@ def test_preset_endpoint_allows_model_placeholder(tmp_path: Path) -> None:
     )
 
 
+def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 2
+    value.pop("stream")
+    value.pop("stream_endpoint")
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["schema_version"] == 3
+    assert preset.definition["stream"] is False
+    assert preset.definition["stream_endpoint"] == ""
+
+
+@pytest.mark.parametrize(
+    "stream_endpoint",
+    [
+        "https://provider.example/stream",
+        "/v1/${other}/stream",
+        "/v1/${model}/stream/${other}",
+    ],
+)
+def test_preset_rejects_invalid_stream_endpoint(
+    tmp_path: Path, stream_endpoint: str
+) -> None:
+    value = preset_definition()
+    value["stream"] = True
+    value["stream_endpoint"] = stream_endpoint
+    with pytest.raises(ConfigError, match="stream_endpoint|相对路径"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
 def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
     value = preset_definition()
     value["credential"] = {"kind": "keychain", "name": "openai-main"}
@@ -140,7 +168,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 2"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 3"):
         load_llm_preset(write_preset(tmp_path, value))
 
 

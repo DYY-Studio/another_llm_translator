@@ -444,3 +444,111 @@ def test_json_adapter_usage_mapping_rejects_invalid(
     mutate(value)
     with pytest.raises(ConfigError, match=message):
         load_json_adapter(write_adapter(tmp_path, value))
+
+
+def streaming_definition() -> dict[str, object]:
+    value = definition()
+    value["schema_version"] = 2
+    value["streaming"] = {
+        "transport": "sse",
+        "request_body": {"stream_options": {"include_usage": True}},
+        "content_events": [
+            {
+                "pointer": "/delta/content",
+                "when": {"pointer": "/type", "equals": "delta"},
+            }
+        ],
+        "reasoning_events": [],
+        "terminal": {"when": {"pointer": "/type", "equals": "done"}},
+        "error_events": [
+            {
+                "when": {"pointer": "/type", "equals": "error"},
+                "message_pointer": "/message",
+            }
+        ],
+        "usage": {
+            "input_tokens_pointers": ["/usage/input"],
+            "output_tokens_pointers": ["/usage/output"],
+            "total_tokens_pointers": ["/usage/total"],
+        },
+    }
+    return value
+
+
+def test_json_adapter_streaming_selectors_and_request_body(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, streaming_definition()))
+    assert adapter.streaming_supported is True
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model",
+        messages=[],
+        temperature=0.2,
+        max_output_tokens=100,
+        stream=True,
+    )
+    assert body["stream_options"] == {"include_usage": True}
+    assert adapter.stream_content_deltas({"type": "delta", "delta": {"content": "x"}}) == ["x"]
+    assert adapter.stream_content_deltas({"type": "other"}) == []
+    assert adapter.stream_terminal({"type": "done"}) is True
+    assert adapter.extract_stream_usage({"usage": {"input": 1, "output": 2, "total": 3}}) == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "total_tokens": 3,
+    }
+
+
+def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
+    tmp_path: Path,
+) -> None:
+    value = streaming_definition()
+    value["streaming"]["request_body"] = {"streaming": False}
+    with pytest.raises(ConfigError, match="request_body 与 body 字段冲突"):
+        adapter = load_json_adapter(write_adapter(tmp_path, value))
+        adapter.build_request(
+            api_key="secret",
+            model="model",
+            messages=[],
+            temperature=0.2,
+            max_output_tokens=100,
+            stream=True,
+        )
+
+    value = streaming_definition()
+    value["streaming"]["content_events"][0]["pointer"] = "/missing"
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    with pytest.raises(ExternalError, match="缺少正文路径"):
+        adapter.stream_content_deltas(
+            {"type": "delta", "delta": {"content": "x"}}
+        )
+
+    with pytest.raises(ExternalError, match="缺少消息路径"):
+        adapter.stream_error({"type": "error"})
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value["streaming"].update({"transport": "json"}), "transport"),
+        (lambda value: value["streaming"].update({"content_events": []}), "非空数组"),
+        (lambda value: value["streaming"].update({"terminal": {"exists": True}}), "必须声明 sentinel 或 when"),
+        (
+            lambda value: value["streaming"]["content_events"][0].update(
+                {"when": {"pointer": "/type", "exists": False}}
+            ),
+            "exists 必须是 true",
+        ),
+        (
+            lambda value: value["streaming"]["usage"].update(
+                {"input_tokens_pointers": ["bad"]}
+            ),
+            "必须是 JSON Pointer",
+        ),
+    ],
+)
+def test_json_adapter_streaming_schema_rejects_invalid(
+    tmp_path: Path, mutate: object, message: str
+) -> None:
+    value = streaming_definition()
+    mutate(value)
+    with pytest.raises(ConfigError, match=message):
+        load_json_adapter(write_adapter(tmp_path, value))

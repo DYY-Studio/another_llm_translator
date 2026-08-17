@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "openai-compatible",
   "headers": {
     "Authorization": "Bearer ${api_key}"
@@ -22,5 +22,26 @@
     "input_tokens_pointer": "/usage/prompt_tokens",
     "output_tokens_pointer": "/usage/completion_tokens",
     "total_tokens_pointer": "/usage/total_tokens"
+  },
+  "streaming": {
+    "transport": "sse",
+    "request_body": {
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    "content_events": [
+      {"pointer": "/choices/0/delta/content"}
+    ],
+    "reasoning_events": [
+      {"pointer": "/choices/0/delta/reasoning_content"}
+    ],
+    "terminal": {"sentinel": "[DONE]"},
+    "error_events": [],
+    "usage": {
+      "input_tokens_pointers": ["/usage/prompt_tokens"],
+      "output_tokens_pointers": ["/usage/completion_tokens"],
+      "total_tokens_pointers": ["/usage/total_tokens"]
+    }
   }
 }

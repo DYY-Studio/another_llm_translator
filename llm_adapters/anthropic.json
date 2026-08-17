@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "anthropic",
   "messages_format": "anthropic",
   "headers": {
@@ -24,5 +24,30 @@
   "usage": {
     "input_tokens_pointer": "/usage/input_tokens",
     "output_tokens_pointer": "/usage/output_tokens"
+  },
+  "streaming": {
+    "transport": "sse",
+    "request_body": {},
+    "content_events": [
+      {
+        "pointer": "/delta/text",
+        "when": {"pointer": "/delta/type", "equals": "text_delta"}
+      }
+    ],
+    "reasoning_events": [],
+    "terminal": {
+      "when": {"pointer": "/type", "equals": "message_stop"}
+    },
+    "error_events": [
+      {
+        "when": {"pointer": "/type", "equals": "error"},
+        "message_pointer": "/error/message"
+      }
+    ],
+    "usage": {
+      "input_tokens_pointers": ["/message/usage/input_tokens"],
+      "output_tokens_pointers": ["/usage/output_tokens"],
+      "total_tokens_pointers": []
+    }
   }
 }

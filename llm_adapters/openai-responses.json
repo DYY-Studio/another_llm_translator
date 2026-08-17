@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "openai-responses",
   "headers": {
     "Authorization": "Bearer ${api_key}"
@@ -22,5 +22,30 @@
     "input_tokens_pointer": "/usage/input_tokens",
     "output_tokens_pointer": "/usage/output_tokens",
     "total_tokens_pointer": "/usage/total_tokens"
+  },
+  "streaming": {
+    "transport": "sse",
+    "request_body": {},
+    "content_events": [
+      {
+        "pointer": "/delta",
+        "when": {"pointer": "/type", "equals": "response.output_text.delta"}
+      }
+    ],
+    "reasoning_events": [],
+    "terminal": {
+      "when": {"pointer": "/type", "equals": "response.completed"}
+    },
+    "error_events": [
+      {
+        "when": {"pointer": "/type", "equals": "error"},
+        "message_pointer": "/message"
+      }
+    ],
+    "usage": {
+      "input_tokens_pointers": ["/response/usage/input_tokens"],
+      "output_tokens_pointers": ["/response/usage/output_tokens"],
+      "total_tokens_pointers": ["/response/usage/total_tokens"]
+    }
   }
 }
