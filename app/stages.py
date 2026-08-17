@@ -110,22 +110,63 @@ def _project_context(
     segments = load_segments(project)
     adapter_options: dict[str, dict[str, Any]] = {}
     adapters: dict[str, dict[str, str]] = {}
+    adapter_prompt_requirements: dict[str, dict[str, str]] = {}
     for file_record in files:
-        adapters[str(file_record["file_id"])] = {
+        file_id = str(file_record["file_id"])
+        adapters[file_id] = {
             "adapter_id": str(file_record["document_adapter_id"]),
             "version": str(file_record["document_adapter_version"]),
         }
         state_path = file_record.get("document_adapter_state")
-        if not isinstance(state_path, str):
-            continue
-        state = read_json(project, project / state_path)
-        adapter_options[str(file_record["file_id"])] = {
-            key: state[key]
-            for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
-            if key in state
-        }
+        state_record = (
+            read_json(project, project / state_path)
+            if isinstance(state_path, str)
+            else None
+        )
+        state = state_record.get("state") if isinstance(state_record, dict) else None
+        if (
+            stage is not None
+            and state_record is not None
+            and not isinstance(state, dict)
+        ):
+            raise ConfigError(
+                f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
+            )
+        if isinstance(state, dict):
+            adapter_options[file_id] = {
+                key: state[key]
+                for key in (
+                    "ruby_mode",
+                    "inline_format_mode",
+                    "inline_format_policy",
+                )
+                if key in state
+            }
+        if stage is not None:
+            adapter = get_document_adapter(
+                str(file_record["document_adapter_id"])
+            )
+            requirements: dict[str, str] = {}
+            for language in PROMPT_LANGUAGES:
+                requirement = adapter.model_prompt_requirements(
+                    stage=stage,
+                    language=language,
+                    opaque_state=state,
+                )
+                if requirement is not None and not isinstance(requirement, str):
+                    raise ConfigError(
+                        "Document Adapter 返回了无效的模型 Prompt 要求："
+                        f"{file_record['document_adapter_id']}"
+                    )
+                if requirement:
+                    requirements[language] = requirement
+            adapter_prompt_requirements[file_id] = requirements
     config["_document_adapter_options"] = adapter_options
     config["_document_adapters"] = adapters
+    if stage is not None:
+        config["_document_adapter_prompt_requirements"] = (
+            adapter_prompt_requirements
+        )
     return config, metadata, files, segments
 
 
@@ -323,6 +364,7 @@ def _split_oversized_preflight(
     config: dict[str, Any],
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str] | None = None,
     fail_planning: Callable[[BaseException], None],
     make_probe: Callable[[dict[str, Any], Any], dict[str, Any]],
     split_part: Callable[[Any], list[Any]],
@@ -336,12 +378,13 @@ def _split_oversized_preflight(
     preflight_failed: list[dict[str, Any]] = []
     fast_checked = 0
     exact_checked = 0
+    prompt_builder = prompt_builder or (lambda _items: prompt)
     for segment in work:
         try:
             fast = estimate_single_segment_preflight(
                 segment,
                 config=config,
-                prompt=prompt,
+                prompt=prompt_builder([segment]),
                 payload_builder=payload_builder,
             )
             if fast:
@@ -369,7 +412,7 @@ def _split_oversized_preflight(
                 fast = estimate_single_segment_preflight(
                     probe,
                     config=config,
-                    prompt=prompt,
+                    prompt=prompt_builder([probe]),
                     payload_builder=payload_builder,
                 )
                 if fast:
@@ -435,6 +478,8 @@ async def _execute_stage_run(
     preflight_failed: list[dict[str, Any]],
     limiter: SlidingWindowLimiter | None,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str],
+    prompt_partition_key: Callable[[dict[str, Any]], object],
     process_once: Callable[..., Awaitable[None]],
     record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
     record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
@@ -456,6 +501,8 @@ async def _execute_stage_run(
         stage=state.stage,
         prompt=state.prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_builder,
+        partition_key=prompt_partition_key,
     )
     chunks = materialize_chunk_stream(state.run_id, state.stage, planned)
     if state.config["debug"]["enabled"]:
@@ -641,6 +688,7 @@ async def _localized_request_loop(
     prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
+    prompt_partition_key: Callable[[dict[str, Any]], object],
     logger: Any,
     initial_parent_request_id: str | None = None,
     repair_candidates: dict[str, dict[str, Any]] | None = None,
@@ -734,6 +782,7 @@ async def _localized_request_loop(
             (by_id[segment_id] for segment_id in unresolved),
             all_segments=segments,
             cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
+            partition_key=prompt_partition_key,
         )
         tasks.extend(
             (
@@ -874,13 +923,61 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
 
 
 def _prompt(project: Path, stage: str, language: str | None = None) -> str:
+    factory = _prompt_factory(project, stage, language)
+    return factory(())
+
+
+def _prompt_factory(
+    project: Path, stage: str, language: str | None = None
+) -> Callable[[Iterable[str]], str]:
     language = _prompt_language(project, stage, language)
     name = prompt_file(stage, language)
     try:
         middle = (project / "prompts" / name).read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
-    return full_prompt(stage, middle, language)
+
+    def build(requirements: Iterable[str]) -> str:
+        return full_prompt(
+            stage,
+            middle,
+            language,
+            document_requirements=requirements,
+        )
+
+    return build
+
+
+def _document_prompt_requirement_helpers(
+    config: dict[str, Any],
+    language: str,
+) -> tuple[
+    Callable[[list[dict[str, Any]]], tuple[str, ...]],
+    Callable[[dict[str, Any]], object],
+]:
+    by_file = config.get("_document_adapter_prompt_requirements", {})
+    if not isinstance(by_file, dict):
+        raise ConfigError("Document Adapter Prompt 要求索引无效")
+
+    def file_requirements(item: dict[str, Any]) -> dict[str, Any]:
+        value = by_file.get(str(item["file_id"]), {})
+        if not isinstance(value, dict):
+            raise ConfigError("Document Adapter Prompt 要求记录无效")
+        return value
+
+    def requirements_for(items: list[dict[str, Any]]) -> tuple[str, ...]:
+        values: list[str] = []
+        for item in items:
+            requirement = file_requirements(item).get(language)
+            if isinstance(requirement, str) and requirement not in values:
+                values.append(requirement)
+        return tuple(values)
+
+    def partition_key(item: dict[str, Any]) -> object:
+        requirement = file_requirements(item).get(language)
+        return requirement if isinstance(requirement, str) else None
+
+    return requirements_for, partition_key
 
 
 _FORMAT_CORRECTION = {
@@ -1936,7 +2033,12 @@ async def run_terminology(
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, "terminology", prompt_language)
-    prompt = _prompt(project, "terminology", language)
+    prompt_factory = _prompt_factory(project, "terminology", language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     fingerprint = stage_fingerprint(
         config, "terminology", prompt_middle_digests(project, "terminology")
     )
@@ -2080,6 +2182,7 @@ async def run_terminology(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=lambda segment, part: {
             **segment,
@@ -2114,6 +2217,8 @@ async def run_terminology(
             stage="terminology",
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -2182,7 +2287,7 @@ async def run_terminology(
                 payload["format_correction"] = _correction_with_errors(
                     _FORMAT_CORRECTION[language], parse_errors, language
                 )
-            messages = render_messages(prompt, payload)
+            messages = render_messages(prompt_for_items(unresolved), payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
@@ -2455,6 +2560,8 @@ async def run_terminology(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,
@@ -3069,7 +3176,12 @@ async def run_translation(
     _require_nonempty_segments(segments)
     translation_validators = config["_translation_validator_instances"]
     language = _prompt_language(project, "translation", prompt_language)
-    prompt = _prompt(project, "translation", language)
+    prompt_factory = _prompt_factory(project, "translation", language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
@@ -3187,6 +3299,7 @@ async def run_translation(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=lambda segment, part: {
             **segment,
@@ -3221,6 +3334,8 @@ async def run_translation(
             stage="translation",
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -3443,7 +3558,7 @@ async def run_translation(
         exhausted = await _localized_request_loop(
             group,
             payload_builder=payload_builder,
-            prompt=prompt,
+            prompt=prompt_for_items(group),
             config=config,
             llm=state.llm,
             stage="translation",
@@ -3454,6 +3569,7 @@ async def run_translation(
             prompt_language=language,
             by_id=by_id,
             segments=segments,
+            prompt_partition_key=prompt_partition_key,
             logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
@@ -3474,7 +3590,7 @@ async def run_translation(
             exhausted = await _localized_request_loop(
                 group,
                 payload_builder=payload_builder,
-                prompt=prompt,
+                prompt=prompt_for_items(group),
                 config=config,
                 llm=state.llm,
                 stage="translation",
@@ -3485,6 +3601,7 @@ async def run_translation(
                 prompt_language=language,
                 by_id=by_id,
                 segments=segments,
+                prompt_partition_key=prompt_partition_key,
                 logger=logger,
                 initial_parent_request_id=parent_request_id,
                 repair_candidates=subset,
@@ -3580,6 +3697,7 @@ async def run_translation(
                     all_segments=segments,
                     cross_boundary="translation"
                     in config["chunking"]["cross_boundary_batching"],
+                    partition_key=prompt_partition_key,
                 )
                 logger.warning(
                     "validation repair attempt=%d segments=%d chunks=%d",
@@ -3612,6 +3730,7 @@ async def run_translation(
                 all_segments=segments,
                 cross_boundary="translation"
                 in config["chunking"]["cross_boundary_batching"],
+                partition_key=prompt_partition_key,
             )
             logger.warning(
                 "advisory validation repair segments=%d chunks=%d",
@@ -3698,6 +3817,8 @@ async def run_translation(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,
@@ -3873,7 +3994,12 @@ async def run_review(
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, stage, prompt_language)
-    prompt = _prompt(project, stage, language)
+    prompt_factory = _prompt_factory(project, stage, language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
@@ -4048,6 +4174,7 @@ async def run_review(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=make_probe,
         split_part=split_part,
@@ -4076,6 +4203,8 @@ async def run_review(
             stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -4264,7 +4393,7 @@ async def run_review(
         exhausted = await _localized_request_loop(
             list(chunk.segments),
             payload_builder=payload_builder,
-            prompt=prompt,
+            prompt=prompt_for_items(list(chunk.segments)),
             config=config,
             llm=state.llm,
             stage=stage,
@@ -4275,6 +4404,7 @@ async def run_review(
             prompt_language=language,
             by_id=by_id,
             segments=segments,
+            prompt_partition_key=prompt_partition_key,
             logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
@@ -4322,6 +4452,8 @@ async def run_review(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,

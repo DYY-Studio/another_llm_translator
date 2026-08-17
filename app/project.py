@@ -369,6 +369,16 @@ class TXTDocumentAdapter:
     import_options = ()
     run_options = ()
 
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, Any] | None,
+    ) -> str | None:
+        del stage, language, opaque_state
+        return None
+
     def import_sources(
         self,
         inputs: list[str],

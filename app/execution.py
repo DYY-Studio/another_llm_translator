@@ -274,7 +274,7 @@ def _make_stage_selection(
     )
 
 
-PROMPT_RULES_VERSION = 8
+PROMPT_RULES_VERSION = 9
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -344,9 +344,7 @@ _SEGMENT_TEXT_SUFFIX: dict[str, str] = {
     "zh-CN": (
         "Ruby base（｜与《之间）是正文，必须翻译，不得因标记照抄。可删标记/"
         "reading，仅输出已译 base；保留须为｜已译base《目标语言适用reading》，"
-        "reading 也须翻译或转写；无法适配则仅输出已译 base。source 中 <em1> 类"
-        "受控标记仅原样成对嵌套保留，"
-        "不增属性、标记或 HTML。"
+        "reading 也须翻译或转写；无法适配则仅输出已译 base。"
     ),
     "en": (
         "An Aozora Ruby base (between ｜ and 《) is source text and must be "
@@ -354,9 +352,7 @@ _SEGMENT_TEXT_SUFFIX: dict[str, str] = {
         "and reading and return only the translated base. If kept, use "
         "｜translated base《target-appropriate reading》; translate or "
         "transliterate the reading, otherwise drop Ruby and return only the "
-        "translated base. For controlled source markers such as <em1>, keep only "
-        "existing, paired, correctly nested markers; never add attributes, "
-        "unknown markers, HTML, or markers absent from source."
+        "translated base."
     ),
 }
 
@@ -433,7 +429,12 @@ _COMMON_SUFFIX: dict[str, str] = {
 }
 
 
-def full_prompt(stage: str, middle: str, language: str = "zh-CN") -> str:
+def full_prompt(
+    stage: str,
+    middle: str,
+    language: str = "zh-CN",
+    document_requirements: Iterable[str] = (),
+) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
     if stage not in _STAGE_PREFIX:
@@ -442,6 +443,11 @@ def full_prompt(stage: str, middle: str, language: str = "zh-CN") -> str:
     suffix_parts = []
     if stage != "terminology":
         suffix_parts.append(_SEGMENT_TEXT_SUFFIX[language])
+    suffix_parts.extend(
+        requirement.strip()
+        for requirement in document_requirements
+        if isinstance(requirement, str) and requirement.strip()
+    )
     suffix_parts.extend(
         (_STAGE_SUFFIX[stage][language], _COMMON_SUFFIX[language])
     )
@@ -482,6 +488,9 @@ def stage_fingerprint(
                 "_document_adapter_options", {}
             ),
             "document_adapters": config.get("_document_adapters", {}),
+            "document_adapter_prompt_requirements": config.get(
+                "_document_adapter_prompt_requirements", {}
+            ),
         }
         if stage == "terminology":
             data["terminology"] = config["terminology"]
@@ -637,6 +646,7 @@ def contiguous_groups(
     *,
     all_segments: Iterable[dict[str, Any]],
     cross_boundary: bool = False,
+    partition_key: Callable[[dict[str, Any]], object] | None = None,
 ) -> list[list[dict[str, Any]]]:
     all_segment_list = list(all_segments)
     file_rank: dict[str, int] = {}
@@ -684,7 +694,10 @@ def contiguous_groups(
                 (*part_key, line_index) in empty_positions
                 for line_index in range(previous_index + 1, current_index)
             )
-        if gap_is_empty:
+        if gap_is_empty and (
+            partition_key is None
+            or partition_key(previous) == partition_key(segment)
+        ):
             groups[-1].append(segment)
         else:
             groups.append([segment])
@@ -697,6 +710,7 @@ def _iter_contiguous_groups(
     all_segments: Iterable[dict[str, Any]],
     cross_boundary: bool = False,
     empty_positions: set[tuple[Any, ...]] | None = None,
+    partition_key: Callable[[dict[str, Any]], object] | None = None,
 ) -> Iterable[list[dict[str, Any]]]:
     all_segment_list = list(all_segments)
     file_rank: dict[str, int] = {}
@@ -749,7 +763,10 @@ def _iter_contiguous_groups(
             can_append = same_part and (
                 current_index == previous_index or gap_is_empty
             )
-        if can_append:
+        if can_append and (
+            partition_key is None
+            or partition_key(previous) == partition_key(segment)
+        ):
             current.append(segment)
             continue
         yield current
@@ -766,6 +783,8 @@ def iter_chunk_plans(
     stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str] | None = None,
+    partition_key: Callable[[dict[str, Any]], object] | None = None,
 ) -> Iterable[ChunkPlan]:
     input_limit = (
         config["llm"]["context_window_tokens"]
@@ -779,6 +798,7 @@ def iter_chunk_plans(
         target_limits.append(config["execution"]["input_tokens_per_minute"])
     target = min(target_limits)
     factor = config["execution"]["token_safety_factor"]
+    prompt_builder = prompt_builder or (lambda _items: prompt)
     cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
     all_segment_list = list(all_segments)
     file_rank: dict[str, int] = {}
@@ -805,7 +825,7 @@ def iter_chunk_plans(
                 candidate = [*current, segment]
                 payload = payload_builder(candidate)
                 estimated = estimate_messages(
-                    render_messages(prompt, payload), factor
+                    render_messages(prompt_builder(candidate), payload), factor
                 )
                 started_new_chunk = False
                 if current and estimated > target:
@@ -818,7 +838,7 @@ def iter_chunk_plans(
                     current = [segment]
                     payload = payload_builder(current)
                     estimated = estimate_messages(
-                        render_messages(prompt, payload), factor
+                        render_messages(prompt_builder(current), payload), factor
                     )
                     started_new_chunk = True
                 _validate_request_estimate(
@@ -851,6 +871,7 @@ def iter_chunk_plans(
                 all_segments=all_segment_list,
                 cross_boundary=cross_boundary,
                 empty_positions=empty_positions,
+                partition_key=partition_key,
             )
         )
         return
@@ -866,6 +887,7 @@ def iter_chunk_plans(
                     all_segments=all_segment_list,
                     cross_boundary=False,
                     empty_positions=empty_positions,
+                    partition_key=partition_key,
                 )
             )
         )
@@ -946,6 +968,8 @@ def build_chunk_plans(
     stage: str,
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str] | None = None,
+    partition_key: Callable[[dict[str, Any]], object] | None = None,
 ) -> list[ChunkPlan]:
     return list(
         iter_chunk_plans(
@@ -955,6 +979,8 @@ def build_chunk_plans(
             stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_builder,
+            partition_key=partition_key,
         )
     )
 
@@ -992,6 +1018,10 @@ def create_run(
     run_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", run_dir / "config.toml")
     _write_llm_snapshots(run_dir, config)
+    atomic_write_json(
+        run_dir / "document_adapter_prompt_requirements.json",
+        config.get("_document_adapter_prompt_requirements", {}),
+    )
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = record_header(
@@ -1007,6 +1037,9 @@ def create_run(
         reused_segment_count=reused_count,
         document_adapters=config.get("_document_adapters", {}),
         document_adapter_options=config.get("_document_adapter_options", {}),
+        document_adapter_prompt_requirements=config.get(
+            "_document_adapter_prompt_requirements", {}
+        ),
         translation_validators=config.get("_translation_validators", []),
         **(details or {}),
         started_at=utc_now(),
@@ -1167,6 +1200,10 @@ def continue_run(
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(project / "config.toml", snapshot_dir / "config.toml")
     _write_llm_snapshots(snapshot_dir, config)
+    atomic_write_json(
+        snapshot_dir / "document_adapter_prompt_requirements.json",
+        config.get("_document_adapter_prompt_requirements", {}),
+    )
     (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     continuations.append(
         {

@@ -115,6 +115,15 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) != original
 
 
+def test_stage_fingerprint_tracks_document_prompt_requirements() -> None:
+    current = config()
+    baseline = stage_fingerprint(current, "translation", {})
+    current["_document_adapter_prompt_requirements"] = {
+        "F0001": {"zh-CN": "保留 EPUB 标记", "en": "Keep EPUB markers"}
+    }
+    assert stage_fingerprint(current, "translation", {}) != baseline
+
+
 def test_token_estimate_matches_the_previous_character_accounting() -> None:
     samples = [
         "",
@@ -337,6 +346,56 @@ def test_chunk_plans_are_iterated_lazily() -> None:
     first = next(iter(stream))
     assert first.segments[0]["segment_id"] == "F0001-S000001"
     assert calls > 0
+
+
+def test_chunk_plans_keep_document_prompt_requirements_separate() -> None:
+    current = config()
+    current["chunking"]["cross_boundary_batching"] = ["translation"]
+    source = [
+        {
+            "segment_id": "F0001-S000001",
+            "file_id": "F0001",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "TXT",
+            "is_empty": False,
+        },
+        {
+            "segment_id": "F0002-S000001",
+            "file_id": "F0002",
+            "part_id": "document",
+            "line_index": 0,
+            "source": "EPUB",
+            "is_empty": False,
+        },
+    ]
+    requirements = {"F0001": None, "F0002": "EPUB markers"}
+    plans = list(
+        iter_chunk_plans(
+            source,
+            all_segments=source,
+            config=current,
+            stage="translation",
+            prompt="base",
+            payload_builder=lambda items: {
+                "segments": [
+                    {"id": item["segment_id"], "source": item["source"]}
+                    for item in items
+                ]
+            },
+            prompt_builder=lambda items: "base "
+            + " ".join(
+                value
+                for value in (requirements[str(item["file_id"])] for item in items)
+                if value
+            ),
+            partition_key=lambda item: requirements[str(item["file_id"])],
+        )
+    )
+    assert [tuple(item["file_id"] for item in plan.segments) for plan in plans] == [
+        ("F0001",),
+        ("F0002",),
+    ]
 
 
 @pytest.mark.asyncio

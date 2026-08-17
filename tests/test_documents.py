@@ -25,7 +25,7 @@ from app.plugins import (
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project
-from app.stages import export_project
+from app.stages import _project_context, export_project
 from app.sqlite_storage import (
     append_jsonl,
     read_files,
@@ -651,12 +651,53 @@ def test_epub_markers_persist_model_source_and_strip_valid_output(
     )
     loaded = __import__("app.project", fromlist=["load_segments"]).load_segments(project)
     assert loaded[0]["_format_markers"]
+    context_config, _, _, _ = _project_context(project, stage="translation")
+    assert "<em1>" in context_config[
+        "_document_adapter_prompt_requirements"
+    ]["F0001"]["en"]
     adapter = get_document_adapter("epub")
     assert adapter.normalize_model_output(
         segment=loaded[0],
         text="A <em1><strong2>B</strong2></em1> C",
         stage="translation",
     ) == "A B C"
+
+
+def test_epub_model_prompt_requirements_follow_format_state() -> None:
+    adapter = get_document_adapter("epub")
+    assert adapter.model_prompt_requirements(
+        stage="translation",
+        language="zh-CN",
+        opaque_state={"inline_format_mode": "plain"},
+    ) is None
+    strict = adapter.model_prompt_requirements(
+        stage="translation",
+        language="zh-CN",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+    assert strict is not None
+    assert "必须保留所有已有标记" in strict
+    tiered = adapter.model_prompt_requirements(
+        stage="proofreading",
+        language="en",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "tiered",
+        },
+    )
+    assert tiered is not None
+    assert "presentation markers may be omitted" in tiered
+    assert adapter.model_prompt_requirements(
+        stage="terminology",
+        language="en",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    ) is None
 
 
 def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
@@ -1469,7 +1510,7 @@ class FakeEntryPoint:
 
 
 @pytest.mark.parametrize(
-    "incompatible_version", [5, 6, 7, PLUGIN_PROTOCOL_VERSION + 1]
+    "incompatible_version", [5, 6, 7, 9, PLUGIN_PROTOCOL_VERSION + 1]
 )
 def test_plugin_host_rejects_protocol_and_duplicate_adapter(
     monkeypatch: pytest.MonkeyPatch, incompatible_version: int

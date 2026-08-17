@@ -65,4 +65,4 @@ def test_preferred_term_usage_is_advisory_and_normalizes_text() -> None:
 def test_descriptor_uses_fixed_protocol_version() -> None:
     value = descriptor()
     assert value.plugin_id == "term-validation"
-    assert value.protocol_version == 9
+    assert value.protocol_version == 10

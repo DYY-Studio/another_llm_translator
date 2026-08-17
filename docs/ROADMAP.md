@@ -106,7 +106,7 @@ entry point、宿主集成和冻结 sidecar 装配验证。外部 Document Adapt
 - 用真实字幕样本持续验证 SRT 核心语法边界与模型标记兼容性；
 - 在出现第二个真实外部 Document Adapter 后再决定 Document Adapter 的兼容范围与运行时安装策略。
 
-翻译校验器现在通过独立的可信 Python Validator 契约扩展；协议版本为 `9`，接收源文、
+翻译校验器现在通过独立的可信 Python Validator 契约扩展；共享插件协议版本为 `10`，接收源文、
 译文和宿主确定的逐 Segment 术语命中，不建立通用 DOM 或自由 HTML 协议。独立的
 `another-llm-translator-term-validation` 是首个真实外部 Validator 示例；官方桌面在
 构建时装配它但默认关闭，基础 Python 包可选安装，外部插件仍按版本不匹配快速失败。
