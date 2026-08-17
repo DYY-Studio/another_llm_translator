@@ -185,6 +185,10 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
     current_completed = summary["current_fingerprint_completed"]
     return {
         "stage": stage,
+        "preset": {
+            "id": str(config["_llm_preset_id"]),
+            "model": str(config["llm"]["model"]),
+        },
         "selected": len(nonempty),
         "completed": completed,
         "pending": summary["pending"],

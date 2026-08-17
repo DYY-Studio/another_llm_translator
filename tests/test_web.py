@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 import app.web as web_module
 from app import sqlite_storage
-from app.config import load_config, load_project_config
+from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import UsageError
 from app.execution import Scope, create_run
@@ -2143,6 +2143,7 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert options.json()["completed"] == 1
     assert options.json()["current_fingerprint_completed"] == 0
     assert options.json()["mismatched_fingerprint_completed"] == 1
+    assert options.json()["preset"] == {"id": "default", "model": "example-model"}
     assert options.json()["running_run"] is None
 
     undecided = client.post(
@@ -2170,6 +2171,44 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert conflicting.status_code == 400
     assert "不能同时使用" in conflicting.json()["error"]
     assert app.state.tasks.tasks == {}
+
+
+def test_web_task_options_report_effective_stage_preset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    alternate = json.loads(
+        (app_root / "llm_presets" / "default.json").read_text(encoding="utf-8")
+    )
+    alternate.update(preset_id="alternate", model="alternate-model")
+    (app_root / "llm_presets" / "alternate.json").write_text(
+        json.dumps(alternate), encoding="utf-8"
+    )
+    config = load_config(project / "config.toml")
+    config["llm"]["preset_translation"] = "alternate"
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+
+    monkeypatch.setattr("app.config.APP_ROOT", app_root)
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    translation = client.get(
+        "/api/v1/projects/sample/task-options/translation"
+    )
+    terminology = client.get(
+        "/api/v1/projects/sample/task-options/terminology"
+    )
+
+    assert translation.status_code == 200
+    assert translation.json()["preset"] == {
+        "id": "alternate",
+        "model": "alternate-model",
+    }
+    assert terminology.status_code == 200
+    assert terminology.json()["preset"] == {
+        "id": "default",
+        "model": "example-model",
+    }
 
 
 def test_web_task_options_require_explicit_running_run_action(
@@ -2226,6 +2265,10 @@ def test_web_task_options_require_explicit_running_run_action(
             "https://generativelanguage.googleapis.com/v1beta/models/"
             "gemini-2.5-flash:generateContent"
         )
+        assert options["preset"] == {
+            "id": "google-gemini",
+            "model": "gemini-2.5-flash",
+        }
 
         undecided = client.post(
             "/api/v1/projects/sample/tasks",
