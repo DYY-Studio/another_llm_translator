@@ -217,6 +217,10 @@ export interface ModelRow {
 
 export interface TaskOptions {
   stage: LLMStage;
+  preset: {
+    id: string;
+    model: string;
+  };
   selected: number;
   completed: number;
   pending: number;
