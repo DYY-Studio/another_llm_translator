@@ -146,8 +146,10 @@ class EPUBDocumentAdapter:
                 )
             return (
                 "source 中的受控内联标记（如 <em1>）用于重建 EPUB 格式；"
-                "保留已有的语义标记并保持成对、原有顺序和正确嵌套，"
-                "表现层标记可以整体省略。不得新增标记、属性、未知 HTML "
+                "语义标记包括 a、abbr、bdi、bdo、cite、code、data、dfn、kbd、"
+                "q、samp、sub、sup、time、var；保留这些已有标记并保持成对、"
+                "原有顺序和正确嵌套。表现层标记 b、em、i、mark、s、small、"
+                "span、strong、u 可以整体省略。不得新增标记、属性、未知 HTML "
                 "或改变标签层级。"
             )
         if language == "en":
@@ -160,10 +162,12 @@ class EPUBDocumentAdapter:
                 )
             return (
                 "Controlled inline markers in source (such as <em1>) are used "
-                "to rebuild EPUB formatting. Keep semantic markers with their "
-                "pairing, order, and correct nesting; presentation markers may "
-                "be omitted as a whole. Never add markers, attributes, unknown "
-                "HTML, or change the tag hierarchy."
+                "to rebuild EPUB formatting. Semantic markers are a, abbr, bdi, "
+                "bdo, cite, code, data, dfn, kbd, q, samp, sub, sup, time, and "
+                "var; keep existing ones with their pairing, order, and correct "
+                "nesting. Presentation markers b, em, i, mark, s, small, span, "
+                "strong, and u may be omitted as a whole. Never add markers, "
+                "attributes, unknown HTML, or change the tag hierarchy."
             )
         raise ConfigError(f"不支持的 Prompt 语言：{language}")
 

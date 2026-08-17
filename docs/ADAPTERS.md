@@ -357,6 +357,9 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 `strict` 要求全部源标签保留。EPUB Adapter 仅在 `markers` 模式向对应请求的
 Prompt 注入上述保留要求，并把受控标记校验交给自身：未知、重复、
 未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
+其中 `tiered` 的语义标签为 `a`、`abbr`、`bdi`、`bdo`、`cite`、`code`、`data`、
+`dfn`、`kbd`、`q`、`samp`、`sub`、`sup`、`time`、`var`；表现层标签为 `b`、`em`、
+`i`、`mark`、`s`、`small`、`span`、`strong`、`u`，后者可整体省略。
 纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；
 详情界面同时显示净文本与模型文本预览。
 

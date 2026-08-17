@@ -689,7 +689,8 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
         },
     )
     assert tiered is not None
-    assert "presentation markers may be omitted" in tiered
+    assert "may be omitted as a whole" in tiered
+    assert "Semantic markers are a, abbr" in tiered
     assert adapter.model_prompt_requirements(
         stage="terminology",
         language="en",
