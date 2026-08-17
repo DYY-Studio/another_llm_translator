@@ -86,7 +86,13 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
     ],
     "reasoning_events": [],
     "terminal": {"sentinel": "[DONE]"},
-    "error_events": [],
+    "error_events": [
+      {
+        "when": {"pointer": "/choices/0/finish_reason", "equals": "error"},
+        "message_pointer": "/error/message",
+        "status_pointer": "/error/status"
+      }
+    ],
     "usage": {
       "input_tokens_pointers": ["/usage/prompt_tokens"],
       "output_tokens_pointers": ["/usage/completion_tokens"],
@@ -103,7 +109,10 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
 未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
 `terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
-声明流内错误及可选字符串消息路径；`usage` 的三个候选指针数组逐事件观察，
+声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
+是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
+HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以
+同时报告外层 HTTP 200 和上游 HTTP 504。`usage` 的三个候选指针数组逐事件观察，
 每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
 
 宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在收到终止事件前

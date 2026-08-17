@@ -464,6 +464,7 @@ def streaming_definition() -> dict[str, object]:
             {
                 "when": {"pointer": "/type", "equals": "error"},
                 "message_pointer": "/message",
+                "status_pointer": "/status",
             }
         ],
         "usage": {
@@ -490,6 +491,13 @@ def test_json_adapter_streaming_selectors_and_request_body(tmp_path: Path) -> No
     assert adapter.stream_content_deltas({"type": "delta", "delta": {"content": "x"}}) == ["x"]
     assert adapter.stream_content_deltas({"type": "other"}) == []
     assert adapter.stream_terminal({"type": "done"}) is True
+    details = adapter.stream_error_details(
+        {"type": "error", "message": "upstream timeout", "status": 504}
+    )
+    assert details is not None
+    assert details.message == "upstream timeout"
+    assert details.provider_error_status == 504
+    assert adapter.stream_error({"type": "other"}) is None
     assert adapter.extract_stream_usage({"usage": {"input": 1, "output": 2, "total": 3}}) == {
         "input_tokens": 1,
         "output_tokens": 2,
@@ -524,6 +532,16 @@ def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
     with pytest.raises(ExternalError, match="缺少消息路径"):
         adapter.stream_error({"type": "error"})
 
+    with pytest.raises(ExternalError, match="缺少状态路径"):
+        adapter.stream_error_details(
+            {"type": "error", "message": "missing status"}
+        )
+
+    with pytest.raises(ExternalError, match="有效 HTTP 状态码"):
+        adapter.stream_error_details(
+            {"type": "error", "message": "bad status", "status": "504"}
+        )
+
 
 @pytest.mark.parametrize(
     ("mutate", "message"),
@@ -540,6 +558,12 @@ def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
         (
             lambda value: value["streaming"]["usage"].update(
                 {"input_tokens_pointers": ["bad"]}
+            ),
+            "必须是 JSON Pointer",
+        ),
+        (
+            lambda value: value["streaming"]["error_events"][0].update(
+                {"status_pointer": "status"}
             ),
             "必须是 JSON Pointer",
         ),

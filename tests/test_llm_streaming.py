@@ -189,6 +189,142 @@ async def test_stream_retry_discards_partial_output_and_saves_failed_events(
 
 
 @pytest.mark.asyncio
+async def test_stream_finish_reason_error_is_retryable_and_reports_provider_status(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    current["debug"]["enabled"] = True
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return stream_response(
+            {"choices": [{"delta": {"content": "半成品"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {},
+                        "finish_reason": "error",
+                    }
+                ],
+                "error": {
+                    "status": 504,
+                    "message": "Request timed out. Please try again later.",
+                    "code": "upstream_timeout",
+                },
+            },
+            "[DONE]",
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    os.environ["LLM_API_KEY"] = "test-key"
+    try:
+        with diagnostics.activate("sample", "translation"):
+            async with LLMClient(
+                current,
+                SlidingWindowLimiter(0, 0),
+                run_dir=tmp_path / "run",
+                project_id="PRJ",
+                run_id="RUN",
+                stage="translation",
+                client=client,
+            ) as llm:
+                with pytest.raises(ExternalError, match="上游 HTTP 504"):
+                    await llm.chat(
+                        messages=render_messages(
+                            "prompt", {"segments": [{"source": "source"}]}
+                        ),
+                        temperature=0.2,
+                        estimated_input_tokens=10,
+                    )
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+        await client.aclose()
+
+    assert calls == 2
+    item = diagnostics.snapshot()["requests"]["items"][0]
+    assert item["status"] == "failed"
+    assert item["last_http_status"] == 200
+    assert item["provider_error_status"] == 504
+    detail = diagnostics.request_detail(item["request_id"])
+    assert detail["response_content"] is None
+    assert [attempt["outcome"] for attempt in detail["attempts"]] == [
+        "stream_error",
+        "stream_error",
+    ]
+    assert [attempt["http_status"] for attempt in detail["attempts"]] == [
+        200,
+        200,
+    ]
+    assert [
+        attempt["provider_error_status"] for attempt in detail["attempts"]
+    ] == [504, 504]
+    attempts = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "attempts.jsonl")
+        .read_text("utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert [item["status"] for item in attempts] == ["failed", "failed"]
+    assert [item["outcome"] for item in attempts] == [
+        "stream_error",
+        "stream_error",
+    ]
+    assert all(item["http_status"] == 200 for item in attempts)
+    assert all(item["provider_error_status"] == 504 for item in attempts)
+    error_files = sorted((tmp_path / "run" / "payloads").glob("*.error.json"))
+    assert len(error_files) == 2
+    assert all(
+        json.loads(path.read_text("utf-8"))["provider_error_status"] == 504
+        for path in error_files
+    )
+    log = (tmp_path / "logs" / "app.log").read_text("utf-8")
+    assert "stream complete" not in log
+    assert "stream error" in log
+    assert "provider_error_status=504" in log
+
+
+@pytest.mark.asyncio
+async def test_stream_finish_reason_error_discards_partial_output_before_success(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return stream_response(
+                {"choices": [{"delta": {"content": "半成品"}}]},
+                {
+                    "choices": [{"delta": {}, "finish_reason": "error"}],
+                    "error": {"status": 504, "message": "timeout"},
+                },
+                "[DONE]",
+            )
+        return stream_response(
+            {"choices": [{"delta": {"content": "完成"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            "[DONE]",
+        )
+
+    response, llm, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+
+    assert calls == 2
+    assert response.content == "完成"
+    assert "半成品" not in response.content
+    assert llm.usage_summary()["available"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_retry_preserves_retry_after_headers(tmp_path: Path) -> None:
     current = streaming_config(tmp_path)
     current["retry"]["http_max_attempts"] = 2

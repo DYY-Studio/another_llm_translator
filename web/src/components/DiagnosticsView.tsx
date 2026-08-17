@@ -124,6 +124,7 @@ const RequestGroup = memo(function RequestGroup({
                     <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
                     {translate("diagnostics.attempts", language, { count: item.attempt_count })}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
+                    {item.provider_error_status !== null ? ` · ${translate("diagnostics.providerErrorStatus", language, { status: item.provider_error_status })}` : ""}
                     {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
                     {item.transport === "sse" ? ` · SSE ${item.stream_event_count} · ${bytes(item.stream_received_bytes, language)}${item.stream_first_event_latency_ms === null ? "" : ` · ${item.stream_first_event_latency_ms} ms first`}` : ""}
                   </span>
@@ -531,6 +532,8 @@ export function DiagnosticsView({ language }: { language: Language }) {
                       <article key={attempt.attempt}>
                         <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}</strong>
                         <span>{attempt.http_status === null ? translate("diagnostics.networkError", language) : `HTTP ${attempt.http_status}`}</span>
+                        {attempt.provider_error_status !== null && <span>{translate("diagnostics.providerErrorStatus", language, { status: attempt.provider_error_status })}</span>}
+                        <span>{translate("diagnostics.outcome", language, { outcome: attempt.outcome })}</span>
                         <span>{attempt.latency_ms} ms</span>
                         {detail.transport === "sse" && <span>{attempt.stream_event_count ?? 0} events · {bytes(attempt.stream_received_bytes ?? 0, language)}{attempt.stream_first_event_latency_ms == null ? "" : ` · ${attempt.stream_first_event_latency_ms} ms first`}</span>}
                       </article>
