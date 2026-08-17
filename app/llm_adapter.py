@@ -29,6 +29,7 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "messages_format",
         "models",
         "response_reasoning_content_pointer",
+        "response_reasoning_content_pointers",
         "usage",
         "streaming",
     }
@@ -92,13 +93,19 @@ class JSONLLMAdapter:
     headers_template: dict[str, str]
     body_template: dict[str, Any]
     response_content_pointer: str
-    response_reasoning_content_pointer: str | None
+    response_reasoning_content_pointers: tuple[str, ...] | None
     messages_format: str
     models_spec: dict[str, Any] | None
     usage_pointers: tuple[str | None, str | None, str | None] | None
     streaming_spec: dict[str, Any] | None
     digest: str
     definition: dict[str, Any]
+
+    @property
+    def response_reasoning_content_pointer(self) -> str | None:
+        """Return the first reasoning pointer for legacy callers."""
+        pointers = self.response_reasoning_content_pointers
+        return pointers[0] if pointers else None
 
     def build_request(
         self,
@@ -261,17 +268,17 @@ class JSONLLMAdapter:
         if not isinstance(content, str):
             raise ExternalError("LLM 响应正文不是字符串")
         reasoning_content = None
-        if self.response_reasoning_content_pointer is not None:
+        for reasoning_pointer in self.response_reasoning_content_pointers or ():
             try:
-                reasoning_content = _resolve_json_pointer(
-                    response, self.response_reasoning_content_pointer
-                )
+                candidate = _resolve_json_pointer(response, reasoning_pointer)
             except ExternalError:
-                reasoning_content = None
-            if reasoning_content is not None and not isinstance(
-                reasoning_content, str
-            ):
+                continue
+            if candidate is None:
+                break
+            if not isinstance(candidate, str):
                 raise ExternalError("LLM 响应思考正文不是字符串或 null")
+            reasoning_content = candidate
+            break
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
@@ -412,16 +419,27 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
     _parse_json_pointer(pointer)
     reasoning_pointer = value.get("response_reasoning_content_pointer")
-    if reasoning_pointer is not None:
-        if (
-            not isinstance(reasoning_pointer, str)
-            or not reasoning_pointer.startswith("/")
+    if "response_reasoning_content_pointers" in value:
+        if reasoning_pointer is not None:
+            raise ConfigError(
+                "LLM Adapter response_reasoning_content_pointer 与 "
+                "response_reasoning_content_pointers 不能同时配置"
+            )
+        reasoning_pointers = _validate_reasoning_pointers(
+            value["response_reasoning_content_pointers"]
+        )
+    elif reasoning_pointer is not None:
+        if not isinstance(reasoning_pointer, str) or not reasoning_pointer.startswith(
+            "/"
         ):
             raise ConfigError(
                 "LLM Adapter response_reasoning_content_pointer "
                 "必须是 JSON Pointer"
             )
         _parse_json_pointer(reasoning_pointer)
+        reasoning_pointers = (reasoning_pointer,)
+    else:
+        reasoning_pointers = None
     models_spec = _validate_models_spec(value.get("models"))
     usage_pointers = _validate_usage_mapping(value.get("usage"))
     streaming_spec = _validate_streaming_spec(value.get("streaming"))
@@ -431,7 +449,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         headers_template=dict(headers),
         body_template=deepcopy(body),
         response_content_pointer=pointer,
-        response_reasoning_content_pointer=reasoning_pointer,
+        response_reasoning_content_pointers=reasoning_pointers,
         messages_format=messages_format,
         models_spec=models_spec,
         usage_pointers=usage_pointers,
@@ -439,6 +457,24 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         digest=digest,
         definition=deepcopy(value),
     )
+
+
+def _validate_reasoning_pointers(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(
+            "LLM Adapter response_reasoning_content_pointers "
+            "必须是非空 JSON Pointer 数组"
+        )
+    pointers: list[str] = []
+    for pointer in value:
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ConfigError(
+                "LLM Adapter response_reasoning_content_pointers "
+                "必须是 JSON Pointer 数组"
+            )
+        _parse_json_pointer(pointer)
+        pointers.append(pointer)
+    return tuple(pointers)
 
 
 def _validate_models_spec(value: Any) -> dict[str, Any] | None:

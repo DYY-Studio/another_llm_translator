@@ -1297,7 +1297,9 @@ Content-Type: application/json
 Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body、正文
 路径 `/choices/0/message/content` 和可选推理路径
-`/choices/0/message/reasoning_content`。另内置 `anthropic`、`google-gemini` 与
+`/choices/0/message/reasoning_content`、`/choices/0/message/reasoning`；启用 SSE
+时同时接受对应的 `/choices/0/delta/reasoning_content` 和
+`/choices/0/delta/reasoning`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
 `endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
 声明式 Adapter 默认使用非流式 JSON POST。schema 2 Adapter 可声明 SSE
@@ -1372,10 +1374,12 @@ SSE 协议损坏、UTF-8/JSON 错误、匹配事件字段缺失或类型错误�
   下述 JSONL 规则解析。
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
-- Adapter 还可配置 `response_reasoning_content_pointer` 提取字符串或 null 的
-  结构化思考字段；路径缺失时同样规范化为 null，字段存在但类型错误时快速
-  失败。规范化响应包含 `content` 和可空的 `reasoning_content`；结构化字段
-  与内嵌块同时非空时快速失败，不猜测合并顺序。
+- Adapter 还可配置 `response_reasoning_content_pointer`，或用有序的
+  `response_reasoning_content_pointers` 候选数组，提取字符串或 null 的结构化
+  思考字段。候选路径缺失时继续尝试，首个存在的 null 规范化为 null，字段存在
+  但类型错误时快速失败，不猜测或拼接多个字段。规范化响应包含 `content` 和
+  可空的 `reasoning_content`；结构化字段与内嵌块同时非空时快速失败，不猜测
+  合并顺序。
 - 思考正文只存在于当前请求生命周期，不属于 Prompt、Chunk、Segment 结果或
   进度。普通模式不持久化；debug 模式仍只在原始响应 Payload 中保存，不新增
   独立思考记录。

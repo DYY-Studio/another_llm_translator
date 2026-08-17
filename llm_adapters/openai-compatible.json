@@ -12,7 +12,10 @@
     "stream": "${stream}"
   },
   "response_content_pointer": "/choices/0/message/content",
-  "response_reasoning_content_pointer": "/choices/0/message/reasoning_content",
+  "response_reasoning_content_pointers": [
+    "/choices/0/message/reasoning_content",
+    "/choices/0/message/reasoning"
+  ],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",
@@ -34,7 +37,8 @@
       {"pointer": "/choices/0/delta/content"}
     ],
     "reasoning_events": [
-      {"pointer": "/choices/0/delta/reasoning_content"}
+      {"pointer": "/choices/0/delta/reasoning_content"},
+      {"pointer": "/choices/0/delta/reasoning"}
     ],
     "terminal": {"sentinel": "[DONE]"},
     "error_events": [
