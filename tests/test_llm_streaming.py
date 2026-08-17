@@ -157,6 +157,24 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
 
 
 @pytest.mark.asyncio
+async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return stream_response(
+            {"choices": [{"delta": {"reasoning": "思考"}}]},
+            {"choices": [{"delta": {"content": "完成"}}]},
+            "[DONE]",
+        )
+
+    response, _, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+
+    assert response.content == "完成"
+    assert response.reasoning_content == "思考"
+
+
+@pytest.mark.asyncio
 async def test_stream_retry_discards_partial_output_and_saves_failed_events(
     tmp_path: Path,
 ) -> None:

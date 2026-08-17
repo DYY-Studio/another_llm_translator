@@ -96,6 +96,22 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
             ),
             "必须是 JSON Pointer",
         ),
+        (
+            lambda value: value.update(
+                {"response_reasoning_content_pointers": "reasoning"}
+            ),
+            "必须是非空 JSON Pointer 数组",
+        ),
+        (
+            lambda value: value.update({"response_reasoning_content_pointers": []}),
+            "必须是非空 JSON Pointer 数组",
+        ),
+        (
+            lambda value: value.update(
+                {"response_reasoning_content_pointers": ["/bad~2pointer"]}
+            ),
+            "转义无效",
+        ),
     ],
 )
 def test_json_adapter_rejects_invalid_templates(
@@ -136,6 +152,88 @@ def test_json_adapter_extracts_optional_reasoning_content(tmp_path: Path) -> Non
         adapter.parse_response(
             {"result": [{"text": "answer", "reasoning": {}}]}
         )
+
+
+def test_json_adapter_uses_ordered_reasoning_pointer_fallbacks(
+    tmp_path: Path,
+) -> None:
+    value = definition()
+    value["response_reasoning_content_pointers"] = [
+        "/result/0/reasoning_content",
+        "/result/0/reasoning",
+    ]
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    assert adapter.parse_response(
+        {
+            "result": [
+                {
+                    "text": "answer",
+                    "reasoning_content": "legacy",
+                    "reasoning": "alias",
+                }
+            ]
+        }
+    ).reasoning_content == "legacy"
+    assert adapter.parse_response(
+        {"result": [{"text": "answer", "reasoning": "alias"}]}
+    ).reasoning_content == "alias"
+    assert adapter.parse_response(
+        {
+            "result": [
+                {"text": "answer", "reasoning_content": None, "reasoning": "alias"}
+            ]
+        }
+    ).reasoning_content is None
+    assert adapter.parse_response(
+        {"result": [{"text": "answer"}]}
+    ).reasoning_content is None
+    with pytest.raises(ExternalError, match="字符串或 null"):
+        adapter.parse_response(
+            {"result": [{"text": "answer", "reasoning": {}}]}
+        )
+
+
+def test_builtin_openai_adapter_accepts_reasoning_alias() -> None:
+    adapter = load_json_adapter(
+        Path(__file__).parents[1] / "llm_adapters" / "openai-compatible.json"
+    )
+    legacy = adapter.parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "answer",
+                        "reasoning_content": "legacy",
+                        "reasoning": "alias",
+                    }
+                }
+            ]
+        }
+    )
+    assert legacy.reasoning_content == "legacy"
+    response = adapter.parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "answer",
+                        "reasoning": "thought",
+                    }
+                }
+            ]
+        }
+    )
+    assert response.content == "answer"
+    assert response.reasoning_content == "thought"
+
+
+def test_json_adapter_rejects_reasoning_pointer_conflict(tmp_path: Path) -> None:
+    value = definition()
+    value["response_reasoning_content_pointer"] = "/result/0/reasoning_content"
+    value["response_reasoning_content_pointers"] = ["/result/0/reasoning"]
+    with pytest.raises(ConfigError, match="不能同时配置"):
+        load_json_adapter(write_adapter(tmp_path, value))
 
 
 def test_json_adapter_anthropic_format_extracts_system_and_roles(

@@ -1048,9 +1048,9 @@ async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
 ) -> None:
     current = config()
     definition = dict(current["_llm_adapter"].definition)
-    definition["response_reasoning_content_pointer"] = (
+    definition["response_reasoning_content_pointers"] = [
         "/choices/0/message/reasoning_content"
-    )
+    ]
     adapter_file = tmp_path / "adapter.json"
     adapter_file.write_text(json.dumps(definition), encoding="utf-8")
     current["_llm_adapter"] = load_json_adapter(adapter_file)

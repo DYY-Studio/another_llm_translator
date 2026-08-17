@@ -33,12 +33,17 @@
 
 ```json
 {
-  "response_reasoning_content_pointer": "/choices/0/message/reasoning_content"
+  "response_reasoning_content_pointers": [
+    "/choices/0/message/reasoning_content",
+    "/choices/0/message/reasoning"
+  ]
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义已配置上述路径，并兼容不返回该
-扩展字段的合法响应。
+该字段可省略；内置 OpenAI-compatible 定义按上述顺序兼容两种字段。已有配置仍可
+使用单数的 `response_reasoning_content_pointer`，但单数与复数不能同时配置。候选
+路径只在前一路径缺失时继续尝试；首个存在的 `null` 表示没有 reasoning，多个字段
+不会拼接。
 
 需要把规范化的 system/user/assistant 消息转换为 Provider 原生形状时，可设置
 `messages_format`（可选，默认 `openai` 原样透传）：
@@ -84,7 +89,10 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
     "content_events": [
       {"pointer": "/choices/0/delta/content"}
     ],
-    "reasoning_events": [],
+    "reasoning_events": [
+      {"pointer": "/choices/0/delta/reasoning_content"},
+      {"pointer": "/choices/0/delta/reasoning"}
+    ],
     "terminal": {"sentinel": "[DONE]"},
     "error_events": [
       {
@@ -108,6 +116,8 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 `{"pointer": "...", "equals": <primitive>}` 或
 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
 未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
+OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
+两类互斥的流式字段。
 `terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
 声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
 是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
@@ -127,8 +137,10 @@ JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`
 最后一个元素、`-2` 为倒数第二。当思考块总是排在最前、文本块在最后时
 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。
 越界、空数组与普通缺失路径同样快速失败。
-可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。推理路径
-不存在时规范化为 null；字段存在但类型错误时当前请求失败，不猜测备用字段。
+可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。也可使用非空
+的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，
+首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或
+拼接多个字段。
 
 Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一
 严格规则从 content 开头剥离一个完整已知思考 Tag；若结构化字段与内嵌块同时
@@ -201,8 +213,9 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 ### 内置 Adapter 定义
 
 - `openai-compatible`：Bearer API Key，Chat Completions body，正文 pointer
-  `/choices/0/message/content`，推理 pointer
-  `/choices/0/message/reasoning_content`。
+  `/choices/0/message/content`，推理 pointers 为
+  `/choices/0/message/reasoning_content`、`/choices/0/message/reasoning`，SSE
+  增量对应为 `/choices/0/delta/reasoning_content`、`/choices/0/delta/reasoning`。
 - `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层
   `system`，pointer `/content/-1/text`。未启用 thinking 时 content 首块即
   文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。
