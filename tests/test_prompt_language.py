@@ -107,6 +107,22 @@ def test_segment_prompts_require_translated_aozora_ruby_base(stage: str) -> None
     assert "otherwise drop Ruby and return only the translated base" in en
 
 
+def test_document_specific_prompt_requirements_are_opt_in() -> None:
+    generic = full_prompt("translation", "Project requirements.", "en")
+    assert "<em1>" not in generic
+    assert "Aozora Ruby base" in generic
+    epub = full_prompt(
+        "translation",
+        "Project requirements.",
+        "en",
+        document_requirements=(
+            "Controlled inline markers in source (such as <em1>) must be kept.",
+        ),
+    )
+    assert "Controlled inline markers" in epub
+    assert epub.index("Aozora Ruby base") < epub.index("Controlled inline markers")
+
+
 @pytest.mark.parametrize(
     ("stage", "zh_anchor", "en_anchor"),
     [

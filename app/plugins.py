@@ -17,7 +17,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 9
+PLUGIN_PROTOCOL_VERSION = 10
 PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 
@@ -166,6 +166,11 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                         f"{adapter.adapter_id}.{option.option_id}"
                     )
                 seen_options.add(option.option_id)
+            if not callable(getattr(adapter, "model_prompt_requirements", None)):
+                raise ConfigError(
+                    f"Document Adapter 缺少 model_prompt_requirements："
+                    f"{adapter.adapter_id}"
+                )
             seen_adapters.add(adapter.adapter_id)
         validators = getattr(plugin, "translation_validators", None)
         if not isinstance(validators, tuple):

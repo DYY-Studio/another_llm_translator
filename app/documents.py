@@ -111,6 +111,14 @@ class DocumentAdapter(Protocol):
     import_options: tuple[DocumentChoiceOption, ...]
     run_options: tuple[DocumentChoiceOption, ...]
 
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, Any] | None,
+    ) -> str | None: ...
+
     def import_sources(
         self,
         inputs: list[str],

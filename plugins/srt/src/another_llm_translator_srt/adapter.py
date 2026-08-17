@@ -282,6 +282,16 @@ class SRTDocumentAdapter:
     import_options: tuple[DocumentChoiceOption, ...] = ()
     run_options: tuple[DocumentChoiceOption, ...] = ()
 
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, Any] | None,
+    ) -> str | None:
+        del stage, language, opaque_state
+        return None
+
     def normalize_model_output(
         self, *, segment: dict[str, Any], text: str, stage: str
     ) -> str:
