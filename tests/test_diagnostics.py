@@ -127,6 +127,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "stream_event_count": 0,
             "stream_received_bytes": 0,
             "stream_first_event_latency_ms": None,
+            "provider_error_status": None,
         }
     ]
     assert "messages" not in snapshot["requests"]["items"][0]

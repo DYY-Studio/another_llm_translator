@@ -76,6 +76,7 @@ class _StreamRetryable(Exception):
         received_bytes: int = 0,
         first_event_latency_ms: float | None = None,
         status: int | None = None,
+        provider_error_status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.events = events or []
@@ -83,6 +84,7 @@ class _StreamRetryable(Exception):
         self.received_bytes = received_bytes
         self.first_event_latency_ms = first_event_latency_ms
         self.status = status
+        self.provider_error_status = provider_error_status
 
 
 class _StreamProtocolError(ExternalError):
@@ -1677,15 +1679,18 @@ class LLMClient:
                         ) from exc
                     if not isinstance(event, dict):
                         raise ExternalError("LLM 流式 SSE data 必须是 JSON 对象")
-                    stream_error = self.adapter.stream_error(event)
+                    stream_error = self.adapter.stream_error_details(event)
                     if stream_error is not None:
                         raise _StreamRetryable(
-                            stream_error,
+                            stream_error.message,
                             events=raw_events,
                             event_count=event_count,
                             received_bytes=received_bytes,
                             first_event_latency_ms=first_event_latency_ms,
                             status=status,
+                            provider_error_status=(
+                                stream_error.provider_error_status
+                            ),
                         )
                     for key, value in self.adapter.extract_stream_usage(event).items():
                         usage_values[key] = value
@@ -1784,6 +1789,11 @@ class LLMClient:
         response: dict[str, Any] | None = None,
         error: str | None = None,
         status: int | None = None,
+        provider_error_status: int | None = None,
+        outcome: str | None = None,
+        stream_event_count: int | None = None,
+        stream_received_bytes: int | None = None,
+        stream_first_event_latency_ms: float | None = None,
         parent_request_id: str | None = None,
     ) -> None:
         if not self.config["debug"]["enabled"]:
@@ -1797,7 +1807,16 @@ class LLMClient:
         if error is not None:
             atomic_write_json(
                 payload_dir / f"{base}.error.json",
-                {"schema_version": 1, "error": error, "http_status": status},
+                {
+                    "schema_version": 1,
+                    "error": error,
+                    "http_status": status,
+                    "provider_error_status": provider_error_status,
+                    "outcome": outcome,
+                    "stream_event_count": stream_event_count,
+                    "stream_received_bytes": stream_received_bytes,
+                    "stream_first_event_latency_ms": stream_first_event_latency_ms,
+                },
             )
         async with self.log_lock:
             append_jsonl_file(
@@ -1812,7 +1831,9 @@ class LLMClient:
                     stage=self.stage,
                     attempt=attempt,
                     http_status=status,
-                    status="completed" if response is not None else "failed",
+                    provider_error_status=provider_error_status,
+                    outcome=outcome,
+                    status="failed" if error is not None else "completed",
                     error=error,
                 ),
             )
@@ -1935,6 +1956,10 @@ class LLMClient:
             ] | None = None
             attempt_error = False
             attempt_outcome: str | None = None
+            attempt_provider_error_status: int | None = None
+            attempt_stream_event_count: int | None = None
+            attempt_stream_received_bytes: int | None = None
+            attempt_stream_first_event_latency_ms: float | None = None
             if diagnostics is not None:
                 diagnostics.request_started(request_id)
             try:
@@ -1979,6 +2004,10 @@ class LLMClient:
                 attempt_error = True
                 attempt_outcome = "stream_error"
                 response_status = exc.status
+                attempt_provider_error_status = exc.provider_error_status
+                attempt_stream_event_count = exc.event_count
+                attempt_stream_received_bytes = exc.received_bytes
+                attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
                 elapsed = time.monotonic() - started
                 await self._debug_attempt(
                     request_id,
@@ -1987,19 +2016,33 @@ class LLMClient:
                     response={"events": exc.events},
                     error=str(exc),
                     status=response_status,
+                    provider_error_status=exc.provider_error_status,
+                    outcome=attempt_outcome,
+                    stream_event_count=exc.event_count,
+                    stream_received_bytes=exc.received_bytes,
+                    stream_first_event_latency_ms=exc.first_event_latency_ms,
                     parent_request_id=parent_request_id,
                 )
                 self.logger.warning(
-                    "stream incomplete request=%s attempt=%d elapsed=%.2fs error=%s",
+                    "stream error request=%s attempt=%d http_status=%s provider_error_status=%s elapsed=%.2fs error=%s",
                     request_id,
                     attempt,
+                    response_status,
+                    exc.provider_error_status,
                     elapsed,
                     exc,
                 )
                 if attempt == attempts:
                     if diagnostics is not None:
                         diagnostics.fail_request(request_id, "stream_error")
-                    raise ExternalError(f"LLM 流式请求重试耗尽：{exc}") from exc
+                    status_hint = (
+                        f"（上游 HTTP {exc.provider_error_status}）"
+                        if exc.provider_error_status is not None
+                        else ""
+                    )
+                    raise ExternalError(
+                        f"LLM 流式请求重试耗尽{status_hint}：{exc}"
+                    ) from exc
                 if diagnostics is not None:
                     diagnostics.retried()
                 await self._backoff(attempt)
@@ -2014,6 +2057,9 @@ class LLMClient:
                 attempt_error = True
                 attempt_outcome = "response_parse_error"
                 response_status = exc.status
+                attempt_stream_event_count = exc.event_count
+                attempt_stream_received_bytes = exc.received_bytes
+                attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
                 await self._debug_attempt(
                     request_id,
                     attempt,
@@ -2021,6 +2067,10 @@ class LLMClient:
                     response={"events": exc.events},
                     error=str(exc),
                     status=response_status,
+                    outcome=attempt_outcome,
+                    stream_event_count=exc.event_count,
+                    stream_received_bytes=exc.received_bytes,
+                    stream_first_event_latency_ms=exc.first_event_latency_ms,
                     parent_request_id=parent_request_id,
                 )
                 if diagnostics is not None:
@@ -2069,14 +2119,21 @@ class LLMClient:
                         or response_status is None
                         or response_status >= 400,
                         stream_event_count=(
-                            stream_result[6] if stream_result is not None else None
+                            stream_result[6]
+                            if stream_result is not None
+                            else attempt_stream_event_count
                         ),
                         stream_received_bytes=(
-                            stream_result[7] if stream_result is not None else None
+                            stream_result[7]
+                            if stream_result is not None
+                            else attempt_stream_received_bytes
                         ),
                         stream_first_event_latency_ms=(
-                            stream_result[8] if stream_result is not None else None
+                            stream_result[8]
+                            if stream_result is not None
+                            else attempt_stream_first_event_latency_ms
                         ),
+                        provider_error_status=attempt_provider_error_status,
                         outcome=attempt_outcome,
                     )
             if stream_enabled:
@@ -2102,6 +2159,7 @@ class LLMClient:
                             payload,
                             response={"events": raw_events},
                             status=stream_status,
+                            outcome="succeeded",
                             parent_request_id=parent_request_id,
                         )
                     normalized = _apply_debug_content_injections(

@@ -173,6 +173,7 @@ class Diagnostics:
             "stream_event_count": 0,
             "stream_received_bytes": 0,
             "stream_first_event_latency_ms": None,
+            "provider_error_status": None,
             "attempts": [],
             "error": None,
             "detail_available": True,
@@ -226,6 +227,7 @@ class Diagnostics:
             request["stream_event_count"] = 0
             request["stream_received_bytes"] = 0
             request["stream_first_event_latency_ms"] = None
+            request["provider_error_status"] = None
             self._touch_request(request)
 
     def stream_progress(
@@ -255,6 +257,7 @@ class Diagnostics:
         stream_event_count: int | None = None,
         stream_received_bytes: int | None = None,
         stream_first_event_latency_ms: float | None = None,
+        provider_error_status: int | None = None,
         outcome: str | None = None,
     ) -> None:
         self.active_requests = max(0, self.active_requests - 1)
@@ -265,6 +268,7 @@ class Diagnostics:
         request = self._request(request_id)
         if request is None:
             return
+        request["provider_error_status"] = provider_error_status
         resolved_outcome = outcome or (
             "network_error"
             if status is None
@@ -279,6 +283,7 @@ class Diagnostics:
                 "http_status": status,
                 "latency_ms": round(latency_seconds * 1000, 1),
                 "outcome": resolved_outcome,
+                "provider_error_status": provider_error_status,
                 "stream_event_count": (
                     request["stream_event_count"]
                     if stream_event_count is None
@@ -465,6 +470,7 @@ class Diagnostics:
                         "stream_first_event_latency_ms": request[
                             "stream_first_event_latency_ms"
                         ],
+                        "provider_error_status": request["provider_error_status"],
                     }
                     for request in self.requests.values()
                     if (

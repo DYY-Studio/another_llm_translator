@@ -61,6 +61,7 @@ _STREAMING_KEYS = frozenset(
     }
 )
 _STREAM_EVENT_KEYS = frozenset({"pointer", "when"})
+_STREAM_ERROR_KEYS = frozenset({"when", "message_pointer", "status_pointer"})
 _STREAM_USAGE_KEYS = frozenset(
     {"input_tokens_pointers", "output_tokens_pointers", "total_tokens_pointers"}
 )
@@ -77,6 +78,12 @@ class Usage:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+
+
+@dataclass(frozen=True)
+class StreamErrorDetails:
+    message: str
+    provider_error_status: int | None
 
 
 @dataclass(frozen=True)
@@ -164,6 +171,12 @@ class JSONLLMAdapter:
         )
 
     def stream_error(self, event: dict[str, Any]) -> str | None:
+        details = self.stream_error_details(event)
+        return details.message if details is not None else None
+
+    def stream_error_details(
+        self, event: dict[str, Any]
+    ) -> StreamErrorDetails | None:
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         for rule in self.streaming_spec["error_events"]:
@@ -171,16 +184,37 @@ class JSONLLMAdapter:
                 continue
             pointer = rule.get("message_pointer")
             if pointer is None:
-                return "LLM 流式响应报告错误"
-            try:
-                message = _resolve_json_pointer(event, pointer)
-            except ExternalError:
-                raise ExternalError(
-                    f"LLM 流式错误事件缺少消息路径：{pointer}"
-                ) from None
-            if not isinstance(message, str):
-                raise ExternalError("LLM 流式错误消息不是字符串")
-            return message or "LLM 流式响应报告错误"
+                message = "LLM 流式响应报告错误"
+            else:
+                try:
+                    message = _resolve_json_pointer(event, pointer)
+                except ExternalError:
+                    raise ExternalError(
+                        f"LLM 流式错误事件缺少消息路径：{pointer}"
+                    ) from None
+                if not isinstance(message, str):
+                    raise ExternalError("LLM 流式错误消息不是字符串")
+                message = message or "LLM 流式响应报告错误"
+            provider_error_status = None
+            status_pointer = rule.get("status_pointer")
+            if status_pointer is not None:
+                try:
+                    value = _resolve_json_pointer(event, status_pointer)
+                except ExternalError:
+                    raise ExternalError(
+                        f"LLM 流式错误事件缺少状态路径：{status_pointer}"
+                    ) from None
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 100 <= value <= 599
+                ):
+                    raise ExternalError("LLM 流式错误状态不是有效 HTTP 状态码")
+                provider_error_status = value
+            return StreamErrorDetails(
+                message=message,
+                provider_error_status=provider_error_status,
+            )
         return None
 
     def stream_terminal(self, event: dict[str, Any]) -> bool:
@@ -510,14 +544,27 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
     for item in errors:
         if not isinstance(item, dict):
             raise ConfigError("LLM Adapter streaming error_events 条目必须是对象")
-        unknown_error = set(item) - {"when", "message_pointer"}
+        unknown_error = set(item) - _STREAM_ERROR_KEYS
         if unknown_error or "when" not in item:
             raise ConfigError("LLM Adapter streaming error_events 条目无效")
         when = _validate_stream_condition(item["when"])
         message_pointer = item.get("message_pointer")
         if message_pointer is not None:
             _validate_stream_pointer(message_pointer, "message_pointer")
-        error_events.append({"when": when, "message_pointer": message_pointer})
+        status_pointer = item.get("status_pointer")
+        if status_pointer is not None:
+            _validate_stream_pointer(status_pointer, "status_pointer")
+        error_events.append(
+            {
+                "when": when,
+                "message_pointer": message_pointer,
+                **(
+                    {"status_pointer": status_pointer}
+                    if status_pointer is not None
+                    else {}
+                ),
+            }
+        )
     usage = _validate_stream_usage(value.get("usage", {}))
     return {
         "transport": "sse",

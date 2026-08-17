@@ -146,6 +146,7 @@ export interface DiagnosticsRequestSummary {
   stream_event_count: number;
   stream_received_bytes: number;
   stream_first_event_latency_ms: number | null;
+  provider_error_status: number | null;
 }
 
 export interface DiagnosticsResponse {
@@ -197,6 +198,7 @@ export interface DiagnosticsRequestDetail {
   stream_event_count: number;
   stream_received_bytes: number;
   stream_first_event_latency_ms: number | null;
+  provider_error_status: number | null;
   status: DiagnosticsRequestStatus;
   max_attempts: number;
   segment_id_map: Record<string, string>;
@@ -215,6 +217,7 @@ export interface DiagnosticsRequestDetail {
     http_status: number | null;
     latency_ms: number;
     outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "cancelled";
+    provider_error_status: number | null;
     stream_event_count?: number;
     stream_received_bytes?: number;
     stream_first_event_latency_ms?: number | null;

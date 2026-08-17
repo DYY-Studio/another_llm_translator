@@ -37,7 +37,16 @@
       {"pointer": "/choices/0/delta/reasoning_content"}
     ],
     "terminal": {"sentinel": "[DONE]"},
-    "error_events": [],
+    "error_events": [
+      {
+        "when": {
+          "pointer": "/choices/0/finish_reason",
+          "equals": "error"
+        },
+        "message_pointer": "/error/message",
+        "status_pointer": "/error/status"
+      }
+    ],
     "usage": {
       "input_tokens_pointers": ["/usage/prompt_tokens"],
       "output_tokens_pointers": ["/usage/completion_tokens"],
