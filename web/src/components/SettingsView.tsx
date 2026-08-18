@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, TranslationValidatorSummary } from "../types";
+import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -655,32 +655,180 @@ interface PromptView {
   language: string;
   assembled: string;
   languages: string[];
+  global_sync?: {
+    available: boolean;
+    same: boolean;
+    language: string;
+  };
 }
 
 function PromptSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
   const [stage, setStage] = useState("translation");
   const [promptLanguage, setPromptLanguage] = useState("zh-CN");
   const [content, setContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
+  const [globalSync, setGlobalSync] = useState<PromptView["global_sync"]>(undefined);
+  const [loadedGlobalDraft, setLoadedGlobalDraft] = useState(false);
+  const [libraryEntries, setLibraryEntries] = useState<PromptLibraryEntry[]>([]);
+  const [selectedLibraryEntry, setSelectedLibraryEntry] = useState("");
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [librarySaveOpen, setLibrarySaveOpen] = useState(false);
+  const [libraryIdDraft, setLibraryIdDraft] = useState("");
+  const [libraryOverwriteId, setLibraryOverwriteId] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
+
+  function applyPromptView(value: PromptView) {
+    setContent(value.content);
+    setSavedContent(value.content);
+    setAssembled(value.assembled);
+    setGlobalSync(value.global_sync);
+    setLoadedGlobalDraft(false);
+    setLanguages(value.languages);
+    setPromptLanguage(value.language);
+  }
+
+  async function loadPrompt() {
+    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`));
+  }
+
   useEffect(() => {
+    let active = true;
     setMessage("");
     setError("");
-    void api<PromptView>(`${path}?language=${promptLanguage}`).then((value) => {
-      setContent(value.content);
-      setAssembled(value.assembled);
-      setLanguages(value.languages);
-      setPromptLanguage(value.language);
-    }).catch((reason) => setError(errorMessage(reason, language)));
+    void api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`).then((value) => {
+      if (active) applyPromptView(value);
+    }).catch((reason) => { if (active) setError(errorMessage(reason, language)); });
+    return () => { active = false; };
   }, [path, promptLanguage]);
+
+  useEffect(() => {
+    if (scope !== "project") {
+      setLibraryEntries([]);
+      setSelectedLibraryEntry("");
+      setLibrarySaveOpen(false);
+      setLibraryIdDraft("");
+      setLibraryOverwriteId("");
+      return;
+    }
+    let active = true;
+    setLibraryLoading(true);
+    void api<{ entries: PromptLibraryEntry[] }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}`).then((value) => {
+      if (active) {
+        setLibraryEntries(value.entries);
+        setSelectedLibraryEntry("");
+        setLibrarySaveOpen(false);
+        setLibraryIdDraft("");
+        setLibraryOverwriteId("");
+      }
+    }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }).finally(() => {
+      if (active) setLibraryLoading(false);
+    });
+    return () => { active = false; };
+  }, [scope, stage, promptLanguage]);
+
   async function save() {
     try {
       await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content }) });
+      await loadPrompt();
       setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language));
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
-  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div><label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label><label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /><div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div></section>;
+
+  async function loadGlobalDraft() {
+    if (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language))) return;
+    try {
+      const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
+      setContent(value.content);
+      setAssembled(value.assembled);
+      setPromptLanguage(value.language);
+      setLoadedGlobalDraft(true);
+      setMessage(translate("settings.promptGlobalLoaded", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function loadLibraryEntry(promptId: string) {
+    if (!promptId) return;
+    try {
+      const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
+      setContent(value.content);
+      setAssembled(value.assembled);
+      setSelectedLibraryEntry(promptId);
+      setLoadedGlobalDraft(false);
+      setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function saveToLibrary() {
+    if (scope !== "project" || !content.trim()) return;
+    const promptId = libraryIdDraft.trim();
+    if (!promptId) return;
+    if (libraryEntries.some((item) => item.id === promptId) && libraryOverwriteId !== promptId) {
+      setLibraryOverwriteId(promptId);
+      return;
+    }
+    try {
+      await api(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      });
+      const result = await api<{ entries: PromptLibraryEntry[] }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}`);
+      setLibraryEntries(result.entries);
+      setSelectedLibraryEntry(promptId);
+      setLibrarySaveOpen(false);
+      setLibraryIdDraft("");
+      setLibraryOverwriteId("");
+      setMessage(translate("settings.promptLibrarySaved", language, { id: promptId }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function deleteLibraryEntry() {
+    if (!selectedLibraryEntry || !window.confirm(translate("settings.promptLibraryDeleteConfirm", language, { id: selectedLibraryEntry }))) return;
+    try {
+      await api(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(selectedLibraryEntry)}`, { method: "DELETE" });
+      setLibraryEntries((current) => current.filter((item) => item.id !== selectedLibraryEntry));
+      setSelectedLibraryEntry("");
+      setMessage(translate("settings.promptLibraryDeleted", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  const draftDirty = content !== savedContent;
+  const showSyncCard = scope === "project" && globalSync;
+  return <section className="text-settings">
+    <div className="page-heading config-heading settings-action-heading">
+      <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
+      <div className="button-group">
+        {scope === "project" && <button className="quiet-button" onClick={() => { setLibrarySaveOpen(true); setLibraryOverwriteId(""); }}>{translate("settings.promptLibrarySave", language)}</button>}
+        <button className="primary-button" onClick={() => void save()}>{translate("common.validateSave", language)}</button>
+      </div>
+    </div>
+    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
+    <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+    {showSyncCard && <div className={`prompt-sync-card ${globalSync.available && globalSync.same && !draftDirty ? "synced" : "out-of-sync"}`}>
+      <div><strong>{!globalSync.available ? translate("settings.promptGlobalUnavailable", language) : draftDirty ? translate("settings.promptUnsaved", language) : globalSync.same ? translate("settings.promptSynced", language) : translate("settings.promptOutOfSync", language)}</strong><small>{!globalSync.available ? translate("settings.promptSyncLanguage", language, { language: globalSync.language }) : loadedGlobalDraft ? translate("settings.promptGlobalLoadedHint", language) : translate("settings.promptSyncLanguage", language, { language: globalSync.language })}</small></div>
+      {globalSync.available && !globalSync.same && !loadedGlobalDraft && <button className="quiet-button" onClick={() => void loadGlobalDraft()}>{translate("settings.promptLoadGlobal", language)}</button>}
+    </div>}
+    {scope === "project" && <div className="prompt-library-card">
+      <div><strong>{translate("settings.promptLibraryTitle", language)}</strong><small>{translate("settings.promptLibraryHint", language)}</small></div>
+      {librarySaveOpen && <div className="prompt-library-save-form">
+        <input aria-label={translate("settings.promptLibraryNewId", language)} value={libraryIdDraft} onChange={(event) => { setLibraryIdDraft(event.target.value); setLibraryOverwriteId(""); }} placeholder="strict-translation" />
+        {libraryOverwriteId ? <small>{translate("settings.promptLibraryOverwriteConfirm", language, { id: libraryOverwriteId })}</small> : null}
+        <div className="button-group">
+          <button className="quiet-button" onClick={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" onClick={() => void saveToLibrary()}>{libraryOverwriteId ? translate("settings.promptLibraryConfirmOverwrite", language) : translate("common.save", language)}</button>
+        </div>
+      </div>}
+      <div className="prompt-library-controls">
+        <select value={selectedLibraryEntry} disabled={libraryLoading || !libraryEntries.length} onChange={(event) => void loadLibraryEntry(event.target.value)}><option value="">{libraryLoading ? translate("settings.promptLibraryLoading", language) : translate("settings.promptLibrarySelect", language)}</option>{libraryEntries.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select>
+        <button className="quiet-button" disabled={!selectedLibraryEntry} onClick={() => void deleteLibraryEntry()}>{translate("common.delete", language)}</button>
+      </div>
+    </div>}
+    {error && <div className="error-banner">{error}</div>}
+    {message && <span className="success-text">{message}</span>}
+    <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
+    <div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div>
+  </section>;
 }
