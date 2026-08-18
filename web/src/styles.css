@@ -431,6 +431,18 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .prompt-preview { margin-top: 18px; }
 .prompt-preview h3 { margin: 0 0 8px; font-size: 13px; }
 .prompt-preview pre { overflow: auto; padding: 14px; margin: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+.prompt-sync-card, .prompt-library-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; margin: 10px 0 14px; border: 1px solid var(--info-border); border-radius: 7px; background: var(--info-bg); color: var(--info-text); }
+.prompt-sync-card.out-of-sync { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }
+.prompt-sync-card.synced { border-color: var(--info-border); }
+.prompt-sync-card > div, .prompt-library-card > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.prompt-sync-card strong, .prompt-library-card strong { font-size: 13px; }
+.prompt-sync-card small, .prompt-library-card small { color: inherit; font-size: 12px; line-height: 1.45; }
+.prompt-library-card { display: grid; justify-content: stretch; margin-top: 16px; border-color: var(--border); background: var(--surface-soft); color: var(--text); }
+.prompt-library-save-form { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.prompt-library-save-form input { min-width: 0; }
+.prompt-library-save-form small { color: var(--warning-text); font-size: 12px; line-height: 1.45; }
+.prompt-library-controls { display: flex; align-items: center; gap: 8px; }
+.prompt-library-controls select { flex: 1; min-width: 0; }
 .settings-editor { width: 100%; height: clamp(360px, 52vh, 520px); min-height: 280px; margin-top: 14px; padding: 16px; resize: vertical; font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .config-settings { height: 100%; min-height: 0; overflow: auto; padding: 0 30px 30px; background: var(--surface-soft); }
 .config-heading { position: sticky; top: 0; z-index: 2; margin: 0 -30px 24px; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
@@ -752,6 +764,11 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .settings-row { display: grid; }
   .settings-row label { min-width: 0; }
   .text-settings { height: auto; overflow: visible; padding: 0 14px 60px; }
+  .settings-action-heading .button-group { flex-wrap: wrap; justify-content: flex-start; }
+  .prompt-sync-card { align-items: stretch; flex-direction: column; }
+  .prompt-library-controls { flex-wrap: wrap; }
+  .prompt-library-controls select { flex-basis: 100%; }
+  .prompt-library-save-form .button-group { flex-wrap: wrap; }
   .stage-select { grid-template-columns: 80px minmax(0, 1fr); }
   .stage-select select { min-width: 0; width: 100%; }
   .settings-editor { height: 320px; min-height: 240px; }

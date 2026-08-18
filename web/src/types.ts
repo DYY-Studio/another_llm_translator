@@ -90,6 +90,11 @@ export interface ProjectSummary {
   segment_count: number;
 }
 
+export interface PromptLibraryEntry {
+  id: string;
+  digest: string;
+}
+
 export interface TranslationValidatorSummary {
   validator_id: string;
   version: string;

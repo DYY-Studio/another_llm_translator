@@ -150,6 +150,17 @@ projects/<name>/
 └── output/
 ```
 
+用户级提示词仓库存放在同一用户数据根目录下，不属于任何项目：
+
+```text
+prompt_library/<stage>/<language>/<prompt-id>.middle.txt
+```
+
+`prompt-id` 只允许以小写字母开头并包含小写字母、数字和连字符。仓库条目使用
+UTF-8 原子写入，按阶段和语言隔离；读取、覆盖或删除仓库条目不会修改全局 Prompt、
+项目 Prompt 或项目元数据。仓库内容不进入 Bundle Hash、阶段指纹或 Run 快照，直到
+用户将其载入项目编辑器并显式保存为项目 Prompt。
+
 `project.sqlite` 是项目权威存储。Run 目录提供可读的 manifest 与设置快照，但不能代替数据库判断进度。
 
 普通日志不得记录完整 Prompt、源文、鉴权 Header、未脱敏请求正文或流式增量正文。
