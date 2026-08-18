@@ -79,6 +79,12 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
+from .prompt_library import (
+    delete_prompt_library,
+    list_prompt_library,
+    read_prompt_library,
+    save_prompt_library,
+)
 from .server_config import load_server_config, save_server_config
 from .sqlite_storage import (
     atomic_write_json,
@@ -735,6 +741,7 @@ def create_app(
         language: str,
         file_for: Callable[[str], Path],
         available: list[str],
+        global_file_for: Callable[[str], Path] | None = None,
     ) -> dict[str, Any]:
         resolved = (
             language
@@ -743,12 +750,27 @@ def create_app(
         )
         path = file_for(resolved)
         content = path.read_text(encoding="utf-8")
-        return {
+        result: dict[str, Any] = {
             "content": content,
             "language": resolved,
             "assembled": full_prompt(stage, content, resolved),
             "languages": available,
         }
+        if global_file_for is not None:
+            global_path = global_file_for(resolved)
+            if global_path.is_file():
+                result["global_sync"] = {
+                    "available": True,
+                    "same": path.read_bytes() == global_path.read_bytes(),
+                    "language": resolved,
+                }
+            else:
+                result["global_sync"] = {
+                    "available": False,
+                    "same": False,
+                    "language": resolved,
+                }
+        return result
 
     def global_prompt_file(stage: str, language: str) -> Path:
         return effective_path(
@@ -781,6 +803,47 @@ def create_app(
             write_user(f"prompts/{prompt_file(stage, language)}"), content
         )
         return {"saved": True}
+
+    @app.get("/api/v1/prompt-library/{stage}/{language}")
+    async def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "language": language,
+            "entries": list_prompt_library(stage, language),
+        }
+
+    @app.get("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def get_prompt_library_entry(
+        stage: str, language: str, prompt_id: str
+    ) -> dict[str, Any]:
+        content, digest = read_prompt_library(stage, language, prompt_id)
+        return {
+            "id": prompt_id,
+            "stage": stage,
+            "language": language,
+            "content": content,
+            "digest": digest,
+            "assembled": full_prompt(stage, content, language),
+        }
+
+    @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def put_prompt_library_entry(
+        stage: str, language: str, prompt_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        digest = save_prompt_library(
+            stage,
+            language,
+            prompt_id,
+            payload.get("content"),
+        )
+        return {"saved": True, "id": prompt_id, "digest": digest}
+
+    @app.delete("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def delete_prompt_library_entry(
+        stage: str, language: str, prompt_id: str
+    ) -> dict[str, Any]:
+        delete_prompt_library(stage, language, prompt_id)
+        return {"deleted": True, "id": prompt_id}
 
     @app.get("/api/v1/global/presets")
     async def list_global_presets() -> dict[str, Any]:
@@ -1509,6 +1572,7 @@ def create_app(
             language,
             lambda value: root / "prompts" / prompt_file(stage, value),
             prompt_languages_for(root)[stage],
+            global_file_for=lambda value: global_prompt_file(stage, value),
         )
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
