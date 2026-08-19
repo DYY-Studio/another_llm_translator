@@ -107,7 +107,8 @@ export function AppShell({
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>
-            ) : <span>{translate("run.tokensUnavailable", language)}</span>}
+            ) : task.usage.partial ? <span>{translate("run.tokensPartial", language, { input: task.usage.input_tokens, output: task.usage.output_tokens })}</span>
+              : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
           {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
           {task.error && <span className="error-text run-error">{task.error}</span>}

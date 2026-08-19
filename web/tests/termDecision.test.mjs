@@ -56,6 +56,7 @@ test("automatic decision dialog separates closing from task cancellation", async
   assert.match(source, /translate\("terms\.decisionCloseHint", language\)/);
   assert.match(source, /\["completed", "cancelled", "failed"\]\.includes\(task\.status\)/);
   assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
+  assert.match(source, /terms\.decisionOverflowPolicy/);
 });
 
 test("automatic decision resume copy identifies persisted progress", async () => {

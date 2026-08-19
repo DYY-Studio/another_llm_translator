@@ -124,6 +124,7 @@ export interface TaskUsage {
   output_tokens: number;
   total_tokens: number;
   available: boolean;
+  partial: boolean;
 }
 
 export type DiagnosticsRequestStatus =
@@ -169,6 +170,7 @@ export interface DiagnosticsResponse {
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
+    usage_partial: boolean;
     throughput_input_tokens_per_second: number | null;
     throughput_output_tokens_per_second: number | null;
     throughput_tokens_per_second: number | null;
@@ -252,6 +254,10 @@ export interface TaskOptions {
   has_pending_draft?: boolean;
   estimated_requests?: number;
   estimated_input_tokens?: number;
+  overflow_policy?: {
+    allow_soft_target_overflow: boolean;
+    anchor_overflow_mode: "error" | "trim" | "compact";
+  };
   running_run: {
     run_id: string;
     started_at: string | null;
@@ -453,6 +459,10 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
+  };
+  terminology_decision: {
+    allow_soft_target_overflow: boolean;
+    anchor_overflow_mode: "error" | "trim" | "compact";
   };
   validation: {
     translation: {
