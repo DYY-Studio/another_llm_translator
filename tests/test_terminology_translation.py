@@ -187,6 +187,7 @@ async def test_terminology_publishes_and_translation_uses_terms(
         "output_tokens": 5,
         "total_tokens": 15,
         "available": True,
+        "partial": False,
     }
     assert term_summary["usage"] == expected_usage
     assert translation_summary["usage"] == expected_usage
