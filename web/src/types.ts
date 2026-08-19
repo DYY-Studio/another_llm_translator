@@ -10,6 +10,7 @@ export type Stage =
 
 export type LLMStage =
   | "terminology"
+  | "terminology_decision"
   | "translation"
   | "proofreading"
   | "polishing";
@@ -247,6 +248,10 @@ export interface TaskOptions {
   failed: number;
   current_fingerprint_completed: number;
   mismatched_fingerprint_completed: number;
+  protected?: number;
+  has_pending_draft?: boolean;
+  estimated_requests?: number;
+  estimated_input_tokens?: number;
   running_run: {
     run_id: string;
     started_at: string | null;
@@ -287,6 +292,53 @@ export interface Term {
     }>;
   };
   has_conflicts: boolean;
+}
+
+export interface TermDecisionState {
+  normalized: string;
+  source: string;
+  category: string | null;
+  description: string | null;
+  preferred_translation: string | null;
+  aliases: string[];
+  group_primary: string | null;
+  disabled: boolean;
+}
+
+export interface TermDecisionEvidence {
+  hit_count: number;
+  source_hit_count: number;
+  alias_hit_counts: Record<string, number>;
+  samples: Array<{ file_id: string; segment_id: string; source: string }>;
+}
+
+export interface TermDecisionProposal {
+  proposal_id: string;
+  kind: "term_update" | "relationship";
+  normalized: string[];
+  before: TermDecisionState[];
+  after: TermDecisionState[];
+  changes: string[];
+  reason: string;
+  evidence: Record<string, TermDecisionEvidence>;
+}
+
+export interface TermDecisionDraft {
+  run_id: string;
+  source_terms_revision: number;
+  proposals: TermDecisionProposal[];
+  needs_review: Array<{
+    normalized: string;
+    source: string;
+    reason: string;
+    evidence: TermDecisionEvidence;
+  }>;
+  rejected_proposal_ids: string[];
+}
+
+export interface TermDecisionReviewState {
+  draft: TermDecisionDraft | null;
+  rollback: { run_id: string; applied_terms_revision: number } | null;
 }
 
 export interface TermsResponse {
@@ -372,10 +424,12 @@ export interface ProjectConfig {
   llm: {
     preset: string;
     preset_terminology: string;
+    preset_terminology_decision: string;
     preset_translation: string;
     preset_proofreading: string;
     preset_polishing: string;
     temperature_terminology: number;
+    temperature_terminology_decision: number;
     temperature_translation: number;
     temperature_proofreading: number;
     temperature_polishing: number;
@@ -386,7 +440,7 @@ export interface ProjectConfig {
   chunking: {
     target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
-    cross_boundary_batching: LLMStage[];
+    cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;

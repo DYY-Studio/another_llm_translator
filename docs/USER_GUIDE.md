@@ -140,6 +140,12 @@ EPUB 青空 Ruby 中的 base 和 reading 会分别参与术语匹配；直接相
 会连续组合，普通正文会切断组合，base 与 reading 不会拼接。比如
 `｜漢《かん》｜字《じ》` 可以命中“漢字”和“かんじ”，同一术语重复命中只提供一次。
 
+已发布术语库可以通过“自动决策（开发版）”显式生成两阶段审查草案。界面会先显示
+Preset、可处理/受保护术语数量及请求和 Token 估算；草案中可搜索、筛选并逐条拒绝建议，
+组合关系建议必须整体接受或拒绝。应用、丢弃、替换旧草案和撤销都需要再次确认。
+模型不会直接写入术语库；已有人工作为 override 的术语只作为一致性参考。应用后的移除
+仍是可恢复的 disabled，后续任何术语编辑或扫描发布都会让旧撤销点失效。
+
 ### 4.2 翻译
 
 进入“翻译”，选择运行范围并启动任务。已完成 Segment 默认复用；失败和未完成内容可以继续处理。
@@ -348,9 +354,18 @@ python -m app.main terms-export novel glossary.csv
 python -m app.main terms-import novel glossary.json
 python -m app.main terms-export novel scanned.json --source scanned
 python -m app.main terms-publish-partial novel
+python -m app.main terms-decide novel --dry-run
+python -m app.main terms-decide novel
+python -m app.main terms-decide-show novel
+python -m app.main terms-decide-apply novel --all --reject TDP-EXAMPLE
+python -m app.main terms-decide-rollback novel --confirm
 ```
 
 术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。
+`terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用
+`--replace-draft` 才能生成替代草案；替代生成失败时旧草案保持不变。`terms-decide-apply`
+必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次可撤销应用，且
+要求术语 revision 从应用后未发生变化。
 
 ### 导出
 

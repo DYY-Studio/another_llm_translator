@@ -135,7 +135,7 @@ MVP 不实现：
 - Python LLM Adapter、自动 Provider 判断或通用工作流引擎。
 - 远程插件、自动安装、插件市场或插件沙箱。
 - Repository、Service、依赖注入或迁移框架。
-- 通用术语编辑器或复杂自动冲突裁决。
+- 无人工确认即覆盖术语库的自动冲突裁决。
 - 自动翻译质量评分。
 - 源 Segment 的增量编辑。
 - TXT 字节级往返、原编码复刻或换行符保真。
@@ -210,6 +210,8 @@ config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
 config/config.toml
 prompts/terminology.zh-CN.middle.txt
 prompts/terminology.en.middle.txt
+prompts/terminology_decision.zh-CN.middle.txt
+prompts/terminology_decision.en.middle.txt
 prompts/translation.zh-CN.middle.txt
 prompts/translation.en.middle.txt
 prompts/proofreading.zh-CN.middle.txt
@@ -408,11 +410,13 @@ fallback_encoding = "utf-8"
 [llm]
 preset = "default"
 preset_terminology = ""
+preset_terminology_decision = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 temperature_terminology = 0.1
+temperature_terminology_decision = 0.1
 temperature_translation = 0.2
 temperature_proofreading = 0.1
 temperature_polishing = 0.3
@@ -1004,6 +1008,21 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 会将副条目 source 与 aliases 合并到组主，保留其他成员关系，并以 disabled 方式移除
 该副条目的独立译名、类别和说明。相关推荐中的“快速移除”复用可恢复的 disabled
 移除语义；有成员的组主仍不可移除。
+
+### 自动术语决策（开发版）
+
+自动术语决策是独立、显式触发的 `terminology_decision` LLM 阶段，不属于
+`run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
+只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中次数和最多五个跨文件
+上下文样本，再进行分批裁决和跨术语一致性复核。模型只能保留、更新、软移除或标为
+`needs_review`；不能修改 source/normalized、虚构 alias 或新增 description。
+
+完整结果保存为绑定源术语 revision、模型和 Prompt 指纹的待处理草案。单术语建议可
+整条拒绝，分组和 alias 转移等多术语建议作为不可拆的组合建议。应用前重新校验 revision、
+override 保护、alias 碰撞和组拓扑，并在一个 SQLite 事务中写入确认后的 overrides、
+术语库新 revision 和 Run 状态；全部拒绝不增加 revision。草案保留应用前快照，只有
+应用后术语 revision 未再变化时才允许以新 revision 严格撤销。失败或替换失败不会留下
+部分草案，也不会丢弃原草案。
 
 ### 术语交换
 

@@ -1,0 +1,7 @@
+Curate the terminology library using actual occurrence evidence from the complete work. Prioritize consistent translations for people, places, organizations, proper names, and recurring concepts.
+
+Fill missing translations for terms worth translating; resolve category and translation conflicts; use the same translated surname across related full names, and make full names, nicknames, pet names, and abbreviations visibly related. Apply this reasoning to Japanese kanji and kana, katakana-rendered Western names, and ordinary Western names.
+
+Remove aliases that never occur, duplicate aliases, and aliases that do not denote the same term. Keep a description only when it materially disambiguates the term; otherwise clear it, and never invent a new description. You may disable zero-hit, low-value, or incidental single-hit common terms, but a single hit alone is not a removal rule: important people, proper names, and plot concepts remain useful.
+
+Never modify source or normalized, invent a source alias, or alter anchors. Use needs_review instead of guessing when evidence is insufficient.

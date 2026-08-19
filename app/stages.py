@@ -1142,8 +1142,9 @@ def _apply_term_overrides(
             ("description", "descriptions"),
             ("preferred_translation", "translations"),
         ):
-            if override.get(source_key):
-                current[target_key] = [override[source_key]]
+            if source_key in override:
+                value = override.get(source_key)
+                current[target_key] = [value] if value else []
         if "aliases" in override:
             current["aliases"] = list(override.get("aliases") or [])
         if "group_primary" in override:
