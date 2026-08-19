@@ -54,5 +54,15 @@ test("automatic decision dialog separates closing from task cancellation", async
   );
   assert.match(source, /translate\("common\.close", language\)/);
   assert.match(source, /translate\("terms\.decisionCloseHint", language\)/);
+  assert.match(source, /\["completed", "cancelled", "failed"\]\.includes\(task\.status\)/);
   assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
+});
+
+test("automatic decision resume copy identifies persisted progress", async () => {
+  const source = await readFile(
+    new URL("../src/i18n.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /已保存 \{completed\} \/ \{total\}/);
+  assert.match(source, /Saved \{completed\} \/ \{total\}/);
 });

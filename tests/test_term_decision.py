@@ -349,6 +349,158 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
 
 
 @pytest.mark.asyncio
+async def test_decision_error_keeps_completed_batches_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    alice_done = asyncio.Event()
+
+    async def failing_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        if phase == "adjudication" and normalized == "alice":
+            alice_done.set()
+            return {normalized: {"action": "keep", "reason": "保持"}}
+        if phase == "adjudication" and normalized == "bob":
+            await alice_done.wait()
+            raise UsageError("模型协议错误")
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision._request_batch", failing_batch)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(UsageError, match="模型协议错误"):
+            await run_terminology_decision(project, http_client=client)
+
+        run_dir = next(
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        )
+        run_id = run_dir.name
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["status"] == "running"
+        assert manifest["decision_status"] == "generating"
+        assert manifest["completed_segment_count"] == 1
+        assert manifest["failed_segment_count"] == 0
+        assert manifest["completed_at"] is None
+        checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text("utf-8"))
+        assert set(checkpoint["phases"]["adjudication"]) == {"alice"}
+
+        resumed_calls: list[tuple[str, str]] = []
+
+        async def resumed_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            resumed_calls.append((phase, normalized))
+            return {normalized: {"action": "keep", "reason": "保持"}}
+
+        monkeypatch.setattr("app.term_decision._request_batch", resumed_batch)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert ("adjudication", "alice") not in resumed_calls
+    assert ("adjudication", "bob") in resumed_calls
+    assert read_json(project, run_dir / "manifest.json")["usage_invocation_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    alice_reviewed = asyncio.Event()
+
+    async def failing_review(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        if phase == "consistency" and normalized == "alice":
+            alice_reviewed.set()
+        if phase == "consistency" and normalized == "bob":
+            await alice_reviewed.wait()
+            raise UsageError("一致性协议错误")
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision._request_batch", failing_review)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(UsageError, match="一致性协议错误"):
+            await run_terminology_decision(project, http_client=client)
+
+        run_dir = next(
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        )
+        checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text("utf-8"))
+        assert set(checkpoint["phases"]["adjudication"]) == {"alice", "bob"}
+        assert set(checkpoint["phases"]["consistency"]) == {"alice"}
+
+        resumed_calls: list[tuple[str, str]] = []
+
+        async def resumed_review(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            resumed_calls.append((phase, normalized))
+            return {normalized: {"action": "keep", "reason": "保持"}}
+
+        monkeypatch.setattr("app.term_decision._request_batch", resumed_review)
+        await run_terminology_decision(
+            project, resume_run_id=run_dir.name, http_client=client
+        )
+
+    assert resumed_calls == [("consistency", "bob")]
+
+
+@pytest.mark.asyncio
+async def test_decision_draft_write_error_resumes_without_model_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    async def keep_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        return {
+            str(item["normalized"]): {"action": "keep", "reason": "保持"}
+            for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision._request_batch", keep_batch)
+    original_atomic_write = atomic_write_json
+
+    def fail_draft_write(path: Path, value: object) -> None:
+        if path.name == "terminology_decision_draft.json":
+            raise StorageError("草案写入失败")
+        original_atomic_write(path, value)
+
+    monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(StorageError, match="草案写入失败"):
+            await run_terminology_decision(project, http_client=client)
+
+        run_dir = next(
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        )
+        run_id = run_dir.name
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["status"] == "running"
+        assert manifest["completed_segment_count"] == 4
+
+        async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+            raise AssertionError("完整检查点续作不应再次请求模型")
+
+        monkeypatch.setattr("app.term_decision.atomic_write_json", original_atomic_write)
+        monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert current_decision_draft(project) is not None
+
+
+@pytest.mark.asyncio
 async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path)
 
@@ -519,6 +671,35 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
     client.get(f"/api/v1/tasks/{forced.json()['task_id']}")
     assert received == [run_id, None]
     assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
+
+
+def test_web_decision_failure_exposes_saved_run_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+
+    async def fail_batch(*_: object, **__: object) -> dict[str, dict]:
+        raise UsageError("模型协议错误")
+
+    monkeypatch.setattr("app.term_decision._request_batch", fail_batch)
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+    assert started.status_code == 200
+    task_id = started.json()["task_id"]
+    state = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert state["status"] == "failed"
+    assert state["error"] == "模型协议错误"
+
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["running_run"]["completed_steps"] == 0
+    assert options.json()["running_run"]["total_steps"] == 4
 
 
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
