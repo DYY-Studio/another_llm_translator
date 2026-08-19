@@ -33,6 +33,7 @@ _PRESET_KEYS = frozenset(
         "extra_body",
         "stream",
         "stream_endpoint",
+        "stream_read_timeout_enabled",
     }
 )
 
@@ -62,16 +63,18 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version not in {2, 3}:
+    if schema_version not in {2, 3, 4}:
         raise ConfigError(
-            "LLM Preset schema_version 必须是 3；v1 的 api_key_env 字段已移除，"
+            "LLM Preset schema_version 必须是 4；v1 的 api_key_env 字段已移除，"
             "请改用显式 credential 引用"
         )
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         value = deepcopy(value)
-        value["schema_version"] = 3
-        value.setdefault("stream", False)
-        value.setdefault("stream_endpoint", "")
+        value["schema_version"] = 4
+        if schema_version == 2:
+            value.setdefault("stream", False)
+            value.setdefault("stream_endpoint", "")
+        value.setdefault("stream_read_timeout_enabled", True)
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
     if unknown:
@@ -84,6 +87,10 @@ def load_llm_preset(path: Path) -> LLMPreset:
         )
     if not isinstance(value["stream"], bool):
         raise ConfigError("LLM Preset stream 必须是布尔值")
+    if not isinstance(value["stream_read_timeout_enabled"], bool):
+        raise ConfigError(
+            "LLM Preset stream_read_timeout_enabled 必须是布尔值"
+        )
     stream_endpoint = value["stream_endpoint"]
     if not isinstance(stream_endpoint, str):
         raise ConfigError("LLM Preset stream_endpoint 必须是字符串")

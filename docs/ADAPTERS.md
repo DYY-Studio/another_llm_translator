@@ -531,11 +531,12 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
 
-当前 Preset schema 为 3。除现有连接字段外，`stream` 明确控制是否使用所引用
+当前 Preset schema 为 4。除现有连接字段外，`stream` 明确控制是否使用所引用
 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用
-`endpoint`，只允许 `${model}` 占位符）。schema 2 用户 Preset 在 CLI、Web 或
-桌面 sidecar 启动时原子迁移为 schema 3，并补入 `stream = false` 与空的
-`stream_endpoint`；Run 内历史 v2 快照只在内存中按非流式解释，不改写审计文件。
+`endpoint`，只允许 `${model}` 占位符）。schema 2/3 用户 Preset 在 CLI、Web 或
+桌面 sidecar 启动时原子迁移为 schema 4，分别补入非流式默认值与
+`stream_read_timeout_enabled = true`；Run 内历史 v2/v3 快照只在内存中补齐默认值，
+不改写审计文件。
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等

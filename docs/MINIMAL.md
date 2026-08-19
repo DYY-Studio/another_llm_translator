@@ -1358,8 +1358,9 @@ Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset �
 整个命令共享一个 `httpx.AsyncClient`：
 
 - 非流式请求的 connect、read、write 和 pool timeout 都使用
-  `request_timeout_seconds`；流式请求把它作为连接及连续读取的空闲超时，不限制
-  整个生成总时长。
+  `request_timeout_seconds`；流式请求默认把它作为连接及连续读取的空闲超时，
+  `stream_read_timeout_enabled = false` 时仅取消连续读取超时，建连、写入和连接池
+  等待仍受该值限制。流式请求不限制整个生成总时长。
 - 连接池上限从 `max_parallel` 派生。
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
@@ -1806,11 +1807,12 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 ### 凭据与 Preset 引用
 
-LLM Preset schema v3 使用显式单凭据引用 `credential: {kind, name}`，并以
+LLM Preset schema v4 使用显式单凭据引用 `credential: {kind, name}`，并以
 `stream` 与 `stream_endpoint` 控制可选 SSE：
 `environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
-不隐式 fallback。schema 2 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
-迁移并默认关闭流式；Run 内历史 v2 快照只按非流式读取，不改写审计文件。v1 的
+不隐式 fallback。schema 2/3 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
+迁移，分别默认关闭流式、启用 SSE 读取超时；Run 内历史 v2/v3 快照只在内存中
+补齐默认值，不改写审计文件。v1 的
 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
 `credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
 Run 快照或阶段指纹。

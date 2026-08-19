@@ -15,15 +15,17 @@ def migrate_llm_resources(*, base: Path | None = None) -> int:
     root = default_user_root(base=base) if base is not None else user_root()
     migrated = 0
     migrated += _migrate_directory(
-        root / "llm_presets", kind="preset", legacy_version=2
+        root / "llm_presets", kind="preset", legacy_versions={2, 3}
     )
     migrated += _migrate_directory(
-        root / "llm_adapters", kind="adapter", legacy_version=1
+        root / "llm_adapters", kind="adapter", legacy_versions={1}
     )
     return migrated
 
 
-def _migrate_directory(path: Path, *, kind: str, legacy_version: int) -> int:
+def _migrate_directory(
+    path: Path, *, kind: str, legacy_versions: set[int]
+) -> int:
     if not path.is_dir():
         return 0
     migrated = 0
@@ -34,7 +36,7 @@ def _migrate_directory(path: Path, *, kind: str, legacy_version: int) -> int:
             raise ConfigError(f"无法读取 LLM {kind} 迁移文件：{item}: {exc}") from exc
         if not isinstance(raw, dict):
             raise ConfigError(f"LLM {kind} 迁移文件顶层必须是对象：{item}")
-        if raw.get("schema_version") != legacy_version:
+        if raw.get("schema_version") not in legacy_versions:
             continue
         if kind == "preset":
             raw = load_llm_preset(item).definition

@@ -529,6 +529,7 @@ def _resolve_llm_config(
                 "context_safety_margin_tokens",
                 "stream",
                 "stream_endpoint",
+                "stream_read_timeout_enabled",
             )
         }
     )

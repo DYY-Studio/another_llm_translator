@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "preset_id": "google-gemini",
   "adapter_id": "google-gemini",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
@@ -16,6 +16,7 @@
   "request_timeout_seconds": 120,
   "stream": false,
   "stream_endpoint": "/models/${model}:streamGenerateContent?alt=sse",
+  "stream_read_timeout_enabled": true,
   "extra_body": {},
   "credential": {
     "kind": "environment",

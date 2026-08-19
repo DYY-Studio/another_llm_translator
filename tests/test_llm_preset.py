@@ -109,9 +109,19 @@ def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> N
     value.pop("stream")
     value.pop("stream_endpoint")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 3
+    assert preset.definition["schema_version"] == 4
     assert preset.definition["stream"] is False
     assert preset.definition["stream_endpoint"] == ""
+    assert preset.definition["stream_read_timeout_enabled"] is True
+
+
+def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 3
+    value.pop("stream_read_timeout_enabled")
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["schema_version"] == 4
+    assert preset.definition["stream_read_timeout_enabled"] is True
 
 
 @pytest.mark.parametrize(
@@ -142,6 +152,13 @@ def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
     }
 
 
+def test_preset_requires_boolean_stream_read_timeout(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["stream_read_timeout_enabled"] = "false"
+    with pytest.raises(ConfigError, match="stream_read_timeout_enabled 必须是布尔值"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
 @pytest.mark.parametrize(
     ("credential", "message"),
     [
@@ -168,7 +185,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 3"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 4"):
         load_llm_preset(write_preset(tmp_path, value))
 
 

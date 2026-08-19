@@ -488,7 +488,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 3;
+  schema_version: 4;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -506,6 +506,7 @@ export interface LLMPreset {
   request_timeout_seconds: number;
   stream: boolean;
   stream_endpoint: string;
+  stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
 }
 
