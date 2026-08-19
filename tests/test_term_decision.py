@@ -247,6 +247,34 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     assert applied.json()["terms"]["terms_revision"] == 1
 
 
+def test_web_starts_terminology_decision_task_without_options_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    async def fake_decision(_: Path, **kwargs: object) -> dict[str, object]:
+        progress = kwargs["on_progress"]
+        assert callable(progress)
+        progress(4, 0, 4)
+        return {"completed": 4, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+    assert started.status_code == 200
+    assert started.json()["stage"] == "terminology_decision"
+    assert started.json()["total_segments"] == 0
+
+    task_id = started.json()["task_id"]
+    state = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert state["status"] == "completed"
+    assert state["completed_segments"] == 4
+    assert state["total_segments"] == 4
+
+
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path, "｜Alice《アリス》 Ally\nBob")
     library = read_json(project, project / "terminology" / "terms.json")
