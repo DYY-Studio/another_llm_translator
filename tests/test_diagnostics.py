@@ -147,9 +147,9 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
         {
             "input_tokens": 12,
             "output_tokens": 3,
-                "total_tokens": 15,
-                "available": False,
-                "partial": False,
+            "total_tokens": 15,
+            "available": False,
+            "partial": False,
         }
     )
     unavailable = diagnostics.snapshot()["metrics"]

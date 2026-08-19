@@ -368,7 +368,7 @@ def _pack_batches(
             token_factor,
         )
 
-    def overflow_reason(estimate: int) -> str:
+    def overflow_reason() -> str:
         if hard_limit == context_limit:
             return "context"
         if hard_limit == itpm_limit:
@@ -414,7 +414,7 @@ def _pack_batches(
                     state,
                     estimate,
                     limit=hard_limit,
-                    reason=overflow_reason(estimate),
+                    reason=overflow_reason(),
                     detail=f"{detail}，Anchor 超限策略为 {anchor_overflow_mode}",
                 )
         if estimate > soft_target and not allow_soft_overflow:
