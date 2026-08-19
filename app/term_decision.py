@@ -569,7 +569,7 @@ def _parse_decisions(
         errors.append("术语决策响应缺少 end")
     if errors:
         raise UsageError("；".join(errors[:10]))
-    return decisions, list(dict.fromkeys(ignored_read_only))
+    return decisions, ignored_read_only
 
 
 async def _request_batch(
@@ -642,7 +642,7 @@ async def _request_batch(
                     "ignored read-only terminology decisions request=%s count=%d normalized=%s",
                     request_id,
                     len(ignored_read_only),
-                    ",".join(ignored_read_only[:10]),
+                    ",".join(dict.fromkeys(ignored_read_only[:10])),
                 )
             return decisions
         except UsageError as exc:
