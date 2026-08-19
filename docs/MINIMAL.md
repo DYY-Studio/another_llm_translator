@@ -1017,6 +1017,12 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 上下文样本，再进行分批裁决和跨术语一致性复核。模型只能保留、更新、软移除或标为
 `needs_review`；不能修改 source/normalized、虚构 alias 或新增 description。
 
+两个阶段分别按当前 Preset 的 `max_parallel` 有界并发，第一阶段全部完成并形成统一
+暂定状态后才进入第二阶段。每个完整校验通过的批次原子写入 Run 检查点；用户取消或
+进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
+和 Prompt。源术语 revision 已变化时拒绝续作。强制重做会结束旧 Run 并忽略检查点。
+检查点不是草案，不能审核或应用。
+
 完整结果保存为绑定源术语 revision、模型和 Prompt 指纹的待处理草案。单术语建议可
 整条拒绝，分组和 alias 转移等多术语建议作为不可拆的组合建议。应用前重新校验 revision、
 override 保护、alias 碰撞和组拓扑，并在一个 SQLite 事务中写入确认后的 overrides、
@@ -1573,8 +1579,8 @@ python -m app.main run-all PROJECT
   扫描中已经解析的候选。
 - `terms-publish-partial` 在当前术语扫描未运行且存在候选时显式发布部分结果；Web
   端要求同样的确认，不提供自动发布或自动修复路径。
-- `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
-- `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
+- `--resume-run`：用于四个主要 LLM 阶段和 `terms-decide`，续用最近同阶段 running Run。
+- `--decline-run`：用于四个主要 LLM 阶段和 `terms-decide`，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
   仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
 - `--document-adapter`：用于带输入的 init 或 files-add，显式选择输入 Adapter；
