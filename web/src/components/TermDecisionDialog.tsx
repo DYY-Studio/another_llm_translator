@@ -68,7 +68,7 @@ export function TermDecisionDialog({
 
   useEffect(() => {
     if (task?.project !== project || task.stage !== "terminology_decision") return;
-    if (["completed", "cancelled"].includes(task.status)) void load().catch((error) => setMessage(String(error)));
+    if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(String(error)));
     if (task.status === "failed") setMessage(task.error ?? translate("common.requestFailed", language));
   }, [task?.task_id, task?.status]);
 

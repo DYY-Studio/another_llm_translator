@@ -673,6 +673,35 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
     assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
 
 
+def test_web_decision_failure_exposes_saved_run_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+
+    async def fail_batch(*_: object, **__: object) -> dict[str, dict]:
+        raise UsageError("模型协议错误")
+
+    monkeypatch.setattr("app.term_decision._request_batch", fail_batch)
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+    assert started.status_code == 200
+    task_id = started.json()["task_id"]
+    state = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert state["status"] == "failed"
+    assert state["error"] == "模型协议错误"
+
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["running_run"]["completed_steps"] == 0
+    assert options.json()["running_run"]["total_steps"] == 4
+
+
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path, "｜Alice《アリス》 Ally\nBob")
     library = read_json(project, project / "terminology" / "terms.json")
