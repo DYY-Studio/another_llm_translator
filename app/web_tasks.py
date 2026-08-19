@@ -346,8 +346,10 @@ class WebTaskManager:
                     raise UsageError(
                         f"项目已有后台任务：{active.task_id}"
                     )
+            selected_count = 0
             if stage not in {"run-all", TERMINOLOGY_DECISION_STAGE}:
                 options = task_options(project, stage)
+                selected_count = int(options["selected"])
                 running_run = options["running_run"]
                 if run_action == "resume":
                     if running_run is None:
@@ -375,9 +377,7 @@ class WebTaskManager:
                 task_id=task_id,
                 project=project,
                 stage=stage,
-                total_segments=(
-                    int(options["selected"]) if stage != "run-all" else 0
-                ),
+                total_segments=selected_count,
             )
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
