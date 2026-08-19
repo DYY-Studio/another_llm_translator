@@ -2570,9 +2570,9 @@ async def run_terminology(
         completed_count=completed_count,
         failed_count=lambda: len(failed_originals),
         exception_completed=lambda: (
-            (len(selected) - len(work)) if resume_run_id else 0
+            len(selected) - len(work) + len(completed_original_ids)
         ),
-        exception_failed=lambda: len(work),
+        exception_failed=lambda: len(work) - len(completed_original_ids),
         failure_counts=failure_counts,
         http_client=http_client,
     )
