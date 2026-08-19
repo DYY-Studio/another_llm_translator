@@ -23,14 +23,17 @@ fallback_encoding = "utf-8"
 [llm]
 # 全局实时引用的命名 LLM Preset。连接、模型、Token 能力和限速由 Preset 提供。
 preset = "default"
-# 四阶段可分别覆盖全局 Preset；空字符串表示使用上面的全局 Preset。
+# 各 LLM 阶段可分别覆盖全局 Preset；空字符串表示使用上面的全局 Preset。
 preset_terminology = ""
+preset_terminology_decision = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 # 术语提取阶段的采样温度。
 temperature_terminology = 0.1
+# 自动术语决策阶段的采样温度。
+temperature_terminology_decision = 0.1
 # 翻译阶段的采样温度。
 temperature_translation = 0.2
 # 校对建议阶段的采样温度。

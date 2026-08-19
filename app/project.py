@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from .config import LLM_STAGES, load_config
+from .config import LLM_MODEL_STAGES, load_config
 from .documents import (
     DocumentAdapter,
     DocumentImport,
@@ -18,20 +18,26 @@ from .documents import (
     decode_plaintext,
 )
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
-from .user_config import APP_ROOT, effective_path, user_root
 from .sqlite_storage import (
     database_path,
-    initialize as initialize_project_database,
     new_record_id,
     read_adapter_state,
-    read_files as read_sqlite_files,
     read_project_meta,
-    read_segments as read_sqlite_segments,
     record_header,
     replace_source,
     utc_now,
     write_json,
 )
+from .sqlite_storage import (
+    initialize as initialize_project_database,
+)
+from .sqlite_storage import (
+    read_files as read_sqlite_files,
+)
+from .sqlite_storage import (
+    read_segments as read_sqlite_segments,
+)
+from .user_config import APP_ROOT, effective_path, user_root
 
 PROJECTS_ROOT = user_root() / "projects"
 PROMPT_LANGUAGES = ("zh-CN", "en")
@@ -43,7 +49,7 @@ def prompt_file(stage: str, language: str) -> str:
 
 PROMPT_NAMES = tuple(
     prompt_file(stage, language)
-    for stage in LLM_STAGES
+    for stage in LLM_MODEL_STAGES
     for language in PROMPT_LANGUAGES
 )
 _TXT_EXTENSIONS = frozenset({".txt", ".text"})

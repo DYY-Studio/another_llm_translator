@@ -14,6 +14,7 @@ from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
 
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
+LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision")
 
 SCHEMA: dict[str, Any] = {
     "project": {
@@ -25,10 +26,12 @@ SCHEMA: dict[str, Any] = {
     "llm": {
         "preset": None,
         "preset_terminology": None,
+        "preset_terminology_decision": None,
         "preset_translation": None,
         "preset_proofreading": None,
         "preset_polishing": None,
         "temperature_terminology": None,
+        "temperature_terminology_decision": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
         "temperature_polishing": None,
@@ -167,7 +170,7 @@ def validate_config(config: dict[str, Any]) -> None:
     preset_id = config["llm"]["preset"]
     if not isinstance(preset_id, str) or not preset_id.strip():
         raise ConfigError("llm.preset 必须是非空字符串")
-    for stage in LLM_STAGES:
+    for stage in LLM_MODEL_STAGES:
         value = config["llm"][f"preset_{stage}"]
         if not isinstance(value, str):
             raise ConfigError(f"llm.preset_{stage} 必须是字符串")
@@ -207,6 +210,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("input.encoding_confidence_threshold 必须在 0 到 1 之间")
     for key in (
         "temperature_terminology",
+        "temperature_terminology_decision",
         "temperature_translation",
         "temperature_proofreading",
         "temperature_polishing",
@@ -370,6 +374,10 @@ def load_config(path: Path) -> dict[str, Any]:
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
+    llm = config.get("llm")
+    if isinstance(llm, dict):
+        llm.setdefault("preset_terminology_decision", "")
+        llm.setdefault("temperature_terminology_decision", 0.1)
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
@@ -484,7 +492,7 @@ def resolve_global_config(
 
 
 def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
-    if stage is not None and stage not in LLM_STAGES:
+    if stage is not None and stage not in LLM_MODEL_STAGES:
         raise ConfigError(f"未知 LLM 阶段：{stage}")
     override = config["llm"].get(f"preset_{stage}", "") if stage else ""
     return str(override or config["llm"]["preset"])

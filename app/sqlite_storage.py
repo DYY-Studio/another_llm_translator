@@ -17,6 +17,7 @@ SCHEMA_VERSION = 3
 STAGES = frozenset(
     {
         "terminology",
+        "terminology_decision",
         "translation",
         "proofreading",
         "proofreading_applied",
@@ -1320,6 +1321,57 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
         raise StorageError(f"无法清空术语阶段状态：{project}: {exc}") from exc
     finally:
         connection.close()
+
+
+def write_terminology_decision_state(
+    project: Path,
+    *,
+    terms: dict[str, Any],
+    overrides: dict[str, Any],
+    run_manifest: dict[str, Any],
+) -> None:
+    """Commit a terminology decision and its Run state in one transaction."""
+    ensure_supported(project)
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.executemany(
+                "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                [
+                    ("terms", _residual(terms, _TERMS_RESIDUAL_FIELDS)),
+                    ("overrides", _residual(overrides, _TERMS_RESIDUAL_FIELDS)),
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO runs(run_id, stage, status, started_at, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    stage=excluded.stage, status=excluded.status,
+                    started_at=excluded.started_at, payload_json=excluded.payload_json
+                """,
+                (
+                    str(run_manifest["run_id"]),
+                    str(run_manifest["stage"]),
+                    str(run_manifest["status"]),
+                    run_manifest.get("started_at"),
+                    _residual(run_manifest, _RUN_RESIDUAL_FIELDS),
+                ),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法原子应用术语决策：{project}: {exc}") from exc
+    finally:
+        connection.close()
+    try:
+        atomic_write_json(
+            project / "runs" / str(run_manifest["run_id"]) / "manifest.json",
+            run_manifest,
+        )
+    except OSError:
+        # SQLite is authoritative; the human-readable Run mirror can be
+        # reconstructed by a later manifest update.
+        pass
 
 
 def _records(
