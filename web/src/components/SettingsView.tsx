@@ -435,6 +435,13 @@ function PresetSettings({ language }: { language: Language }) {
                 help={translate("preset.streamingHint", language)}
                 onChange={(value) => updateConnection((draft) => { draft.stream = value; })}
               />
+              <ToggleField
+                label={translate("preset.streamReadTimeout", language)}
+                checked={preset.stream_read_timeout_enabled}
+                disabled={!preset.stream}
+                help={translate("preset.streamReadTimeoutHint", language)}
+                onChange={(value) => updateConnection((draft) => { draft.stream_read_timeout_enabled = value; })}
+              />
               <Field label={translate("preset.streamEndpoint", language)} help={translate("preset.streamEndpointHint", language)}>
                 <input
                   value={preset.stream_endpoint}

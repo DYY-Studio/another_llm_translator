@@ -1116,6 +1116,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "endpoint": "/v1/models/${model}:generate",
         "stream": True,
         "stream_endpoint": "/v1/models/${model}:stream",
+        "stream_read_timeout_enabled": False,
         "model": "provider/model",
         "extra_body": {
             "provider": {
@@ -1126,6 +1127,9 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     }
     saved = client.put("/api/v1/global/presets/openrouter", json=custom)
     assert saved.status_code == 200
+    assert client.get(
+        "/api/v1/global/presets/openrouter"
+    ).json()["stream_read_timeout_enabled"] is False
     preview = client.get(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
