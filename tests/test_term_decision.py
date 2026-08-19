@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import load_config, load_project_config
-from app.errors import StorageError, UsageError
+from app.errors import RequestSizeError, StorageError, UsageError
 from app.execution import create_run
 from app.main import build_parser
 from app.project import init_project
@@ -20,10 +20,12 @@ from app.term_decision import (
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
+    _pack_batches,
     rollback_decision,
     run_terminology_decision,
     save_decision_rejections,
 )
+from app.stages import term_normalization
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
@@ -138,6 +140,10 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     config = load_config(config_path)
     assert config["llm"]["preset_terminology_decision"] == ""
     assert config["llm"]["temperature_terminology_decision"] == 0.1
+    assert config["terminology_decision"] == {
+        "allow_soft_target_overflow": True,
+        "anchor_overflow_mode": "error",
+    }
 
     parser = build_parser()
     generated = parser.parse_args(["terms-decide", "demo", "--replace-draft"])
@@ -151,6 +157,112 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
         ["terms-decide-apply", "demo", "--all", "--reject", "TDP-1"]
     )
     assert applied.rejected_proposal_ids == ["TDP-1"]
+
+
+def _batch_state(normalized: str, source: str) -> dict[str, object]:
+    return {
+        "normalized": normalized,
+        "source": source,
+        "category": "人物",
+        "description": "",
+        "preferred_translation": None,
+        "aliases": [],
+        "group_primary": None,
+        "disabled": False,
+    }
+
+
+def _batch_evidence(*states: dict[str, object]) -> dict[str, dict[str, object]]:
+    return {
+        str(state["normalized"]): {
+            "hit_count": 1,
+            "source_hit_count": 1,
+            "alias_hit_counts": {},
+            "samples": [{"file_id": "F", "segment_id": "S", "source": "sample"}] * 5,
+        }
+        for state in states
+    }
+
+
+def test_decision_batch_overflow_policy_controls_local_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["chunking"]["target_chunk_input_tokens"] = 50
+    config["llm"]["context_window_tokens"] = 120
+    config["llm"]["context_safety_margin_tokens"] = 0
+    config["execution"]["input_tokens_per_minute"] = 0
+    config["execution"]["token_safety_factor"] = 1
+    focus = _batch_state("alice", "Alice")
+    first_anchor = _batch_state("alice smith", "Alice Smith")
+    second_anchor = _batch_state("alice johnson", "Alice Johnson")
+    evidence = _batch_evidence(focus, first_anchor, second_anchor)
+
+    def estimate(messages: list[dict[str, str]], _: float) -> int:
+        payload = json.loads(messages[1]["content"])
+        anchors = payload["anchors"]
+        samples = sum(len(item["evidence"]["samples"]) for item in anchors)
+        return 31 + 20 * len(payload["terms"]) + 15 * len(anchors) + 4 * samples
+
+    monkeypatch.setattr("app.term_decision.estimate_messages", estimate)
+    spec = term_normalization(config)
+
+    config["terminology_decision"]["anchor_overflow_mode"] = "error"
+    with pytest.raises(RequestSizeError, match="Anchor 超限策略为 error") as error:
+        _pack_batches(
+            [focus],
+            phase="consistency",
+            target_language="简体中文",
+            anchors=[first_anchor, second_anchor],
+            evidence=evidence,
+            prompt="prompt",
+            config=config,
+            spec=spec,
+        )
+    assert error.value.reason == "context"
+
+    config["terminology_decision"]["anchor_overflow_mode"] = "trim"
+    batches, _ = _pack_batches(
+        [focus],
+        phase="consistency",
+        target_language="简体中文",
+        anchors=[first_anchor, second_anchor],
+        evidence=evidence,
+        prompt="prompt",
+        config=config,
+        spec=spec,
+    )
+    assert [item["source"] for item in batches[0][1]] == ["Alice Smith"]
+
+    config["terminology_decision"]["anchor_overflow_mode"] = "compact"
+    batches, _ = _pack_batches(
+        [focus],
+        phase="consistency",
+        target_language="简体中文",
+        anchors=[first_anchor, second_anchor],
+        evidence=evidence,
+        prompt="prompt",
+        config=config,
+        spec=spec,
+    )
+    assert len(batches[0][1]) == 2
+    assert all(item.get("_compact_evidence") for item in batches[0][1])
+
+    config["terminology_decision"]["anchor_overflow_mode"] = "error"
+    config["terminology_decision"]["allow_soft_target_overflow"] = False
+    with pytest.raises(RequestSizeError, match="超过软目标") as error:
+        _pack_batches(
+            [focus],
+            phase="consistency",
+            target_language="简体中文",
+            anchors=[],
+            evidence=evidence,
+            prompt="prompt",
+            config=config,
+            spec=spec,
+        )
+    assert error.value.reason == "context"
 
 
 @pytest.mark.asyncio
@@ -527,6 +639,10 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     assert options.status_code == 200
     assert options.json()["selected"] == 2
     assert options.json()["has_pending_draft"] is True
+    assert options.json()["overflow_policy"] == {
+        "allow_soft_target_overflow": True,
+        "anchor_overflow_mode": "error",
+    }
     review = client.get(
         "/api/v1/projects/decision-demo/terms/decision"
     ).json()

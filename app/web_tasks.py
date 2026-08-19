@@ -195,6 +195,14 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
             },
             "selected": selected,
             "protected": len(protected),
+            "overflow_policy": {
+                "allow_soft_target_overflow": bool(
+                    config["terminology_decision"]["allow_soft_target_overflow"]
+                ),
+                "anchor_overflow_mode": str(
+                    config["terminology_decision"]["anchor_overflow_mode"]
+                ),
+            },
             "completed": 0,
             "pending": selected,
             "failed": 0,
@@ -275,6 +283,7 @@ class WebTask:
             "output_tokens": 0,
             "total_tokens": 0,
             "available": False,
+            "partial": False,
         }
     )
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -581,6 +590,6 @@ def _task_usage(
     *,
     resuming: bool,
 ) -> dict[str, Any]:
-    if current is None:
-        return unavailable_usage()
-    return combine_usage(previous, current) if resuming else current
+    if resuming:
+        return combine_usage(previous, current)
+    return current or unavailable_usage()
