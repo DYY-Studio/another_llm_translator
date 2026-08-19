@@ -46,6 +46,7 @@ export function TermDecisionDialog({
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [runChoice, setRunChoice] = useState<"resume" | "force">("resume");
 
   const running = Boolean(task && task.project === project
     && task.stage === "terminology_decision"
@@ -58,6 +59,7 @@ export function TermDecisionDialog({
     ]);
     setReview(nextReview);
     setOptions(nextOptions);
+    if (!nextOptions.running_run) setRunChoice("resume");
   }
 
   useEffect(() => {
@@ -66,7 +68,7 @@ export function TermDecisionDialog({
 
   useEffect(() => {
     if (task?.project !== project || task.stage !== "terminology_decision") return;
-    if (task.status === "completed") void load().catch((error) => setMessage(String(error)));
+    if (["completed", "cancelled"].includes(task.status)) void load().catch((error) => setMessage(String(error)));
     if (task.status === "failed") setMessage(task.error ?? translate("common.requestFailed", language));
   }, [task?.task_id, task?.status]);
 
@@ -88,6 +90,8 @@ export function TermDecisionDialog({
   async function generate() {
     const replace = Boolean(review?.draft);
     if (replace && !window.confirm(translate("terms.decisionReplaceConfirm", language))) return;
+    const force = Boolean(options?.running_run && runChoice === "force");
+    if (force && !window.confirm(translate("terms.decisionForceConfirm", language))) return;
     setBusy(true);
     setMessage("");
     try {
@@ -97,9 +101,9 @@ export function TermDecisionDialog({
           stage: "terminology_decision",
           language,
           replace_draft: replace,
-          force: false,
+          force,
           reuse_mixed_fingerprints: false,
-          run_action: null,
+          run_action: options?.running_run ? (force ? "decline" : "resume") : null,
         }),
       });
       onTask(next);
@@ -150,7 +154,7 @@ export function TermDecisionDialog({
       <div className="term-decision-dialog">
         <header className="term-decision-heading">
           <div><h2>{translate("terms.decisionTitle", language)}</h2><p>{translate("terms.decisionHint", language)}</p></div>
-          <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
+          <button className="quiet-button" onClick={onClose}>{translate("common.close", language)}</button>
         </header>
         {options && <div className="term-decision-options">
           <span>{translate("terms.decisionPreset", language)} <strong>{options.preset.id}</strong> · {options.preset.model}</span>
@@ -158,10 +162,27 @@ export function TermDecisionDialog({
           <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
         </div>}
         {message && <p className="inline-message error-text">{message}</p>}
-        {running && <p>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</p>}
+        {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
+        {!running && options?.running_run && <fieldset className="decision-group term-decision-resume">
+          <legend>{translate("terms.decisionUnfinished", language)}</legend>
+          <label className="radio-option decision-option">
+            <input type="radio" checked={runChoice === "resume"} onChange={() => setRunChoice("resume")} />
+            <span><strong>{translate("terms.decisionResume", language)}</strong><small>{translate("terms.decisionResumeHint", language, { completed: options.running_run?.completed_steps ?? 0, total: options.running_run?.total_steps ?? options.selected * 2 })}</small></span>
+          </label>
+          <label className="radio-option decision-option">
+            <input type="radio" checked={runChoice === "force"} onChange={() => setRunChoice("force")} />
+            <span><strong>{translate("terms.decisionForce", language)}</strong><small>{translate("terms.decisionForceHint", language)}</small></span>
+          </label>
+        </fieldset>}
         <div className="term-decision-actions">
           <button className="primary-button" disabled={busy || running || !options || options.selected === 0} onClick={generate}>
-            {review?.draft ? translate("terms.decisionRegenerate", language) : translate("terms.decisionGenerate", language)}
+            {options?.running_run
+              ? runChoice === "resume"
+                ? translate("terms.decisionResume", language)
+                : translate("terms.decisionForce", language)
+              : review?.draft
+                ? translate("terms.decisionRegenerate", language)
+                : translate("terms.decisionGenerate", language)}
           </button>
           {review?.rollback && <button disabled={busy || running} onClick={() => mutate("rollback", translate("terms.decisionRollbackConfirm", language))}>{translate("terms.decisionRollback", language)}</button>}
         </div>

@@ -356,6 +356,8 @@ python -m app.main terms-export novel scanned.json --source scanned
 python -m app.main terms-publish-partial novel
 python -m app.main terms-decide novel --dry-run
 python -m app.main terms-decide novel
+python -m app.main terms-decide novel --resume-run
+python -m app.main terms-decide novel --force
 python -m app.main terms-decide-show novel
 python -m app.main terms-decide-apply novel --all --reject TDP-EXAMPLE
 python -m app.main terms-decide-rollback novel --confirm
@@ -365,7 +367,10 @@ python -m app.main terms-decide-rollback novel --confirm
 `terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用
 `--replace-draft` 才能生成替代草案；替代生成失败时旧草案保持不变。`terms-decide-apply`
 必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次可撤销应用，且
-要求术语 revision 从应用后未发生变化。
+要求术语 revision 从应用后未发生变化。自动决策在每个阶段内按当前 Preset 的
+`max_parallel` 并发，两个阶段之间仍严格串行。取消任务后可用 `--resume-run` 复用已经
+完成的批次；剩余批次使用当前配置和 Prompt。`--force` 会结束未完成 Run 并从头重做，
+但不会隐式替换待审核草案。
 
 ### 导出
 
