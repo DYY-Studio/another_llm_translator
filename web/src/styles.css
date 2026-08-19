@@ -581,6 +581,9 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .term-decision-heading p, .term-decision-options, .term-decision-summary, .term-decision-proposal small { color: var(--muted); }
 .term-decision-options, .term-decision-summary, .term-decision-actions, .term-decision-pages { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
 .term-decision-options, .term-decision-summary { padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--sidebar); font-size: 12px; }
+.term-decision-running { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent-soft); }
+.term-decision-running span { color: var(--muted); font-size: 12px; }
+.term-decision-resume { margin: 0; }
 .term-decision-filters { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
 .term-decision-list { display: grid; gap: 10px; }
 .term-decision-proposal { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }

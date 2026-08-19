@@ -258,6 +258,8 @@ export interface TaskOptions {
     scope: Record<string, unknown> | null;
     previous: { model: string; endpoint: string };
     current: { model: string; endpoint: string };
+    completed_steps?: number;
+    total_steps?: number;
   } | null;
 }
 

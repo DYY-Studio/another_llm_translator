@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { filterDecisionProposals, summarizeDecisionProposals } from "../src/termDecision.ts";
@@ -44,4 +45,14 @@ test("summarizes accepted whole proposals", () => {
     translations: 0,
     structural: 1,
   });
+});
+
+test("automatic decision dialog separates closing from task cancellation", async () => {
+  const source = await readFile(
+    new URL("../src/components/TermDecisionDialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /translate\("common\.close", language\)/);
+  assert.match(source, /translate\("terms\.decisionCloseHint", language\)/);
+  assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
 });
