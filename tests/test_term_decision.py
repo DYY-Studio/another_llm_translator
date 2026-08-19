@@ -434,6 +434,8 @@ def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
     library["terms_revision"] = 2
     write_json(project, project / "terminology" / "terms.json", library)
     with pytest.raises(UsageError, match="已过期"):
+        save_decision_rejections(project, [])
+    with pytest.raises(UsageError, match="已过期"):
         apply_decision_draft(project, confirm_all=True)
 
 

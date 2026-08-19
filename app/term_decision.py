@@ -1008,6 +1008,11 @@ def save_decision_rejections(
     draft = current_decision_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
+    library = load_terms(project)
+    if library is None or int(library["terms_revision"]) != int(
+        draft["source_terms_revision"]
+    ):
+        raise UsageError("术语库已变化，当前决策草案已过期")
     if not isinstance(proposal_ids, list) or not all(
         isinstance(value, str) and value for value in proposal_ids
     ):

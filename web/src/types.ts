@@ -440,7 +440,7 @@ export interface ProjectConfig {
   chunking: {
     target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
-    cross_boundary_batching: LLMStage[];
+    cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
