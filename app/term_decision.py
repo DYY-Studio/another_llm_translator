@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,10 @@ from .documents import aozora_match_views
 from .errors import ContextLengthError, StorageError, UsageError
 from .execution import (
     LLMClient,
+    Scope,
     SlidingWindowLimiter,
+    combine_usage,
+    continue_run,
     create_run,
     estimate_messages,
     finalize_run,
@@ -46,6 +50,7 @@ from .stages import (
 
 STAGE = "terminology_decision"
 DRAFT_FILE = "terminology_decision_draft.json"
+CHECKPOINT_FILE = "terminology_decision_checkpoint.json"
 EVIDENCE_SAMPLE_LIMIT = 5
 EVIDENCE_SNIPPET_LIMIT = 600
 RELATED_ANCHOR_LIMIT = 24
@@ -59,6 +64,8 @@ _STATE_FIELDS = (
     "group_primary",
     "disabled",
 )
+
+_PHASES = ("adjudication", "consistency")
 
 
 def _prompt_language(project: Path, requested: str | None) -> str:
@@ -523,6 +530,159 @@ async def _request_batch(
     raise UsageError("术语决策格式修正重试耗尽：" + "；".join(errors[:5]))
 
 
+async def _dispatch_batches(
+    batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
+    worker: Callable[
+        [list[dict[str, Any]], list[dict[str, Any]]],
+        Awaitable[None],
+    ],
+    *,
+    max_parallel: int,
+) -> None:
+    iterator = iter(batches)
+    pending: set[asyncio.Task[None]] = set()
+
+    def fill() -> None:
+        while len(pending) < max_parallel:
+            try:
+                focus, anchors = next(iterator)
+            except StopIteration:
+                return
+            pending.add(asyncio.create_task(worker(focus, anchors)))
+
+    fill()
+    try:
+        while pending:
+            done, still_pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            pending = still_pending
+            try:
+                for task in done:
+                    task.result()
+            except BaseException:
+                pending.update(done)
+                raise
+            fill()
+    except BaseException:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
+
+
+def _checkpoint_path(project: Path, run_id: str) -> Path:
+    return project / "runs" / run_id / CHECKPOINT_FILE
+
+
+def decision_checkpoint_progress(project: Path, run_id: str) -> int:
+    path = _checkpoint_path(project, run_id)
+    if not path.is_file():
+        return 0
+    checkpoint = _read_checkpoint_file(path)
+    phases = checkpoint.get("phases")
+    if not isinstance(phases, dict):
+        raise StorageError("术语决策检查点 phases 无效")
+    completed = 0
+    for phase in _PHASES:
+        records = phases.get(phase)
+        if not isinstance(records, dict):
+            raise StorageError(f"术语决策检查点 {phase} 无效")
+        completed += len(records)
+    return completed
+
+
+def _read_checkpoint_file(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法读取术语决策检查点：{exc}") from exc
+    if not isinstance(value, dict):
+        raise StorageError("术语决策检查点必须是 JSON 对象")
+    return value
+
+
+def _new_checkpoint(
+    project_id: str, run_id: str, revision: int
+) -> dict[str, Any]:
+    return record_header(
+        "terminology_decision_checkpoint",
+        project_id,
+        record_id=f"TERMINOLOGY-DECISION-CHECKPOINT-{run_id}",
+        run_id=run_id,
+        source_terms_revision=revision,
+        phases={phase: {} for phase in _PHASES},
+    )
+
+
+def _load_checkpoint(
+    project: Path,
+    run_id: str,
+    *,
+    project_id: str,
+    revision: int,
+    known_terms: set[str],
+) -> dict[str, Any]:
+    path = _checkpoint_path(project, run_id)
+    if not path.is_file():
+        checkpoint = _new_checkpoint(project_id, run_id, revision)
+        atomic_write_json(path, checkpoint)
+        return checkpoint
+    checkpoint = _read_checkpoint_file(path)
+    if (
+        checkpoint.get("record_type") != "terminology_decision_checkpoint"
+        or checkpoint.get("run_id") != run_id
+        or int(checkpoint.get("source_terms_revision", -1)) != revision
+    ):
+        raise UsageError("术语决策检查点与当前 Run 或术语 revision 不一致")
+    phases = checkpoint.get("phases")
+    if not isinstance(phases, dict):
+        raise StorageError("术语决策检查点 phases 无效")
+    for phase in _PHASES:
+        records = phases.get(phase)
+        if not isinstance(records, dict):
+            raise StorageError(f"术语决策检查点 {phase} 无效")
+        unknown = set(map(str, records)) - known_terms
+        if unknown:
+            raise StorageError(
+                "术语决策检查点包含未知术语：" + ", ".join(sorted(unknown)[:10])
+            )
+        if any(
+            not isinstance(value, dict)
+            or not isinstance(value.get("decision"), dict)
+            or not isinstance(value.get("decision_fingerprint"), str)
+            or not isinstance(value.get("model_fingerprint"), str)
+            or not isinstance(value.get("prompt_fingerprint"), str)
+            for value in records.values()
+        ):
+            raise StorageError(f"术语决策检查点 {phase} 记录无效")
+    return checkpoint
+
+
+def _checkpoint_decisions(
+    checkpoint: dict[str, Any], phase: str
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(normalized): deepcopy(record["decision"])
+        for normalized, record in checkpoint["phases"][phase].items()
+    }
+
+
+def _composite_fingerprint(checkpoint: dict[str, Any], field: str) -> str:
+    values = {
+        str(record[field])
+        for phase in _PHASES
+        for record in checkpoint["phases"][phase].values()
+    }
+    if not values:
+        raise StorageError("术语决策检查点缺少批次指纹")
+    if len(values) == 1:
+        return values.pop()
+    encoded = json.dumps(sorted(values), separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _apply_tentative(
     states: dict[str, dict[str, Any]], decisions: dict[str, dict[str, Any]]
 ) -> None:
@@ -789,6 +949,7 @@ async def run_terminology_decision(
     *,
     dry_run: bool = False,
     replace_draft: bool = False,
+    resume_run_id: str | None = None,
     prompt_language: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
@@ -809,9 +970,28 @@ async def run_terminology_decision(
     language = plan["language"]
     prompt = plan["prompt"]
     fingerprint = _decision_fingerprint(config, prompt, library)
+    model_fingerprint = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "model": config["llm"]["model"],
+                "adapter": config.get("_llm_adapter_hash"),
+                "preset": config.get("_llm_preset_hash"),
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    prompt_fingerprint = "sha256:" + hashlib.sha256(prompt.encode()).hexdigest()
     spec = plan["spec"]
     protected_states = plan["protected_states"]
-    phase_one = plan["phase_one"]
+    revision = int(library["terms_revision"])
+    resumed_steps = 0
+    if resume_run_id is not None:
+        resume_manifest = read_json(
+            project, project / "runs" / resume_run_id / "manifest.json"
+        )
+        if int(resume_manifest.get("source_terms_revision", -1)) != revision:
+            raise UsageError("术语库 revision 已变化，不能续用自动决策 Run")
+        resumed_steps = decision_checkpoint_progress(project, resume_run_id)
     if dry_run:
         return {
             "stage": STAGE,
@@ -821,23 +1001,39 @@ async def run_terminology_decision(
             "protected": len(protected_states),
             "estimated_requests": plan["estimated_requests"],
             "estimated_input_tokens": plan["estimated_input_tokens"],
+            "resume_run_id": resume_run_id,
+            "completed_steps": resumed_steps,
         }
-    run_id, run_dir = create_run(
-        project,
-        config=config,
-        stage=STAGE,
-        fingerprint=fingerprint,
-        prompt=prompt,
-        selected_count=len(eligible),
-        requested_count=len(eligible),
-        reused_count=0,
-        details={
-            "source_terms_revision": int(library["terms_revision"]),
-            "decision_status": "generating",
-            "rejected_proposal_ids": [],
-            "prompt_language": language,
-        },
-    )
+    if resume_run_id is None:
+        run_id, run_dir = create_run(
+            project,
+            config=config,
+            stage=STAGE,
+            fingerprint=fingerprint,
+            prompt=prompt,
+            selected_count=len(eligible),
+            requested_count=len(eligible),
+            reused_count=0,
+            details={
+                "source_terms_revision": revision,
+                "decision_status": "generating",
+                "rejected_proposal_ids": [],
+                "prompt_language": language,
+            },
+        )
+    else:
+        run_id, run_dir = continue_run(
+            project,
+            resume_run_id,
+            config=config,
+            stage=STAGE,
+            fingerprint=fingerprint,
+            prompt=prompt,
+            scope=Scope(),
+            selected_count=len(eligible),
+            requested_count=len(eligible),
+            reused_count=0,
+        )
     limiter = SlidingWindowLimiter(
         int(config["execution"]["requests_per_minute"]),
         int(config["execution"]["input_tokens_per_minute"]),
@@ -848,9 +1044,21 @@ async def run_terminology_decision(
         for value in [str(state["source"]), *map(str, state.get("aliases", []))]
     }
     known_terms = set(states)
+    eligible_terms = {str(item["normalized"]) for item in eligible}
+    checkpoint = _load_checkpoint(
+        project,
+        run_id,
+        project_id=str(metadata["project_id"]),
+        revision=revision,
+        known_terms=eligible_terms,
+    )
     tentative = deepcopy(states)
-    decisions: dict[str, dict[str, Any]] = {}
-    completed = 0
+    decisions = _checkpoint_decisions(checkpoint, "adjudication")
+    _apply_tentative(tentative, decisions)
+    final_decisions = _checkpoint_decisions(checkpoint, "consistency")
+    if final_decisions and len(decisions) != len(eligible):
+        raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
+    completed = len(decisions) + len(final_decisions)
     usage: dict[str, Any] | None = None
     try:
         async with LLMClient(
@@ -864,7 +1072,28 @@ async def run_terminology_decision(
             on_usage=on_usage,
         ) as llm:
             total = len(eligible) * 2
-            for focus, anchors in phase_one:
+            if on_progress:
+                on_progress(completed, 0, total)
+            remaining_phase_one = [
+                item
+                for item in eligible
+                if str(item["normalized"]) not in decisions
+            ]
+            phase_one, _ = _pack_batches(
+                remaining_phase_one,
+                phase="adjudication",
+                target_language=str(config["project"]["target_language"]),
+                anchors=protected_states,
+                evidence=evidence,
+                prompt=prompt,
+                config=config,
+                spec=spec,
+            )
+
+            async def adjudicate(
+                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+            ) -> None:
+                nonlocal completed
                 result = await _request_batch(
                     llm,
                     focus=focus,
@@ -877,17 +1106,38 @@ async def run_terminology_decision(
                     known_terms=known_terms,
                 )
                 decisions.update(result)
-                _apply_tentative(tentative, result)
+                records = checkpoint["phases"]["adjudication"]
+                for normalized, decision in result.items():
+                    records[normalized] = {
+                        "decision": deepcopy(decision),
+                        "decision_fingerprint": fingerprint,
+                        "model_fingerprint": model_fingerprint,
+                        "prompt_fingerprint": prompt_fingerprint,
+                    }
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
                 completed += len(focus)
                 if on_progress:
                     on_progress(completed, 0, total)
+
+            await _dispatch_batches(
+                phase_one,
+                adjudicate,
+                max_parallel=int(config["execution"]["max_parallel"]),
+            )
+            tentative = deepcopy(states)
+            _apply_tentative(tentative, decisions)
             phase_two_focus = [tentative[item["normalized"]] for item in eligible]
             phase_two_anchors = [
                 *protected_states,
                 *[tentative[item["normalized"]] for item in eligible],
             ]
+            remaining_phase_two = [
+                item
+                for item in phase_two_focus
+                if str(item["normalized"]) not in final_decisions
+            ]
             phase_two, _ = _pack_batches(
-                phase_two_focus,
+                remaining_phase_two,
                 phase="consistency",
                 target_language=str(config["project"]["target_language"]),
                 anchors=phase_two_anchors,
@@ -896,8 +1146,11 @@ async def run_terminology_decision(
                 config=config,
                 spec=spec,
             )
-            final_decisions: dict[str, dict[str, Any]] = {}
-            for focus, anchors in phase_two:
+
+            async def review_consistency(
+                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+            ) -> None:
+                nonlocal completed
                 result = await _request_batch(
                     llm,
                     focus=focus,
@@ -910,9 +1163,24 @@ async def run_terminology_decision(
                     known_terms=known_terms,
                 )
                 final_decisions.update(result)
+                records = checkpoint["phases"]["consistency"]
+                for normalized, decision in result.items():
+                    records[normalized] = {
+                        "decision": deepcopy(decision),
+                        "decision_fingerprint": fingerprint,
+                        "model_fingerprint": model_fingerprint,
+                        "prompt_fingerprint": prompt_fingerprint,
+                    }
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
                 completed += len(focus)
                 if on_progress:
                     on_progress(completed, 0, total)
+
+            await _dispatch_batches(
+                phase_two,
+                review_consistency,
+                max_parallel=int(config["execution"]["max_parallel"]),
+            )
             final = deepcopy(tentative)
             _apply_tentative(final, final_decisions)
             for normalized, decision in final_decisions.items():
@@ -930,21 +1198,15 @@ async def run_terminology_decision(
             decisions=decisions,
             protected=protected,
             evidence=evidence,
-            fingerprint=fingerprint,
+            fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
             source_library=deepcopy(library),
             source_overrides=deepcopy(overrides_document),
-            model_fingerprint="sha256:"
-            + hashlib.sha256(
-                json.dumps(
-                    {
-                        "model": config["llm"]["model"],
-                        "adapter": config.get("_llm_adapter_hash"),
-                        "preset": config.get("_llm_preset_hash"),
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest(),
-            prompt_fingerprint="sha256:" + hashlib.sha256(prompt.encode()).hexdigest(),
+            model_fingerprint=_composite_fingerprint(
+                checkpoint, "model_fingerprint"
+            ),
+            prompt_fingerprint=_composite_fingerprint(
+                checkpoint, "prompt_fingerprint"
+            ),
         )
         atomic_write_json(_draft_path(project, run_id), draft)
         manifest = read_json(project, run_dir / "manifest.json")
@@ -982,7 +1244,27 @@ async def run_terminology_decision(
             "needs_review": len(draft["needs_review"]),
             "usage": usage or unavailable_usage(),
         }
+    except asyncio.CancelledError:
+        if "llm" in locals():
+            usage = llm.usage_summary()
+        manifest = read_json(project, run_dir / "manifest.json")
+        previous_usage = manifest.get("usage")
+        invocation_count = manifest.get("usage_invocation_count")
+        if type(invocation_count) is int and invocation_count > 0:
+            usage = combine_usage(previous_usage, usage)
+        manifest.update(
+            completed_segment_count=completed,
+            failed_segment_count=0,
+            usage=usage or unavailable_usage(),
+            usage_invocation_count=(
+                invocation_count + 1 if type(invocation_count) is int else 1
+            ),
+        )
+        write_json(project, run_dir / "manifest.json", manifest)
+        raise
     except Exception:
+        if "llm" in locals():
+            usage = llm.usage_summary()
         finalize_run(
             project,
             run_dir,
