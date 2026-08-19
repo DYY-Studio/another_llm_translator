@@ -276,6 +276,25 @@ BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用�
 不通过此方法重复声明。
 内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
 
+所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
+
+```python
+from app.documents import DecodedPlaintext, decode_plaintext
+
+decoded: DecodedPlaintext = decode_plaintext(
+    data,
+    confidence_threshold=0.6,
+    fallback_encoding="utf-8",
+)
+```
+
+`DecodedPlaintext` 返回 `text`、探测到的 `encoding_detected`、实际使用的
+`encoding_used`、探测置信度 `encoding_confidence` 和不可变的 `warnings`。API
+只负责字节到文本的严格解码：它处理 BOM、chardet 探测、GB2312/GBK 到 GB18030
+及 ASCII 到 UTF-8 的归一化，并在首选编码失败后只尝试一次 fallback。它不负责
+换行规范化、文件发现、格式解析、文件名上下文或配置校验；这些职责仍属于各自的
+Document Adapter 和宿主边界。两次严格解码都失败时抛出 `ProjectError`。
+
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
 

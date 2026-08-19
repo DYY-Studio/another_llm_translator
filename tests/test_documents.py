@@ -5,21 +5,28 @@ import re
 import sqlite3
 import stat
 import zipfile
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
 
 from app.config import dump_config, load_config
+from app.documents import (
+    DecodedPlaintext,
+    DocumentChoiceOption,
+    DocumentExportJob,
+    ImportedFile,
+    decode_plaintext,
+    publish_document_exports,
+)
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
-from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
-from app.documents import publish_document_exports
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
-    get_document_adapter_for_extension,
     get_document_adapter,
+    get_document_adapter_for_extension,
     load_plugins,
     normalize_model_text,
     validate_document_import_options,
@@ -34,6 +41,83 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+def test_decode_plaintext_handles_unicode_boms(encoding: str) -> None:
+    decoded = decode_plaintext(
+        "纯文本".encode(encoding),
+        confidence_threshold=0.6,
+        fallback_encoding="ascii",
+    )
+
+    assert isinstance(decoded, DecodedPlaintext)
+    assert decoded.text == "纯文本"
+    assert decoded.encoding_detected == encoding
+    assert decoded.encoding_used == encoding
+    assert decoded.encoding_confidence == 1.0
+    assert decoded.warnings == ()
+
+
+def test_decode_plaintext_normalizes_ascii_and_gbk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "ascii", "confidence": 1.0},
+    )
+    ascii_decoded = decode_plaintext(
+        b"plain text", confidence_threshold=0.6, fallback_encoding="utf-8"
+    )
+    assert ascii_decoded.encoding_detected == "ascii"
+    assert ascii_decoded.encoding_used == "utf-8"
+
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "GBK", "confidence": 1.0},
+    )
+    gbk_decoded = decode_plaintext(
+        "你好".encode("gb18030"),
+        confidence_threshold=0.6,
+        fallback_encoding="utf-8",
+    )
+    assert gbk_decoded.text == "你好"
+    assert gbk_decoded.encoding_detected == "GBK"
+    assert gbk_decoded.encoding_used == "gb18030"
+
+
+def test_decode_plaintext_reports_low_confidence_and_is_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "utf-8", "confidence": 0.2},
+    )
+    decoded = decode_plaintext(
+        b"plain text", confidence_threshold=0.6, fallback_encoding="ascii"
+    )
+
+    assert decoded.warnings == ("编码探测置信度较低：utf-8 (0.20)",)
+    with pytest.raises(FrozenInstanceError):
+        decoded.text = "changed"  # type: ignore[misc]
+
+
+def test_decode_plaintext_falls_back_once_and_fails_strictly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "utf-8", "confidence": 1.0},
+    )
+    decoded = decode_plaintext(
+        b"caf\xe9", confidence_threshold=0.6, fallback_encoding="latin-1"
+    )
+    assert decoded.text == "café"
+    assert decoded.encoding_used == "latin-1"
+    assert decoded.warnings == ("首选编码失败，使用 fallback：latin-1",)
+
+    with pytest.raises(ProjectError, match="严格解码纯文本输入"):
+        decode_plaintext(
+            b"caf\xe9", confidence_threshold=0.6, fallback_encoding="ascii"
+        )
 from tests.test_foundation import make_app_root
 
 

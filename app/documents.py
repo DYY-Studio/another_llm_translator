@@ -1,15 +1,80 @@
 from __future__ import annotations
 
+import codecs
 import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import chardet
+
 from .errors import ProjectError
 
-
 _AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
+
+
+@dataclass(frozen=True)
+class DecodedPlaintext:
+    """The result of strict byte decoding for a plaintext-based adapter."""
+
+    text: str
+    encoding_detected: str
+    encoding_used: str
+    encoding_confidence: float
+    warnings: tuple[str, ...]
+
+
+def decode_plaintext(
+    data: bytes,
+    *,
+    confidence_threshold: float,
+    fallback_encoding: str,
+) -> DecodedPlaintext:
+    """Decode plaintext bytes without applying format-specific processing."""
+    warnings: list[str] = []
+    detected = ""
+    confidence = 1.0
+    encoding: str
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        detected = encoding = "utf-32"
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        detected = encoding = "utf-16"
+    elif data.startswith(codecs.BOM_UTF8):
+        detected = encoding = "utf-8-sig"
+    else:
+        result = chardet.detect(data)
+        detected = str(result.get("encoding") or "utf-8")
+        confidence = float(result.get("confidence") or 0.0)
+        normalized = detected.casefold().replace("_", "-")
+        if normalized in {"gb2312", "gbk"}:
+            encoding = "gb18030"
+        elif normalized == "ascii":
+            encoding = "utf-8"
+        else:
+            encoding = detected
+        if confidence < confidence_threshold:
+            warnings.append(f"编码探测置信度较低：{detected} ({confidence:.2f})")
+
+    try:
+        text = data.decode(encoding, errors="strict")
+        used = encoding
+    except (LookupError, UnicodeDecodeError):
+        try:
+            text = data.decode(fallback_encoding, errors="strict")
+            used = fallback_encoding
+            warnings.append(f"首选编码失败，使用 fallback：{fallback_encoding}")
+        except (LookupError, UnicodeDecodeError) as exc:
+            raise ProjectError(
+                f"无法使用 {encoding} 或 {fallback_encoding} 严格解码纯文本输入"
+            ) from exc
+    return DecodedPlaintext(
+        text=text,
+        encoding_detected=detected,
+        encoding_used=used,
+        encoding_confidence=confidence,
+        warnings=tuple(warnings),
+    )
 
 
 def parse_aozora_text(

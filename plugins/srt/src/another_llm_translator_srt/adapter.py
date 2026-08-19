@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import codecs
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import chardet
-
-from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
+from app.documents import (
+    DocumentChoiceOption,
+    DocumentImport,
+    ImportedFile,
+    decode_plaintext,
+)
 from app.errors import IncompleteError, ProjectError, UsageError
 
 _SRT_EXTENSIONS = frozenset({".srt"})
@@ -114,48 +116,6 @@ def _discover_inputs(values: list[str], recursive: bool) -> list[_InputFile]:
     if duplicates:
         raise UsageError(f"重复导出相对路径：{', '.join(sorted(duplicates))}")
     return discovered
-
-
-def _decode_input(
-    data: bytes, *, confidence_threshold: float, fallback_encoding: str
-) -> tuple[str, str, str, float, list[str]]:
-    warnings: list[str] = []
-    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
-        detected = encoding = "utf-32"
-        confidence = 1.0
-    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        detected = encoding = "utf-16"
-        confidence = 1.0
-    elif data.startswith(codecs.BOM_UTF8):
-        detected = encoding = "utf-8-sig"
-        confidence = 1.0
-    else:
-        result = chardet.detect(data)
-        detected = str(result.get("encoding") or "utf-8")
-        confidence = float(result.get("confidence") or 0.0)
-        normalized = detected.casefold().replace("_", "-")
-        if normalized in {"gb2312", "gbk"}:
-            encoding = "gb18030"
-        elif normalized == "ascii":
-            encoding = "utf-8"
-        else:
-            encoding = detected
-        if confidence < confidence_threshold:
-            warnings.append(f"编码探测置信度较低：{detected} ({confidence:.2f})")
-
-    try:
-        text = data.decode(encoding, errors="strict")
-        used = encoding
-    except (LookupError, UnicodeDecodeError):
-        try:
-            text = data.decode(fallback_encoding, errors="strict")
-            used = fallback_encoding
-            warnings.append(f"首选编码失败，使用 fallback：{fallback_encoding}")
-        except (LookupError, UnicodeDecodeError) as exc:
-            raise ProjectError(
-                f"无法使用 {encoding} 或 {fallback_encoding} 严格解码 SRT 输入"
-            ) from exc
-    return text, detected, used, confidence, warnings
 
 
 def _parse_sequence(value: str, *, context: str) -> str:
@@ -316,28 +276,30 @@ class SRTDocumentAdapter:
         files: list[ImportedFile] = []
         warnings: list[str] = []
         for item in discovered:
-            text, detected, used, confidence, file_warnings = _decode_input(
+            decoded = decode_plaintext(
                 item.path.read_bytes(),
                 confidence_threshold=float(
                     input_config.get("encoding_confidence_threshold", 0.6)
                 ),
                 fallback_encoding=str(input_config.get("fallback_encoding", "utf-8")),
             )
-            segments, cues = _parse_document(text, source_name=item.original_name)
+            segments, cues = _parse_document(
+                decoded.text, source_name=item.original_name
+            )
             files.append(
                 ImportedFile(
                     source_path=item.path,
                     original_name=item.original_name,
                     segments=segments,
-                    encoding_detected=detected,
-                    encoding_used=used,
-                    encoding_confidence=confidence,
+                    encoding_detected=decoded.encoding_detected,
+                    encoding_used=decoded.encoding_used,
+                    encoding_confidence=decoded.encoding_confidence,
                     segment_part_ids=tuple("document" for _ in segments),
                     opaque_state={"schema_version": 1, "cues": cues},
                 )
             )
             warnings.extend(
-                f"{item.original_name}: {warning}" for warning in file_warnings
+                f"{item.original_name}: {warning}" for warning in decoded.warnings
             )
         return DocumentImport(files=tuple(files), warnings=tuple(warnings))
 
