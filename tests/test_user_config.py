@@ -6,7 +6,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.project import bundle_hash, init_project, sync_global_templates
-from app.user_config import effective_path, user_root, write_user
+from app.user_config import (
+    effective_path,
+    migrate_legacy_user_root,
+    user_root,
+    write_user,
+)
 from app.web import create_app
 from tests.test_foundation import make_app_root
 
@@ -15,8 +20,53 @@ def test_user_root_honors_environment_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     override = tmp_path / "custom-user-root"
-    monkeypatch.setenv("MINIMAL_LLM_USER_ROOT", str(override))
+    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(override))
     assert user_root() == override
+
+
+def test_legacy_default_user_root_moves_when_release_root_is_absent(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "minimal-llm-translator"
+    legacy.mkdir()
+    (legacy / "marker").write_text("legacy", encoding="utf-8")
+
+    assert migrate_legacy_user_root(base=tmp_path) == "migrated"
+    assert not legacy.exists()
+    assert (tmp_path / "another-llm-translator" / "marker").read_text(
+        encoding="utf-8"
+    ) == "legacy"
+
+
+def test_legacy_default_user_root_skips_when_release_root_exists(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "minimal-llm-translator"
+    current = tmp_path / "another-llm-translator"
+    legacy.mkdir()
+    current.mkdir()
+    (legacy / "marker").write_text("legacy", encoding="utf-8")
+    (current / "marker").write_text("current", encoding="utf-8")
+
+    assert migrate_legacy_user_root(base=tmp_path) == "skipped"
+    assert legacy.is_dir()
+    assert (current / "marker").read_text(encoding="utf-8") == "current"
+
+
+def test_legacy_default_user_root_reports_move_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = tmp_path / "minimal-llm-translator"
+    legacy.mkdir()
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(RuntimeError, match="无法将旧数据目录迁移"):
+        migrate_legacy_user_root(base=tmp_path)
+    assert legacy.is_dir()
+    assert not (tmp_path / "another-llm-translator").exists()
 
 
 def test_effective_path_prefers_user_copy_and_falls_back_to_builtin(
@@ -171,7 +221,7 @@ def test_web_diagnostics_log_lands_in_user_root(
     assert log_path.is_file()
     import logging
 
-    logging.getLogger("minimal_llm_translator").warning("diagnostics write")
+    logging.getLogger("another_llm_translator").warning("diagnostics write")
     assert "diagnostics write" in log_path.read_text(encoding="utf-8")
 
 

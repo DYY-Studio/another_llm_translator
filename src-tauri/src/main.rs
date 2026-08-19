@@ -1,3 +1,3 @@
 fn main() {
-    minimal_llm_translator_lib::run();
+    another_llm_translator_lib::run();
 }

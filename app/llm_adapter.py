@@ -10,7 +10,6 @@ from typing import Any
 
 from .errors import ConfigError, ExternalError
 
-
 _PLACEHOLDER_RE = re.compile(r"\$\{([a-z_][a-z0-9_]*)\}")
 _BODY_PLACEHOLDERS = frozenset(
     {"model", "system", "messages", "temperature", "max_output_tokens", "stream"}
@@ -26,7 +25,14 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
     }
 )
 _OPTIONAL_ADAPTER_KEYS = frozenset(
-    {"messages_format", "models", "response_reasoning_content_pointer", "usage"}
+    {
+        "messages_format",
+        "models",
+        "response_reasoning_content_pointer",
+        "response_reasoning_content_pointers",
+        "usage",
+        "streaming",
+    }
 )
 _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
 _MODELS_KEYS = frozenset(
@@ -44,6 +50,22 @@ _MODELS_REQUIRED_KEYS = frozenset(
 _USAGE_KEYS = frozenset(
     {"input_tokens_pointer", "output_tokens_pointer", "total_tokens_pointer"}
 )
+_STREAMING_KEYS = frozenset(
+    {
+        "transport",
+        "request_body",
+        "content_events",
+        "reasoning_events",
+        "terminal",
+        "error_events",
+        "usage",
+    }
+)
+_STREAM_EVENT_KEYS = frozenset({"pointer", "when"})
+_STREAM_ERROR_KEYS = frozenset({"when", "message_pointer", "status_pointer"})
+_STREAM_USAGE_KEYS = frozenset(
+    {"input_tokens_pointers", "output_tokens_pointers", "total_tokens_pointers"}
+)
 
 
 @dataclass(frozen=True)
@@ -60,15 +82,22 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class StreamErrorDetails:
+    message: str
+    provider_error_status: int | None
+
+
+@dataclass(frozen=True)
 class JSONLLMAdapter:
     adapter_id: str
     headers_template: dict[str, str]
     body_template: dict[str, Any]
     response_content_pointer: str
-    response_reasoning_content_pointer: str | None
+    response_reasoning_content_pointers: tuple[str, ...] | None
     messages_format: str
     models_spec: dict[str, Any] | None
     usage_pointers: tuple[str | None, str | None, str | None] | None
+    streaming_spec: dict[str, Any] | None
     digest: str
     definition: dict[str, Any]
 
@@ -97,6 +126,19 @@ class JSONLLMAdapter:
             for name, value in self.headers_template.items()
         }
         body = _render_body(deepcopy(self.body_template), values)
+        if stream:
+            if self.streaming_spec is None:
+                raise ConfigError("LLM Adapter 未声明 streaming 规则")
+            stream_body = _render_body(
+                deepcopy(self.streaming_spec["request_body"]), values
+            )
+            conflicts = set(body) & set(stream_body)
+            if conflicts:
+                raise ConfigError(
+                    "LLM Adapter streaming request_body 与 body 字段冲突："
+                    + ", ".join(sorted(conflicts))
+                )
+            body.update(stream_body)
         if extra_body:
             conflicts = set(body) & set(extra_body)
             if conflicts:
@@ -106,6 +148,102 @@ class JSONLLMAdapter:
                 )
             body.update(deepcopy(extra_body))
         return headers, body
+
+    @property
+    def streaming_supported(self) -> bool:
+        return self.streaming_spec is not None
+
+    def stream_content_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.streaming_spec is None:
+            raise ExternalError("LLM Adapter 未声明 streaming 规则")
+        return _stream_deltas(
+            event,
+            self.streaming_spec["content_events"],
+            label="正文",
+        )
+
+    def stream_reasoning_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.streaming_spec is None:
+            raise ExternalError("LLM Adapter 未声明 streaming 规则")
+        return _stream_deltas(
+            event,
+            self.streaming_spec["reasoning_events"],
+            label="思考正文",
+        )
+
+    def stream_error_details(
+        self, event: dict[str, Any]
+    ) -> StreamErrorDetails | None:
+        if self.streaming_spec is None:
+            raise ExternalError("LLM Adapter 未声明 streaming 规则")
+        for rule in self.streaming_spec["error_events"]:
+            if not _stream_condition_matches(event, rule["when"]):
+                continue
+            pointer = rule.get("message_pointer")
+            if pointer is None:
+                message = "LLM 流式响应报告错误"
+            else:
+                try:
+                    message = _resolve_json_pointer(event, pointer)
+                except ExternalError:
+                    raise ExternalError(
+                        f"LLM 流式错误事件缺少消息路径：{pointer}"
+                    ) from None
+                if not isinstance(message, str):
+                    raise ExternalError("LLM 流式错误消息不是字符串")
+                message = message or "LLM 流式响应报告错误"
+            provider_error_status = None
+            status_pointer = rule.get("status_pointer")
+            if status_pointer is not None:
+                try:
+                    value = _resolve_json_pointer(event, status_pointer)
+                except ExternalError:
+                    raise ExternalError(
+                        f"LLM 流式错误事件缺少状态路径：{status_pointer}"
+                    ) from None
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 100 <= value <= 599
+                ):
+                    raise ExternalError("LLM 流式错误状态不是有效 HTTP 状态码")
+                provider_error_status = value
+            return StreamErrorDetails(
+                message=message,
+                provider_error_status=provider_error_status,
+            )
+        return None
+
+    def stream_terminal(self, event: dict[str, Any]) -> bool:
+        if self.streaming_spec is None:
+            raise ExternalError("LLM Adapter 未声明 streaming 规则")
+        terminal = self.streaming_spec["terminal"]
+        if "sentinel" in terminal:
+            return False
+        return _stream_condition_matches(event, terminal["when"])
+
+    def extract_stream_usage(self, event: dict[str, Any]) -> dict[str, int]:
+        if self.streaming_spec is None:
+            return {}
+        values: dict[str, int] = {}
+        for key, pointers in self.streaming_spec["usage"].items():
+            metric = key.removesuffix("_pointers")
+            for pointer in pointers:
+                try:
+                    value = _resolve_json_pointer(event, pointer)
+                except ExternalError:
+                    continue
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise ExternalError(
+                        f"LLM 流式 usage {metric} 不是非负整数"
+                    )
+                values[metric] = value
+                break
+        return values
 
     def parse_response(self, response: Any) -> LLMResponse:
         try:
@@ -120,17 +258,17 @@ class JSONLLMAdapter:
         if not isinstance(content, str):
             raise ExternalError("LLM 响应正文不是字符串")
         reasoning_content = None
-        if self.response_reasoning_content_pointer is not None:
+        for reasoning_pointer in self.response_reasoning_content_pointers or ():
             try:
-                reasoning_content = _resolve_json_pointer(
-                    response, self.response_reasoning_content_pointer
-                )
+                candidate = _resolve_json_pointer(response, reasoning_pointer)
             except ExternalError:
-                reasoning_content = None
-            if reasoning_content is not None and not isinstance(
-                reasoning_content, str
-            ):
+                continue
+            if candidate is None:
+                break
+            if not isinstance(candidate, str):
                 raise ExternalError("LLM 响应思考正文不是字符串或 null")
+            reasoning_content = candidate
+            break
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
@@ -237,8 +375,9 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError(f"LLM Adapter 包含未知字段：{', '.join(sorted(unknown))}")
     if missing:
         raise ConfigError(f"LLM Adapter 缺少字段：{', '.join(sorted(missing))}")
-    if value["schema_version"] != 1:
-        raise ConfigError("LLM Adapter schema_version 必须是 1")
+    schema_version = value["schema_version"]
+    if schema_version not in {1, 2}:
+        raise ConfigError("LLM Adapter schema_version 必须是 2")
     adapter_id = value["adapter_id"]
     if (
         not isinstance(adapter_id, str)
@@ -270,31 +409,62 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
     _parse_json_pointer(pointer)
     reasoning_pointer = value.get("response_reasoning_content_pointer")
-    if reasoning_pointer is not None:
-        if (
-            not isinstance(reasoning_pointer, str)
-            or not reasoning_pointer.startswith("/")
+    if "response_reasoning_content_pointers" in value:
+        if reasoning_pointer is not None:
+            raise ConfigError(
+                "LLM Adapter response_reasoning_content_pointer 与 "
+                "response_reasoning_content_pointers 不能同时配置"
+            )
+        reasoning_pointers = _validate_reasoning_pointers(
+            value["response_reasoning_content_pointers"]
+        )
+    elif reasoning_pointer is not None:
+        if not isinstance(reasoning_pointer, str) or not reasoning_pointer.startswith(
+            "/"
         ):
             raise ConfigError(
                 "LLM Adapter response_reasoning_content_pointer "
                 "必须是 JSON Pointer"
             )
         _parse_json_pointer(reasoning_pointer)
+        reasoning_pointers = (reasoning_pointer,)
+    else:
+        reasoning_pointers = None
     models_spec = _validate_models_spec(value.get("models"))
     usage_pointers = _validate_usage_mapping(value.get("usage"))
+    streaming_spec = _validate_streaming_spec(value.get("streaming"))
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
         headers_template=dict(headers),
         body_template=deepcopy(body),
         response_content_pointer=pointer,
-        response_reasoning_content_pointer=reasoning_pointer,
+        response_reasoning_content_pointers=reasoning_pointers,
         messages_format=messages_format,
         models_spec=models_spec,
         usage_pointers=usage_pointers,
+        streaming_spec=streaming_spec,
         digest=digest,
         definition=deepcopy(value),
     )
+
+
+def _validate_reasoning_pointers(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(
+            "LLM Adapter response_reasoning_content_pointers "
+            "必须是非空 JSON Pointer 数组"
+        )
+    pointers: list[str] = []
+    for pointer in value:
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ConfigError(
+                "LLM Adapter response_reasoning_content_pointers "
+                "必须是 JSON Pointer 数组"
+            )
+        _parse_json_pointer(pointer)
+        pointers.append(pointer)
+    return tuple(pointers)
 
 
 def _validate_models_spec(value: Any) -> dict[str, Any] | None:
@@ -364,6 +534,171 @@ def _validate_usage_mapping(
         _parse_json_pointer(pointer)
         pointers.append(pointer)
     return (pointers[0], pointers[1], pointers[2])
+
+
+def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("LLM Adapter streaming 必须是 JSON 对象")
+    unknown = set(value) - _STREAMING_KEYS
+    required = {"transport", "content_events", "terminal"}
+    missing = required - set(value)
+    if unknown:
+        raise ConfigError(
+            f"LLM Adapter streaming 包含未知字段：{', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise ConfigError(
+            f"LLM Adapter streaming 缺少字段：{', '.join(sorted(missing))}"
+        )
+    if value["transport"] != "sse":
+        raise ConfigError("LLM Adapter streaming transport 必须是 sse")
+    request_body = value.get("request_body", {})
+    if not isinstance(request_body, dict):
+        raise ConfigError("LLM Adapter streaming request_body 必须是 JSON 对象")
+    _validate_body(request_body)
+    content_events = _validate_stream_events(value["content_events"], "content_events")
+    reasoning_events = _validate_stream_events(
+        value.get("reasoning_events", []), "reasoning_events", allow_empty=True
+    )
+    terminal = _validate_stream_terminal(value["terminal"])
+    errors = value.get("error_events", [])
+    if not isinstance(errors, list):
+        raise ConfigError("LLM Adapter streaming error_events 必须是数组")
+    error_events: list[dict[str, Any]] = []
+    for item in errors:
+        if not isinstance(item, dict):
+            raise ConfigError("LLM Adapter streaming error_events 条目必须是对象")
+        unknown_error = set(item) - _STREAM_ERROR_KEYS
+        if unknown_error or "when" not in item:
+            raise ConfigError("LLM Adapter streaming error_events 条目无效")
+        when = _validate_stream_condition(item["when"])
+        message_pointer = item.get("message_pointer")
+        if message_pointer is not None:
+            _validate_stream_pointer(message_pointer, "message_pointer")
+        status_pointer = item.get("status_pointer")
+        if status_pointer is not None:
+            _validate_stream_pointer(status_pointer, "status_pointer")
+        error_events.append(
+            {
+                "when": when,
+                "message_pointer": message_pointer,
+                **(
+                    {"status_pointer": status_pointer}
+                    if status_pointer is not None
+                    else {}
+                ),
+            }
+        )
+    usage = _validate_stream_usage(value.get("usage", {}))
+    return {
+        "transport": "sse",
+        "request_body": deepcopy(request_body),
+        "content_events": content_events,
+        "reasoning_events": reasoning_events,
+        "terminal": terminal,
+        "error_events": error_events,
+        "usage": usage,
+    }
+
+
+def _validate_stream_events(
+    value: Any, location: str, *, allow_empty: bool = False
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        requirement = "数组" if allow_empty else "非空数组"
+        raise ConfigError(f"LLM Adapter streaming {location} 必须是{requirement}")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or "pointer" not in item:
+            raise ConfigError(f"LLM Adapter streaming {location} 条目无效")
+        if set(item) - _STREAM_EVENT_KEYS:
+            raise ConfigError(f"LLM Adapter streaming {location} 条目包含未知字段")
+        pointer = _validate_stream_pointer(item["pointer"], "pointer")
+        when = _validate_stream_condition(item["when"]) if "when" in item else None
+        result.append({"pointer": pointer, **({"when": when} if when else {})})
+    return result
+
+
+def _validate_stream_terminal(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) not in ({"sentinel"}, {"when"}):
+        raise ConfigError("LLM Adapter streaming terminal 必须声明 sentinel 或 when")
+    if "sentinel" in value:
+        if not isinstance(value["sentinel"], str) or not value["sentinel"]:
+            raise ConfigError("LLM Adapter streaming terminal sentinel 无效")
+        return {"sentinel": value["sentinel"]}
+    return {"when": _validate_stream_condition(value["when"])}
+
+
+def _validate_stream_condition(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or "pointer" not in value:
+        raise ConfigError("LLM Adapter streaming 条件必须包含 pointer")
+    if set(value) not in ({"pointer", "equals"}, {"pointer", "exists"}):
+        raise ConfigError("LLM Adapter streaming 条件必须是 equals 或 exists")
+    pointer = _validate_stream_pointer(value["pointer"], "pointer")
+    if "equals" in value and not isinstance(value["equals"], (str, int, float, bool, type(None))):
+        raise ConfigError("LLM Adapter streaming equals 值类型无效")
+    if "exists" in value and value["exists"] is not True:
+        raise ConfigError("LLM Adapter streaming exists 必须是 true")
+    return deepcopy({**value, "pointer": pointer})
+
+
+def _validate_stream_pointer(value: Any, location: str) -> str:
+    if not isinstance(value, str) or not value.startswith("/"):
+        raise ConfigError(f"LLM Adapter streaming {location} 必须是 JSON Pointer")
+    _parse_json_pointer(value)
+    return value
+
+
+def _validate_stream_usage(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        raise ConfigError("LLM Adapter streaming usage 必须是 JSON 对象")
+    unknown = set(value) - _STREAM_USAGE_KEYS
+    if unknown:
+        raise ConfigError(
+            f"LLM Adapter streaming usage 包含未知字段：{', '.join(sorted(unknown))}"
+        )
+    result: dict[str, list[str]] = {}
+    for key in _STREAM_USAGE_KEYS:
+        pointers = value.get(key, [])
+        if not isinstance(pointers, list):
+            raise ConfigError(f"LLM Adapter streaming usage {key} 必须是数组")
+        result[key] = [_validate_stream_pointer(item, key) for item in pointers]
+    return result
+
+
+def _stream_condition_matches(event: dict[str, Any], condition: dict[str, Any]) -> bool:
+    try:
+        actual = _resolve_json_pointer(event, condition["pointer"])
+    except ExternalError:
+        return False
+    if "equals" in condition:
+        return actual == condition["equals"]
+    return True
+
+
+def _stream_deltas(
+    event: dict[str, Any], selectors: list[dict[str, Any]], *, label: str
+) -> list[str]:
+    values: list[str] = []
+    for selector in selectors:
+        when = selector.get("when")
+        if when is not None and not _stream_condition_matches(event, when):
+            continue
+        pointer = selector["pointer"]
+        try:
+            value = _resolve_json_pointer(event, pointer)
+        except ExternalError:
+            if when is None:
+                continue
+            raise ExternalError(f"LLM 流式事件缺少{label}路径：{pointer}") from None
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ExternalError(f"LLM 流式{label}增量不是字符串")
+        values.append(value)
+    return values
 
 
 def _validate_placeholders(

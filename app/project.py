@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import codecs
 import hashlib
 import os
 import re
@@ -11,10 +10,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-import chardet
-
 from .config import LLM_STAGES, load_config
-from .documents import DocumentAdapter, DocumentImport, ImportedFile
+from .documents import (
+    DocumentAdapter,
+    DocumentImport,
+    ImportedFile,
+    decode_plaintext,
+)
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
 from .user_config import APP_ROOT, effective_path, user_root
 from .sqlite_storage import (
@@ -315,52 +317,6 @@ def _normalize_imported_file(item: ImportedFile) -> ImportedFile:
     return replace(item, segment_part_ids=parts, model_sources=model_sources)
 
 
-def decode_txt(
-    data: bytes,
-    *,
-    confidence_threshold: float,
-    fallback_encoding: str,
-) -> tuple[str, str, str, float, list[str]]:
-    warnings: list[str] = []
-    detected = ""
-    confidence = 1.0
-    encoding: str
-    if data.startswith(codecs.BOM_UTF32_LE) or data.startswith(codecs.BOM_UTF32_BE):
-        detected = encoding = "utf-32"
-    elif data.startswith(codecs.BOM_UTF16_LE) or data.startswith(codecs.BOM_UTF16_BE):
-        detected = encoding = "utf-16"
-    elif data.startswith(codecs.BOM_UTF8):
-        detected = encoding = "utf-8-sig"
-    else:
-        result = chardet.detect(data)
-        detected = str(result.get("encoding") or "utf-8")
-        confidence = float(result.get("confidence") or 0.0)
-        normalized = detected.casefold().replace("_", "-")
-        if normalized in {"gb2312", "gbk"}:
-            encoding = "gb18030"
-        elif normalized == "ascii":
-            encoding = "utf-8"
-        else:
-            encoding = detected
-        if confidence < confidence_threshold:
-            warnings.append(
-                f"编码探测置信度较低：{detected} ({confidence:.2f})"
-            )
-    try:
-        text = data.decode(encoding, errors="strict")
-        used = encoding
-    except (LookupError, UnicodeDecodeError):
-        try:
-            text = data.decode(fallback_encoding, errors="strict")
-            used = fallback_encoding
-            warnings.append(f"首选编码失败，使用 fallback：{fallback_encoding}")
-        except (LookupError, UnicodeDecodeError) as exc:
-            raise ProjectError(
-                f"无法使用 {encoding} 或 {fallback_encoding} 严格解码"
-            ) from exc
-    return text, detected, used, confidence, warnings
-
-
 class TXTDocumentAdapter:
     adapter_id = "txt"
     version = "1"
@@ -368,6 +324,16 @@ class TXTDocumentAdapter:
     extensions = _TXT_EXTENSIONS
     import_options = ()
     run_options = ()
+
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, Any] | None,
+    ) -> str | None:
+        del stage, language, opaque_state
+        return None
 
     def import_sources(
         self,
@@ -385,30 +351,30 @@ class TXTDocumentAdapter:
         if not isinstance(input_config, dict):
             raise ConfigError("input 配置节无效")
         for item in discovered:
-            text, detected, used, confidence, file_warnings = decode_txt(
+            decoded = decode_plaintext(
                 item.path.read_bytes(),
                 confidence_threshold=float(
                     input_config["encoding_confidence_threshold"]
                 ),
                 fallback_encoding=str(input_config["fallback_encoding"]),
             )
-            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            normalized = decoded.text.replace("\r\n", "\n").replace("\r", "\n")
             segments = tuple(normalized.split("\n"))
             files.append(
                 ImportedFile(
                     source_path=item.path,
                     original_name=item.original_name,
                     segments=segments,
-                    encoding_detected=detected,
-                    encoding_used=used,
-                    encoding_confidence=confidence,
+                    encoding_detected=decoded.encoding_detected,
+                    encoding_used=decoded.encoding_used,
+                    encoding_confidence=decoded.encoding_confidence,
                     segment_part_ids=tuple("document" for _ in segments),
                     model_sources=None,
                 )
             )
             warnings.extend(
                 f"{item.original_name}: {warning}"
-                for warning in file_warnings
+                for warning in decoded.warnings
             )
         return DocumentImport(files=tuple(files), warnings=tuple(warnings))
 

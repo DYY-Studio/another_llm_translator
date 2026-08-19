@@ -48,6 +48,11 @@ export function RunDialog({
             <p>{translate("runDialog.subtitle", language)}</p>
           </div>
         </div>
+        <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
+          <span>{translate("runDialog.currentPreset", language)}</span>
+          <strong><code>{options.preset.id}</code></strong>
+          <small>{options.preset.model}</small>
+        </div>
         <div className="run-counts">
           <span><strong>{options.selected}</strong>{translate("runDialog.total", language)}</span>
           <span><strong>{options.completed}</strong>{translate("runDialog.done", language)}</span>

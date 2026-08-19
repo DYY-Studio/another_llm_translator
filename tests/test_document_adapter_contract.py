@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
-from app.errors import IncompleteError, UsageError
+from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope, stage_fingerprint
 from app.main import run
 from app.plugins import PLUGIN_PROTOCOL_VERSION, PluginDescriptor
@@ -49,6 +49,16 @@ class RecordDocumentAdapter:
     def __init__(self) -> None:
         self.export_languages: list[str] = []
         self.export_language_tags: list[str] = []
+
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, object] | None,
+    ) -> str | None:
+        del stage, language, opaque_state
+        return None
 
     def normalize_model_output(
         self, *, segment: dict[str, object], text: str, stage: str
@@ -271,6 +281,26 @@ def test_contract_import_by_extension_stores_file_and_segments(
     assert state["adapter_version"] == "1"
     assert state["file_id"] == "F0001"
     assert state["state"] == {"name": "demo", "line_ending": "lf"}
+
+
+def test_contract_rejects_invalid_model_prompt_requirements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = RecordDocumentAdapter()
+    adapter.model_prompt_requirements = lambda **_: []  # type: ignore[method-assign]
+    register_plugin(monkeypatch, adapter)
+    source = tmp_path / "book.rec"
+    write_record(source, "line one")
+    project, _ = init_project(
+        [str(source)],
+        name="invalid-prompt",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="record",
+    )
+    assert project is not None
+    with pytest.raises(ConfigError, match="模型 Prompt 要求"):
+        _project_context(project, stage="translation")
 
 
 def test_contract_import_by_id_applies_options_and_model_sources(

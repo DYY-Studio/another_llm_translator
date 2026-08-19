@@ -102,7 +102,7 @@ def test_lan_requires_login_and_validates_credentials(
         json={"username": "translator", "password": "p@ss"},
     )
     assert login.status_code == 200
-    cookie = login.cookies.get("minimal_llm_session")
+    cookie = login.cookies.get("another_llm_session")
     assert cookie
     assert login.headers["set-cookie"]
     assert "HttpOnly" in login.headers["set-cookie"]
@@ -121,11 +121,11 @@ def test_sessions_invalidate_on_restart(fake_keyring: FakeKeyring) -> None:
         "/api/v1/auth/login",
         json={"username": "translator", "password": "p@ss"},
     )
-    token = login.cookies.get("minimal_llm_session")
+    token = login.cookies.get("another_llm_session")
     assert first.get("/api/v1/projects").status_code == 200
 
     restarted = make_client(server_config=config, client=LAN)
-    restarted.cookies.set("minimal_llm_session", token)
+    restarted.cookies.set("another_llm_session", token)
     assert restarted.get("/api/v1/projects").status_code == 401
 
 
@@ -197,7 +197,7 @@ def test_server_config_validation_and_password_flow(
     )
     assert saved.status_code == 200
     assert saved.json()["warning"] == ""
-    assert fake_keyring.values[("minimal-llm-translator", "lan-auth")] == "s3cret"
+    assert fake_keyring.values[("another-llm-translator", "lan-auth")] == "s3cret"
 
     warning = client.put(
         "/api/v1/server/config",

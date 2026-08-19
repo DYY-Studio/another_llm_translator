@@ -5,27 +5,34 @@ import re
 import sqlite3
 import stat
 import zipfile
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
 
 from app.config import dump_config, load_config
+from app.documents import (
+    DecodedPlaintext,
+    DocumentChoiceOption,
+    DocumentExportJob,
+    ImportedFile,
+    decode_plaintext,
+    publish_document_exports,
+)
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
-from app.documents import DocumentChoiceOption, DocumentExportJob, ImportedFile
-from app.documents import publish_document_exports
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
-    get_document_adapter_for_extension,
     get_document_adapter,
+    get_document_adapter_for_extension,
     load_plugins,
     normalize_model_text,
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project
-from app.stages import export_project
+from app.stages import _project_context, export_project
 from app.sqlite_storage import (
     append_jsonl,
     read_files,
@@ -34,6 +41,83 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+def test_decode_plaintext_handles_unicode_boms(encoding: str) -> None:
+    decoded = decode_plaintext(
+        "纯文本".encode(encoding),
+        confidence_threshold=0.6,
+        fallback_encoding="ascii",
+    )
+
+    assert isinstance(decoded, DecodedPlaintext)
+    assert decoded.text == "纯文本"
+    assert decoded.encoding_detected == encoding
+    assert decoded.encoding_used == encoding
+    assert decoded.encoding_confidence == 1.0
+    assert decoded.warnings == ()
+
+
+def test_decode_plaintext_normalizes_ascii_and_gbk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "ascii", "confidence": 1.0},
+    )
+    ascii_decoded = decode_plaintext(
+        b"plain text", confidence_threshold=0.6, fallback_encoding="utf-8"
+    )
+    assert ascii_decoded.encoding_detected == "ascii"
+    assert ascii_decoded.encoding_used == "utf-8"
+
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "GBK", "confidence": 1.0},
+    )
+    gbk_decoded = decode_plaintext(
+        "你好".encode("gb18030"),
+        confidence_threshold=0.6,
+        fallback_encoding="utf-8",
+    )
+    assert gbk_decoded.text == "你好"
+    assert gbk_decoded.encoding_detected == "GBK"
+    assert gbk_decoded.encoding_used == "gb18030"
+
+
+def test_decode_plaintext_reports_low_confidence_and_is_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "utf-8", "confidence": 0.2},
+    )
+    decoded = decode_plaintext(
+        b"plain text", confidence_threshold=0.6, fallback_encoding="ascii"
+    )
+
+    assert decoded.warnings == ("编码探测置信度较低：utf-8 (0.20)",)
+    with pytest.raises(FrozenInstanceError):
+        decoded.text = "changed"  # type: ignore[misc]
+
+
+def test_decode_plaintext_falls_back_once_and_fails_strictly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.documents.chardet.detect",
+        lambda _data: {"encoding": "utf-8", "confidence": 1.0},
+    )
+    decoded = decode_plaintext(
+        b"caf\xe9", confidence_threshold=0.6, fallback_encoding="latin-1"
+    )
+    assert decoded.text == "café"
+    assert decoded.encoding_used == "latin-1"
+    assert decoded.warnings == ("首选编码失败，使用 fallback：latin-1",)
+
+    with pytest.raises(ProjectError, match="严格解码纯文本输入"):
+        decode_plaintext(
+            b"caf\xe9", confidence_threshold=0.6, fallback_encoding="ascii"
+        )
 from tests.test_foundation import make_app_root
 
 
@@ -651,12 +735,54 @@ def test_epub_markers_persist_model_source_and_strip_valid_output(
     )
     loaded = __import__("app.project", fromlist=["load_segments"]).load_segments(project)
     assert loaded[0]["_format_markers"]
+    context_config, _, _, _ = _project_context(project, stage="translation")
+    assert "<em1>" in context_config[
+        "_document_adapter_prompt_requirements"
+    ]["F0001"]["en"]
     adapter = get_document_adapter("epub")
     assert adapter.normalize_model_output(
         segment=loaded[0],
         text="A <em1><strong2>B</strong2></em1> C",
         stage="translation",
     ) == "A B C"
+
+
+def test_epub_model_prompt_requirements_follow_format_state() -> None:
+    adapter = get_document_adapter("epub")
+    assert adapter.model_prompt_requirements(
+        stage="translation",
+        language="zh-CN",
+        opaque_state={"inline_format_mode": "plain"},
+    ) is None
+    strict = adapter.model_prompt_requirements(
+        stage="translation",
+        language="zh-CN",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+    assert strict is not None
+    assert "必须保留所有已有标记" in strict
+    tiered = adapter.model_prompt_requirements(
+        stage="proofreading",
+        language="en",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "tiered",
+        },
+    )
+    assert tiered is not None
+    assert "may be omitted as a whole" in tiered
+    assert "Semantic markers are a, abbr" in tiered
+    assert adapter.model_prompt_requirements(
+        stage="terminology",
+        language="en",
+        opaque_state={
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    ) is None
 
 
 def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
@@ -1469,7 +1595,7 @@ class FakeEntryPoint:
 
 
 @pytest.mark.parametrize(
-    "incompatible_version", [5, 6, 7, PLUGIN_PROTOCOL_VERSION + 1]
+    "incompatible_version", [5, 6, 7, 9, PLUGIN_PROTOCOL_VERSION + 1]
 )
 def test_plugin_host_rejects_protocol_and_duplicate_adapter(
     monkeypatch: pytest.MonkeyPatch, incompatible_version: int

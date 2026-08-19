@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 
-LOGGER_NAME = "minimal_llm_translator"
-_HANDLER_MARKER = "_minimal_llm_translator_handler"
+LOGGER_NAME = "another_llm_translator"
+_HANDLER_MARKER = "_another_llm_translator_handler"
 _PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "diagnostics_project", default="-"
 )

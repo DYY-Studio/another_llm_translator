@@ -19,7 +19,13 @@ from .documents import (
     ImportedFile,
     parse_aozora_text,
 )
-from .errors import IncompleteError, ProjectError, StorageError, UsageError
+from .errors import (
+    ConfigError,
+    IncompleteError,
+    ProjectError,
+    StorageError,
+    UsageError,
+)
 from .sqlite_storage import read_json
 
 
@@ -114,6 +120,56 @@ class EPUBDocumentAdapter:
             ),
         ),
     )
+
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, Any] | None,
+    ) -> str | None:
+        if stage not in {"translation", "proofreading", "polishing"}:
+            return None
+        if not isinstance(opaque_state, dict):
+            raise ConfigError("EPUB Document Adapter 状态无效")
+        if opaque_state.get("inline_format_mode") != "markers":
+            return None
+        policy = opaque_state.get("inline_format_policy", "tiered")
+        if policy not in {"tiered", "strict"}:
+            raise ConfigError(f"EPUB 内联格式策略无效：{policy}")
+        if language == "zh-CN":
+            if policy == "strict":
+                return (
+                    "source 中的受控内联标记（如 <em1>）是 EPUB 格式的一部分；"
+                    "必须保留所有已有标记，保持成对、原有顺序和正确嵌套。"
+                    "不得新增标记、属性、未知 HTML 或改变标签层级。"
+                )
+            return (
+                "source 中的受控内联标记（如 <em1>）用于重建 EPUB 格式；"
+                "语义标记包括 a、abbr、bdi、bdo、cite、code、data、dfn、kbd、"
+                "q、samp、sub、sup、time、var；保留这些已有标记并保持成对、"
+                "原有顺序和正确嵌套。表现层标记 b、em、i、mark、s、small、"
+                "span、strong、u 可以整体省略。不得新增标记、属性、未知 HTML "
+                "或改变标签层级。"
+            )
+        if language == "en":
+            if policy == "strict":
+                return (
+                    "Controlled inline markers in source (such as <em1>) are "
+                    "part of the EPUB format. Keep every existing marker with "
+                    "its pairing, order, and correct nesting. Never add markers, "
+                    "attributes, unknown HTML, or change the tag hierarchy."
+                )
+            return (
+                "Controlled inline markers in source (such as <em1>) are used "
+                "to rebuild EPUB formatting. Semantic markers are a, abbr, bdi, "
+                "bdo, cite, code, data, dfn, kbd, q, samp, sub, sup, time, and "
+                "var; keep existing ones with their pairing, order, and correct "
+                "nesting. Presentation markers b, em, i, mark, s, small, span, "
+                "strong, and u may be omitted as a whole. Never add markers, "
+                "attributes, unknown HTML, or change the tag hierarchy."
+            )
+        raise ConfigError(f"不支持的 Prompt 语言：{language}")
 
     def normalize_model_output(
         self, *, segment: dict[str, Any], text: str, stage: str
@@ -578,7 +634,7 @@ def _new_xml_id(root: ElementTree.Element) -> str:
         for element in root.iter()
         if (value := element.get("id"))
     }
-    base = "minimal-translator-publication-id"
+    base = "another-translator-publication-id"
     candidate = base
     suffix = 2
     while candidate in used:

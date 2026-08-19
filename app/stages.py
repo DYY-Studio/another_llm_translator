@@ -44,14 +44,14 @@ from .execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
-    continue_run,
     contiguous_groups,
+    continue_run,
     create_run,
     dispatch_chunks,
     estimate_messages,
     estimate_single_segment_preflight,
-    find_running_runs,
     finalize_run,
+    find_running_runs,
     full_prompt,
     iter_chunk_plans,
     load_stage_history,
@@ -59,37 +59,42 @@ from .execution import (
     materialize_chunk_stream,
     parse_jsonl_document,
     render_messages,
-    segment_model_source,
     save_debug_chunks,
-    select_scope,
     scope_from_run,
+    segment_model_source,
+    select_scope,
     stage_fingerprint,
     stage_result_path,
 )
+from .i18n import SUPPORTED_LANGUAGES, resolve_language
 from .logging_utils import get_logger
+from .plugins import (
+    get_document_adapter,
+    normalize_model_text,
+)
 from .project import (
     PROMPT_LANGUAGES,
     load_segments,
     load_source_files,
     prompt_file,
 )
-from .plugins import (
-    get_document_adapter,
-    normalize_model_text,
-)
-from .translation_validation import validate_translation_text
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
+    latest_stage_states,
     read_json,
     read_jsonl,
     record_exists,
     record_header,
-    latest_stage_states,
     terminology_scan_state,
     write_json,
 )
-from .i18n import SUPPORTED_LANGUAGES, resolve_language
+from .translation_validation import (
+    TranslationTermMatch,
+    TranslationValidationContext,
+    validate_translation_text,
+)
+
 
 def _project_context(
     project: Path, *, stage: str | None = None
@@ -105,22 +110,63 @@ def _project_context(
     segments = load_segments(project)
     adapter_options: dict[str, dict[str, Any]] = {}
     adapters: dict[str, dict[str, str]] = {}
+    adapter_prompt_requirements: dict[str, dict[str, str]] = {}
     for file_record in files:
-        adapters[str(file_record["file_id"])] = {
+        file_id = str(file_record["file_id"])
+        adapters[file_id] = {
             "adapter_id": str(file_record["document_adapter_id"]),
             "version": str(file_record["document_adapter_version"]),
         }
         state_path = file_record.get("document_adapter_state")
-        if not isinstance(state_path, str):
-            continue
-        state = read_json(project, project / state_path)
-        adapter_options[str(file_record["file_id"])] = {
-            key: state[key]
-            for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
-            if key in state
-        }
+        state_record = (
+            read_json(project, project / state_path)
+            if isinstance(state_path, str)
+            else None
+        )
+        state = state_record.get("state") if isinstance(state_record, dict) else None
+        if (
+            stage is not None
+            and state_record is not None
+            and not isinstance(state, dict)
+        ):
+            raise ConfigError(
+                f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
+            )
+        if isinstance(state, dict):
+            adapter_options[file_id] = {
+                key: state[key]
+                for key in (
+                    "ruby_mode",
+                    "inline_format_mode",
+                    "inline_format_policy",
+                )
+                if key in state
+            }
+        if stage is not None:
+            adapter = get_document_adapter(
+                str(file_record["document_adapter_id"])
+            )
+            requirements: dict[str, str] = {}
+            for language in PROMPT_LANGUAGES:
+                requirement = adapter.model_prompt_requirements(
+                    stage=stage,
+                    language=language,
+                    opaque_state=state,
+                )
+                if requirement is not None and not isinstance(requirement, str):
+                    raise ConfigError(
+                        "Document Adapter 返回了无效的模型 Prompt 要求："
+                        f"{file_record['document_adapter_id']}"
+                    )
+                if requirement:
+                    requirements[language] = requirement
+            adapter_prompt_requirements[file_id] = requirements
     config["_document_adapter_options"] = adapter_options
     config["_document_adapters"] = adapters
+    if stage is not None:
+        config["_document_adapter_prompt_requirements"] = (
+            adapter_prompt_requirements
+        )
     return config, metadata, files, segments
 
 
@@ -318,6 +364,7 @@ def _split_oversized_preflight(
     config: dict[str, Any],
     prompt: str,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str] | None = None,
     fail_planning: Callable[[BaseException], None],
     make_probe: Callable[[dict[str, Any], Any], dict[str, Any]],
     split_part: Callable[[Any], list[Any]],
@@ -331,12 +378,13 @@ def _split_oversized_preflight(
     preflight_failed: list[dict[str, Any]] = []
     fast_checked = 0
     exact_checked = 0
+    prompt_builder = prompt_builder or (lambda _items: prompt)
     for segment in work:
         try:
             fast = estimate_single_segment_preflight(
                 segment,
                 config=config,
-                prompt=prompt,
+                prompt=prompt_builder([segment]),
                 payload_builder=payload_builder,
             )
             if fast:
@@ -364,7 +412,7 @@ def _split_oversized_preflight(
                 fast = estimate_single_segment_preflight(
                     probe,
                     config=config,
-                    prompt=prompt,
+                    prompt=prompt_builder([probe]),
                     payload_builder=payload_builder,
                 )
                 if fast:
@@ -430,6 +478,8 @@ async def _execute_stage_run(
     preflight_failed: list[dict[str, Any]],
     limiter: SlidingWindowLimiter | None,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    prompt_builder: Callable[[list[dict[str, Any]]], str],
+    prompt_partition_key: Callable[[dict[str, Any]], object],
     process_once: Callable[..., Awaitable[None]],
     record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
     record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
@@ -451,6 +501,8 @@ async def _execute_stage_run(
         stage=state.stage,
         prompt=state.prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_builder,
+        partition_key=prompt_partition_key,
     )
     chunks = materialize_chunk_stream(state.run_id, state.stage, planned)
     if state.config["debug"]["enabled"]:
@@ -636,6 +688,7 @@ async def _localized_request_loop(
     prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
+    prompt_partition_key: Callable[[dict[str, Any]], object],
     logger: Any,
     initial_parent_request_id: str | None = None,
     repair_candidates: dict[str, dict[str, Any]] | None = None,
@@ -729,6 +782,7 @@ async def _localized_request_loop(
             (by_id[segment_id] for segment_id in unresolved),
             all_segments=segments,
             cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
+            partition_key=prompt_partition_key,
         )
         tasks.extend(
             (
@@ -869,13 +923,61 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
 
 
 def _prompt(project: Path, stage: str, language: str | None = None) -> str:
+    factory = _prompt_factory(project, stage, language)
+    return factory(())
+
+
+def _prompt_factory(
+    project: Path, stage: str, language: str | None = None
+) -> Callable[[Iterable[str]], str]:
     language = _prompt_language(project, stage, language)
     name = prompt_file(stage, language)
     try:
         middle = (project / "prompts" / name).read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
-    return full_prompt(stage, middle, language)
+
+    def build(requirements: Iterable[str]) -> str:
+        return full_prompt(
+            stage,
+            middle,
+            language,
+            document_requirements=requirements,
+        )
+
+    return build
+
+
+def _document_prompt_requirement_helpers(
+    config: dict[str, Any],
+    language: str,
+) -> tuple[
+    Callable[[list[dict[str, Any]]], tuple[str, ...]],
+    Callable[[dict[str, Any]], object],
+]:
+    by_file = config.get("_document_adapter_prompt_requirements", {})
+    if not isinstance(by_file, dict):
+        raise ConfigError("Document Adapter Prompt 要求索引无效")
+
+    def file_requirements(item: dict[str, Any]) -> dict[str, Any]:
+        value = by_file.get(str(item["file_id"]), {})
+        if not isinstance(value, dict):
+            raise ConfigError("Document Adapter Prompt 要求记录无效")
+        return value
+
+    def requirements_for(items: list[dict[str, Any]]) -> tuple[str, ...]:
+        values: list[str] = []
+        for item in items:
+            requirement = file_requirements(item).get(language)
+            if isinstance(requirement, str) and requirement not in values:
+                values.append(requirement)
+        return tuple(values)
+
+    def partition_key(item: dict[str, Any]) -> object:
+        requirement = file_requirements(item).get(language)
+        return requirement if isinstance(requirement, str) else None
+
+    return requirements_for, partition_key
 
 
 _FORMAT_CORRECTION = {
@@ -893,13 +995,23 @@ _FORMAT_CORRECTION = {
 _VALIDATION_REPAIR = {
     "zh-CN": (
         "以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
-        "返回完整且格式合规的译文。"
+        "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
+        "是否适合当前语境；适用时采用，不适用时可以保留原候选。"
     ),
     "en": (
         "Use failed_candidate as the base, fix only the issues in "
-        "validation_matches, and return a complete, format-compliant translation."
+        "validation_matches, and return a complete, format-compliant translation. "
+        "For advisory terminology suggestions, first decide whether the "
+        "recommended translation fits this context; use it when it does, but "
+        "you may keep the candidate when it does not."
     ),
 }
+
+
+def _has_hard_validation_findings(findings: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("severity", "error")) == "error" for item in findings
+    )
 
 
 def _correction_with_errors(
@@ -1921,7 +2033,12 @@ async def run_terminology(
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, "terminology", prompt_language)
-    prompt = _prompt(project, "terminology", language)
+    prompt_factory = _prompt_factory(project, "terminology", language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     fingerprint = stage_fingerprint(
         config, "terminology", prompt_middle_digests(project, "terminology")
     )
@@ -2065,6 +2182,7 @@ async def run_terminology(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=lambda segment, part: {
             **segment,
@@ -2099,6 +2217,8 @@ async def run_terminology(
             stage="terminology",
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -2167,7 +2287,7 @@ async def run_terminology(
                 payload["format_correction"] = _correction_with_errors(
                     _FORMAT_CORRECTION[language], parse_errors, language
                 )
-            messages = render_messages(prompt, payload)
+            messages = render_messages(prompt_for_items(unresolved), payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
             try:
@@ -2440,6 +2560,8 @@ async def run_terminology(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,
@@ -2581,6 +2703,13 @@ class _PreparedTermMatcher:
         )
         return {name for name in candidates if name in normalized_source}
 
+    def _candidate_names_for_source(self, source: str) -> set[str]:
+        candidate_names: set[str] = set()
+        for view in aozora_match_views(source):
+            normalized_view = normalize_term(view, self.spec)
+            candidate_names.update(self._candidate_names(normalized_view))
+        return candidate_names
+
     @staticmethod
     def _claim_sort_key(value: dict[str, Any]) -> tuple[str, str, str, str]:
         return (
@@ -2610,10 +2739,7 @@ class _PreparedTermMatcher:
         )
 
     def match(self, source: str, limit: int) -> list[dict]:
-        candidate_names: set[str] = set()
-        for view in aozora_match_views(source):
-            normalized_view = normalize_term(view, self.spec)
-            candidate_names.update(self._candidate_names(normalized_view))
+        candidate_names = self._candidate_names_for_source(source)
         bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
         disputed: set[str] = set()
         for related_keys, related_claims in self._claim_components:
@@ -2778,6 +2904,55 @@ class _PreparedTermMatcher:
         bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
         return [term for bundle in bundles[:limit] for term in bundle[4]]
 
+    def validation_matches(
+        self, source: str, payload_terms: list[dict[str, Any]]
+    ) -> tuple[TranslationTermMatch, ...]:
+        """Return only actual, non-disputed matches represented in the payload."""
+        candidate_names = self._candidate_names_for_source(source)
+        matches: list[TranslationTermMatch] = []
+        seen: set[tuple[str, str, str]] = set()
+        for term in payload_terms:
+            preferred = term.get("preferred_translation")
+            if not isinstance(preferred, str) or not preferred.strip():
+                continue
+            term_source = str(term.get("source", ""))
+            normalized_source = normalize_term(term_source, self.spec)
+            if normalized_source and normalized_source in candidate_names:
+                key = (term_source, term_source, "source")
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(
+                        TranslationTermMatch(
+                            source=term_source,
+                            matched_text=term_source,
+                            match_type="source",
+                            preferred_translation=preferred,
+                        )
+                    )
+                continue
+            aliases = [
+                str(alias)
+                for alias in term.get("aliases", [])
+                if normalize_term(str(alias), self.spec) in candidate_names
+            ]
+            for alias in sorted(
+                aliases,
+                key=lambda value: (normalize_term(value, self.spec), value),
+            ):
+                key = (term_source, alias, "alias")
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(
+                    TranslationTermMatch(
+                        source=term_source,
+                        matched_text=alias,
+                        match_type="alias",
+                        preferred_translation=preferred,
+                    )
+                )
+        return tuple(matches)
+
 
 class _TermMatchCache:
     def __init__(
@@ -2791,18 +2966,31 @@ class _TermMatchCache:
         self.limit = limit
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
 
+    def _matches_for_item(self, item: dict[str, Any]) -> tuple[dict, ...]:
+        key = (str(item["segment_id"]), str(item["source"]))
+        matches = self._cache.get(key)
+        if matches is None:
+            matches = tuple(
+                self.matcher.match(str(item["source"]), self.limit)
+                if self.matcher is not None
+                else []
+            )
+            self._cache[key] = matches
+        return matches
+
+    def validation_matches_for_item(
+        self, item: dict[str, Any]
+    ) -> tuple[TranslationTermMatch, ...]:
+        if self.matcher is None:
+            return ()
+        return self.matcher.validation_matches(
+            str(item["source"]), list(self._matches_for_item(item))
+        )
+
     def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
         by_source: dict[str, dict] = {}
         for item in items:
-            key = (str(item["segment_id"]), str(item["source"]))
-            matches = self._cache.get(key)
-            if matches is None:
-                matches = tuple(
-                    self.matcher.match(str(item["source"]), self.limit)
-                    if self.matcher is not None
-                    else []
-                )
-                self._cache[key] = matches
+            matches = self._matches_for_item(item)
             for term in matches:
                 source = str(term["source"])
                 current = by_source.get(source)
@@ -2845,6 +3033,19 @@ def match_terms(
     if library is None:
         return []
     return _PreparedTermMatcher(library, spec).match(source, limit)
+
+
+def match_term_validation(
+    source: str,
+    library: dict[str, Any] | None,
+    limit: int,
+    spec: TermNormalization,
+) -> tuple[TranslationTermMatch, ...]:
+    if library is None:
+        return ()
+    matcher = _PreparedTermMatcher(library, spec)
+    payload_terms = matcher.match(source, limit)
+    return matcher.validation_matches(source, payload_terms)
 
 
 def _split_source_once(source: str) -> tuple[str, str]:
@@ -2975,7 +3176,12 @@ async def run_translation(
     _require_nonempty_segments(segments)
     translation_validators = config["_translation_validator_instances"]
     language = _prompt_language(project, "translation", prompt_language)
-    prompt = _prompt(project, "translation", language)
+    prompt_factory = _prompt_factory(project, "translation", language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
@@ -3093,6 +3299,7 @@ async def run_translation(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=lambda segment, part: {
             **segment,
@@ -3127,6 +3334,8 @@ async def run_translation(
             stage="translation",
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -3153,6 +3362,7 @@ async def run_translation(
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
+    advisory_repair_attempted: set[str] = set()
     failed_ids: set[str] = set()
     failure_counts: Counter[str] = Counter()
     completed_ids: set[str] = set()
@@ -3161,6 +3371,17 @@ async def run_translation(
         {str(item["segment_id"]): item for item in request_segments}
     )
     part_results: dict[str, dict[str, tuple[str, str]]] = {}
+
+    def validation_context(
+        segment_id: str, translation: str
+    ) -> TranslationValidationContext:
+        original_id = part_original.get(segment_id)
+        item = by_id[original_id or segment_id]
+        return TranslationValidationContext(
+            source=str(item["source"]),
+            translation=translation,
+            terms=term_match_cache.validation_matches_for_item(item),
+        )
 
     def report_progress() -> None:
         if on_progress is not None:
@@ -3266,7 +3487,7 @@ async def run_translation(
         original_id = part_original.get(segment_id)
         if original_id is None:
             findings = validate_translation_text(
-                str(by_id[segment_id]["source"]), text, translation_validators
+                validation_context(segment_id, text), translation_validators
             )
             if findings:
                 validation_pending[segment_id] = {
@@ -3285,7 +3506,7 @@ async def run_translation(
         combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
         combined_request_id = part_results[original_id][expected_parts[-1]][1]
         findings = validate_translation_text(
-            str(by_id[original_id]["source"]), combined, translation_validators
+            validation_context(original_id, combined), translation_validators
         )
         if findings:
             validation_pending[original_id] = {
@@ -3337,7 +3558,7 @@ async def run_translation(
         exhausted = await _localized_request_loop(
             group,
             payload_builder=payload_builder,
-            prompt=prompt,
+            prompt=prompt_for_items(group),
             config=config,
             llm=state.llm,
             stage="translation",
@@ -3348,6 +3569,7 @@ async def run_translation(
             prompt_language=language,
             by_id=by_id,
             segments=segments,
+            prompt_partition_key=prompt_partition_key,
             logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
@@ -3368,7 +3590,7 @@ async def run_translation(
             exhausted = await _localized_request_loop(
                 group,
                 payload_builder=payload_builder,
-                prompt=prompt,
+                prompt=prompt_for_items(group),
                 config=config,
                 llm=state.llm,
                 stage="translation",
@@ -3379,6 +3601,7 @@ async def run_translation(
                 prompt_language=language,
                 by_id=by_id,
                 segments=segments,
+                prompt_partition_key=prompt_partition_key,
                 logger=logger,
                 initial_parent_request_id=parent_request_id,
                 repair_candidates=subset,
@@ -3422,8 +3645,7 @@ async def run_translation(
                         "segment": part,
                         "candidate": candidate_part,
                         "findings": validate_translation_text(
-                            str(part["source"]),
-                            candidate_part,
+                            validation_context(part_id, candidate_part),
                             translation_validators,
                         ),
                         "request_id": subset[segment_id]["request_id"],
@@ -3457,26 +3679,67 @@ async def run_translation(
 
     async def before_finalize() -> None:
         max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-        for repair_attempt in range(1, max_repairs + 1):
-            if not validation_pending:
+        hard_repairs = 0
+        while validation_pending:
+            hard_pending = {
+                segment_id: item
+                for segment_id, item in validation_pending.items()
+                if _has_hard_validation_findings(item["findings"])
+            }
+            if hard_pending:
+                if hard_repairs >= max_repairs:
+                    break
+                hard_repairs += 1
+                for segment_id in hard_pending:
+                    validation_pending.pop(segment_id, None)
+                groups = contiguous_groups(
+                    (item["segment"] for item in hard_pending.values()),
+                    all_segments=segments,
+                    cross_boundary="translation"
+                    in config["chunking"]["cross_boundary_batching"],
+                    partition_key=prompt_partition_key,
+                )
+                logger.warning(
+                    "validation repair attempt=%d segments=%d chunks=%d",
+                    hard_repairs,
+                    len(hard_pending),
+                    len(groups),
+                )
+                for group in groups:
+                    subset = {
+                        str(item["segment_id"]): hard_pending[
+                            str(item["segment_id"])
+                        ]
+                        for item in group
+                    }
+                    await repair_group(group, subset)
+                continue
+
+            advisory_pending = {
+                segment_id: item
+                for segment_id, item in validation_pending.items()
+                if segment_id not in advisory_repair_attempted
+            }
+            if not advisory_pending:
                 break
-            current_pending = dict(validation_pending)
-            validation_pending.clear()
+            for segment_id in advisory_pending:
+                advisory_repair_attempted.add(segment_id)
+                validation_pending.pop(segment_id, None)
             groups = contiguous_groups(
-                (item["segment"] for item in current_pending.values()),
+                (item["segment"] for item in advisory_pending.values()),
                 all_segments=segments,
                 cross_boundary="translation"
                 in config["chunking"]["cross_boundary_batching"],
+                partition_key=prompt_partition_key,
             )
             logger.warning(
-                "validation repair attempt=%d segments=%d chunks=%d",
-                repair_attempt,
-                len(current_pending),
+                "advisory validation repair segments=%d chunks=%d",
+                len(advisory_pending),
                 len(groups),
             )
             for group in groups:
                 subset = {
-                    str(item["segment_id"]): current_pending[
+                    str(item["segment_id"]): advisory_pending[
                         str(item["segment_id"])
                     ]
                     for item in group
@@ -3511,15 +3774,17 @@ async def run_translation(
                         request_id,
                         validation_status="warning",
                         findings=validate_translation_text(
-                            str(by_id[original_id]["source"]),
-                            combined,
+                            validation_context(original_id, combined),
                             translation_validators,
                         ),
                     )
                     for part_id in expected:
                         validation_pending.pop(part_id, None)
         for segment_id, item in validation_pending.items():
-            if exhausted_mode == "warning":
+            if (
+                not _has_hard_validation_findings(item["findings"])
+                or exhausted_mode == "warning"
+            ):
                 await save_completed(
                     segment_id,
                     item["candidate"],
@@ -3552,6 +3817,8 @@ async def run_translation(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,
@@ -3727,7 +3994,12 @@ async def run_review(
     )
     _require_nonempty_segments(segments)
     language = _prompt_language(project, stage, prompt_language)
-    prompt = _prompt(project, stage, language)
+    prompt_factory = _prompt_factory(project, stage, language)
+    prompt = prompt_factory(())
+    requirements_for_items, prompt_partition_key = (
+        _document_prompt_requirement_helpers(config, language)
+    )
+    prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
     library = load_terms(project)
     terms_revision = int(library["terms_revision"]) if library else None
     fingerprint = stage_fingerprint(
@@ -3902,6 +4174,7 @@ async def run_review(
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=make_probe,
         split_part=split_part,
@@ -3930,6 +4203,8 @@ async def run_review(
             stage=stage,
             prompt=prompt,
             payload_builder=payload_builder,
+            prompt_builder=prompt_for_items,
+            partition_key=prompt_partition_key,
         )
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
@@ -4118,7 +4393,7 @@ async def run_review(
         exhausted = await _localized_request_loop(
             list(chunk.segments),
             payload_builder=payload_builder,
-            prompt=prompt,
+            prompt=prompt_for_items(list(chunk.segments)),
             config=config,
             llm=state.llm,
             stage=stage,
@@ -4129,6 +4404,7 @@ async def run_review(
             prompt_language=language,
             by_id=by_id,
             segments=segments,
+            prompt_partition_key=prompt_partition_key,
             logger=logger,
             initial_parent_request_id=initial_parent_request_id,
         )
@@ -4176,6 +4452,8 @@ async def run_review(
         preflight_failed=preflight_failed,
         limiter=limiter,
         payload_builder=payload_builder,
+        prompt_builder=prompt_for_items,
+        prompt_partition_key=prompt_partition_key,
         process_once=process_once,
         record_preflight_failure=record_preflight_failure,
         record_context_failure=record_context_failure,

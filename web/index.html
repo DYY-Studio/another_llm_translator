@@ -7,10 +7,11 @@
     <title>译工坊</title>
     <script>
       (() => {
-        const key = "minimal-llm-translator.theme.v1";
+        const key = "another-llm-translator.theme.v1";
+        const legacyKey = "minimal-llm-translator.theme.v1";
         let mode = "system";
         try {
-          const stored = localStorage.getItem(key);
+          const stored = localStorage.getItem(key) ?? localStorage.getItem(legacyKey);
           if (stored === "light" || stored === "dark" || stored === "system") mode = stored;
         } catch {}
         const theme = mode === "system"

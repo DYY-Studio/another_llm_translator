@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
-
 _PRESET_ID_RE = re.compile(r"[a-z][a-z0-9-]*")
 _PRESET_KEYS = frozenset(
     {
@@ -32,6 +31,8 @@ _PRESET_KEYS = frozenset(
         "max_parallel",
         "request_timeout_seconds",
         "extra_body",
+        "stream",
+        "stream_endpoint",
     }
 )
 
@@ -60,11 +61,17 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError(f"LLM Preset 不是合法 JSON：{path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
-    if value.get("schema_version") != 2:
+    schema_version = value.get("schema_version")
+    if schema_version not in {2, 3}:
         raise ConfigError(
-            "LLM Preset schema_version 必须是 2；v1 的 api_key_env 字段已移除，"
+            "LLM Preset schema_version 必须是 3；v1 的 api_key_env 字段已移除，"
             "请改用显式 credential 引用"
         )
+    if schema_version == 2:
+        value = deepcopy(value)
+        value["schema_version"] = 3
+        value.setdefault("stream", False)
+        value.setdefault("stream_endpoint", "")
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
     if unknown:
@@ -75,6 +82,13 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError(
             f"LLM Preset 缺少字段：{', '.join(sorted(missing))}"
         )
+    if not isinstance(value["stream"], bool):
+        raise ConfigError("LLM Preset stream 必须是布尔值")
+    stream_endpoint = value["stream_endpoint"]
+    if not isinstance(stream_endpoint, str):
+        raise ConfigError("LLM Preset stream_endpoint 必须是字符串")
+    if stream_endpoint and not stream_endpoint.strip():
+        raise ConfigError("LLM Preset stream_endpoint 不能为空白")
     preset_id = value["preset_id"]
     if not isinstance(preset_id, str) or not _PRESET_ID_RE.fullmatch(preset_id):
         raise ConfigError("LLM Preset preset_id 格式无效")
@@ -100,6 +114,15 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
     if "${" in value["endpoint"].replace("${model}", ""):
         raise ConfigError("LLM Preset endpoint 只允许 ${model} 占位符")
+    if "${" in stream_endpoint.replace("${model}", ""):
+        raise ConfigError("LLM Preset stream_endpoint 只允许 ${model} 占位符")
+    if (
+        "://" in value["endpoint"]
+        or "://" in stream_endpoint
+        or value["endpoint"].startswith("//")
+        or stream_endpoint.startswith("//")
+    ):
+        raise ConfigError("LLM Preset endpoint 必须是相对路径")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
     parsed_base = urlsplit(value["base_url"])

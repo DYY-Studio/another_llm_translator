@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "another-llm-translator-srt"
+version = "0.1.0"
+description = "SRT Document Adapter for Another LLM Translator"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "another-llm-translator>=0.3,<0.4",
+]
+
+[project.entry-points."another_llm_translator.plugins"]
+srt = "another_llm_translator_srt.plugin:descriptor"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -8,9 +8,9 @@
 
 运行方式：单机、本地 CLI/Web、异步并发
 
-存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB
+存储方式：项目文件夹、SQLite、JSON、TOML、TXT、EPUB，以及可选的外部 SRT 插件
 
-LLM 接口：声明式非流式 JSON POST Adapter
+LLM 接口：声明式 JSON POST Adapter，支持 Preset 显式启用的 SSE 流式传输
 
 ---
 
@@ -21,7 +21,7 @@ LLM 接口：声明式非流式 JSON POST Adapter
 本项目只验证下面这条工程化翻译链路是否可行：
 
 ```text
-TXT/EPUB 导入
+TXT/EPUB 导入（安装 SRT 插件时也支持 SRT）
 → Segment 化
 → 术语提取
 → 翻译
@@ -34,7 +34,7 @@ TXT/EPUB 导入
 
 MVP 需要回答：
 
-1. TXT 与 EPUB 能否稳定导入、处理并按原格式导出。
+1. TXT、EPUB 与已安装外部 Adapter 支持的格式能否稳定导入、处理并按原格式导出。
 2. 文档的可翻译单元能否稳定映射为 Segment，TXT 空行是否保持可见结构。
 3. 长文本能否在模型 Token 限制内动态分块。
 4. 术语能否从项目文本提取、合并并注入相关翻译请求。
@@ -65,6 +65,9 @@ Segment 是 Document Adapter 返回的有序可翻译单元：TXT 中对应逻�
 Ruby 是同一文本流中的内联语义成员，与前后普通文本共同组成一个语义单元；只有
 没有相邻文本的独立 Ruby 才保持旧的独立定位形状。术语扫描、翻译、校对和润色的完成结果、
 失败记录和恢复判断全部绑定 `segment_id`。
+
+外部 SRT Adapter 将每个字幕 cue 映射为一个 Segment，整个 SRT File 使用
+`part_id = "document"`；序号和时间行由 Adapter 状态保存，不成为 Segment 正文。
 
 非空 Segment 的连续前导 Unicode 空白以源文为准。模型仍接收完整文本，但翻译、
 校对建议、润色建议、apply 和导出在本地移除模型生成的前导空白，并恢复源
@@ -164,7 +167,7 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 
 - CLI 和配置加载。
 - 项目初始化及模板同步。
-- TXT/EPUB Document Adapter 与 Segment 化。
+- TXT/EPUB Document Adapter、外部 Document Adapter 与 Segment 化。
 - SQLite 项目持久化与项目外 JSON 交换文件。
 - Prompt 渲染、Token 估算和 Chunk 生成。
 - 声明式 LLM Adapter、HTTP 调用、限流和重试。
@@ -192,11 +195,16 @@ Run 的配置和 Prompt 快照放在对应 Run 目录。启用调试模式时，
 
 内置只读资源位于应用目录；用户内容（全局配置修改、自定义 Prompt/Adapter/
 Preset、默认项目和诊断日志）写入平台用户数据根目录，可用
-`MINIMAL_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
-`~/Library/Application Support/minimal-llm-translator`，POSIX 默认
-`~/.local/share/minimal-llm-translator`，Windows 默认
-`%LOCALAPPDATA%\minimal-llm-translator`）。用户根存在同名文件时优先读取：
+`ANOTHER_LLM_USER_ROOT` 环境变量覆盖（macOS 默认
+`~/Library/Application Support/another-llm-translator`，POSIX 默认
+`~/.local/share/another-llm-translator`，Windows 默认
+`%LOCALAPPDATA%\another-llm-translator`）。用户根存在同名文件时优先读取：
 config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
+
+发布改名时，若新的默认用户根不存在，启动阶段将旧开发名称对应的默认用户根原子迁移到
+新路径；若新路径已存在，则跳过且不覆盖、不合并旧路径。显式设置
+`ANOTHER_LLM_USER_ROOT` 时不执行默认路径扫描。旧钥匙串条目只在新服务缺少对应账户时复制，
+旧服务不删除；旧命令、旧环境变量和旧插件 entry point 不再提供。
 
 ```text
 config/config.toml
@@ -216,7 +224,8 @@ Web 编辑全局资源只写入用户根；内置资源删除明确失败，编�
 
 ## 2.3 初始化与文件发现
 
-TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。项目也可先创建
+TXT 支持目录或显式文件；EPUB Adapter 每次导入一个显式文件。已安装的外部 Adapter
+也参与扩展名发现；SRT Adapter 支持 `.srt` 文件和目录。项目也可先创建
 不预设格式的空项目：
 
 ```bash
@@ -224,6 +233,7 @@ python -m app.main init INPUT... --name PROJECT_NAME
 python -m app.main init INPUT_DIR --recursive --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --name PROJECT_NAME
 python -m app.main init BOOK.epub --document-adapter epub --adapter-option epub.ruby_mode=aozora --name PROJECT_NAME
+python -m app.main init SUBTITLES.srt --document-adapter srt --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME
 python -m app.main init --empty --name PROJECT_NAME --parent-dir PARENT
 python -m app.main files-add PROJECT INPUT...
@@ -312,6 +322,14 @@ EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露
 关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留
 原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新
 导入；运行选项随 Adapter 状态和阶段指纹保存。
+
+SRT 外部 Adapter 只接受核心字幕结构：唯一正整数序号、严格的
+`HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行和非空正文；序号不要求连续，正文可跨多行。
+每个 cue 是一个 Segment，序号和时间行写入 `opaque_state`。单语导出替换 cue 正文，
+双语导出在同一 cue 中追加换行和译文；cue 之间使用空行并保留文件末尾换行。输入
+换行统一为 LF，BOM、原换行风格和输入字节不进入项目契约。HTML/ASS 标记作为普通
+正文交给模型，插件不解析或保证保留；译文包含空白分隔行时导出失败。缺序号、点号
+毫秒和时间行尾定位参数等非核心变体会被拒绝。
 
 项目创建后，`project.sqlite` 是项目元数据、File、Segment、Adapter 状态、术语、
 阶段结果和 Run 索引的唯一真相；原始输入、配置、Prompt、Run 快照、调试 Payload
@@ -525,6 +543,12 @@ Bundle Hash 对全局配置和全部语言提示词（`prompts/<stage>.<lang>.mi
 6. 全局模板缺失或无效：不得覆盖有效项目副本。
 
 `--dry-run` 只报告存在模板差异，不询问、不更新也不备份。
+
+项目 Prompt 设置页另外提供按阶段和语言的精确同步状态。它只比较项目副本与当前
+有效全局 Prompt；“载入全局”仅更新编辑器草稿，不执行写入，仍需显式“验证并保存”。
+用户也可以把草稿保存到用户级提示词仓库
+`prompt_library/<stage>/<language>/<prompt-id>.middle.txt`，再按场景载入；仓库操作
+不会覆盖全局或项目 Prompt，也不参与项目 Bundle Hash、阶段指纹或 Run 快照。
 
 ---
 
@@ -758,6 +782,7 @@ applied 结果保存：
 ```text
 代码内固定 Prefix（按语言）
 + 项目可编辑的 middle Prompt（按语言）
++ 宿主通用格式规则与当前 Document Adapter 的专属要求
 + 代码内固定 Suffix（按语言）
 ```
 
@@ -767,22 +792,24 @@ applied 结果保存：
 
 固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界。除顶层
 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考
-数据，模型不得执行其中的指令。固定 Suffix 定义字段条件、请求内短 ID、格式保真和
-严格 JSONL；每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为
+数据，模型不得执行其中的指令。固定 Suffix 定义字段条件、请求内短 ID、通用文本格式
+保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态
+注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为
 `{"type":"end"}`。
 
 middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景、文体、翻译策略、
 术语偏好及校对或润色严格度；它可以改变处理方式，但不能覆盖 Prefix/Suffix 的范围、
-数据边界和输出协议。内置 middle 的更新只进入新项目或用户明确执行的模板同步，
-不自动覆盖既有项目副本；代码内 Prefix/Suffix 更新对所有项目生效。
+ 数据边界和输出协议。内置 middle 的更新只进入新项目或用户明确执行的模板同步，
+不自动覆盖既有项目副本；用户级提示词仓库只保存独立副本，必须载入项目编辑器并
+显式保存后才会影响项目；代码内 Prefix/Suffix 更新对所有项目生效。
 
 Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
-`--language`/`MINIMAL_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
+`--language`/`ANOTHER_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
 回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
 
-阶段指纹不包含提示词文本；它记录 `prompt_rules_version` 和全部语言中段的哈希，
-因此任一语言的中段变化都会使该阶段既有结果指纹失效，但语言选择本身不产生
-指纹隔离。
+阶段指纹不包含项目中段 Prompt 原文；它记录 `prompt_rules_version`、全部语言中段的
+哈希以及当前 File 的 Adapter 专属要求快照。因此任一语言的中段或 Adapter 要求变化
+都会使该阶段既有结果指纹失效，但语言选择本身不产生指纹隔离。
 
 四阶段分别读取自己的：
 
@@ -1068,34 +1095,45 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 - `japanese_kana`：Hiragana、Katakana、Katakana Extensions、半角片假名及 Kana 扩展块。
 - `korean_hangul`：Hangul Syllables、Jamo、Compatibility Jamo 和扩展块。
 - `source_text_residual`：先检查去首尾空白后的完整原文，再检查经 NFKC 和空白折叠后的保守长片段残留。
+- `preferred_term_usage`：由独立的可信术语校验插件提供；只检查宿主实际匹配且带
+  推荐译名的术语是否至少在候选译文中出现一次。该校验是 advisory，默认关闭。
 
 长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母；纯数字和标点不触发。该校验器默认关闭。
 
 校验发生在结构解析成功之后、写 completed 之前。
 
+校验器上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中；
+不向插件暴露项目路径、术语库对象或 Run。术语命中包含术语主名称、实际命中形式、
+主名称/alias 类型和推荐译名。普通翻译请求中的 `terms` 形状和内容不因校验器改变。
+
 命中时记录：
 
-- 校验器名称。
-- 命中字符和 Unicode code point。
-- 字符位置。
-- 候选文本。
+- 校验器名称和 `error`/`advisory` 强度。
+- 硬校验的命中字符、Unicode code point、字符位置和候选文本（若有）。
+- advisory 术语建议的术语主名称、实际命中形式和推荐译名。
 
 普通模式只在最终 failed 或 warning 结果中保存必要校验信息；调试模式保存每轮候选和请求血缘。
 
 修复流程：
 
-1. 汇总当前轮校验失败 Segment。
+1. 汇总当前轮校验失败或建议 Segment。
 2. 按当前阶段的 Chunk 边界配置分组；默认限制在同一 `file_id + part_id`，启用
    跨边界合并时遵守不同 File 直连、同 File 跨 part 中间区间全为空的规则。
 3. 正常非空行或筛选边界中断分组。
 4. 修复请求只包含失败 Segment、源文、失败候选、命中字符、相关术语和允许的上文。
 5. 超过 Token 限制时继续拆分。
-6. 每轮修复后重新执行全部已启用校验器。
+6. 每轮修复后重新执行全部已启用校验器。硬校验使用配置的最大修复次数；每个
+   Segment 的 advisory 术语建议最多只发起一轮修复，模型可以因语境不适用而保留
+   原候选。
 
 耗尽后：
 
 - `fail`：保存 failed，候选不成为当前翻译。
 - `warning`：保存 completed 和 `validation_status = "warning"`，允许进入下游，但 inspect 和导出必须报告。
+
+术语 advisory 即使 `exhausted_mode = "fail"` 也不会单独把 Segment 标记为 failed；
+一次建议修复仍未采用时保存 completed 和 warning。若同一候选同时存在硬校验问题，
+硬校验仍按原有 fail/warning 规则处理。
 
 ## 4.4 校对
 
@@ -1266,10 +1304,15 @@ Content-Type: application/json
 Header、完整 JSON body 和成功响应正文路径由选中的 JSON LLM Adapter 定义。
 内置 `openai-compatible` 使用 Bearer API Key、Chat Completions body、正文
 路径 `/choices/0/message/content` 和可选推理路径
-`/choices/0/message/reasoning_content`。另内置 `anthropic`、`google-gemini` 与
+`/choices/0/message/reasoning_content`、`/choices/0/message/reasoning`；启用 SSE
+时同时接受对应的 `/choices/0/delta/reasoning_content` 和
+`/choices/0/delta/reasoning`。另内置 `anthropic`、`google-gemini` 与
 `openai-responses` 定义：分别使用 `messages_format` 消息形状转换、Preset
 `endpoint` 的 `${model}` 占位符与 `/output/-1/content/-1/text` 响应路径。
-声明式 Adapter 只支持非流式 JSON POST。
+声明式 Adapter 默认使用非流式 JSON POST。schema 2 Adapter 可声明 SSE
+`streaming` 规则；只有 Preset 的 `stream = true` 时才使用流式 Endpoint 和流式
+请求 body。普通 Preset 迁移后保持 `stream = false`，四个内置 Adapter 的非流式
+body 与此前一致。
 
 Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 在用户
 手动触发时以非流式 GET 检测连通性并读取模型列表，用于填写 Preset；不自动
@@ -1295,7 +1338,9 @@ Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset �
 
 整个命令共享一个 `httpx.AsyncClient`：
 
-- connect、read、write 和 pool timeout 都使用 `request_timeout_seconds`。
+- 非流式请求的 connect、read、write 和 pool timeout 都使用
+  `request_timeout_seconds`；流式请求把它作为连接及连续读取的空闲超时，不限制
+  整个生成总时长。
 - 连接池上限从 `max_parallel` 派生。
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
@@ -1313,6 +1358,20 @@ HTTP 重试：
 - 所有 HTTP 错误共享 `http_max_attempts` 总上限。
 - 退避使用有上限的指数退避和 jitter。
 
+启用流式时，宿主要求响应为 UTF-8 SSE，并严格处理 CRLF/LF、注释、多行 `data:`
+和任意 HTTP chunk 边界。OpenAI-compatible 使用 `[DONE]`，OpenAI Responses
+使用 `response.completed`，Anthropic 使用 `message_stop`，Gemini 使用最终
+`finishReason`；每条流必须命中对应终止事件。宿主在后台聚合正文、reasoning 和
+声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件前超时、
+读取超时、EOF、流内服务错误或 HTTP 可重试错误会清空本次聚合并沿
+`http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生重复计费。
+Provider 可能在外层 HTTP 200 的 SSE 中报告最终错误（例如
+`finish_reason=error`、上游状态 504）；这类事件按流内错误处理，不会进入格式
+修复或保存半成品。诊断和 Debug 同时保留实际 `http_status` 与可选的
+`provider_error_status`，避免把两层状态混为一谈。
+SSE 协议损坏、UTF-8/JSON 错误、匹配事件字段缺失或类型错误属于配置/协议错误，
+立即失败。用户取消立即关闭连接且不重试。
+
 格式修正：
 
 - Adapter 提取出的 content 开头允许存在一个完整的 Tag 思考块：
@@ -1322,10 +1381,12 @@ HTTP 重试：
   下述 JSONL 规则解析。
 - 只剥离开头一个完整的已知思考块。未闭合、重复、嵌套或不在开头的标签不得
   猜测或全文删除，按普通格式错误处理；JSON 字符串字段内的同名文本保持原样。
-- Adapter 还可配置 `response_reasoning_content_pointer` 提取字符串或 null 的
-  结构化思考字段；路径缺失时同样规范化为 null，字段存在但类型错误时快速
-  失败。规范化响应包含 `content` 和可空的 `reasoning_content`；结构化字段
-  与内嵌块同时非空时快速失败，不猜测合并顺序。
+- Adapter 还可配置 `response_reasoning_content_pointer`，或用有序的
+  `response_reasoning_content_pointers` 候选数组，提取字符串或 null 的结构化
+  思考字段。候选路径缺失时继续尝试，首个存在的 null 规范化为 null，字段存在
+  但类型错误时快速失败，不猜测或拼接多个字段。规范化响应包含 `content` 和
+  可空的 `reasoning_content`；结构化字段与内嵌块同时非空时快速失败，不猜测
+  合并顺序。
 - 思考正文只存在于当前请求生命周期，不属于 Prompt、Chunk、Segment 结果或
   进度。普通模式不持久化；debug 模式仍只在原始响应 Payload 中保存，不新增
   独立思考记录。
@@ -1379,16 +1440,18 @@ CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写
 本地 Web 将相同安全摘要写入应用级 `logs/app.log`，按大小轮转，不因项目切换
 而清空；同时在有界内存中保留当前进程的结构化日志供仪表盘读取。仪表盘还为
 当前 Run 保留最近 50 个逻辑 LLM 请求；HTTP 重试只追加到同一请求。每项保存
-规范化 messages、解析后的 Content 和 Reasoning、模型、状态、HTTP 尝试次数、
-状态码与延迟。单条 message 和 Content 最多 100,000 字符，Reasoning 最多
+规范化 messages、完整成功响应的 Content 和 Reasoning、模型、状态、HTTP 尝试次数、
+传输方式、流式事件数、接收字节数、首事件延迟、状态码和延迟。单条 message 和
+Content 最多 100,000 字符，Reasoning 最多
 20,000 字符，超限时在详情中明确标记截断。
 
 仪表盘全局延迟指标按当前 Run 内已完成的全部 HTTP 尝试计算，包括成功、429、
 其他 HTTP 错误和网络错误；平均延迟为算术平均，P95 使用确定性的 nearest-rank
 规则。请求列表中的 `latest_latency_ms` 仍表示该逻辑请求最后一次尝试的延迟。
 
-这些请求详情可能包含 Prompt 和源文，只能通过当前进程的详情接口按请求 ID
-读取；诊断摘要轮询不返回正文。新 Run 开始时清空，应用重启后丢失，不经过
+这些请求详情可能包含 Prompt 和源文；流式请求在完成前不会暴露增量正文，只能通过
+当前进程的详情接口按请求 ID 读取；诊断摘要轮询不返回正文。新 Run 开始时清空，
+应用重启后丢失，不经过
 普通 logger，也不会额外写入轮转日志、Run 文件或项目数据。内存详情不采集
 Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失败和
 终止错误只记录安全错误类别。显式启用 debug 时既有调试 Payload 仍按下述规则
@@ -1399,6 +1462,7 @@ Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失�
 - Chunk Manifest。
 - 逐 Attempt 结构化日志。
 - 完整请求、响应和错误 Payload。
+- 未校验的流式增量正文或原始 SSE 事件。
 - 中间校验候选。
 
 `debug.enabled = true` 时额外保存：
@@ -1406,6 +1470,7 @@ Header、API Key、Adapter Wire Body 或 Provider 原始 REST JSON；解析失�
 - 当前 Run 的 `chunks.jsonl`。
 - 每次 Attempt 的结构化日志。
 - 每次实际请求、响应或错误 Payload。
+- 流式 Attempt 收集到的原始 SSE `data` 事件；失败 Attempt 同时保存错误元数据。
 - 格式修正、上下文拆分和校验修复的父请求关系。
 - 每轮翻译校验候选。
 
@@ -1597,13 +1662,17 @@ XHTML 文本单元及其定位槽位。普通复合 Segment 的单语译文写�
 槽，单语移除该 Segment 的全部 Ruby，双语在完整源句末尾追加译文。只有旧的
 独立 Ruby locator 继续按其专用定位规则导出。
 
+SRT Adapter 按 cue 序号和时间行重建 `.srt`，单语替换正文，双语在正文末尾追加
+换行和译文；所有 cue 独立保留在同一 File 中。输出使用项目的
+`output_encoding` 严格编码，无法表示结果字符时失败。
+
 ```bash
 python -m app.main export PROJECT --stage translated --format original
 python -m app.main export PROJECT --stage translated --format txt
 python -m app.main export PROJECT --stage translated --file F0001 --file F0003
 ```
 
-除各 File 来源格式和 TXT 外，不提供任意格式转换。
+除各 File 来源格式（包括已安装的外部 Adapter）和 TXT 外，不提供任意格式转换。
 文件范围同时适用于原格式和 TXT；只校验所选 File 的阶段结果。宿主保持
 `file_order`，不提供按 Segment 导出或跨 File 合并；跨 File 合并只属于启用配置的
 LLM Chunk 请求规划。
@@ -1662,7 +1731,9 @@ Web 只在当前浏览器的版本化 localStorage 保存最近外部项目路�
 明确提示并从最近列表移除，默认 `projects/` 项目继续直接列出。导出页用
 Ctrl/Cmd/Shift 经典多选限定文件范围，未选择时导出全部。项目配置使用覆盖
 全部现有字段的分组表单；
-项目 Prompt 与 JSON LLM Adapter 在设置页分别提供高级编辑器。Web 还提供全局配置、
+项目 Prompt 与 JSON LLM Adapter 在设置页分别提供高级编辑器。项目 Prompt 编辑器展示
+当前阶段/语言与全局 Prompt 的同步状态，支持仅载入全局草稿，并提供不覆盖全局的用户级
+提示词仓库；载入仓库条目后仍需显式保存项目 Prompt。Web 还提供全局配置、
 全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确
 同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工
 审校、apply 和 export。
@@ -1716,9 +1787,12 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 ### 凭据与 Preset 引用
 
-LLM Preset schema v2 使用显式单凭据引用 `credential: {kind, name}`：
+LLM Preset schema v3 使用显式单凭据引用 `credential: {kind, name}`，并以
+`stream` 与 `stream_endpoint` 控制可选 SSE：
 `environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
-不隐式 fallback。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
+不隐式 fallback。schema 2 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
+迁移并默认关闭流式；Run 内历史 v2 快照只按非流式读取，不改写审计文件。v1 的
+`api_key_env` 字段已移除，加载时明确拒绝并提示改用
 `credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
 Run 快照或阶段指纹。
 
@@ -1752,8 +1826,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 对 `/api/v1/server/status` 做健康探测，通过后加载 `http://127.0.0.1:8765`，
 退出时关闭 sidecar。原生文件与文件夹选择器经 `window.__TAURI__` 桥接为
 `select_file` / `select_folder`，把服务端路径随创建/追加请求提交；普通浏览器
-和 LAN 客户端继续使用上传与服务端目录浏览。`MINIMAL_LLM_PYTHON`、
-`MINIMAL_LLM_REPO_ROOT`、`MINIMAL_LLM_WEB_PORT` 仅开发模式生效。
+和 LAN 客户端继续使用上传与服务端目录浏览。`ANOTHER_LLM_PYTHON`、
+`ANOTHER_LLM_REPO_ROOT`、`ANOTHER_LLM_WEB_PORT` 仅开发模式生效。
 
 ---
 
@@ -1880,6 +1954,8 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
   Adapter 状态。
 - EPUB ZIP 路径、符号链接、压缩炸弹、非法版本化 DOCTYPE 和 XML 实体输入明确
   拒绝；普通内联文本合并、混合 Ruby 复合定位和旧独立 Ruby locator 均保持可导出。
+- 独立 SRT 插件按 cue 建立 Segment，严格校验序号和时间行，纯译文与双语导出均
+  保留 cue 元数据；HTML/ASS 标记不由插件解析，破坏 cue 边界的译文被拒绝。
 - Document Adapter 缺失、版本不兼容、状态损坏或运行失败时不发布部分输出，
   也不静默回退。
 - Python 插件发现拒绝重复 ID 和未知协议版本。
@@ -1904,7 +1980,7 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 # 8. 最终最小架构
 
 ```text
-TXT / EPUB
+TXT / EPUB / 外部 Adapter（示例：SRT）
    │
    ▼
 稳定 File / Segment
@@ -1936,5 +2012,5 @@ Chunk 只是当前请求包装。
 Run 记录一次执行。
 设置变化不使旧结果失效；复用或重做由用户明确决定。
 普通模式保存最小结果，调试模式增加请求审计。
-TXT 保持逻辑行；EPUB 保持原包资源和格式定位。
+TXT 保持逻辑行；EPUB 保持原包资源和格式定位；SRT 保持 cue 序号、时间行和正文边界。
 ```

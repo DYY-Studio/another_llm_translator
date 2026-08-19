@@ -6,13 +6,15 @@ import json
 import sys
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 
-from .execution import Scope, choose_running_run
+from .credentials import migrate_legacy_credentials
 from .errors import AppError, UsageError
+from .execution import Scope, choose_running_run
 from .i18n import cli_language
-from .logging_utils import attach_project_log, configure_cli_logging, get_logger
+from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
-from .sqlite_storage import compact_project_database
+from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .project import (
     add_project_files,
     init_project,
@@ -21,9 +23,10 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
+from .sqlite_storage import compact_project_database
 from .stages import (
-    export_terms,
     export_project,
+    export_terms,
     import_terms,
     inspect_full,
     publish_partial_terms,
@@ -36,7 +39,7 @@ from .stages import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="minimal-llm-translator")
+    parser = argparse.ArgumentParser(prog="another-llm-translator")
     parser.add_argument(
         "--language",
         choices=("system", "zh-CN", "en"),
@@ -78,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     files_add.add_argument("--recursive", action="store_true")
     files_add.add_argument(
         "--document-adapter",
-        help="显式指定 Adapter；省略时按内置 TXT/EPUB 格式识别",
+        help="显式指定 Adapter；省略时按已安装 Adapter 的扩展名识别",
     )
     files_add.add_argument(
         "--adapter-option",
@@ -217,6 +220,8 @@ def emit_summary(summary: dict[str, Any]) -> None:
 
 
 def run(argv: list[str] | None = None) -> int:
+    migrate_legacy_credentials()
+    migrate_llm_resources()
     configure_cli_logging()
     logger = get_logger()
     parser = build_parser()

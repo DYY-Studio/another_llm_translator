@@ -519,6 +519,8 @@ def _resolve_llm_config(
                 "context_window_tokens",
                 "max_output_tokens",
                 "context_safety_margin_tokens",
+                "stream",
+                "stream_endpoint",
             )
         }
     )
@@ -547,13 +549,16 @@ def _resolve_llm_config(
         )
     config["_llm_adapter"] = adapter
     config["_llm_adapter_hash"] = adapter.digest
+    stream = bool(config["llm"].get("stream", False))
+    if stream and not adapter.streaming_supported:
+        raise ConfigError("已启用流式请求，但 LLM Adapter 未声明 streaming 规则")
     adapter.build_request(
         api_key="***",
         model=str(config["llm"]["model"]),
         messages=[],
         temperature=0,
         max_output_tokens=int(config["llm"]["max_output_tokens"]),
-        stream=False,
+        stream=stream,
         extra_body=config["_llm_extra_body"],
     )
     return config

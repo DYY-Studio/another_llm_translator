@@ -36,6 +36,7 @@ from .config import (
 from .credentials import (
     credential_summaries,
     delete_credential,
+    migrate_legacy_credentials,
     read_credential,
     read_lan_password,
     resolve_api_key,
@@ -52,6 +53,7 @@ from .errors import (
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
+from .llm_migration import migrate_llm_resources
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .logging_utils import get_logger
@@ -77,6 +79,12 @@ from .project import (
     resolve_project_parent,
     sync_global_templates,
 )
+from .prompt_library import (
+    delete_prompt_library,
+    list_prompt_library,
+    read_prompt_library,
+    save_prompt_library,
+)
 from .server_config import load_server_config, save_server_config
 from .sqlite_storage import (
     atomic_write_json,
@@ -101,7 +109,7 @@ WEB_DIST = (
     if Path(__file__).with_name("web_dist").is_dir()
     else Path(sys.prefix) / "app" / "web_dist"
 )
-SESSION_COOKIE = "minimal_llm_session"
+SESSION_COOKIE = "another_llm_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 3600
 _WINDOWS_DRIVE_TYPES = {
     0: "unknown",
@@ -232,11 +240,13 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    migrate_legacy_credentials()
+    migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
-    app = FastAPI(title="Minimal LLM Translator", version="1")
+    app = FastAPI(title="Another LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
     app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
@@ -574,8 +584,11 @@ def create_app(
             "default_projects_path": str(projects_root.resolve()),
         }
 
-    @app.get("/api/v1/directories")
-    async def list_directories(path: str = "") -> dict[str, Any]:
+    @app.post("/api/v1/directories")
+    async def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
+        path = payload.get("path", "")
+        if not isinstance(path, str):
+            raise UsageError("目录路径必须是字符串")
         raw_path = path.strip()
         if raw_path and "\0" in raw_path:
             raise UsageError("目录路径包含无效字符")
@@ -587,8 +600,11 @@ def create_app(
             raise UsageError("目录路径无效") from exc
         if raw_path and not candidate.is_absolute():
             raise UsageError("目录路径必须是绝对路径")
-        if candidate.is_symlink():
-            raise UsageError("目录路径不能是符号链接")
+        try:
+            if candidate.is_symlink():
+                raise UsageError("目录路径不能是符号链接")
+        except OSError as exc:
+            raise UsageError("目录路径无效") from exc
         try:
             current = candidate.resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -677,7 +693,7 @@ def create_app(
                 messages=[],
                 temperature=0,
                 max_output_tokens=int(preset.definition["max_output_tokens"]),
-                stream=False,
+                stream=bool(preset.definition["stream"]),
                 extra_body=preset.definition["extra_body"],
             )
             return preset
@@ -725,6 +741,7 @@ def create_app(
         language: str,
         file_for: Callable[[str], Path],
         available: list[str],
+        global_file_for: Callable[[str], Path] | None = None,
     ) -> dict[str, Any]:
         resolved = (
             language
@@ -733,12 +750,27 @@ def create_app(
         )
         path = file_for(resolved)
         content = path.read_text(encoding="utf-8")
-        return {
+        result: dict[str, Any] = {
             "content": content,
             "language": resolved,
             "assembled": full_prompt(stage, content, resolved),
             "languages": available,
         }
+        if global_file_for is not None:
+            global_path = global_file_for(resolved)
+            if global_path.is_file():
+                result["global_sync"] = {
+                    "available": True,
+                    "same": path.read_bytes() == global_path.read_bytes(),
+                    "language": resolved,
+                }
+            else:
+                result["global_sync"] = {
+                    "available": False,
+                    "same": False,
+                    "language": resolved,
+                }
+        return result
 
     def global_prompt_file(stage: str, language: str) -> Path:
         return effective_path(
@@ -772,6 +804,47 @@ def create_app(
         )
         return {"saved": True}
 
+    @app.get("/api/v1/prompt-library/{stage}/{language}")
+    async def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "language": language,
+            "entries": list_prompt_library(stage, language),
+        }
+
+    @app.get("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def get_prompt_library_entry(
+        stage: str, language: str, prompt_id: str
+    ) -> dict[str, Any]:
+        content, digest = read_prompt_library(stage, language, prompt_id)
+        return {
+            "id": prompt_id,
+            "stage": stage,
+            "language": language,
+            "content": content,
+            "digest": digest,
+            "assembled": full_prompt(stage, content, language),
+        }
+
+    @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def put_prompt_library_entry(
+        stage: str, language: str, prompt_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        digest = save_prompt_library(
+            stage,
+            language,
+            prompt_id,
+            payload.get("content"),
+        )
+        return {"saved": True, "id": prompt_id, "digest": digest}
+
+    @app.delete("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
+    async def delete_prompt_library_entry(
+        stage: str, language: str, prompt_id: str
+    ) -> dict[str, Any]:
+        delete_prompt_library(stage, language, prompt_id)
+        return {"deleted": True, "id": prompt_id}
+
     @app.get("/api/v1/global/presets")
     async def list_global_presets() -> dict[str, Any]:
         selected = str(
@@ -792,6 +865,7 @@ def create_app(
                         "preset_id": preset.preset_id,
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
+                        "stream": bool(preset.definition["stream"]),
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -862,17 +936,25 @@ def create_app(
             messages=[{"role": "user", "content": "…"}],
             temperature=0.2,
             max_output_tokens=int(preset.definition["max_output_tokens"]),
-            stream=False,
+            stream=bool(preset.definition["stream"]),
             extra_body=preset.definition["extra_body"],
+        )
+        endpoint = (
+            preset.definition["stream_endpoint"]
+            if preset.definition["stream"] and preset.definition["stream_endpoint"]
+            else preset.definition["endpoint"]
         )
         return {
             "url": endpoint_url(
                 preset.definition["base_url"],
-                preset.definition["endpoint"],
+                endpoint,
                 model=preset.definition["model"],
             ),
             "headers": headers,
             "body": body,
+            "transport": "sse"
+            if preset.definition["stream"]
+            else "non_streaming",
         }
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
@@ -1131,20 +1213,59 @@ def create_app(
         return result
 
     @app.get("/api/v1/projects/{name}")
-    async def overview(name: str, request: Request) -> dict[str, Any]:
+    async def overview(
+        name: str,
+        request: Request,
+    ) -> dict[str, Any]:
         params = request.query_params
+        if set(params) - {"offset", "limit", "stage"}:
+            raise UsageError(
+                "Segment 搜索和筛选必须通过 POST /segments/query 提交"
+            )
         try:
             offset = int(params.get("offset", "0"))
             limit = int(params.get("limit", "100"))
         except ValueError as exc:
             raise UsageError("Segment 窗口参数必须是整数") from exc
+        if offset < 0 or limit < 1:
+            raise UsageError("Segment 窗口参数无效")
+        try:
+            return WebStore(project(name)).overview(
+                offset=offset,
+                limit=limit,
+                stage=params.get("stage", "translation"),
+            )
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+
+    @app.post("/api/v1/projects/{name}/segments/query")
+    async def overview_query(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            offset = int(payload.get("offset", 0))
+            limit = int(payload.get("limit", 100))
+        except (TypeError, ValueError) as exc:
+            raise UsageError("Segment 窗口参数必须是整数") from exc
+        file_id = payload.get("file_id")
+        status = payload.get("status")
+        search = payload.get("q")
+        stage = payload.get("stage", "translation")
+        if file_id is not None and not isinstance(file_id, str):
+            raise UsageError("file_id 必须是字符串")
+        if status is not None and not isinstance(status, str):
+            raise UsageError("status 必须是字符串")
+        if search is not None and not isinstance(search, str):
+            raise UsageError("q 必须是字符串")
+        if not isinstance(stage, str):
+            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).overview(
             offset=offset,
             limit=limit,
-            file_id=params.get("file_id") or None,
-            status=params.get("status") or None,
-            search=params.get("q") or None,
-            stage=params.get("stage", "translation"),
+            file_id=file_id or None,
+            status=status or None,
+            search=search or None,
+            stage=stage,
         )
 
     @app.post("/api/v1/projects/{name}/storage/compact")
@@ -1155,14 +1276,27 @@ def create_app(
         with project_write_lock(root):
             return compact_project_database(root)
 
-    @app.get("/api/v1/projects/{name}/segments/ids")
-    async def segment_index(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
+    @app.post("/api/v1/projects/{name}/segments/ids")
+    async def segment_index(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        file_id = payload.get("file_id")
+        status = payload.get("status")
+        search = payload.get("q")
+        stage = payload.get("stage", "translation")
+        if file_id is not None and not isinstance(file_id, str):
+            raise UsageError("file_id 必须是字符串")
+        if status is not None and not isinstance(status, str):
+            raise UsageError("status 必须是字符串")
+        if search is not None and not isinstance(search, str):
+            raise UsageError("q 必须是字符串")
+        if not isinstance(stage, str):
+            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).segment_index(
-            file_id=params.get("file_id") or None,
-            status=params.get("status") or None,
-            search=params.get("q") or None,
-            stage=params.get("stage", "translation"),
+            file_id=file_id or None,
+            status=status or None,
+            search=search or None,
+            stage=stage,
         )
 
     @app.post("/api/v1/projects/{name}/files")
@@ -1254,30 +1388,36 @@ def create_app(
     async def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
-    @app.get("/api/v1/projects/{name}/terms/hits")
-    async def term_hits(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
-        normalized = params.get("normalized")
+    @app.post("/api/v1/projects/{name}/terms/hits")
+    async def term_hits(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = payload.get("normalized")
         if not normalized:
             raise UsageError("术语命中查询必须提供 normalized")
+        if not isinstance(normalized, str):
+            raise UsageError("normalized 必须是字符串")
         try:
-            offset = int(params.get("offset", "0"))
-            limit = int(params.get("limit", "50"))
-        except ValueError as exc:
+            offset = int(payload.get("offset", 0))
+            limit = int(payload.get("limit", 50))
+        except (TypeError, ValueError) as exc:
             raise UsageError("术语命中窗口参数必须是整数") from exc
         return WebStore(project(name)).term_hits(
             normalized, offset=offset, limit=limit
         )
 
-    @app.get("/api/v1/projects/{name}/terms/related")
-    async def related_terms(name: str, request: Request) -> dict[str, Any]:
-        params = request.query_params
-        normalized = params.get("normalized")
+    @app.post("/api/v1/projects/{name}/terms/related")
+    async def related_terms(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = payload.get("normalized")
         if not normalized:
             raise UsageError("术语推荐查询必须提供 normalized")
+        if not isinstance(normalized, str):
+            raise UsageError("normalized 必须是字符串")
         try:
-            limit = int(params.get("limit", "20"))
-        except ValueError as exc:
+            limit = int(payload.get("limit", 20))
+        except (TypeError, ValueError) as exc:
             raise UsageError("术语推荐数量参数必须是整数") from exc
         return WebStore(project(name)).related_terms(normalized, limit=limit)
 
@@ -1432,6 +1572,7 @@ def create_app(
             language,
             lambda value: root / "prompts" / prompt_file(stage, value),
             prompt_languages_for(root)[stage],
+            global_file_for=lambda value: global_prompt_file(stage, value),
         )
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
@@ -1466,6 +1607,7 @@ def create_app(
                         "adapter_id": adapter.adapter_id,
                         "valid": True,
                         "digest": adapter.digest,
+                        "streaming_supported": adapter.streaming_supported,
                     }
                 )
             except AppError as exc:
@@ -1583,22 +1725,35 @@ def create_app(
     async def cancel_task(task_id: str) -> dict[str, Any]:
         return await app.state.tasks.cancel(task_id)
 
-    @app.get("/api/v1/diagnostics")
-    async def diagnostics(
-        level: str | None = None,
-        project: str | None = None,
-        stage: str | None = None,
-        q: str | None = None,
-        request_session: str | None = None,
-        request_after: int | None = None,
-    ) -> dict[str, Any]:
+    @app.post("/api/v1/diagnostics")
+    async def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+        values = {
+            key: payload.get(key)
+            for key in (
+                "level",
+                "project",
+                "stage",
+                "q",
+                "request_session",
+                "request_after",
+            )
+        }
+        for key in ("level", "project", "stage", "q", "request_session"):
+            if values[key] is not None and not isinstance(values[key], str):
+                raise UsageError(f"{key} 必须是字符串")
+        request_after = values["request_after"]
+        if request_after is not None:
+            try:
+                request_after = int(request_after)
+            except (TypeError, ValueError) as exc:
+                raise UsageError("request_after 必须是整数") from exc
         try:
             return app.state.diagnostics.snapshot(
-                level=level or None,
-                project=project or None,
-                stage=stage or None,
-                query=q or None,
-                request_session=request_session or None,
+                level=values["level"] or None,
+                project=values["project"] or None,
+                stage=values["stage"] or None,
+                query=values["q"] or None,
+                request_session=values["request_session"] or None,
                 request_after=request_after,
             )
         except ValueError as exc:
@@ -1685,8 +1840,13 @@ def create_app(
             )
         return {"files": files}
 
-    @app.get("/api/v1/projects/{name}/exports/download")
-    async def download_export(name: str, file: str) -> Response:
+    @app.post("/api/v1/projects/{name}/exports/download")
+    async def download_export(
+        name: str, payload: dict[str, Any]
+    ) -> Response:
+        file = payload.get("file")
+        if not isinstance(file, str) or not file:
+            raise UsageError("导出文件路径必须是非空字符串")
         root = project(name)
         path = _resolve_export_file(root, file)
         return Response(

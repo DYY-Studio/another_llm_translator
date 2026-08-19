@@ -11,10 +11,13 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_entry_point, collect_submodules
 
 ROOT = Path(SPECPATH) if "SPECPATH" in globals() else Path.cwd()
-hiddenimports = collect_submodules("uvicorn")
+plugin_datas, plugin_hiddenimports = collect_entry_point(
+    "another_llm_translator.plugins"
+)
+hiddenimports = collect_submodules("uvicorn") + plugin_hiddenimports
 
 a = Analysis(
     [str(ROOT / "sidecar_entry.py")],
@@ -26,7 +29,7 @@ a = Analysis(
         (str(ROOT.parent / "llm_adapters"), "llm_adapters"),
         (str(ROOT.parent / "llm_presets"), "llm_presets"),
         (str(ROOT.parent / "app" / "web_dist"), "app/web_dist"),
-    ],
+    ] + plugin_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

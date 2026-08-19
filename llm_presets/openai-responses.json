@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "preset_id": "openai-responses",
   "adapter_id": "openai-responses",
   "base_url": "https://api.openai.com/v1",
@@ -14,6 +14,8 @@
   "input_tokens_per_minute": 50000,
   "max_parallel": 4,
   "request_timeout_seconds": 120,
+  "stream": false,
+  "stream_endpoint": "",
   "extra_body": {},
   "credential": {
     "kind": "environment",

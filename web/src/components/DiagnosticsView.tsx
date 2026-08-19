@@ -8,11 +8,12 @@ import type {
   DiagnosticsResponse,
 } from "../types";
 import { translate, type Language } from "../i18n";
+import { STORAGE_KEYS } from "../storageMigration";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 type ThroughputMetric = "input" | "output" | "total";
 
-const THROUGHPUT_STORAGE_KEY = "minimal-llm-translator.throughput.v1";
+const THROUGHPUT_STORAGE_KEY = STORAGE_KEYS.throughput;
 
 function readThroughputMetric(): ThroughputMetric {
   try {
@@ -28,6 +29,11 @@ function readThroughputMetric(): ThroughputMetric {
 
 function number(value: number | null, language: Language, suffix = "", unavailable = translate("diagnostics.unavailable", language)) {
   return value === null ? unavailable : `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")}${suffix}`;
+}
+
+function bytes(value: number, language: Language) {
+  if (value < 1024) return `${value.toLocaleString(language === "en" ? "en-US" : "zh-CN")} B`;
+  return `${(value / 1024).toLocaleString(language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 1 })} KiB`;
 }
 
 function waitingRequests(value: number | undefined, language: Language) {
@@ -118,7 +124,9 @@ const RequestGroup = memo(function RequestGroup({
                     <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
                     {translate("diagnostics.attempts", language, { count: item.attempt_count })}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
+                    {item.provider_error_status !== null ? ` · ${translate("diagnostics.providerErrorStatus", language, { status: item.provider_error_status })}` : ""}
                     {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
+                    {item.transport === "sse" ? ` · SSE ${item.stream_event_count} · ${bytes(item.stream_received_bytes, language)}${item.stream_first_event_latency_ms === null ? "" : ` · ${item.stream_first_event_latency_ms} ms first`}` : ""}
                   </span>
                 </div>
                 <button
@@ -183,19 +191,20 @@ export function DiagnosticsView({ language }: { language: Language }) {
 
   const load = useCallback(async () => {
     const loadId = ++summaryLoadRef.current;
-    const params = new URLSearchParams();
-    if (level) params.set("level", level);
-    if (project) params.set("project", project);
-    if (stage) params.set("stage", stage);
-    if (query) params.set("q", query);
+    const payload: Record<string, unknown> = {};
+    if (level) payload.level = level;
+    if (project) payload.project = project;
+    if (stage) payload.stage = stage;
+    if (query) payload.q = query;
     const currentFeed = requestFeedRef.current;
     if (currentFeed.sessionId) {
-      params.set("request_session", currentFeed.sessionId);
-      params.set("request_after", String(currentFeed.cursor));
+      payload.request_session = currentFeed.sessionId;
+      payload.request_after = currentFeed.cursor;
     }
     try {
       const nextValue = await api<DiagnosticsResponse>(
-        `/api/v1/diagnostics${params.size ? `?${params}` : ""}`,
+        "/api/v1/diagnostics",
+        { method: "POST", body: JSON.stringify(payload) },
       );
       if (loadId !== summaryLoadRef.current) return;
       const feed = nextValue.requests;
@@ -480,6 +489,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
                 <div className="exchange-meta">
                   <span>{translate("diagnostics.model", language)} <strong>{detail.model}</strong></span>
                   <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
+                  {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">
@@ -522,7 +532,10 @@ export function DiagnosticsView({ language }: { language: Language }) {
                       <article key={attempt.attempt}>
                         <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}</strong>
                         <span>{attempt.http_status === null ? translate("diagnostics.networkError", language) : `HTTP ${attempt.http_status}`}</span>
+                        {attempt.provider_error_status !== null && <span>{translate("diagnostics.providerErrorStatus", language, { status: attempt.provider_error_status })}</span>}
+                        <span>{translate("diagnostics.outcome", language, { outcome: attempt.outcome })}</span>
                         <span>{attempt.latency_ms} ms</span>
+                        {detail.transport === "sse" && <span>{attempt.stream_event_count ?? 0} events · {bytes(attempt.stream_received_bytes ?? 0, language)}{attempt.stream_first_event_latency_ms == null ? "" : ` · ${attempt.stream_first_event_latency_ms} ms first`}</span>}
                       </article>
                     )) : <div className="diagnostics-empty">{translate("diagnostics.noAttempts", language)}</div>}
                     {detail.error && <p className="error-text">{translate("diagnostics.errorCategory", language)}{detail.error}</p>}

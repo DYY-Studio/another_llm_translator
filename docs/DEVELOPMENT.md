@@ -26,6 +26,10 @@ python -m pip check
 
 `requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 在此基础上增加测试和构建依赖。API Key 必须通过 Preset 引用的环境变量或系统钥匙串提供，不要写入仓库文件。
 
+开发依赖会以 editable 方式安装宿主、`plugins/srt` 和
+`plugins/term_validation`，因此测试与桌面构建可以发现官方 SRT 与术语校验
+entry point。两个插件都可以单独构建并安装；插件代码与宿主同进程运行，安装即表示信任。
+
 ## 2. 仓库结构
 
 - `app/`：CLI、本地 Web API、项目存储、阶段执行、LLM 请求和导出。
@@ -34,6 +38,8 @@ python -m pip check
 - `config/`、`prompts/`、`llm_adapters/`、`llm_presets/`：随应用分发的内置资源。
 - `tests/`：使用模拟 LLM 响应的确定性工作流测试。
 - `packaging/`：冻结 Python/FastAPI sidecar 的 PyInstaller 配置。
+- `plugins/srt/`：可单独构建和发行的 SRT Document Adapter 示例插件。
+- `plugins/term_validation/`：可单独构建和发行的术语使用 Translation Validator 示例插件。
 - `scripts/`：前端、sidecar 和桌面构建辅助脚本。
 - `docs/`：产品规范、Adapter 契约、用户与开发文档。
 
@@ -87,8 +93,17 @@ bash scripts/desktop-dev.sh
 
 `desktop-dev.sh` 设置仓库根目录和 Python 解释器后执行 Tauri 开发壳。可用环境变量：
 
-- `MINIMAL_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
-- `MINIMAL_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
+- `ANOTHER_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
+- `ANOTHER_LLM_REPO_ROOT`：桌面开发壳使用的仓库根目录，由脚本自动设置。
+- `ANOTHER_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
+
+`scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
+`another_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
+和术语校验 entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时
+安装任意插件。
+
+发布改名不保留旧包名、命令、环境变量或插件组。默认用户数据目录由旧名称迁移到
+`another-llm-translator`：只有新目录不存在时才迁移；新目录存在则跳过且不覆盖旧目录。
 
 桌面壳启动时优先拉起 bundle 内的冻结 sidecar，找不到时使用开发环境中的 `python -m app.web`，健康探测成功后加载 `http://127.0.0.1:<port>`。退出桌面应用时会终止由本次进程启动的 sidecar。异常退出后如果端口上仍有兼容服务，再次启动可能继续使用该服务；必要时应手动结束残留进程。
 
@@ -105,7 +120,7 @@ bash scripts/build-app.sh
 脚本生成未签名的 ad-hoc `.app` 和 zip，输出目录为：
 
 ```text
-dist/minimal-llm-translator-<版本>-macos-arm64/
+dist/another-llm-translator-<版本>-macos-arm64/
 ```
 
 构建产物内含配置、Prompt、Adapter、Preset 和 Web 静态资源。当前脚本面向 macOS arm64；签名、公证和公开发行流程尚未建立，仓库也没有可直接下载的 GitHub Release。
@@ -119,10 +134,10 @@ dist/minimal-llm-translator-<版本>-macos-arm64/
 macOS 默认用户数据根目录：
 
 ```text
-~/Library/Application Support/minimal-llm-translator/
+~/Library/Application Support/another-llm-translator/
 ```
 
-开发时可以用 `MINIMAL_LLM_USER_ROOT` 覆盖。典型项目目录包含：
+开发时可以用 `ANOTHER_LLM_USER_ROOT` 覆盖。典型项目目录包含：
 
 ```text
 projects/<name>/
@@ -135,9 +150,31 @@ projects/<name>/
 └── output/
 ```
 
+用户级提示词仓库存放在同一用户数据根目录下，不属于任何项目：
+
+```text
+prompt_library/<stage>/<language>/<prompt-id>.middle.txt
+```
+
+`prompt-id` 只允许以小写字母开头并包含小写字母、数字和连字符。仓库条目使用
+UTF-8 原子写入，按阶段和语言隔离；读取、覆盖或删除仓库条目不会修改全局 Prompt、
+项目 Prompt 或项目元数据。仓库内容不进入 Bundle Hash、阶段指纹或 Run 快照，直到
+用户将其载入项目编辑器并显式保存为项目 Prompt。
+
 `project.sqlite` 是项目权威存储。Run 目录提供可读的 manifest 与设置快照，但不能代替数据库判断进度。
 
-普通日志不得记录完整 Prompt、源文、鉴权 Header 或未脱敏请求正文。Debug 记录可能含敏感内容，只能用于明确的本地诊断。Document Adapter 插件是可信同进程扩展，不提供沙箱。
+普通日志不得记录完整 Prompt、源文、鉴权 Header、未脱敏请求正文或流式增量正文。
+Debug 记录可能含敏感内容；启用时会保存每个流式 Attempt 收集到的原始 SSE
+`data` 事件，只能用于明确的本地诊断。诊断 API 只返回流式事件数、接收字节数和
+首事件耗时，完整正文仍须通过格式解析与校验后才进入请求详情。Document Adapter
+和 LLM Adapter 插件是可信同进程扩展，不提供沙箱。
+
+Preset schema 3 的 `stream` 必须由用户显式开启，且只对声明 `streaming` SSE
+规则的 JSON LLM Adapter 有效。启动 CLI、Web 或桌面 sidecar 会先原子迁移用户
+schema 2 Preset 和 schema 1 Adapter；迁移失败应终止启动，不留下兼容副本。流式
+请求使用 `request_timeout_seconds` 作为连接及连续读取的空闲超时，不限制完整生成
+时间；EOF、读取超时和流内错误会丢弃半成品并沿 HTTP 尝试次数重试，不自动回退为
+非流式。
 
 ## 7. 验证
 

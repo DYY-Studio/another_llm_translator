@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, TranslationValidatorSummary } from "../types";
+import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -13,6 +13,7 @@ type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credenti
 interface AdapterRow {
   adapter_id: string;
   valid?: boolean;
+  streaming_supported?: boolean;
 }
 
 export function SettingsView({ project, language }: { project: string; language: Language }) {
@@ -181,22 +182,22 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
               ].map((value) => <option key={value} value={value} />)}
             </datalist>
           </Field>
-          <Field label={translate("settings.txtOutputEncoding", language)}><input value={config.project.output_encoding} onChange={(event) => update((draft) => { draft.project.output_encoding = event.target.value; })} /></Field>
-          <NumberField label={translate("settings.encodingThreshold", language)} value={config.input.encoding_confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.input.encoding_confidence_threshold = value; })} />
-          <Field label={translate("settings.fallbackEncoding", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
+          <Field label={translate("settings.txtOutputEncoding", language)} help={translate("settings.outputEncodingHint", language)}><input value={config.project.output_encoding} onChange={(event) => update((draft) => { draft.project.output_encoding = event.target.value; })} /></Field>
+          <NumberField label={translate("settings.encodingThreshold", language)} value={config.input.encoding_confidence_threshold} min={0} max={1} step={0.05} help={translate("settings.encodingThresholdHint", language)} onChange={(value) => update((draft) => { draft.input.encoding_confidence_threshold = value; })} />
+          <Field label={translate("settings.fallbackEncoding", language)} help={translate("settings.fallbackEncodingHint", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.llmSampling", language)} description={translate("settings.llmSamplingHint", language)}>
           <Field label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
           {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
-          <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
-          <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
-          <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
-          <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
+          <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
+          <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
+          <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
+          <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
-          <Field label={translate("settings.schedulingMode", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
-          <NumberField label={translate("settings.targetChunkTokens", language)} value={config.chunking.target_chunk_input_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.chunking.target_chunk_input_tokens = value; })} />
-          <ToggleField label={translate("settings.splitOversized", language)} checked={config.chunking.allow_split_oversized_segment} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
+          <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
+          <NumberField label={translate("settings.targetChunkTokens", language)} value={config.chunking.target_chunk_input_tokens} min={1} step={1} help={translate("settings.targetChunkTokensHint", language)} onChange={(value) => update((draft) => { draft.chunking.target_chunk_input_tokens = value; })} />
+          <ToggleField label={translate("settings.splitOversized", language)} checked={config.chunking.allow_split_oversized_segment} help={translate("settings.splitOversizedHint", language)} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
           {crossBoundaryStages.map(([stage, label]) => <ToggleField key={stage} label={translate("settings.crossBoundary", language, { stage: label })} checked={config.chunking.cross_boundary_batching.includes(stage)} help={translate("settings.crossBoundaryHint", language)} onChange={(value) => update((draft) => { const selected = new Set(draft.chunking.cross_boundary_batching); if (value) selected.add(stage); else selected.delete(stage); draft.chunking.cross_boundary_batching = crossBoundaryStages.map(([candidate]) => candidate).filter((candidate) => selected.has(candidate)); })} />)}
         </ConfigSection>
         <ConfigSection title={translate("settings.referenceContext", language)} description={translate("settings.referenceContextHint", language)}>
@@ -205,8 +206,8 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
         <ConfigSection title={translate("settings.terminology", language)} description={translate("settings.terminologyHint", language)}>
           <Field label={translate("settings.unicodeNormalization", language)} help={translate("settings.unicodeHint", language)}><select value={config.terminology.unicode_normalization} onChange={(event) => update((draft) => { draft.terminology.unicode_normalization = event.target.value as ProjectConfig["terminology"]["unicode_normalization"]; })}><option value="">{translate("settings.unicodeNone", language)}</option><option value="NFC">NFC</option><option value="NFD">NFD</option><option value="NFKC">NFKC</option><option value="NFKD">NFKD</option></select></Field>
           <ToggleField label={translate("settings.caseInsensitive", language)} checked={config.terminology.case_insensitive} help={translate("settings.casefoldHint", language)} onChange={(value) => update((draft) => { draft.terminology.case_insensitive = value; })} />
-          <NumberField label={translate("settings.maxTermsPerSegment", language)} value={config.terminology.max_terms_per_segment} min={1} step={1} onChange={(value) => update((draft) => { draft.terminology.max_terms_per_segment = value; })} />
-          <Field label={translate("settings.aliasCollision", language)}><select value={config.terminology.alias_primary_collision} onChange={(event) => update((draft) => { draft.terminology.alias_primary_collision = event.target.value as ProjectConfig["terminology"]["alias_primary_collision"]; })}><option value="conflict">{translate("settings.requireReview", language)}</option><option value="merge">{translate("settings.deterministicMerge", language)}</option></select></Field>
+          <NumberField label={translate("settings.maxTermsPerSegment", language)} value={config.terminology.max_terms_per_segment} min={1} step={1} help={translate("settings.maxTermsPerSegmentHint", language)} onChange={(value) => update((draft) => { draft.terminology.max_terms_per_segment = value; })} />
+          <Field label={translate("settings.aliasCollision", language)} help={translate("settings.aliasCollisionHint", language)}><select value={config.terminology.alias_primary_collision} onChange={(event) => update((draft) => { draft.terminology.alias_primary_collision = event.target.value as ProjectConfig["terminology"]["alias_primary_collision"]; })}><option value="conflict">{translate("settings.requireReview", language)}</option><option value="merge">{translate("settings.deterministicMerge", language)}</option></select></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.validation", language)} description={translate("settings.validationHint", language)}>
           {validatorRows.map((validator) => {
@@ -217,7 +218,9 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
                 ? translate("settings.koreanHangul", language)
                 : validator.validator_id === "source_text_residual"
                   ? translate("settings.sourceTextResidual", language)
-                  : validator.label;
+                  : validator.validator_id === "preferred_term_usage"
+                    ? translate("settings.preferredTermUsage", language)
+                    : validator.label;
             const help = installed
               ? `${validator.validator_id} · ${validator.plugin_id} ${validator.plugin_version}`
               : translate("settings.validatorUnavailable", language);
@@ -234,21 +237,21 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
               })}
             />;
           })}
-          <NumberField label={translate("settings.repairAttempts", language)} value={config.validation.translation.max_retry_attempts} min={0} step={1} onChange={(value) => update((draft) => { draft.validation.translation.max_retry_attempts = value; })} />
-          <Field label={translate("settings.exhaustedMode", language)}><select value={config.validation.translation.exhausted_mode} onChange={(event) => update((draft) => { draft.validation.translation.exhausted_mode = event.target.value as ProjectConfig["validation"]["translation"]["exhausted_mode"]; })}><option value="fail">{translate("settings.markFailed", language)}</option><option value="warning">{translate("settings.acceptWarning", language)}</option></select></Field>
-          <NumberField label={translate("settings.httpMaxAttempts", language)} value={config.retry.http_max_attempts} min={1} step={1} onChange={(value) => update((draft) => { draft.retry.http_max_attempts = value; })} />
-          <NumberField label={translate("settings.formatRepairAttempts", language)} value={config.retry.format_max_attempts} min={0} step={1} onChange={(value) => update((draft) => { draft.retry.format_max_attempts = value; })} />
-          <NumberField label={translate("settings.baseDelay", language)} value={config.retry.base_delay_seconds} min={0} step={0.1} onChange={(value) => update((draft) => { draft.retry.base_delay_seconds = value; })} />
-          <NumberField label={translate("settings.maxDelay", language)} value={config.retry.max_delay_seconds} min={0} step={0.1} onChange={(value) => update((draft) => { draft.retry.max_delay_seconds = value; })} />
-          <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
+          <NumberField label={translate("settings.repairAttempts", language)} value={config.validation.translation.max_retry_attempts} min={0} step={1} help={translate("settings.repairAttemptsHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.max_retry_attempts = value; })} />
+          <Field label={translate("settings.exhaustedMode", language)} help={translate("settings.exhaustedModeHint", language)}><select value={config.validation.translation.exhausted_mode} onChange={(event) => update((draft) => { draft.validation.translation.exhausted_mode = event.target.value as ProjectConfig["validation"]["translation"]["exhausted_mode"]; })}><option value="fail">{translate("settings.markFailed", language)}</option><option value="warning">{translate("settings.acceptWarning", language)}</option></select></Field>
+          <NumberField label={translate("settings.httpMaxAttempts", language)} value={config.retry.http_max_attempts} min={1} step={1} help={translate("settings.httpMaxAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry.http_max_attempts = value; })} />
+          <NumberField label={translate("settings.formatRepairAttempts", language)} value={config.retry.format_max_attempts} min={0} step={1} help={translate("settings.formatRepairAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry.format_max_attempts = value; })} />
+          <NumberField label={translate("settings.baseDelay", language)} value={config.retry.base_delay_seconds} min={0} step={0.1} help={translate("settings.baseDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.base_delay_seconds = value; })} />
+          <NumberField label={translate("settings.maxDelay", language)} value={config.retry.max_delay_seconds} min={0} step={0.1} help={translate("settings.maxDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.max_delay_seconds = value; })} />
+          <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} help={translate("settings.jitterHint", language)} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.debug", language)} description={translate("settings.debugHint", language)} warning>
-          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
-          <NumberField label={translate("settings.inject429", language)} value={config.debug.inject_429_every} min={0} step={1} onChange={(value) => update((draft) => { draft.debug.inject_429_every = value; })} />
-          <NumberField label={translate("settings.inject500", language)} value={config.debug.inject_500_every} min={0} step={1} onChange={(value) => update((draft) => { draft.debug.inject_500_every = value; })} />
-          <NumberField label={translate("settings.injectTimeout", language)} value={config.debug.inject_timeout_every} min={0} step={1} onChange={(value) => update((draft) => { draft.debug.inject_timeout_every = value; })} />
-          <NumberField label={translate("settings.injectInvalidJson", language)} value={config.debug.inject_invalid_json_every} min={0} step={1} onChange={(value) => update((draft) => { draft.debug.inject_invalid_json_every = value; })} />
-          <NumberField label={translate("settings.injectMissingSegment", language)} value={config.debug.inject_missing_segment_every} min={0} step={1} onChange={(value) => update((draft) => { draft.debug.inject_missing_segment_every = value; })} />
+          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} help={translate("settings.enableDebugHint", language)} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
+          <NumberField label={translate("settings.inject429", language)} value={config.debug.inject_429_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_429_every = value; })} />
+          <NumberField label={translate("settings.inject500", language)} value={config.debug.inject_500_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_500_every = value; })} />
+          <NumberField label={translate("settings.injectTimeout", language)} value={config.debug.inject_timeout_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_timeout_every = value; })} />
+          <NumberField label={translate("settings.injectInvalidJson", language)} value={config.debug.inject_invalid_json_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_invalid_json_every = value; })} />
+          <NumberField label={translate("settings.injectMissingSegment", language)} value={config.debug.inject_missing_segment_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_missing_segment_every = value; })} />
         </ConfigSection>
       </div>
     </section>
@@ -386,10 +389,10 @@ function PresetSettings({ language }: { language: Language }) {
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
             <div className="config-grid preset-fields">
-              <Field label="Adapter"><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
+              <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
               <Field label="Base URL" help={translate("preset.baseUrlHint", language)}><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
-              <Field label="Endpoint"><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
-              <Field label={translate("preset.credential", language)}>
+              <Field label="Endpoint" help={translate("preset.endpointHint", language)}><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
+              <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}>
                 <div className="credential-selector">
                   <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
                     <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
@@ -408,15 +411,29 @@ function PresetSettings({ language }: { language: Language }) {
                 </div>
               </Field>
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
-              <Field label={translate("preset.proxyUrl", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
-              <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
-              <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={1} step={1} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
-              <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
-              <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
+              <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
+              <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
+              <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={1} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
+              <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
+              <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
               <NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
               <NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
               <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
-              <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
+              <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("preset.timeoutSecondsHint", language)} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
+              <ToggleField
+                label={translate("preset.streaming", language)}
+                checked={preset.stream}
+                disabled={!adapters.find((item) => item.adapter_id === preset.adapter_id)?.streaming_supported && !preset.stream}
+                help={translate("preset.streamingHint", language)}
+                onChange={(value) => updateConnection((draft) => { draft.stream = value; })}
+              />
+              <Field label={translate("preset.streamEndpoint", language)} help={translate("preset.streamEndpointHint", language)}>
+                <input
+                  value={preset.stream_endpoint}
+                  disabled={!preset.stream}
+                  onChange={(event) => updateConnection((draft) => { draft.stream_endpoint = event.target.value; })}
+                />
+              </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
             </div>
             <h2 className="preview-heading">{translate("preset.requestPreview", language)}</h2>
@@ -638,32 +655,180 @@ interface PromptView {
   language: string;
   assembled: string;
   languages: string[];
+  global_sync?: {
+    available: boolean;
+    same: boolean;
+    language: string;
+  };
 }
 
 function PromptSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
   const [stage, setStage] = useState("translation");
   const [promptLanguage, setPromptLanguage] = useState("zh-CN");
   const [content, setContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
+  const [globalSync, setGlobalSync] = useState<PromptView["global_sync"]>(undefined);
+  const [loadedGlobalDraft, setLoadedGlobalDraft] = useState(false);
+  const [libraryEntries, setLibraryEntries] = useState<PromptLibraryEntry[]>([]);
+  const [selectedLibraryEntry, setSelectedLibraryEntry] = useState("");
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [librarySaveOpen, setLibrarySaveOpen] = useState(false);
+  const [libraryIdDraft, setLibraryIdDraft] = useState("");
+  const [libraryOverwriteId, setLibraryOverwriteId] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
+
+  function applyPromptView(value: PromptView) {
+    setContent(value.content);
+    setSavedContent(value.content);
+    setAssembled(value.assembled);
+    setGlobalSync(value.global_sync);
+    setLoadedGlobalDraft(false);
+    setLanguages(value.languages);
+    setPromptLanguage(value.language);
+  }
+
+  async function loadPrompt() {
+    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`));
+  }
+
   useEffect(() => {
+    let active = true;
     setMessage("");
     setError("");
-    void api<PromptView>(`${path}?language=${promptLanguage}`).then((value) => {
-      setContent(value.content);
-      setAssembled(value.assembled);
-      setLanguages(value.languages);
-      setPromptLanguage(value.language);
-    }).catch((reason) => setError(errorMessage(reason, language)));
+    void api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`).then((value) => {
+      if (active) applyPromptView(value);
+    }).catch((reason) => { if (active) setError(errorMessage(reason, language)); });
+    return () => { active = false; };
   }, [path, promptLanguage]);
+
+  useEffect(() => {
+    if (scope !== "project") {
+      setLibraryEntries([]);
+      setSelectedLibraryEntry("");
+      setLibrarySaveOpen(false);
+      setLibraryIdDraft("");
+      setLibraryOverwriteId("");
+      return;
+    }
+    let active = true;
+    setLibraryLoading(true);
+    void api<{ entries: PromptLibraryEntry[] }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}`).then((value) => {
+      if (active) {
+        setLibraryEntries(value.entries);
+        setSelectedLibraryEntry("");
+        setLibrarySaveOpen(false);
+        setLibraryIdDraft("");
+        setLibraryOverwriteId("");
+      }
+    }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }).finally(() => {
+      if (active) setLibraryLoading(false);
+    });
+    return () => { active = false; };
+  }, [scope, stage, promptLanguage]);
+
   async function save() {
     try {
       await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content }) });
+      await loadPrompt();
       setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language));
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
-  return <section className="text-settings"><div className="page-heading config-heading settings-action-heading"><div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div><label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label><label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{error && <div className="error-banner">{error}</div>}<span className="success-text">{message}</span><textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} /><div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div></section>;
+
+  async function loadGlobalDraft() {
+    if (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language))) return;
+    try {
+      const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
+      setContent(value.content);
+      setAssembled(value.assembled);
+      setPromptLanguage(value.language);
+      setLoadedGlobalDraft(true);
+      setMessage(translate("settings.promptGlobalLoaded", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function loadLibraryEntry(promptId: string) {
+    if (!promptId) return;
+    try {
+      const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
+      setContent(value.content);
+      setAssembled(value.assembled);
+      setSelectedLibraryEntry(promptId);
+      setLoadedGlobalDraft(false);
+      setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function saveToLibrary() {
+    if (scope !== "project" || !content.trim()) return;
+    const promptId = libraryIdDraft.trim();
+    if (!promptId) return;
+    if (libraryEntries.some((item) => item.id === promptId) && libraryOverwriteId !== promptId) {
+      setLibraryOverwriteId(promptId);
+      return;
+    }
+    try {
+      await api(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      });
+      const result = await api<{ entries: PromptLibraryEntry[] }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}`);
+      setLibraryEntries(result.entries);
+      setSelectedLibraryEntry(promptId);
+      setLibrarySaveOpen(false);
+      setLibraryIdDraft("");
+      setLibraryOverwriteId("");
+      setMessage(translate("settings.promptLibrarySaved", language, { id: promptId }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function deleteLibraryEntry() {
+    if (!selectedLibraryEntry || !window.confirm(translate("settings.promptLibraryDeleteConfirm", language, { id: selectedLibraryEntry }))) return;
+    try {
+      await api(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(selectedLibraryEntry)}`, { method: "DELETE" });
+      setLibraryEntries((current) => current.filter((item) => item.id !== selectedLibraryEntry));
+      setSelectedLibraryEntry("");
+      setMessage(translate("settings.promptLibraryDeleted", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  const draftDirty = content !== savedContent;
+  const showSyncCard = scope === "project" && globalSync;
+  return <section className="text-settings">
+    <div className="page-heading config-heading settings-action-heading">
+      <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
+      <div className="button-group">
+        {scope === "project" && <button className="quiet-button" onClick={() => { setLibrarySaveOpen(true); setLibraryOverwriteId(""); }}>{translate("settings.promptLibrarySave", language)}</button>}
+        <button className="primary-button" onClick={() => void save()}>{translate("common.validateSave", language)}</button>
+      </div>
+    </div>
+    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
+    <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+    {showSyncCard && <div className={`prompt-sync-card ${globalSync.available && globalSync.same && !draftDirty ? "synced" : "out-of-sync"}`}>
+      <div><strong>{!globalSync.available ? translate("settings.promptGlobalUnavailable", language) : draftDirty ? translate("settings.promptUnsaved", language) : globalSync.same ? translate("settings.promptSynced", language) : translate("settings.promptOutOfSync", language)}</strong><small>{!globalSync.available ? translate("settings.promptSyncLanguage", language, { language: globalSync.language }) : loadedGlobalDraft ? translate("settings.promptGlobalLoadedHint", language) : translate("settings.promptSyncLanguage", language, { language: globalSync.language })}</small></div>
+      {globalSync.available && !globalSync.same && !loadedGlobalDraft && <button className="quiet-button" onClick={() => void loadGlobalDraft()}>{translate("settings.promptLoadGlobal", language)}</button>}
+    </div>}
+    {scope === "project" && <div className="prompt-library-card">
+      <div><strong>{translate("settings.promptLibraryTitle", language)}</strong><small>{translate("settings.promptLibraryHint", language)}</small></div>
+      {librarySaveOpen && <div className="prompt-library-save-form">
+        <input aria-label={translate("settings.promptLibraryNewId", language)} value={libraryIdDraft} onChange={(event) => { setLibraryIdDraft(event.target.value); setLibraryOverwriteId(""); }} placeholder="strict-translation" />
+        {libraryOverwriteId ? <small>{translate("settings.promptLibraryOverwriteConfirm", language, { id: libraryOverwriteId })}</small> : null}
+        <div className="button-group">
+          <button className="quiet-button" onClick={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" onClick={() => void saveToLibrary()}>{libraryOverwriteId ? translate("settings.promptLibraryConfirmOverwrite", language) : translate("common.save", language)}</button>
+        </div>
+      </div>}
+      <div className="prompt-library-controls">
+        <select value={selectedLibraryEntry} disabled={libraryLoading || !libraryEntries.length} onChange={(event) => void loadLibraryEntry(event.target.value)}><option value="">{libraryLoading ? translate("settings.promptLibraryLoading", language) : translate("settings.promptLibrarySelect", language)}</option>{libraryEntries.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select>
+        <button className="quiet-button" disabled={!selectedLibraryEntry} onClick={() => void deleteLibraryEntry()}>{translate("common.delete", language)}</button>
+      </div>
+    </div>}
+    {error && <div className="error-banner">{error}</div>}
+    {message && <span className="success-text">{message}</span>}
+    <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
+    <div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div>
+  </section>;
 }

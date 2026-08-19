@@ -11,12 +11,15 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 
 ## 当前基线
 
-- TXT/EPUB、File/Segment/Chunk/Run、SQLite 项目存储、CLI 和完整翻译流程已经实现。
+- TXT/EPUB、独立发行的 SRT Document Adapter、File/Segment/Chunk/Run、SQLite
+  项目存储、CLI 和完整翻译流程已经实现。
 - CLI 与本地 Web 共享阶段、Run、限速、恢复和项目持久化代码；项目视图与人工
   编辑逻辑均由 Web 内部职责提供。
 - 本地 Web 已覆盖项目、术语、结果审校、阶段决策、apply、export 和诊断，并
   保持回环访问与显式 LAN 共享的安全边界。
-- 产品路线 Stage 1 至 Stage 23.3 已完成；下一阶段是 Stage 23 Windows Tauri
+- 发布品牌已统一为 Another LLM Translator；旧开发名称的公共入口删除，默认用户
+  数据目录、钥匙串和浏览器存储提供一次性迁移。
+- 产品路线 Stage 1 至 Stage 23.4 已完成；下一阶段是 Stage 23 Windows Tauri
   公开 Beta 与 Stage 24 多 API Key。
 - 已完成 Stage 的行为验收见 `docs/MINIMAL.md`（§7 核心验收矩阵）；逐 Stage
   实现细节可在 git 历史检索，本文不再重复记录已完成内容。
@@ -51,6 +54,7 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 | 23.1 | 导出文件浏览与局域网下载（限制在项目 `output/` 内） |
 | 23.2 | 导出页标签化与列表可用性 |
 | 23.3 | 导出页标签栏稳定与双栏工作台 |
+| 23.4 | 四个内置 LLM Adapter 的 SSE 流式请求与诊断聚合 |
 | — | 发行包资源完整性：wheel/sdist 内置资源、用户根同名覆盖优先 |
 
 ## Stage 23：Windows Tauri 公开 Beta
@@ -82,27 +86,33 @@ Provider 判断、静默 fallback、任意格式互转或未经真实需求验�
 
 ### 声明式 JSON LLM Adapter（已实现）
 
-当前 schema 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
+当前 schema 2 已覆盖类型化占位符、任意嵌套 body、自定义认证 Header、响应
 JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system}` 与
 `${model}` 占位符。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主
 管理；API Key 不进入 URL、请求正文、Run 快照或阶段指纹。
 
-Preset 与规范化思考响应已落地。Stage 22 公开 Beta 后，已发布 Preset schema
-变更必须提供明确迁移或主版本边界。
+Preset schema 3 的 `stream`/`stream_endpoint` 与四个内置 Adapter 的 SSE 规则
+已落地；普通 Preset 迁移后仍为非流式。宿主聚合完整正文，流中断丢弃半成品并
+沿既有尝试次数重试，不隐式 fallback；诊断只展示事件、字节和首事件延迟。Stage
+22 公开 Beta 后，已发布 Preset/Adapter schema 变更必须提供明确迁移或主版本边界。
 
 ### Document Adapter 与可信 Python 插件（Beta）
 
-内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。外部
-Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）与
-Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
+内置 TXT、EPUB、统一 Document Adapter 和可信 Python 插件发现已实现。SRT 已作为
+`plugins/srt/` 独立发行包示例和
+`plugins/term_validation/` 独立 Translation Validator 示例均已接入，并通过
+entry point、宿主集成和冻结 sidecar 装配验证。外部 Document Adapter 契约测试（`tests/test_document_adapter_contract.py`）
+与 Adapter 版本/opaque_state 升级策略（严格版本匹配、重新导入升级，见
 `docs/ADAPTERS.md` §2）已落地。仍需：
 
 - 用更多真实 EPUB 验证 spine、命名空间、导航、CSS、图片、字体和跨节点文本；
-- 维护至少一个独立发行的真实 Python Document 插件。
+- 用真实字幕样本持续验证 SRT 核心语法边界与模型标记兼容性；
+- 在出现第二个真实外部 Document Adapter 后再决定 Document Adapter 的兼容范围与运行时安装策略。
 
-翻译校验器现在通过独立的可信 Python Validator 契约扩展；它只接收源文和译文，
-不建立通用 DOM 或自由 HTML 协议。公开 Beta 前协议版本可以直接升级并同步仓库调用方；
-外部插件仍按版本不匹配快速失败。
+翻译校验器现在通过独立的可信 Python Validator 契约扩展；共享插件协议版本为 `10`，接收源文、
+译文和宿主确定的逐 Segment 术语命中，不建立通用 DOM 或自由 HTML 协议。独立的
+`another-llm-translator-term-validation` 是首个真实外部 Validator 示例；官方桌面在
+构建时装配它但默认关闭，基础 Python 包可选安装，外部插件仍按版本不匹配快速失败。
 
 Python LLM Adapter 只有 provisional 边界。只有出现 JSON POST 无法表达的真实
 端点后才实现首个适配器，不用模拟需求扩张协议。

@@ -96,6 +96,22 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
             ),
             "必须是 JSON Pointer",
         ),
+        (
+            lambda value: value.update(
+                {"response_reasoning_content_pointers": "reasoning"}
+            ),
+            "必须是非空 JSON Pointer 数组",
+        ),
+        (
+            lambda value: value.update({"response_reasoning_content_pointers": []}),
+            "必须是非空 JSON Pointer 数组",
+        ),
+        (
+            lambda value: value.update(
+                {"response_reasoning_content_pointers": ["/bad~2pointer"]}
+            ),
+            "转义无效",
+        ),
     ],
 )
 def test_json_adapter_rejects_invalid_templates(
@@ -136,6 +152,88 @@ def test_json_adapter_extracts_optional_reasoning_content(tmp_path: Path) -> Non
         adapter.parse_response(
             {"result": [{"text": "answer", "reasoning": {}}]}
         )
+
+
+def test_json_adapter_uses_ordered_reasoning_pointer_fallbacks(
+    tmp_path: Path,
+) -> None:
+    value = definition()
+    value["response_reasoning_content_pointers"] = [
+        "/result/0/reasoning_content",
+        "/result/0/reasoning",
+    ]
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    assert adapter.parse_response(
+        {
+            "result": [
+                {
+                    "text": "answer",
+                    "reasoning_content": "legacy",
+                    "reasoning": "alias",
+                }
+            ]
+        }
+    ).reasoning_content == "legacy"
+    assert adapter.parse_response(
+        {"result": [{"text": "answer", "reasoning": "alias"}]}
+    ).reasoning_content == "alias"
+    assert adapter.parse_response(
+        {
+            "result": [
+                {"text": "answer", "reasoning_content": None, "reasoning": "alias"}
+            ]
+        }
+    ).reasoning_content is None
+    assert adapter.parse_response(
+        {"result": [{"text": "answer"}]}
+    ).reasoning_content is None
+    with pytest.raises(ExternalError, match="字符串或 null"):
+        adapter.parse_response(
+            {"result": [{"text": "answer", "reasoning": {}}]}
+        )
+
+
+def test_builtin_openai_adapter_accepts_reasoning_alias() -> None:
+    adapter = load_json_adapter(
+        Path(__file__).parents[1] / "llm_adapters" / "openai-compatible.json"
+    )
+    legacy = adapter.parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "answer",
+                        "reasoning_content": "legacy",
+                        "reasoning": "alias",
+                    }
+                }
+            ]
+        }
+    )
+    assert legacy.reasoning_content == "legacy"
+    response = adapter.parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "answer",
+                        "reasoning": "thought",
+                    }
+                }
+            ]
+        }
+    )
+    assert response.content == "answer"
+    assert response.reasoning_content == "thought"
+
+
+def test_json_adapter_rejects_reasoning_pointer_conflict(tmp_path: Path) -> None:
+    value = definition()
+    value["response_reasoning_content_pointer"] = "/result/0/reasoning_content"
+    value["response_reasoning_content_pointers"] = ["/result/0/reasoning"]
+    with pytest.raises(ConfigError, match="不能同时配置"):
+        load_json_adapter(write_adapter(tmp_path, value))
 
 
 def test_json_adapter_anthropic_format_extracts_system_and_roles(
@@ -441,6 +539,137 @@ def test_json_adapter_usage_mapping_rejects_invalid(
     tmp_path: Path, mutate: object, message: str
 ) -> None:
     value = usage_definition()
+    mutate(value)
+    with pytest.raises(ConfigError, match=message):
+        load_json_adapter(write_adapter(tmp_path, value))
+
+
+def streaming_definition() -> dict[str, object]:
+    value = definition()
+    value["schema_version"] = 2
+    value["streaming"] = {
+        "transport": "sse",
+        "request_body": {"stream_options": {"include_usage": True}},
+        "content_events": [
+            {
+                "pointer": "/delta/content",
+                "when": {"pointer": "/type", "equals": "delta"},
+            }
+        ],
+        "reasoning_events": [],
+        "terminal": {"when": {"pointer": "/type", "equals": "done"}},
+        "error_events": [
+            {
+                "when": {"pointer": "/type", "equals": "error"},
+                "message_pointer": "/message",
+                "status_pointer": "/status",
+            }
+        ],
+        "usage": {
+            "input_tokens_pointers": ["/usage/input"],
+            "output_tokens_pointers": ["/usage/output"],
+            "total_tokens_pointers": ["/usage/total"],
+        },
+    }
+    return value
+
+
+def test_json_adapter_streaming_selectors_and_request_body(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, streaming_definition()))
+    assert adapter.streaming_supported is True
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model",
+        messages=[],
+        temperature=0.2,
+        max_output_tokens=100,
+        stream=True,
+    )
+    assert body["stream_options"] == {"include_usage": True}
+    assert adapter.stream_content_deltas({"type": "delta", "delta": {"content": "x"}}) == ["x"]
+    assert adapter.stream_content_deltas({"type": "other"}) == []
+    assert adapter.stream_terminal({"type": "done"}) is True
+    details = adapter.stream_error_details(
+        {"type": "error", "message": "upstream timeout", "status": 504}
+    )
+    assert details is not None
+    assert details.message == "upstream timeout"
+    assert details.provider_error_status == 504
+    assert adapter.extract_stream_usage({"usage": {"input": 1, "output": 2, "total": 3}}) == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "total_tokens": 3,
+    }
+
+
+def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
+    tmp_path: Path,
+) -> None:
+    value = streaming_definition()
+    value["streaming"]["request_body"] = {"streaming": False}
+    with pytest.raises(ConfigError, match="request_body 与 body 字段冲突"):
+        adapter = load_json_adapter(write_adapter(tmp_path, value))
+        adapter.build_request(
+            api_key="secret",
+            model="model",
+            messages=[],
+            temperature=0.2,
+            max_output_tokens=100,
+            stream=True,
+        )
+
+    value = streaming_definition()
+    value["streaming"]["content_events"][0]["pointer"] = "/missing"
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    with pytest.raises(ExternalError, match="缺少正文路径"):
+        adapter.stream_content_deltas(
+            {"type": "delta", "delta": {"content": "x"}}
+        )
+
+    with pytest.raises(ExternalError, match="缺少消息路径"):
+        adapter.stream_error_details({"type": "error"})
+
+    with pytest.raises(ExternalError, match="缺少状态路径"):
+        adapter.stream_error_details(
+            {"type": "error", "message": "missing status"}
+        )
+
+    with pytest.raises(ExternalError, match="有效 HTTP 状态码"):
+        adapter.stream_error_details(
+            {"type": "error", "message": "bad status", "status": "504"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value["streaming"].update({"transport": "json"}), "transport"),
+        (lambda value: value["streaming"].update({"content_events": []}), "非空数组"),
+        (lambda value: value["streaming"].update({"terminal": {"exists": True}}), "必须声明 sentinel 或 when"),
+        (
+            lambda value: value["streaming"]["content_events"][0].update(
+                {"when": {"pointer": "/type", "exists": False}}
+            ),
+            "exists 必须是 true",
+        ),
+        (
+            lambda value: value["streaming"]["usage"].update(
+                {"input_tokens_pointers": ["bad"]}
+            ),
+            "必须是 JSON Pointer",
+        ),
+        (
+            lambda value: value["streaming"]["error_events"][0].update(
+                {"status_pointer": "status"}
+            ),
+            "必须是 JSON Pointer",
+        ),
+    ],
+)
+def test_json_adapter_streaming_schema_rejects_invalid(
+    tmp_path: Path, mutate: object, message: str
+) -> None:
+    value = streaming_definition()
     mutate(value)
     with pytest.raises(ConfigError, match=message):
         load_json_adapter(write_adapter(tmp_path, value))

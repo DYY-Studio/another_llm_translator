@@ -8,11 +8,12 @@ Another LLM Translator 是一个在本机运行、支持中断恢复的 LLM 文�
 
 ## 可以做什么
 
-- 导入 TXT 和 EPUB 文档，并按原文件分别管理和导出。
+- 导入 TXT、EPUB，以及安装 SRT 插件后可用的 SRT 文档，并按原文件分别管理和导出。
 - 扫描、编辑和交换术语表，术语冲突交由用户裁决。
 - 分阶段执行翻译、校对和润色，明确选择是否应用修改建议。
 - 以 Segment 为单位保存进度；中断后可继续处理未完成内容。
 - 为不同阶段选择不同的 LLM Preset，支持 OpenAI-compatible、OpenAI Responses、Gemini 和 Anthropic 等内置请求模板。
+- Preset 可按需开启 SSE 流式请求；宿主只在完整响应通过解析和校验后保存结果，断流会丢弃半成品并重试。
 - 在 Web 中管理项目、模型连接、Prompt、术语、译文、诊断信息和导出文件。
 
 当前版本为 `0.3.0`。应用面向可信用户的本机使用，不是远程、多用户或公网翻译服务。
@@ -29,6 +30,22 @@ npm ci --prefix web
 npm run build --prefix web
 python -m app.web
 ```
+
+需要在源码 Web 中使用 SRT 时，再安装独立插件：
+
+```bash
+python -m pip install -e . -e plugins/srt
+# 可选：安装术语使用校验示范插件
+python -m pip install -e plugins/term_validation
+```
+
+官方桌面构建会在构建时装配该插件；已发布桌面应用暂不支持运行时安装任意插件。
+术语使用校验插件同样在官方桌面构建时装配，但默认关闭；它只提供一次建议级修复，
+仍未采用推荐译名时保留译文并记录 warning。
+
+本发行版使用 Another LLM Translator 的新包名、命令、环境变量和数据目录。首次启动时，
+若默认的新数据目录不存在，会将旧版本的默认数据目录一次性迁移；新目录已存在时不会覆盖或合并旧目录。
+显式设置 `ANOTHER_LLM_USER_ROOT` 时，以该目录为准。
 
 Windows PowerShell 使用：
 
@@ -47,7 +64,8 @@ python -m app.web
 
 1. 打开右上角“设置”，在全局设置中选择或编辑 LLM Preset。
 2. 为 Preset 指定模型、端点和凭据引用。密钥可以来自启动应用前设置的环境变量，也可以通过设置页保存到系统钥匙串；不要把 API Key 写进 Preset 或项目文件。
-3. 在全局配置中确认新项目的默认目标语言，然后新建项目并添加 TXT 或 EPUB 文件；已有项目可在项目设置中单独修改目标语言。
+   支持流式的 Adapter 可在 Preset 编辑器中显式开启 SSE；它只能降低等待完整响应时的网关 504 风险，不能解决首事件延迟或代理缓冲。
+3. 在全局配置中确认新项目的默认目标语言，然后新建项目并添加 TXT、EPUB 或已安装插件支持的文件；已有项目可在项目设置中单独修改目标语言。
 4. 根据需要依次进入“术语”“翻译”“校对”“润色”。每个阶段都可以先确认范围和已有结果的处理方式。
 5. 校对和润色只生成建议，不会自动覆盖译文。审阅后明确应用需要的建议。
 6. 在“导出”中选择结果阶段、文件范围、原格式或 TXT，以及是否生成双语版本。
@@ -62,10 +80,10 @@ python -m app.web
 
 ## 数据、安全与限制
 
-- 项目、设置和日志默认保存在平台用户数据目录；macOS 路径为 `~/Library/Application Support/minimal-llm-translator/`。
+- 项目、设置和日志默认保存在平台用户数据目录；macOS 路径为 `~/Library/Application Support/another-llm-translator/`。
 - API Key 只从显式配置的环境变量或系统钥匙串读取。普通日志不保存完整 Prompt、源文或鉴权 Header；Debug 模式可能保存敏感请求内容。
 - Web 默认只允许本机访问。局域网共享必须在设置中显式开启，首版使用 HTTP，不适合公网暴露。
-- 当前支持 TXT 和 EPUB，不支持 PDF、DOCX、Markdown 或任意格式互转。
+- 基础安装支持 TXT 和 EPUB；SRT 由独立可信插件提供。不支持 PDF、DOCX、Markdown 或任意格式互转。
 - 应用不提供自动翻译质量评分或质量保证，关键内容必须人工检查。
 
 ## CLI（高级用法）

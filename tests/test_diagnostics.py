@@ -115,6 +115,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "stage": "translation",
             "request_id": "REQ-1",
             "model": "test-model",
+            "transport": "non_streaming",
             "status": "completed",
             "attempt_count": 2,
             "last_http_status": 200,
@@ -123,6 +124,10 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "has_reasoning": True,
             "error": None,
             "detail_available": True,
+            "stream_event_count": 0,
+            "stream_received_bytes": 0,
+            "stream_first_event_latency_ms": None,
+            "provider_error_status": None,
         }
     ]
     assert "messages" not in snapshot["requests"]["items"][0]
@@ -151,6 +156,35 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert unavailable["throughput_input_tokens_per_second"] is None
     assert unavailable["throughput_output_tokens_per_second"] is None
     assert unavailable["throughput_tokens_per_second"] is None
+
+
+def test_stream_progress_is_visible_without_partial_response(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-SSE",
+            model="stream-model",
+            messages=[{"role": "user", "content": "source"}],
+            max_attempts=2,
+            transport="sse",
+        )
+        diagnostics.request_started("REQ-SSE")
+        diagnostics.stream_progress(
+            "REQ-SSE",
+            event_count=3,
+            received_bytes=128,
+            first_event_latency_ms=42.5,
+        )
+        summary = diagnostics.snapshot()["requests"]["items"][0]
+        assert summary["transport"] == "sse"
+        assert summary["stream_event_count"] == 3
+        assert summary["stream_received_bytes"] == 128
+        assert summary["stream_first_event_latency_ms"] == 42.5
+        detail = diagnostics.request_detail("REQ-SSE")
+        assert detail["response_content"] is None
+        assert detail["attempts"] == []
 
 
 def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:
@@ -708,11 +742,11 @@ async def test_llm_runtime_reports_safe_failure_categories(
 
 def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> None:
     app = create_app(projects_root=tmp_path / "projects", app_root=tmp_path)
-    logger = logging.getLogger("minimal_llm_translator.api-test")
+    logger = logging.getLogger("another_llm_translator.api-test")
     logger.info("visible api log")
     client = TestClient(app)
 
-    response = client.get("/api/v1/diagnostics", params={"q": "VISIBLE"})
+    response = client.post("/api/v1/diagnostics", json={"q": "VISIBLE"})
     assert response.status_code == 200
     assert [item["message"] for item in response.json()["logs"]] == [
         "visible api log"
@@ -722,9 +756,9 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert metrics["p95_latency_ms"] is None
     assert "latest_latency_ms" not in metrics
     feed = response.json()["requests"]
-    delta = client.get(
+    delta = client.post(
         "/api/v1/diagnostics",
-        params={
+        json={
             "request_session": feed["session_id"],
             "request_after": feed["cursor"],
         },
@@ -732,11 +766,11 @@ def test_diagnostics_api_filters_and_rejects_unknown_level(tmp_path: Path) -> No
     assert delta.status_code == 200
     assert delta.json()["requests"]["reset"] is False
     assert delta.json()["requests"]["items"] == []
-    rejected = client.get("/api/v1/diagnostics", params={"level": "trace"})
+    rejected = client.post("/api/v1/diagnostics", json={"level": "trace"})
     assert rejected.status_code == 400
     assert "未知日志级别" in rejected.json()["error"]
-    negative_cursor = client.get(
-        "/api/v1/diagnostics", params={"request_after": -1}
+    negative_cursor = client.post(
+        "/api/v1/diagnostics", json={"request_after": -1}
     )
     assert negative_cursor.status_code == 400
     assert "request_after" in negative_cursor.json()["error"]

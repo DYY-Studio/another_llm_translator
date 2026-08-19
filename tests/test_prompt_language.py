@@ -107,6 +107,22 @@ def test_segment_prompts_require_translated_aozora_ruby_base(stage: str) -> None
     assert "otherwise drop Ruby and return only the translated base" in en
 
 
+def test_document_specific_prompt_requirements_are_opt_in() -> None:
+    generic = full_prompt("translation", "Project requirements.", "en")
+    assert "<em1>" not in generic
+    assert "Aozora Ruby base" in generic
+    epub = full_prompt(
+        "translation",
+        "Project requirements.",
+        "en",
+        document_requirements=(
+            "Controlled inline markers in source (such as <em1>) must be kept.",
+        ),
+    )
+    assert "Controlled inline markers" in epub
+    assert epub.index("Aozora Ruby base") < epub.index("Controlled inline markers")
+
+
 @pytest.mark.parametrize(
     ("stage", "zh_anchor", "en_anchor"),
     [
@@ -240,11 +256,11 @@ async def test_run_translation_uses_requested_language_and_records_it(
     assert manifest["prompt_language"] == "en"
 
 
-def test_cli_language_follows_minimal_llm_language(
+def test_cli_language_follows_another_llm_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     use_llm_preset(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINIMAL_LLM_LANGUAGE", "en")
+    monkeypatch.setenv("ANOTHER_LLM_LANGUAGE", "en")
     project = create_project_sync(tmp_path)
     assert _prompt_language(project, "translation", None) == "en"
 

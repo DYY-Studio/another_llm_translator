@@ -13,7 +13,7 @@
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "adapter_id": "openai-compatible",
   "headers": {
     "Authorization": "Bearer ${api_key}"
@@ -33,12 +33,17 @@
 
 ```json
 {
-  "response_reasoning_content_pointer": "/choices/0/message/reasoning_content"
+  "response_reasoning_content_pointers": [
+    "/choices/0/message/reasoning_content",
+    "/choices/0/message/reasoning"
+  ]
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义已配置上述路径，并兼容不返回该
-扩展字段的合法响应。
+该字段可省略；内置 OpenAI-compatible 定义按上述顺序兼容两种字段。已有配置仍可
+使用单数的 `response_reasoning_content_pointer`，但单数与复数不能同时配置。候选
+路径只在前一路径缺失时继续尝试；首个存在的 `null` 表示没有 reasoning，多个字段
+不会拼接。
 
 需要把规范化的 system/user/assistant 消息转换为 Provider 原生形状时，可设置
 `messages_format`（可选，默认 `openai` 原样透传）：
@@ -60,8 +65,8 @@
 - Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
   `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
-- 声明式 Adapter 固定构建非流式 JSON POST；HTTP Client、代理、超时、限速、
-  重试、取消和日志由宿主负责。
+- 未声明 `streaming` 的 Adapter 只支持普通 JSON POST；声明后可由 Preset 显式
+  启用 SSE。HTTP Client、代理、超时、限速、重试、取消和日志始终由宿主负责。
 - `body` 是完整模板。可直接加入 `reasoning_effort`、`response_format` 或
   Provider 自定义嵌套字段，不存在与宿主默认字段合并的覆盖顺序。
 - body 支持 `${model}`、`${system}`、`${messages}`、`${temperature}`、
@@ -71,6 +76,60 @@
 - `${api_key}` 禁止出现在 body；URL 不支持模板，因此密钥也不能进入 URL。
 - 未知字段、未知占位符、混合 body 文本占位符和非法 schema 立即失败。
 
+### SSE 流式规则（可选）
+
+schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+`streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
+
+```json
+{
+  "streaming": {
+    "transport": "sse",
+    "request_body": {"stream_options": {"include_usage": true}},
+    "content_events": [
+      {"pointer": "/choices/0/delta/content"}
+    ],
+    "reasoning_events": [
+      {"pointer": "/choices/0/delta/reasoning_content"},
+      {"pointer": "/choices/0/delta/reasoning"}
+    ],
+    "terminal": {"sentinel": "[DONE]"},
+    "error_events": [
+      {
+        "when": {"pointer": "/choices/0/finish_reason", "equals": "error"},
+        "message_pointer": "/error/message",
+        "status_pointer": "/error/status"
+      }
+    ],
+    "usage": {
+      "input_tokens_pointers": ["/usage/prompt_tokens"],
+      "output_tokens_pointers": ["/usage/completion_tokens"],
+      "total_tokens_pointers": ["/usage/total_tokens"]
+    }
+  }
+}
+```
+
+`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset
+`extra_body` 的顶层字段冲突。`content_events` 必须非空；每项以
+`pointer` 指向字符串增量，可选 `when` 条件为
+`{"pointer": "...", "equals": <primitive>}` 或
+`{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
+未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
+OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
+两类互斥的流式字段。
+`terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
+声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
+是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
+HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以
+同时报告外层 HTTP 200 和上游 HTTP 504。`usage` 的三个候选指针数组逐事件观察，
+每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
+
+宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在收到终止事件前
+断流或遇到流内服务错误时丢弃完整聚合正文，并按既有 HTTP 尝试次数重试；不会
+隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug 模式才保存原始
+SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
+
 ### 响应边界
 
 `response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。
@@ -78,8 +137,10 @@ JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`
 最后一个元素、`-2` 为倒数第二。当思考块总是排在最前、文本块在最后时
 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。
 越界、空数组与普通缺失路径同样快速失败。
-可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。推理路径
-不存在时规范化为 null；字段存在但类型错误时当前请求失败，不猜测备用字段。
+可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。也可使用非空
+的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，
+首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或
+拼接多个字段。
 
 Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一
 严格规则从 content 开头剥离一个完整已知思考 Tag；若结构化字段与内嵌块同时
@@ -87,7 +148,7 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 周期，不进入阶段记录。debug 模式只保留原始响应，不新增思考副本。
 
 常规 HTTP 状态与网络异常不由 Adapter 分类。需要特殊签名、非 JSON body、
-非 JSON 成功响应或特殊错误解析的端点超出 schema 1 范围。
+非 JSON 成功响应或特殊错误解析的端点超出当前声明式 schema 范围。
 
 ### 指纹与密钥
 
@@ -152,8 +213,9 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 ### 内置 Adapter 定义
 
 - `openai-compatible`：Bearer API Key，Chat Completions body，正文 pointer
-  `/choices/0/message/content`，推理 pointer
-  `/choices/0/message/reasoning_content`。
+  `/choices/0/message/content`，推理 pointers 为
+  `/choices/0/message/reasoning_content`、`/choices/0/message/reasoning`，SSE
+  增量对应为 `/choices/0/delta/reasoning_content`、`/choices/0/delta/reasoning`。
 - `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层
   `system`，pointer `/content/-1/text`。未启用 thinking 时 content 首块即
   文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。
@@ -172,7 +234,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应
   缺少该结构时快速失败。
 
-三个新定义都只存在于全局目录；示例 Preset 见
+四个内置定义都声明 `streaming` 与 `usage` 映射；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
 `openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
@@ -181,7 +243,8 @@ Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前
 
 ## 2. Document Adapter（Beta）
 
-Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`：
+Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；独立发行的
+`another-llm-translator-srt` 插件提供 `srt` Adapter：
 
 ```python
 class DocumentAdapter(Protocol):
@@ -192,6 +255,10 @@ class DocumentAdapter(Protocol):
     import_options: tuple[DocumentChoiceOption, ...]
     run_options: tuple[DocumentChoiceOption, ...]
 
+    def model_prompt_requirements(
+        *, stage: str, language: str, opaque_state: dict | None
+    ) -> str | None: ...
+
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
 ```
@@ -200,14 +267,40 @@ class DocumentAdapter(Protocol):
 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的
 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，
 或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言行为。更新该导出参数
-后，Document Adapter 插件协议版本为 `7`；旧协议插件会快速失败。
+后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+
+`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按
+当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。
+返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，
+不通过此方法重复声明。
+内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
+
+所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
+
+```python
+from app.documents import DecodedPlaintext, decode_plaintext
+
+decoded: DecodedPlaintext = decode_plaintext(
+    data,
+    confidence_threshold=0.6,
+    fallback_encoding="utf-8",
+)
+```
+
+`DecodedPlaintext` 返回 `text`、探测到的 `encoding_detected`、实际使用的
+`encoding_used`、探测置信度 `encoding_confidence` 和不可变的 `warnings`。API
+只负责字节到文本的严格解码：它处理 BOM、chardet 探测、GB2312/GBK 到 GB18030
+及 ASCII 到 UTF-8 的归一化，并在首选编码失败后只尝试一次 fallback。它不负责
+换行规范化、文件发现、格式解析、文件名上下文或配置校验；这些职责仍属于各自的
+Document Adapter 和宿主边界。两次严格解码都失败时抛出 `ProjectError`。
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
 
 可导入 Adapter 必须声明至少一个小写、带前导点的扩展名。宿主按大小写不敏感
 匹配扩展名；不同 Adapter 声明同一扩展名时插件加载直接失败，不猜测格式。
-内置 TXT 声明 `.txt`、`.text`，EPUB 声明 `.epub`。
+内置 TXT 声明 `.txt`、`.text`，EPUB 声明 `.epub`；SRT 插件声明 `.srt`。
 
 ### 导入
 
@@ -265,11 +358,25 @@ Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 7。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 10。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
 不会自动改用 TXT，也不会删除仍可读取的项目 Segment 和阶段结果。
+
+### SRT 0.1（外部插件示例）
+
+SRT 插件位于 `plugins/srt/`，发行包名为 `another-llm-translator-srt`，通过
+`another_llm_translator.plugins` entry point 注册。每个 cue 是一个 Segment，所有
+cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
+
+插件严格接受唯一正整数序号及 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行，序号不要求
+连续，正文可以跨多行。单语导出替换 cue 正文，双语导出在同一 cue 中追加换行和译文。
+输入换行会规范化为 LF，输出换行、末尾换行和编码由插件与宿主输出契约决定。
+
+HTML/ASS 样式标记作为普通正文交给模型，不由首版插件解析或保证保留；译文不得包含
+空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
+毫秒或时间行尾定位参数等非核心变体。
 
 ### EPUB 0.3
 
@@ -328,10 +435,18 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是
 默认值，模型只看到净文本。`tiered` 要求语义关键标签保留，表现层标签可整体省略；
-`strict` 要求全部源标签保留。宿主把受控标记校验交给 EPUB Adapter：未知、重复、
+`strict` 要求全部源标签保留。EPUB Adapter 仅在 `markers` 模式向对应请求的
+Prompt 注入上述保留要求，并把受控标记校验交给自身：未知、重复、
 未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
+其中 `tiered` 的语义标签为 `a`、`abbr`、`bdi`、`bdo`、`cite`、`code`、`data`、
+`dfn`、`kbd`、`q`、`samp`、`sub`、`sup`、`time`、`var`；表现层标签为 `b`、`em`、
+`i`、`mark`、`s`、`small`、`span`、`strong`、`u`，后者可整体省略。
 纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；
 详情界面同时显示净文本与模型文本预览。
+
+每个 Run 的 `document_adapter_prompt_requirements.json` 和 manifest 会保存按 File
+生成的本地化要求快照；`prompt.txt` 保存宿主基础 Prompt。请求实际使用的 Prompt
+还会在分块、格式修复和翻译校验修复时按当前要求集合组装。
 
 安全边界拒绝：
 
@@ -342,11 +457,11 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 
 ## 3. 可信 Python 插件宿主（Beta）
 
-插件包在 entry-point 组 `minimal_llm_translator.plugins` 注册一个
+插件包在 entry-point 组 `another_llm_translator.plugins` 注册一个
 `PluginDescriptor` 实例或返回该实例的无参函数：
 
 ```toml
-[project.entry-points."minimal_llm_translator.plugins"]
+[project.entry-points."another_llm_translator.plugins"]
 my_plugin = "my_package.plugin:descriptor"
 ```
 
@@ -357,7 +472,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=8,
+        protocol_version=10,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -366,20 +481,31 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。每个校验器声明唯一的
-`validator_id`、`version`、`label`，并实现 `validate(source, translation)`，返回
-带 `match_type`、匹配文本和译文位置的 `TranslationValidationMatch`。宿主会
-校验匹配边界，并把校验器及插件版本写入翻译阶段指纹。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；
+每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收
+`TranslationValidationContext` 的 `validate(context)`。上下文只包含当前 Segment
+的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或
+Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+
+`TranslationValidationMatch.severity` 为 `error` 或 `advisory`。`error` 必须指向
+候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的
+建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为
+warning。首个真实外部示例是可选的
+`another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查
+实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
-from app.translation_validation import TranslationValidationMatch
+from app.translation_validation import (
+    TranslationValidationContext,
+    TranslationValidationMatch,
+)
 
 class MyValidator:
     validator_id = "my_validator"
     version = "1.0.0"
     label = "My validator"
 
-    def validate(self, source: str, translation: str):
+    def validate(self, context: TranslationValidationContext):
         return ()
 ```
 
@@ -404,6 +530,13 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色
 分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
+
+当前 Preset schema 为 3。除现有连接字段外，`stream` 明确控制是否使用所引用
+Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用
+`endpoint`，只允许 `${model}` 占位符）。schema 2 用户 Preset 在 CLI、Web 或
+桌面 sidecar 启动时原子迁移为 schema 3，并补入 `stream = false` 与空的
+`stream_endpoint`；Run 内历史 v2 快照只在内存中按非流式解释，不改写审计文件。
+启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等
 端点专属请求字段：
@@ -434,7 +567,8 @@ Preset 修改立即影响所有引用项目，不维护版本历史。Adapter �
 
 路线 Stage 10 的 `models` 请求与响应映射、规范化 `usage` 映射和任务内
 汇总已实现（见 §1）。模型发现只由用户手动触发，缺少 usage 时明确显示
-不可用。
+不可用。流式使用 Preset 的显式开关，不改变普通请求的 body、术语注入或
+持久化语义。
 
 路线 Stage 11 才考虑单 Preset 多 API Key。Preset 仍只记录密钥环境变量名；
 每 Key 限流、调度、失效恢复和 Run 审计必须先形成可测试规则。该能力不提供
