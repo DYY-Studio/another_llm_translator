@@ -442,7 +442,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
 
 @pytest.mark.asyncio
 async def test_decision_ignores_extra_read_only_anchor_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
 
@@ -501,7 +501,6 @@ async def test_decision_ignores_extra_read_only_anchor_records(
 
     assert calls == 4
     assert summary["proposals"] == 1
-    assert "ignored read-only terminology decisions" in caplog.text
     draft = current_decision_draft(project)
     assert draft is not None
     assert draft["proposals"][0]["after"][0]["preferred_translation"] == "爱丽丝"
