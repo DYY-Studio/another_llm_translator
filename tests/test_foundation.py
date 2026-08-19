@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 from app.config import ConfigError, dump_config, load_config, load_project_config
+from app.documents import decode_plaintext
 from app.errors import StorageError, UsageError
 from app.main import run
 from app.project import (
     bundle_hash,
-    decode_txt,
     discover_inputs,
     init_project,
     natural_path_key,
@@ -332,14 +332,14 @@ def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
 
 def test_decode_gbk_as_gb18030() -> None:
     source = "你好，世界。这是一段用于编码探测的简体中文测试文本。"
-    text, detected, used, _, _ = decode_txt(
+    decoded = decode_plaintext(
         source.encode("gb18030"),
         confidence_threshold=0.0,
         fallback_encoding="utf-8",
     )
-    assert text == source
-    assert detected
-    assert used.casefold() in {"gb18030", "gb2312"}
+    assert decoded.text == source
+    assert decoded.encoding_detected
+    assert decoded.encoding_used.casefold() in {"gb18030", "gb2312"}
 
 
 def test_natural_path_key_orders_relative_paths_deterministically() -> None:

@@ -101,12 +101,6 @@ class JSONLLMAdapter:
     digest: str
     definition: dict[str, Any]
 
-    @property
-    def response_reasoning_content_pointer(self) -> str | None:
-        """Return the first reasoning pointer for legacy callers."""
-        pointers = self.response_reasoning_content_pointers
-        return pointers[0] if pointers else None
-
     def build_request(
         self,
         *,
@@ -176,10 +170,6 @@ class JSONLLMAdapter:
             self.streaming_spec["reasoning_events"],
             label="思考正文",
         )
-
-    def stream_error(self, event: dict[str, Any]) -> str | None:
-        details = self.stream_error_details(event)
-        return details.message if details is not None else None
 
     def stream_error_details(
         self, event: dict[str, Any]

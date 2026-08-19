@@ -1,4 +1,4 @@
-export const STORAGE_NAMESPACE = "another-llm-translator";
+const STORAGE_NAMESPACE = "another-llm-translator";
 const LEGACY_STORAGE_NAMESPACE = "minimal-llm-translator";
 
 export const STORAGE_KEYS = {

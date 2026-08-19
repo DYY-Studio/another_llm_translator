@@ -7,6 +7,7 @@ import pytest
 
 from app.errors import ConfigError
 from app.llm_migration import migrate_llm_resources
+from app.llm_preset import load_llm_preset
 from app.user_config import default_user_root
 
 ROOT = Path(__file__).parents[1]
@@ -47,8 +48,33 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     assert upgraded_preset["schema_version"] == 3
     assert upgraded_preset["stream"] is False
     assert upgraded_preset["stream_endpoint"] == ""
+    assert upgraded_preset == load_llm_preset(
+        root / "llm_presets" / "custom.json"
+    ).definition
     assert upgraded_adapter["schema_version"] == 2
     assert "streaming" not in upgraded_adapter
+
+
+def test_llm_resource_migration_uses_user_root_override_without_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "override"
+    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(root))
+    presets = root / "llm_presets"
+    presets.mkdir(parents=True)
+    value = json.loads(
+        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
+    )
+    value["schema_version"] = 2
+    value.pop("stream")
+    value.pop("stream_endpoint")
+    (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
+
+    assert migrate_llm_resources() == 1
+    assert (
+        json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
+        == 3
+    )
 
 
 def test_llm_resource_migration_rejects_invalid_file_without_rewriting(

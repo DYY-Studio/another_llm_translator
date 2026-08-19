@@ -595,7 +595,6 @@ def test_json_adapter_streaming_selectors_and_request_body(tmp_path: Path) -> No
     assert details is not None
     assert details.message == "upstream timeout"
     assert details.provider_error_status == 504
-    assert adapter.stream_error({"type": "other"}) is None
     assert adapter.extract_stream_usage({"usage": {"input": 1, "output": 2, "total": 3}}) == {
         "input_tokens": 1,
         "output_tokens": 2,
@@ -628,7 +627,7 @@ def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
         )
 
     with pytest.raises(ExternalError, match="缺少消息路径"):
-        adapter.stream_error({"type": "error"})
+        adapter.stream_error_details({"type": "error"})
 
     with pytest.raises(ExternalError, match="缺少状态路径"):
         adapter.stream_error_details(

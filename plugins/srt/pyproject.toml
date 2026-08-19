@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "another-llm-translator>=0.3,<0.4",
-  "chardet>=5.2,<6",
 ]
 
 [project.entry-points."another_llm_translator.plugins"]
