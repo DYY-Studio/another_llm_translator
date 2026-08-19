@@ -9,8 +9,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import load_config, load_project_config
-from app.errors import RequestSizeError, StorageError, UsageError
+from app.config import load_config, load_project_config, validate_config
+from app.errors import ConfigError, RequestSizeError, StorageError, UsageError
 from app.execution import create_run
 from app.main import build_parser
 from app.project import init_project
@@ -144,6 +144,9 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
         "allow_soft_target_overflow": True,
         "anchor_overflow_mode": "error",
     }
+    config["terminology_decision"] = "invalid"
+    with pytest.raises(ConfigError, match="配置节必须是表"):
+        validate_config(config)
 
     parser = build_parser()
     generated = parser.parse_args(["terms-decide", "demo", "--replace-draft"])
@@ -263,6 +266,21 @@ def test_decision_batch_overflow_policy_controls_local_planning(
             spec=spec,
         )
     assert error.value.reason == "context"
+
+    config["terminology_decision"]["allow_soft_target_overflow"] = True
+    config["execution"]["input_tokens_per_minute"] = 40
+    with pytest.raises(RequestSizeError, match="限制 40 tokens") as error:
+        _pack_batches(
+            [focus],
+            phase="consistency",
+            target_language="简体中文",
+            anchors=[],
+            evidence=evidence,
+            prompt="prompt",
+            config=config,
+            spec=spec,
+        )
+    assert error.value.reason == "itpm"
 
 
 @pytest.mark.asyncio

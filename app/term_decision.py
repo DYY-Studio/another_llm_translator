@@ -369,9 +369,9 @@ def _pack_batches(
         )
 
     def overflow_reason(estimate: int) -> str:
-        if estimate > context_limit:
+        if hard_limit == context_limit:
             return "context"
-        if itpm_limit > 0 and estimate > itpm_limit:
+        if hard_limit == itpm_limit:
             return "itpm"
         return "context"
 
@@ -394,6 +394,7 @@ def _pack_batches(
     ) -> tuple[list[dict[str, Any]], int]:
         state = focus[0]
         selected_anchors = _related_anchors(focus, anchors, spec)
+        had_anchors = bool(selected_anchors)
         estimate = estimate_for(focus, selected_anchors)
         if estimate > hard_limit:
             if anchor_overflow_mode == "trim":
@@ -404,15 +405,17 @@ def _pack_batches(
                 selected_anchors = _compact_anchors(selected_anchors)
                 estimate = estimate_for(focus, selected_anchors)
             if estimate > hard_limit:
+                detail = (
+                    "无 Anchors 时完整术语及证据仍超过硬限制"
+                    if not had_anchors
+                    else "完整术语证据和 Anchors 仍超过硬限制"
+                )
                 fail_size(
                     state,
                     estimate,
                     limit=hard_limit,
                     reason=overflow_reason(estimate),
-                    detail=(
-                        "完整术语证据和 Anchors 仍超过硬限制，"
-                        f"Anchor 超限策略为 {anchor_overflow_mode}"
-                    ),
+                    detail=f"{detail}，Anchor 超限策略为 {anchor_overflow_mode}",
                 )
         if estimate > soft_target and not allow_soft_overflow:
             fail_size(
@@ -1319,7 +1322,7 @@ async def run_terminology_decision(
             protected_term_count=len(protected_states),
         )
         write_json(project, run_dir / "manifest.json", manifest)
-        finalize_run(
+        usage = finalize_run(
             project,
             run_dir,
             status="completed",

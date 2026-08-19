@@ -393,11 +393,12 @@ def load_config(path: Path) -> dict[str, Any]:
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
     terminology_decision = config.get("terminology_decision")
-    if not isinstance(terminology_decision, dict):
+    if terminology_decision is None:
         terminology_decision = {}
         config["terminology_decision"] = terminology_decision
-    terminology_decision.setdefault("allow_soft_target_overflow", True)
-    terminology_decision.setdefault("anchor_overflow_mode", "error")
+    if isinstance(terminology_decision, dict):
+        terminology_decision.setdefault("allow_soft_target_overflow", True)
+        terminology_decision.setdefault("anchor_overflow_mode", "error")
     llm = config.get("llm")
     if isinstance(llm, dict):
         llm.setdefault("preset_terminology_decision", "")
