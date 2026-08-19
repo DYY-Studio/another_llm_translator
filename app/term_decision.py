@@ -632,8 +632,9 @@ def _load_checkpoint(
     checkpoint = _read_checkpoint_file(path)
     if (
         checkpoint.get("record_type") != "terminology_decision_checkpoint"
+        or checkpoint.get("project_id") != project_id
         or checkpoint.get("run_id") != run_id
-        or int(checkpoint.get("source_terms_revision", -1)) != revision
+        or checkpoint.get("source_terms_revision") != revision
     ):
         raise UsageError("术语决策检查点与当前 Run 或术语 revision 不一致")
     phases = checkpoint.get("phases")
