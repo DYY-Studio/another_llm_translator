@@ -59,6 +59,43 @@ def streaming_config(tmp_path: Path) -> dict:
     return current
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream", "read_timeout_enabled", "expected_read_timeout"),
+    [
+        (True, False, None),
+        (True, True, 17.0),
+        (False, False, 17.0),
+    ],
+)
+async def test_stream_read_timeout_can_be_disabled_independently(
+    tmp_path: Path,
+    stream: bool,
+    read_timeout_enabled: bool,
+    expected_read_timeout: float | None,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["llm"]["stream"] = stream
+    current["llm"]["stream_read_timeout_enabled"] = read_timeout_enabled
+    current["execution"]["request_timeout_seconds"] = 17
+    llm = LLMClient(
+        current,
+        SlidingWindowLimiter(0, 0),
+        run_dir=tmp_path / "run",
+        project_id="PRJ",
+        run_id="RUN",
+        stage="translation",
+    )
+
+    async with llm:
+        assert llm.client is not None
+        timeout = llm.client.timeout
+        assert timeout.connect == 17.0
+        assert timeout.read == expected_read_timeout
+        assert timeout.write == 17.0
+        assert timeout.pool == 17.0
+
+
 async def run_client(
     current: dict,
     tmp_path: Path,

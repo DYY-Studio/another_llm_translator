@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "preset_id": "anthropic-claude",
   "adapter_id": "anthropic",
   "base_url": "https://api.anthropic.com/v1",
@@ -16,6 +16,7 @@
   "request_timeout_seconds": 120,
   "stream": false,
   "stream_endpoint": "",
+  "stream_read_timeout_enabled": true,
   "extra_body": {},
   "credential": {
     "kind": "environment",

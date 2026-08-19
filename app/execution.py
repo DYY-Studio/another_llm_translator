@@ -1801,12 +1801,18 @@ class LLMClient:
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
             timeout = float(self.config["execution"]["request_timeout_seconds"])
+            client_timeout: float | httpx.Timeout = timeout
+            if (
+                self.config["llm"].get("stream", False)
+                and not self.config["llm"]["stream_read_timeout_enabled"]
+            ):
+                client_timeout = httpx.Timeout(timeout, read=None)
             limits = httpx.Limits(
                 max_connections=self.config["execution"]["max_parallel"],
                 max_keepalive_connections=self.config["execution"]["max_parallel"],
             )
             self.client = httpx.AsyncClient(
-                timeout=timeout,
+                timeout=client_timeout,
                 limits=limits,
                 proxy=self.config["llm"]["proxy_url"] or None,
             )

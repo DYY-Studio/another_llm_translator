@@ -76,7 +76,7 @@ def test_web_preset_with_keychain_credential_validates(
     assert saved.status_code == 200
     loaded = client.get("/api/v1/global/presets/default").json()
     assert loaded["credential"] == {"kind": "keychain", "name": "openai-main"}
-    assert "schema_version" in loaded and loaded["schema_version"] == 3
+    assert "schema_version" in loaded and loaded["schema_version"] == 4
 
 
 def test_web_welcome_first_and_dismiss(tmp_path: Path, monkeypatch) -> None:
