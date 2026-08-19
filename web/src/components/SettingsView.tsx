@@ -673,6 +673,7 @@ interface PromptView {
   content: string;
   language: string;
   assembled: string;
+  assembled_phases?: Record<string, string>;
   languages: string[];
   global_sync?: {
     available: boolean;
@@ -687,6 +688,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
+  const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
+  const [previewPhase, setPreviewPhase] = useState("adjudication");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
   const [globalSync, setGlobalSync] = useState<PromptView["global_sync"]>(undefined);
   const [loadedGlobalDraft, setLoadedGlobalDraft] = useState(false);
@@ -704,6 +707,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     setContent(value.content);
     setSavedContent(value.content);
     setAssembled(value.assembled);
+    setAssembledPhases(value.assembled_phases ?? {});
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
     setLanguages(value.languages);
@@ -763,6 +767,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
       setContent(value.content);
       setAssembled(value.assembled);
+      setAssembledPhases(value.assembled_phases ?? {});
       setPromptLanguage(value.language);
       setLoadedGlobalDraft(true);
       setMessage(translate("settings.promptGlobalLoaded", language));
@@ -775,6 +780,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
       setContent(value.content);
       setAssembled(value.assembled);
+      setAssembledPhases(value.assembled_phases ?? {});
       setSelectedLibraryEntry(promptId);
       setLoadedGlobalDraft(false);
       setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
@@ -848,6 +854,16 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     {error && <div className="error-banner">{error}</div>}
     {message && <span className="success-text">{message}</span>}
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
-    <div className="prompt-preview"><h3>{translate("settings.promptAssembled", language)}</h3><pre>{assembled || translate("settings.promptAssembledEmpty", language)}</pre></div>
+    <div className="prompt-preview">
+      <h3>{translate("settings.promptAssembled", language)}</h3>
+      {stage === "terminology_decision" && Object.keys(assembledPhases).length > 0 && <>
+        <p className="prompt-preview-hint">{translate("settings.promptPhaseHint", language)}</p>
+        <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptPhaseHint", language)}>
+          <button type="button" role="tab" aria-selected={previewPhase === "adjudication"} className={previewPhase === "adjudication" ? "active" : ""} onClick={() => setPreviewPhase("adjudication")}>{translate("settings.promptPhaseAdjudication", language)}</button>
+          <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
+        </div>
+      </>}
+      <pre>{(assembledPhases[previewPhase] ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
+    </div>
   </section>;
 }

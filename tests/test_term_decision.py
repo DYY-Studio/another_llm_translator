@@ -15,17 +15,18 @@ from app.execution import create_run
 from app.main import build_parser
 from app.project import init_project
 from app.sqlite_storage import atomic_write_json, read_json, record_header, write_json
+from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    _pack_batches,
+    _parse_decisions,
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
-    _pack_batches,
     rollback_decision,
     run_terminology_decision,
     save_decision_rejections,
 )
-from app.stages import term_normalization
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
@@ -283,6 +284,95 @@ def test_decision_batch_overflow_policy_controls_local_planning(
     assert error.value.reason == "itpm"
 
 
+def test_decision_parser_keeps_unknown_terms_strict() -> None:
+    focus = [_batch_state("target", "Target")]
+    content = llm_jsonl(
+        [
+            {
+                "type": "decision",
+                "normalized": "target",
+                "action": "keep",
+                "reason": "保持",
+            },
+            {
+                "type": "decision",
+                "normalized": "not-an-anchor",
+                "action": "keep",
+                "reason": "越界",
+            },
+        ]
+    )
+    with pytest.raises(UsageError, match="未知术语决策 normalized：not-an-anchor"):
+        _parse_decisions(
+            content,
+            focus,
+            all_forms={"Target"},
+            known_terms={"target"},
+            read_only_terms={"known-anchor"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "marker"),
+    [("zh-CN", "本批唯一允许输出"), ("en", "The only allowed decision normalized")],
+)
+async def test_decision_format_repair_lists_exact_target_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    marker: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    calls = 0
+    repairs = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls, repairs
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "format_correction" in payload:
+            repairs += 1
+            correction = str(payload["format_correction"])
+            assert marker in correction
+            assert json.dumps(
+                [item["normalized"] for item in payload["terms"]],
+                ensure_ascii=False,
+            ) in correction
+            assert "anchors" in correction
+            if language == "en":
+                assert "未知术语" not in correction
+            content = llm_jsonl(decision_response(payload))
+        else:
+            content = llm_jsonl(
+                [
+                    *decision_response(payload),
+                    {
+                        "type": "decision",
+                        "normalized": "not-an-anchor",
+                        "action": "keep",
+                        "reason": "越界",
+                    },
+                ]
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        summary = await run_terminology_decision(
+            project, prompt_language=language, http_client=client
+        )
+    del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert calls == 8
+    assert repairs == 4
+
+
 @pytest.mark.asyncio
 async def test_decision_generates_persistent_two_pass_draft_and_applies(
     tmp_path: Path,
@@ -315,6 +405,15 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
 
     assert phases == ["adjudication", "consistency"]
     assert summary["proposals"] == 1
+    run_dir = project / "runs" / summary["run_id"]
+    checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    assert (
+        checkpoint["phases"]["adjudication"]["alice"]["prompt_fingerprint"]
+        != checkpoint["phases"]["consistency"]["alice"]["prompt_fingerprint"]
+    )
+    prompt_snapshot = (run_dir / "prompt.txt").read_text(encoding="utf-8")
+    assert "===== terminology_decision/adjudication =====" in prompt_snapshot
+    assert "===== terminology_decision/consistency =====" in prompt_snapshot
     draft = current_decision_draft(project)
     assert draft is not None
     assert draft["source_terms_revision"] == 1
@@ -339,6 +438,72 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     alice = next(item for item in restored["terms"] if item["normalized"] == "alice")
     assert alice["preferred_translation"] is None
     assert alice["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_decision_ignores_extra_read_only_anchor_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def scoped_batches(
+        states: list[dict[str, object]], *, phase: str, **_: object
+    ) -> tuple[list, int]:
+        batches = []
+        for index, state in enumerate(states):
+            references = (
+                [states[1 - index]] if phase == "consistency" else []
+            )
+            batches.append(([state], references))
+        return batches, len(batches)
+
+    monkeypatch.setattr("app.term_decision._pack_batches", scoped_batches)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = decision_response(payload)
+        if payload["phase"] == "consistency":
+            anchor = payload["anchors"][0]
+            records.append(
+                {
+                    "type": "decision",
+                    "normalized": anchor["normalized"],
+                    "action": "update" if calls % 2 else "disable",
+                    "reason": "越界参照，不应应用",
+                    **(
+                        {
+                            "category": "错误类别",
+                            "description": "不应写入",
+                            "preferred_translation": "错误译名",
+                            "aliases": ["不存在的 alias"],
+                            "group_primary": None,
+                        }
+                        if calls % 2
+                        else {}
+                    ),
+                }
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": llm_jsonl(records)}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        summary = await run_terminology_decision(project, http_client=client)
+    del os.environ["LLM_API_KEY"]
+
+    assert calls == 4
+    assert summary["proposals"] == 1
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["proposals"][0]["after"][0]["preferred_translation"] == "爱丽丝"
 
 
 @pytest.mark.asyncio

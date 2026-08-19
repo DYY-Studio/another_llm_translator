@@ -1014,7 +1014,9 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 自动术语决策是独立、显式触发的 `terminology_decision` LLM 阶段，不属于
 `run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
 只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中次数和最多五个跨文件
-上下文样本，再进行分批裁决和跨术语一致性复核。模型只能保留、更新、软移除或标为
+上下文样本，再进行分批裁决和跨术语一致性复核。两个阶段共用项目的可编辑决策规则，
+但使用各自的固定阶段指令；第一阶段的 anchors 是人工决定，第二阶段的 anchors 还
+包括第一阶段暂定状态，所有 anchors 始终只读且不得输出 decision。模型只能保留、更新、软移除或标为
 `needs_review`；不能修改 source/normalized、虚构 alias 或新增 description。
 
 两个阶段分别按当前 Preset 的 `max_parallel` 有界并发，第一阶段全部完成并形成统一

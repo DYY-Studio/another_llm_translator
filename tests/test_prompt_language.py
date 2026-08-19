@@ -88,6 +88,24 @@ def test_fixed_prompts_define_data_and_output_boundaries() -> None:
         assert "non-empty complete suggested_text" in review
 
 
+def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() -> None:
+    middle = "共同术语政策：优先保持人名译名一致。"
+    adjudication = full_prompt(
+        "terminology_decision", middle, "zh-CN", phase="adjudication"
+    )
+    consistency = full_prompt(
+        "terminology_decision", middle, "zh-CN", phase="consistency"
+    )
+
+    assert middle in adjudication and middle in consistency
+    assert "当前是第一阶段“术语裁决”" in adjudication
+    assert "当前是第二阶段“跨术语一致性复核”" in consistency
+    assert "只包含受保护人工决定" in adjudication
+    assert "可能包含受保护人工决定和第一阶段暂定状态" in consistency
+    assert "不得为 anchors 输出任何决策" in consistency
+    assert adjudication != consistency
+
+
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
 def test_segment_prompts_require_translated_aozora_ruby_base(stage: str) -> None:
     zh = full_prompt(stage, "项目要求。", "zh-CN")
@@ -282,6 +300,11 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert "用户消息为 JSON" in zh["assembled"]
     assert "The user message is JSON" in en["assembled"]
     assert set(en["languages"]) == {"zh-CN", "en"}
+
+    decision = client.get("/api/v1/global/prompts/terminology_decision").json()
+    assert set(decision["assembled_phases"]) == {"adjudication", "consistency"}
+    assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
+    assert "当前是第二阶段“跨术语一致性复核”" in decision["assembled_phases"]["consistency"]
 
     assert client.put(
         "/api/v1/global/prompts/translation",

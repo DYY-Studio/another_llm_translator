@@ -67,3 +67,14 @@ test("automatic decision resume copy identifies persisted progress", async () =>
   assert.match(source, /已保存 \{completed\} \/ \{total\}/);
   assert.match(source, /Saved \{completed\} \/ \{total\}/);
 });
+
+test("prompt settings expose distinct terminology decision phase previews", async () => {
+  const source = await readFile(
+    new URL("../src/components/SettingsView.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /assembled_phases\?: Record<string, string>/);
+  assert.match(source, /settings\.promptPhaseAdjudication/);
+  assert.match(source, /settings\.promptPhaseConsistency/);
+  assert.match(source, /previewPhase/);
+});

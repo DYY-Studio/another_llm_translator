@@ -77,13 +77,23 @@ def _prompt_language(project: Path, requested: str | None) -> str:
     return language
 
 
-def _prompt(project: Path, language: str) -> str:
+def _prompt(project: Path, language: str) -> dict[str, str]:
     path = project / "prompts" / prompt_file(STAGE, language)
     try:
         middle = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{path.name}: {exc}") from exc
-    return full_prompt(STAGE, middle, language)
+    return {
+        phase: full_prompt(STAGE, middle, language, phase=phase)
+        for phase in _PHASES
+    }
+
+
+def _prompt_snapshot(prompts: dict[str, str]) -> str:
+    return "\n\n".join(
+        f"===== terminology_decision/{phase} =====\n{prompts[phase]}"
+        for phase in _PHASES
+    )
 
 
 def _term_state(
@@ -470,15 +480,20 @@ def _parse_decisions(
     *,
     all_forms: set[str],
     known_terms: set[str],
-) -> dict[str, dict[str, Any]]:
+    read_only_terms: set[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = list(document.errors)
     expected = {str(item["normalized"]): item for item in focus}
     decisions: dict[str, dict[str, Any]] = {}
+    ignored_read_only: list[str] = []
     for value in document.records:
         normalized = value.get("normalized")
         action = value.get("action")
         if not isinstance(normalized, str) or normalized not in expected:
+            if isinstance(normalized, str) and normalized in read_only_terms:
+                ignored_read_only.append(normalized)
+                continue
             errors.append(f"未知术语决策 normalized：{normalized}")
             continue
         if normalized in decisions:
@@ -554,7 +569,7 @@ def _parse_decisions(
         errors.append("术语决策响应缺少 end")
     if errors:
         raise UsageError("；".join(errors[:10]))
-    return decisions
+    return decisions, ignored_read_only
 
 
 async def _request_batch(
@@ -568,6 +583,8 @@ async def _request_batch(
     evidence: dict[str, dict[str, Any]],
     all_forms: set[str],
     known_terms: set[str],
+    read_only_terms: set[str],
+    prompt_language: str,
 ) -> dict[str, dict[str, Any]]:
     errors: list[str] = []
     parent_request_id: str | None = None
@@ -580,9 +597,26 @@ async def _request_batch(
             evidence=_compact_anchor_evidence(evidence, anchors),
         )
         if attempt:
-            payload["format_correction"] = (
-                "上次响应不符合术语决策协议：" + "；".join(errors[:5])
+            allowed = json.dumps(
+                [str(item["normalized"]) for item in focus],
+                ensure_ascii=False,
             )
+            if prompt_language == "en":
+                payload["format_correction"] = (
+                    "The previous response violated the terminology decision "
+                    "protocol and could not be accepted. "
+                    f"The only allowed decision normalized values are {allowed}. "
+                    "Output exactly one decision for each terms[] item, no decision "
+                    "for any anchors[] item, and then the exact end record."
+                )
+            else:
+                payload["format_correction"] = (
+                    "上次响应不符合术语决策协议："
+                    f"{errors[0] if errors else '响应无效'}。"
+                    f"本批唯一允许输出的 normalized 为 {allowed}。"
+                    "必须为每个 terms[] 项各输出一条 decision；不得为 anchors[] 任一项输出"
+                    " decision；最后输出精确的 end 记录。"
+                )
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
         estimate = estimate_messages(
@@ -596,12 +630,21 @@ async def _request_batch(
             parent_request_id=parent_request_id,
         )
         try:
-            return _parse_decisions(
+            decisions, ignored_read_only = _parse_decisions(
                 response.content,
                 focus,
                 all_forms=all_forms,
                 known_terms=known_terms,
+                read_only_terms=read_only_terms,
             )
+            if ignored_read_only:
+                llm.logger.warning(
+                    "ignored read-only terminology decisions request=%s count=%d normalized=%s",
+                    request_id,
+                    len(ignored_read_only),
+                    ",".join(dict.fromkeys(ignored_read_only[:10])),
+                )
+            return decisions
         except UsageError as exc:
             errors = [str(exc)]
             parent_request_id = request_id
@@ -906,17 +949,20 @@ def _validate_final_states(
 
 
 def _decision_fingerprint(
-    config: dict[str, Any], prompt: str, library: dict[str, Any]
+    config: dict[str, Any], prompts: dict[str, str], library: dict[str, Any]
 ) -> str:
     data = {
         "stage": STAGE,
-        "rules_version": 1,
+        "rules_version": 2,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
         "preset_hash": config.get("_llm_preset_hash"),
         "temperature": config["llm"]["temperature_terminology_decision"],
-        "prompt": hashlib.sha256(prompt.encode()).hexdigest(),
+        "prompts": {
+            phase: hashlib.sha256(prompts[phase].encode()).hexdigest()
+            for phase in _PHASES
+        },
         "terms_revision": library["terms_revision"],
         "terminology": config["terminology"],
         "terminology_decision": config["terminology_decision"],
@@ -993,7 +1039,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         project, list(library.get("terms", [])), config
     )
     language = _prompt_language(project, prompt_language)
-    prompt = _prompt(project, language)
+    prompts = _prompt(project, language)
     spec = term_normalization(config)
     protected_states = [states[key] for key in sorted(protected & set(states))]
     batches, tokens = _pack_batches(
@@ -1002,7 +1048,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         target_language=str(config["project"]["target_language"]),
         anchors=protected_states,
         evidence=evidence,
-        prompt=prompt,
+        prompt=prompts["adjudication"],
         config=config,
         spec=spec,
     )
@@ -1015,7 +1061,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         "eligible": eligible,
         "evidence": evidence,
         "language": language,
-        "prompt": prompt,
+        "prompts": prompts,
         "spec": spec,
         "protected_states": protected_states,
         "phase_one": batches,
@@ -1048,8 +1094,8 @@ async def run_terminology_decision(
     eligible = plan["eligible"]
     evidence = plan["evidence"]
     language = plan["language"]
-    prompt = plan["prompt"]
-    fingerprint = _decision_fingerprint(config, prompt, library)
+    prompts = plan["prompts"]
+    fingerprint = _decision_fingerprint(config, prompts, library)
     model_fingerprint = "sha256:" + hashlib.sha256(
         json.dumps(
             {
@@ -1060,7 +1106,11 @@ async def run_terminology_decision(
             sort_keys=True,
         ).encode()
     ).hexdigest()
-    prompt_fingerprint = "sha256:" + hashlib.sha256(prompt.encode()).hexdigest()
+    prompt_fingerprints = {
+        phase: "sha256:" + hashlib.sha256(prompts[phase].encode()).hexdigest()
+        for phase in _PHASES
+    }
+    prompt_snapshot = _prompt_snapshot(prompts)
     spec = plan["spec"]
     protected_states = plan["protected_states"]
     revision = int(library["terms_revision"])
@@ -1090,7 +1140,7 @@ async def run_terminology_decision(
             config=config,
             stage=STAGE,
             fingerprint=fingerprint,
-            prompt=prompt,
+            prompt=prompt_snapshot,
             selected_count=len(eligible),
             requested_count=len(eligible),
             reused_count=0,
@@ -1108,7 +1158,7 @@ async def run_terminology_decision(
             config=config,
             stage=STAGE,
             fingerprint=fingerprint,
-            prompt=prompt,
+            prompt=prompt_snapshot,
             scope=Scope(),
             selected_count=len(eligible),
             requested_count=len(eligible),
@@ -1190,7 +1240,7 @@ async def run_terminology_decision(
                 target_language=str(config["project"]["target_language"]),
                 anchors=protected_states,
                 evidence=evidence,
-                prompt=prompt,
+                prompt=prompts["adjudication"],
                 config=config,
                 spec=spec,
             )
@@ -1204,11 +1254,13 @@ async def run_terminology_decision(
                     focus=focus,
                     anchors=anchors,
                     phase="adjudication",
-                    prompt=prompt,
+                    prompt=prompts["adjudication"],
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
                     known_terms=known_terms,
+                    read_only_terms={str(item["normalized"]) for item in anchors},
+                    prompt_language=language,
                 )
                 decisions.update(result)
                 records = checkpoint["phases"]["adjudication"]
@@ -1217,7 +1269,7 @@ async def run_terminology_decision(
                         "decision": deepcopy(decision),
                         "decision_fingerprint": fingerprint,
                         "model_fingerprint": model_fingerprint,
-                        "prompt_fingerprint": prompt_fingerprint,
+                        "prompt_fingerprint": prompt_fingerprints["adjudication"],
                     }
                 atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
                 completed += len(focus)
@@ -1247,7 +1299,7 @@ async def run_terminology_decision(
                 target_language=str(config["project"]["target_language"]),
                 anchors=phase_two_anchors,
                 evidence=evidence,
-                prompt=prompt,
+                prompt=prompts["consistency"],
                 config=config,
                 spec=spec,
             )
@@ -1261,11 +1313,13 @@ async def run_terminology_decision(
                     focus=focus,
                     anchors=anchors,
                     phase="consistency",
-                    prompt=prompt,
+                    prompt=prompts["consistency"],
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
                     known_terms=known_terms,
+                    read_only_terms={str(item["normalized"]) for item in anchors},
+                    prompt_language=language,
                 )
                 final_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
@@ -1274,7 +1328,7 @@ async def run_terminology_decision(
                         "decision": deepcopy(decision),
                         "decision_fingerprint": fingerprint,
                         "model_fingerprint": model_fingerprint,
-                        "prompt_fingerprint": prompt_fingerprint,
+                        "prompt_fingerprint": prompt_fingerprints["consistency"],
                     }
                 atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
                 completed += len(focus)

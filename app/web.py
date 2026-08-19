@@ -763,6 +763,13 @@ def create_app(
             "assembled": full_prompt(stage, content, resolved),
             "languages": available,
         }
+        if stage == "terminology_decision":
+            assembled_phases = {
+                phase: full_prompt(stage, content, resolved, phase=phase)
+                for phase in ("adjudication", "consistency")
+            }
+            result["assembled_phases"] = assembled_phases
+            result["assembled"] = assembled_phases["adjudication"]
         if global_file_for is not None:
             global_path = global_file_for(resolved)
             if global_path.is_file():
@@ -824,7 +831,7 @@ def create_app(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         content, digest = read_prompt_library(stage, language, prompt_id)
-        return {
+        result: dict[str, Any] = {
             "id": prompt_id,
             "stage": stage,
             "language": language,
@@ -832,6 +839,14 @@ def create_app(
             "digest": digest,
             "assembled": full_prompt(stage, content, language),
         }
+        if stage == "terminology_decision":
+            assembled_phases = {
+                phase: full_prompt(stage, content, language, phase=phase)
+                for phase in ("adjudication", "consistency")
+            }
+            result["assembled_phases"] = assembled_phases
+            result["assembled"] = assembled_phases["adjudication"]
+        return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
     async def put_prompt_library_entry(
