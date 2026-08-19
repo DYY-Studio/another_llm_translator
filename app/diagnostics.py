@@ -392,9 +392,15 @@ class Diagnostics:
         elapsed = self._elapsed_seconds
         if self._started_monotonic is not None and self._running:
             elapsed = time.monotonic() - self._started_monotonic
-        usage_available = bool(self.usage and self.usage.get("available") is True)
-        input_tokens = int(self.usage["input_tokens"]) if usage_available else 0
-        output_tokens = int(self.usage["output_tokens"]) if usage_available else 0
+        usage_partial = bool(self.usage and self.usage.get("partial") is True)
+        usage_available = bool(
+            self.usage
+            and self.usage.get("available") is True
+            and not usage_partial
+        )
+        usage_observed = usage_available or usage_partial
+        input_tokens = int(self.usage["input_tokens"]) if usage_observed else 0
+        output_tokens = int(self.usage["output_tokens"]) if usage_observed else 0
         throughput_input = None
         throughput_output = None
         throughput_total = None
@@ -427,6 +433,7 @@ class Diagnostics:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usage_available": usage_available,
+                "usage_partial": usage_partial,
                 "throughput_input_tokens_per_second": throughput_input,
                 "throughput_output_tokens_per_second": throughput_output,
                 "throughput_tokens_per_second": throughput_total,
