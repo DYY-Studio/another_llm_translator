@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from .errors import ConfigError
 from .llm_adapter import load_json_adapter
 from .llm_preset import load_llm_preset
 from .sqlite_storage import atomic_write_json
-from .user_config import USER_ROOT_OVERRIDE_ENV, default_user_root, user_root
+from .user_config import default_user_root, user_root
 
 
 def migrate_llm_resources(*, base: Path | None = None) -> int:
     """Upgrade user-owned LLM resources without touching immutable Run snapshots."""
-    if base is None and os.environ.get(USER_ROOT_OVERRIDE_ENV):
-        root = user_root()
-    else:
-        root = default_user_root(base=base) if base is not None else user_root()
+    root = default_user_root(base=base) if base is not None else user_root()
     migrated = 0
     migrated += _migrate_directory(
         root / "llm_presets", kind="preset", legacy_version=2
@@ -41,10 +37,7 @@ def _migrate_directory(path: Path, *, kind: str, legacy_version: int) -> int:
         if raw.get("schema_version") != legacy_version:
             continue
         if kind == "preset":
-            load_llm_preset(item)
-            raw["schema_version"] = 3
-            raw.setdefault("stream", False)
-            raw.setdefault("stream_endpoint", "")
+            raw = load_llm_preset(item).definition
         else:
             load_json_adapter(item)
             raw["schema_version"] = 2
