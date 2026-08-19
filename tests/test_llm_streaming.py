@@ -179,6 +179,7 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
         "output_tokens": 3,
         "total_tokens": 10,
         "available": True,
+        "partial": False,
     }
     assert len(calls) == 1
     payload = json.loads(calls[0].content)
@@ -589,4 +590,4 @@ async def test_builtin_provider_stream_protocols(
     await client.aclose()
 
     assert response.content == expected
-    assert llm.usage_summary() == {**usage, "available": True}
+    assert llm.usage_summary() == {**usage, "available": True, "partial": False}

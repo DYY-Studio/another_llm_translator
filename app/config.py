@@ -54,6 +54,10 @@ SCHEMA: dict[str, Any] = {
         "max_terms_per_segment": None,
         "alias_primary_collision": None,
     },
+    "terminology_decision": {
+        "allow_soft_target_overflow": None,
+        "anchor_overflow_mode": None,
+    },
     "validation": {
         "translation": {
             "validators": None,
@@ -304,6 +308,20 @@ def validate_config(config: dict[str, Any]) -> None:
         or max_terms <= 0
     ):
         raise ConfigError("terminology.max_terms_per_segment 必须是正整数")
+    decision_config = config["terminology_decision"]
+    if not isinstance(decision_config["allow_soft_target_overflow"], bool):
+        raise ConfigError(
+            "terminology_decision.allow_soft_target_overflow 必须是布尔值"
+        )
+    anchor_overflow_mode = decision_config["anchor_overflow_mode"]
+    if not isinstance(anchor_overflow_mode, str) or anchor_overflow_mode not in {
+        "error",
+        "trim",
+        "compact",
+    }:
+        raise ConfigError(
+            "terminology_decision.anchor_overflow_mode 必须是 error、trim 或 compact"
+        )
     if not isinstance(config["debug"]["enabled"], bool):
         raise ConfigError("debug.enabled 必须是布尔值")
     for key in (
@@ -374,6 +392,13 @@ def load_config(path: Path) -> dict[str, Any]:
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
+    terminology_decision = config.get("terminology_decision")
+    if terminology_decision is None:
+        terminology_decision = {}
+        config["terminology_decision"] = terminology_decision
+    if isinstance(terminology_decision, dict):
+        terminology_decision.setdefault("allow_soft_target_overflow", True)
+        terminology_decision.setdefault("anchor_overflow_mode", "error")
     llm = config.get("llm")
     if isinstance(llm, dict):
         llm.setdefault("preset_terminology_decision", "")

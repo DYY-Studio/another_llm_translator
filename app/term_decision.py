@@ -14,7 +14,7 @@ import httpx
 
 from .config import load_project_config
 from .documents import aozora_match_views
-from .errors import ContextLengthError, StorageError, UsageError
+from .errors import RequestSizeError, StorageError, UsageError
 from .execution import (
     LLMClient,
     Scope,
@@ -246,6 +246,29 @@ def _payload_term(
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
 
 
+def _compact_anchor_evidence(
+    evidence: dict[str, dict[str, Any]],
+    anchors: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Return payload evidence with anchor samples removed when requested."""
+    if not any(item.get("_compact_evidence") for item in anchors):
+        return evidence
+    compacted = deepcopy(evidence)
+    for anchor in anchors:
+        normalized = str(anchor["normalized"])
+        value = compacted.get(normalized)
+        if isinstance(value, dict):
+            value["samples"] = []
+    return compacted
+
+
+def _compact_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {**deepcopy(anchor), "_compact_evidence": True}
+        for anchor in anchors
+    ]
+
+
 def _related_anchors(
     focus: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
@@ -280,17 +303,18 @@ def _related_anchors(
     return related[:RELATED_ANCHOR_LIMIT]
 
 
-def _request_limit(config: dict[str, Any]) -> int:
-    return min(
-        int(config["chunking"]["target_chunk_input_tokens"]),
+def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
+    soft_target = int(config["chunking"]["target_chunk_input_tokens"])
+    context_limit = (
         int(config["llm"]["context_window_tokens"])
-        - int(config["llm"]["context_safety_margin_tokens"]),
-        (
-            int(config["execution"]["input_tokens_per_minute"])
-            if int(config["execution"]["input_tokens_per_minute"]) > 0
-            else 2**63 - 1
-        ),
+        - int(config["llm"]["context_safety_margin_tokens"])
     )
+    itpm_limit = int(config["execution"]["input_tokens_per_minute"])
+    hard_limit = min(
+        context_limit,
+        itpm_limit if itpm_limit > 0 else 2**63 - 1,
+    )
+    return soft_target, hard_limit, context_limit, itpm_limit
 
 
 def _make_payload(
@@ -320,60 +344,114 @@ def _pack_batches(
     config: dict[str, Any],
     spec: Any,
 ) -> tuple[list[tuple[list[dict[str, Any]], list[dict[str, Any]]]], int]:
-    limit = _request_limit(config)
-    batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
-    total = 0
-    current: list[dict[str, Any]] = []
-    for state in _ordered_states(states, spec):
-        proposed = [*current, state]
-        related = _related_anchors(proposed, anchors, spec)
+    soft_target, hard_limit, context_limit, itpm_limit = _request_limits(config)
+    decision_config = config["terminology_decision"]
+    allow_soft_overflow = bool(
+        decision_config["allow_soft_target_overflow"]
+    )
+    anchor_overflow_mode = str(decision_config["anchor_overflow_mode"])
+    token_factor = float(config["execution"]["token_safety_factor"])
+
+    def estimate_for(
+        focus: list[dict[str, Any]],
+        anchor_list: list[dict[str, Any]],
+    ) -> int:
         payload = _make_payload(
             phase=phase,
             target_language=target_language,
-            focus=proposed,
-            anchors=related,
-            evidence=evidence,
+            focus=focus,
+            anchors=anchor_list,
+            evidence=_compact_anchor_evidence(evidence, anchor_list),
         )
-        estimate = estimate_messages(
+        return estimate_messages(
             render_messages(prompt, payload),
-            float(config["execution"]["token_safety_factor"]),
+            token_factor,
         )
-        if current and estimate > limit:
-            previous_anchors = _related_anchors(current, anchors, spec)
-            previous_payload = _make_payload(
-                phase=phase,
-                target_language=target_language,
-                focus=current,
-                anchors=previous_anchors,
-                evidence=evidence,
+
+    def overflow_reason() -> str:
+        if hard_limit == context_limit:
+            return "context"
+        if hard_limit == itpm_limit:
+            return "itpm"
+        return "context"
+
+    def fail_size(
+        state: dict[str, Any],
+        estimate: int,
+        *,
+        limit: int,
+        reason: str,
+        detail: str,
+    ) -> None:
+        raise RequestSizeError(
+            f"术语 {state['source']} 的自动决策请求估算 {estimate} tokens，"
+            f"限制 {limit} tokens；{detail}",
+            reason=reason,
+        )
+
+    def prepare_single(
+        focus: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        state = focus[0]
+        selected_anchors = _related_anchors(focus, anchors, spec)
+        had_anchors = bool(selected_anchors)
+        estimate = estimate_for(focus, selected_anchors)
+        if estimate > hard_limit:
+            if anchor_overflow_mode == "trim":
+                while selected_anchors and estimate > hard_limit:
+                    selected_anchors = selected_anchors[:-1]
+                    estimate = estimate_for(focus, selected_anchors)
+            elif anchor_overflow_mode == "compact":
+                selected_anchors = _compact_anchors(selected_anchors)
+                estimate = estimate_for(focus, selected_anchors)
+            if estimate > hard_limit:
+                detail = (
+                    "无 Anchors 时完整术语及证据仍超过硬限制"
+                    if not had_anchors
+                    else "完整术语证据和 Anchors 仍超过硬限制"
+                )
+                fail_size(
+                    state,
+                    estimate,
+                    limit=hard_limit,
+                    reason=overflow_reason(),
+                    detail=f"{detail}，Anchor 超限策略为 {anchor_overflow_mode}",
+                )
+        if estimate > soft_target and not allow_soft_overflow:
+            fail_size(
+                state,
+                estimate,
+                limit=soft_target,
+                reason="context",
+                detail="超过软目标且配置禁止继续执行",
             )
-            previous_estimate = estimate_messages(
-                render_messages(prompt, previous_payload),
-                float(config["execution"]["token_safety_factor"]),
-            )
+        return selected_anchors, estimate
+
+    batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+    total = 0
+    current: list[dict[str, Any]] = []
+    batch_limit = min(soft_target, hard_limit)
+    for state in _ordered_states(states, spec):
+        proposed = [*current, state]
+        related = _related_anchors(proposed, anchors, spec)
+        estimate = estimate_for(proposed, related)
+        if current and estimate > batch_limit:
+            previous_anchors, previous_estimate = prepare_single(current)
             batches.append((current, previous_anchors))
             total += previous_estimate
             current = [state]
             continue
-        if estimate > limit:
-            raise ContextLengthError(
-                f"单个术语及证据超过模型输入限制：{state['source']}"
-            )
+        if not current and estimate > batch_limit:
+            selected_anchors, single_estimate = prepare_single([state])
+            batches.append(([state], selected_anchors))
+            total += single_estimate
+            current = []
+            continue
         current = proposed
     if current:
-        related = _related_anchors(current, anchors, spec)
-        payload = _make_payload(
-            phase=phase,
-            target_language=target_language,
-            focus=current,
-            anchors=related,
-            evidence=evidence,
-        )
-        total += estimate_messages(
-            render_messages(prompt, payload),
-            float(config["execution"]["token_safety_factor"]),
-        )
-        batches.append((current, related))
+        selected_anchors, final_estimate = prepare_single(current)
+        total += final_estimate
+        batches.append((current, selected_anchors))
     return batches, total
 
 
@@ -499,7 +577,7 @@ async def _request_batch(
             target_language=str(config["project"]["target_language"]),
             focus=focus,
             anchors=anchors,
-            evidence=evidence,
+            evidence=_compact_anchor_evidence(evidence, anchors),
         )
         if attempt:
             payload["format_correction"] = (
@@ -841,6 +919,7 @@ def _decision_fingerprint(
         "prompt": hashlib.sha256(prompt.encode()).hexdigest(),
         "terms_revision": library["terms_revision"],
         "terminology": config["terminology"],
+        "terminology_decision": config["terminology_decision"],
     }
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
@@ -1243,7 +1322,7 @@ async def run_terminology_decision(
             protected_term_count=len(protected_states),
         )
         write_json(project, run_dir / "manifest.json", manifest)
-        finalize_run(
+        usage = finalize_run(
             project,
             run_dir,
             status="completed",

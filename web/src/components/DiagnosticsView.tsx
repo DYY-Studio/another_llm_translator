@@ -358,13 +358,13 @@ export function DiagnosticsView({ language }: { language: Language }) {
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
         <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
-        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.input_tokens, language) : metrics?.usage_partial ? translate("diagnostics.atLeast", language, { value: number(metrics.input_tokens, language) }) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available ? number(metrics.output_tokens, language) : metrics?.usage_partial ? translate("diagnostics.atLeast", language, { value: number(metrics.output_tokens, language) }) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.runTotal", language)}</small></article>
         <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(throughput, language)}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" ref={detailsRef} aria-label={translate("diagnostics.requestSummary", language)}>
-        <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : translate("diagnostics.unavailable", language)}</strong></span>
+        <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : metrics?.usage_partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
         <span>{translate("diagnostics.averageLatency", language)} <strong>{number(metrics?.average_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.httpErrors", language)} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>

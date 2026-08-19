@@ -1412,10 +1412,11 @@ def finalize_run(
         previous = manifest.get("usage")
         if type(invocation_count) is int and invocation_count > 0:
             usage = combine_usage(previous, usage)
-        elif type(invocation_count) is not int and manifest.get(
-            "continuations"
-        ):
-            usage = unavailable_usage()
+        elif type(invocation_count) is not int and manifest.get("continuations"):
+            # Legacy manifests have no invocation counter.  Treat an old
+            # exact usage value as observed, and mark the new continuation
+            # partial when its usage is missing.
+            usage = combine_usage(previous, usage)
         elif usage is None:
             usage = unavailable_usage()
         manifest["usage"] = usage
@@ -1432,28 +1433,47 @@ def unavailable_usage() -> dict[str, Any]:
         "output_tokens": 0,
         "total_tokens": 0,
         "available": False,
+        "partial": False,
     }
 
 
 def combine_usage(
     previous: Any, current: Any
 ) -> dict[str, Any]:
-    values = (previous, current)
-    if any(
-        not isinstance(value, dict)
-        or value.get("available") is not True
-        or any(
-            not isinstance(value.get(key), int) or value[key] < 0
-            for key in ("input_tokens", "output_tokens", "total_tokens")
+    observed = []
+    incomplete = False
+    for index, value in enumerate((previous, current)):
+        if value is None:
+            if index == 1 and previous is not None:
+                incomplete = True
+            continue
+        if not isinstance(value, dict):
+            incomplete = True
+            continue
+        numbers = tuple(
+            value.get(key) for key in ("input_tokens", "output_tokens", "total_tokens")
         )
-        for value in values
-    ):
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0
+            for item in numbers
+        ):
+            incomplete = True
+            continue
+        is_partial = value.get("partial") is True
+        is_available = value.get("available") is True and not is_partial
+        if not is_available and not is_partial:
+            incomplete = True
+            continue
+        observed.append((numbers, is_partial))
+        incomplete = incomplete or is_partial
+    if not observed:
         return unavailable_usage()
     return {
-        "input_tokens": sum(value["input_tokens"] for value in values),
-        "output_tokens": sum(value["output_tokens"] for value in values),
-        "total_tokens": sum(value["total_tokens"] for value in values),
-        "available": True,
+        "input_tokens": sum(values[0][0] for values in observed),
+        "output_tokens": sum(values[0][1] for values in observed),
+        "total_tokens": sum(values[0][2] for values in observed),
+        "available": not incomplete,
+        "partial": incomplete,
     }
 
 
@@ -2450,11 +2470,13 @@ class LLMClient:
         if self.adapter.usage_pointers is None:
             return None
         available = self.usage_observed and self.usage_complete
+        partial = self.usage_observed and not self.usage_complete
         return {
-            "input_tokens": self.usage.input_tokens if available else 0,
-            "output_tokens": self.usage.output_tokens if available else 0,
-            "total_tokens": self.usage.total_tokens if available else 0,
+            "input_tokens": self.usage.input_tokens if self.usage_observed else 0,
+            "output_tokens": self.usage.output_tokens if self.usage_observed else 0,
+            "total_tokens": self.usage.total_tokens if self.usage_observed else 0,
             "available": available,
+            "partial": partial,
         }
 
     def _record_stream_usage(self, values: dict[str, int]) -> None:

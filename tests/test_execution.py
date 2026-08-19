@@ -21,6 +21,7 @@ from app.execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
+    combine_usage,
     contiguous_groups,
     estimate_messages,
     estimate_messages_upper_bound,
@@ -1381,6 +1382,7 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
                 "output_tokens": 11,
                 "total_tokens": 25,
                 "available": True,
+                "partial": False,
             }
             assert observed[-1] == llm.usage_summary()
             assert len(observed) == 3
@@ -1421,6 +1423,7 @@ async def test_llm_client_marks_usage_unavailable_when_omitted(
             summary = llm.usage_summary()
             assert summary is not None
             assert summary["available"] is False
+            assert summary["partial"] is False
             assert summary["input_tokens"] == 0
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1435,7 +1438,7 @@ async def test_llm_client_marks_usage_unavailable_when_omitted(
     ],
 )
 @pytest.mark.asyncio
-async def test_llm_client_marks_mixed_usage_unavailable(
+async def test_llm_client_preserves_observed_usage_as_partial(
     tmp_path: Path,
     second_usage: object,
 ) -> None:
@@ -1476,10 +1479,11 @@ async def test_llm_client_marks_mixed_usage_unavailable(
                     estimated_input_tokens=10,
                 )
             assert llm.usage_summary() == {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
                 "available": False,
+                "partial": True,
             }
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1556,6 +1560,55 @@ def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
     assert "usage" not in manifest
 
 
+def test_combine_usage_accumulates_observed_lower_bounds() -> None:
+    exact = {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "available": True,
+    }
+    assert combine_usage(
+        exact,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "available": False,
+            "partial": True,
+        },
+    ) == {
+        "input_tokens": 13,
+        "output_tokens": 6,
+        "total_tokens": 19,
+        "available": False,
+        "partial": True,
+    }
+    assert combine_usage(exact, None) == {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "available": False,
+        "partial": True,
+    }
+    assert combine_usage(
+        {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "available": False},
+        exact,
+    ) == {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "available": False,
+        "partial": True,
+    }
+    assert combine_usage(None, None) == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "available": False,
+        "partial": False,
+    }
+
+
 def test_finalize_run_accumulates_exact_usage_across_continuations(
     tmp_path: Path,
 ) -> None:
@@ -1596,6 +1649,7 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
         "output_tokens": 7,
         "total_tokens": 24,
         "available": True,
+        "partial": False,
     }
     manifest = read_json(project, run_dir / "manifest.json")
     assert manifest["usage"] == combined
@@ -1614,7 +1668,7 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
         },
     ],
 )
-def test_finalize_run_marks_incomplete_or_legacy_continuation_usage_unavailable(
+def test_finalize_run_preserves_lower_bound_for_incomplete_continuation_usage(
     tmp_path: Path, current: dict[str, object] | None
 ) -> None:
     project = _finalize_project(tmp_path)
@@ -1645,10 +1699,11 @@ def test_finalize_run_marks_incomplete_or_legacy_continuation_usage_unavailable(
     )
 
     assert usage == {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
         "available": False,
+        "partial": True,
     }
 
 

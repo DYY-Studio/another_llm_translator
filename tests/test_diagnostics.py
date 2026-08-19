@@ -80,6 +80,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
                 "output_tokens": 3,
                 "total_tokens": 15,
                 "available": True,
+                "partial": False,
             }
         )
         logger.info("safe summary")
@@ -94,6 +95,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert metrics["average_latency_ms"] == 175.0
     assert metrics["p95_latency_ms"] == 250.0
     assert metrics["usage_available"] is True
+    assert metrics["usage_partial"] is False
     assert metrics["input_tokens"] == 12
     assert metrics["output_tokens"] == 3
     assert metrics["throughput_input_tokens_per_second"] is not None
@@ -147,6 +149,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "output_tokens": 3,
             "total_tokens": 15,
             "available": False,
+            "partial": False,
         }
     )
     unavailable = diagnostics.snapshot()["metrics"]
@@ -156,6 +159,22 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert unavailable["throughput_input_tokens_per_second"] is None
     assert unavailable["throughput_output_tokens_per_second"] is None
     assert unavailable["throughput_tokens_per_second"] is None
+
+    diagnostics.set_usage(
+        {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "total_tokens": 15,
+            "available": False,
+            "partial": True,
+        }
+    )
+    partial = diagnostics.snapshot()["metrics"]
+    assert partial["usage_available"] is False
+    assert partial["usage_partial"] is True
+    assert partial["input_tokens"] == 12
+    assert partial["output_tokens"] == 3
+    assert partial["throughput_tokens_per_second"] is None
 
 
 def test_stream_progress_is_visible_without_partial_response(

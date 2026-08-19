@@ -2470,6 +2470,7 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
                 "output_tokens": 5,
                 "total_tokens": 17,
                 "available": True,
+                "partial": False,
             }
         )
         progress(2, 0, 2)
@@ -2483,6 +2484,7 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
                 "output_tokens": 5,
                 "total_tokens": 17,
                 "available": True,
+                "partial": False,
             },
         }
 

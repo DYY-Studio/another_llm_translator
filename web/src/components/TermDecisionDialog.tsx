@@ -160,6 +160,7 @@ export function TermDecisionDialog({
           <span>{translate("terms.decisionPreset", language)} <strong>{options.preset.id}</strong> · {options.preset.model}</span>
           <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
+          {options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, { soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language), mode: options.overflow_policy.anchor_overflow_mode })}</span>}
         </div>}
         {message && <p className="inline-message error-text">{message}</p>}
         {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
