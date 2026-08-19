@@ -9,7 +9,7 @@ Another LLM Translator 是一个在本机运行、支持中断恢复的 LLM 文�
 ## 可以做什么
 
 - 导入 TXT、EPUB，以及安装 SRT 插件后可用的 SRT 文档，并按原文件分别管理和导出。
-- 扫描、编辑和交换术语表，术语冲突交由用户裁决。
+- 扫描、编辑和交换术语表，并可显式生成自动术语决策草案供用户逐条裁决。
 - 分阶段执行翻译、校对和润色，明确选择是否应用修改建议。
 - 以 Segment 为单位保存进度；中断后可继续处理未完成内容。
 - 为不同阶段选择不同的 LLM Preset，支持 OpenAI-compatible、OpenAI Responses、Gemini 和 Anthropic 等内置请求模板。
