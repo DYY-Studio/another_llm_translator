@@ -41,6 +41,7 @@ from .term_decision import (
 )
 from .term_decision import (
     current_decision_draft,
+    decision_checkpoint_progress,
     decision_plan,
     run_terminology_decision,
 )
@@ -180,6 +181,12 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         )
         config = load_project_config(project, stage=stage)
         plan = decision_plan(project) if selected else None
+        running_run = _running_run(project, stage, config)
+        if running_run is not None:
+            running_run["completed_steps"] = decision_checkpoint_progress(
+                project, str(running_run["run_id"])
+            )
+            running_run["total_steps"] = selected * 2
         return {
             "stage": stage,
             "preset": {
@@ -193,7 +200,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
             "failed": 0,
             "current_fingerprint_completed": 0,
             "mismatched_fingerprint_completed": 0,
-            "running_run": None,
+            "running_run": running_run,
             "has_pending_draft": current_decision_draft(project) is not None,
             "estimated_requests": int(plan["estimated_requests"]) if plan else 0,
             "estimated_input_tokens": (
@@ -331,13 +338,10 @@ class WebTaskManager:
             )
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("run_action 必须是 resume、decline 或 null")
-        if stage == "run-all":
-            if run_action is not None:
-                raise UsageError("run-all 不支持 run_action")
-        if stage == TERMINOLOGY_DECISION_STAGE and (
-            force or reuse_mixed_fingerprints or run_action is not None
-        ):
-            raise UsageError("自动术语决策不支持 force、结果复用或续作选择")
+        if stage == "run-all" and run_action is not None:
+            raise UsageError("run-all 不支持 run_action")
+        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
+            raise UsageError("自动术语决策不支持复用已发布结果")
         async with self.guard:
             active_id = self.active_by_project.get(project)
             if active_id is not None:
@@ -347,7 +351,21 @@ class WebTaskManager:
                         f"项目已有后台任务：{active.task_id}"
                     )
             selected_count = 0
-            if stage not in {"run-all", TERMINOLOGY_DECISION_STAGE}:
+            if stage == TERMINOLOGY_DECISION_STAGE:
+                running = find_running_runs(project, stage)
+                if run_action == "resume":
+                    if not running:
+                        raise UsageError(f"{stage} 没有可续用的 running Run")
+                    if force:
+                        raise UsageError("续用 Run 时不能同时指定 force")
+                elif running:
+                    if run_action != "decline" or not force:
+                        raise UsageError(
+                            "发现未完成 Run，必须选择续用或强制重做全部"
+                        )
+                elif run_action == "decline" and not force:
+                    raise UsageError("结束自动决策 Run 时必须同时指定 force")
+            elif stage != "run-all":
                 options = task_options(project, stage)
                 selected_count = int(options["selected"])
                 running_run = options["running_run"]
@@ -426,7 +444,7 @@ class WebTaskManager:
             )
             with diagnostics_context, project_write_lock(state.project):
                 resume_run_id = None
-                if state.stage not in {"run-all", TERMINOLOGY_DECISION_STAGE}:
+                if state.stage != "run-all":
                     resume_run_id, _ = choose_running_run(
                         state.project,
                         state.stage,
@@ -451,6 +469,7 @@ class WebTaskManager:
                     summary = await run_terminology_decision(
                         state.project,
                         replace_draft=replace_draft,
+                        resume_run_id=resume_run_id,
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,

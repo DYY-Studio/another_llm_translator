@@ -199,6 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
     terms_decide.add_argument("project")
     terms_decide.add_argument("--dry-run", action="store_true")
     terms_decide.add_argument("--replace-draft", action="store_true")
+    terms_decide.add_argument("--force", action="store_true")
+    terms_decide_run = terms_decide.add_mutually_exclusive_group()
+    terms_decide_run.add_argument("--resume-run", action="store_true")
+    terms_decide_run.add_argument("--decline-run", action="store_true")
     subparsers.add_parser(
         "terms-decide-show", help="查看当前自动术语决策草案"
     ).add_argument("project")
@@ -351,6 +355,22 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == "terms-decide":
         project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)
+        if args.force and args.resume_run:
+            raise UsageError("续用自动决策 Run 时不能同时指定 --force")
+        run_action = (
+            "resume"
+            if args.resume_run
+            else "decline"
+            if args.decline_run or args.force
+            else None
+        )
+        resume_run_id, run_warnings = choose_running_run(
+            project,
+            "terminology_decision",
+            action=run_action,
+            dry_run=args.dry_run,
+        )
+        warnings.extend(run_warnings)
         lock = nullcontext() if args.dry_run else project_write_lock(project)
         with lock:
             summary = asyncio.run(
@@ -358,6 +378,7 @@ def run(argv: list[str] | None = None) -> int:
                     project,
                     dry_run=args.dry_run,
                     replace_draft=args.replace_draft,
+                    resume_run_id=resume_run_id,
                 )
             )
         summary["warnings"] = warnings

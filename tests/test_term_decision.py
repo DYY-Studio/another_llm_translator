@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -8,12 +9,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import load_config
+from app.config import load_config, load_project_config
 from app.errors import StorageError, UsageError
+from app.execution import create_run
 from app.main import build_parser
 from app.project import init_project
-from app.sqlite_storage import read_json, record_header, write_json
+from app.sqlite_storage import atomic_write_json, read_json, record_header, write_json
 from app.term_decision import (
+    CHECKPOINT_FILE,
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
@@ -117,6 +120,10 @@ def decision_response(payload: dict) -> list[dict]:
     return values
 
 
+def single_term_batches(states: list[dict], **_: object) -> tuple[list, int]:
+    return [([state], []) for state in states], len(states)
+
+
 def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> None:
     config_path = make_app_root(tmp_path) / "config" / "config.toml"
     source = config_path.read_text(encoding="utf-8")
@@ -136,6 +143,10 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     generated = parser.parse_args(["terms-decide", "demo", "--replace-draft"])
     assert generated.command == "terms-decide"
     assert generated.replace_draft is True
+    resumed = parser.parse_args(["terms-decide", "demo", "--resume-run"])
+    assert resumed.resume_run is True
+    forced = parser.parse_args(["terms-decide", "demo", "--force"])
+    assert forced.force is True
     applied = parser.parse_args(
         ["terms-decide-apply", "demo", "--all", "--reject", "TDP-1"]
     )
@@ -198,6 +209,143 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     alice = next(item for item in restored["terms"] if item["normalized"] == "alice")
     assert alice["preferred_translation"] is None
     assert alice["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_decision_runs_batches_concurrently_with_phase_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    preset_path = tmp_path / "app-root" / "llm_presets" / "default.json"
+    preset = json.loads(preset_path.read_text(encoding="utf-8"))
+    preset["max_parallel"] = 2
+    preset_path.write_text(json.dumps(preset), encoding="utf-8")
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    phase_one_started = asyncio.Event()
+    release_phase_one = asyncio.Event()
+    active = 0
+    maximum = 0
+    phase_one_finished = 0
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        nonlocal active, maximum, phase_one_finished
+        phase = str(kwargs["phase"])
+        focus = kwargs["focus"]
+        normalized = str(focus[0]["normalized"])
+        if phase == "consistency":
+            assert phase_one_finished == 2
+        active += 1
+        maximum = max(maximum, active)
+        if phase == "adjudication":
+            if active == 2:
+                phase_one_started.set()
+            await release_phase_one.wait()
+        await asyncio.sleep(0)
+        active -= 1
+        if phase == "adjudication":
+            phase_one_finished += 1
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        task = asyncio.create_task(
+            run_terminology_decision(project, http_client=client)
+        )
+        await asyncio.wait_for(phase_one_started.wait(), timeout=1)
+        release_phase_one.set()
+        await task
+
+    assert maximum == 2
+    assert current_decision_draft(project) is not None
+
+
+@pytest.mark.asyncio
+async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    alice_done = asyncio.Event()
+    hold_bob = asyncio.Event()
+    calls: list[tuple[str, str]] = []
+
+    async def interrupted_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        calls.append((phase, normalized))
+        if phase == "adjudication" and normalized == "bob":
+            await hold_bob.wait()
+        if phase == "adjudication" and normalized == "alice":
+            alice_done.set()
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision._request_batch", interrupted_batch)
+    async with httpx.AsyncClient() as client:
+        task = asyncio.create_task(
+            run_terminology_decision(project, http_client=client)
+        )
+        await asyncio.wait_for(alice_done.wait(), timeout=1)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        runs = [
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        ]
+        assert len(runs) == 1
+        run_id = runs[0].name
+        manifest = read_json(project, runs[0] / "manifest.json")
+        assert manifest["status"] == "running"
+        checkpoint = json.loads(
+            (runs[0] / CHECKPOINT_FILE).read_text(encoding="utf-8")
+        )
+        assert set(checkpoint["phases"]["adjudication"]) == {"alice"}
+
+        library_path = project / "terminology" / "terms.json"
+        library = read_json(project, library_path)
+        library["terms_revision"] = 2
+        write_json(project, library_path, library)
+        with pytest.raises(UsageError, match="revision 已变化"):
+            await run_terminology_decision(
+                project, resume_run_id=run_id, http_client=client
+            )
+        library["terms_revision"] = 1
+        write_json(project, library_path, library)
+
+        prompt_path = project / "prompts" / "terminology_decision.zh-CN.middle.txt"
+        prompt_path.write_text(
+            prompt_path.read_text(encoding="utf-8") + "\n继续时使用当前 Prompt。\n",
+            encoding="utf-8",
+        )
+
+        resumed_calls: list[tuple[str, str]] = []
+
+        async def resumed_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            resumed_calls.append((phase, normalized))
+            return {normalized: {"action": "keep", "reason": "保持"}}
+
+        monkeypatch.setattr("app.term_decision._request_batch", resumed_batch)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert ("adjudication", "alice") not in resumed_calls
+    assert ("adjudication", "bob") in resumed_calls
+    assert {value for value in resumed_calls if value[0] == "consistency"} == {
+        ("consistency", "alice"),
+        ("consistency", "bob"),
+    }
+    manifest = read_json(project, project / "runs" / run_id / "manifest.json")
+    assert len(manifest["continuations"]) == 1
+    assert manifest["usage_invocation_count"] == 2
+    assert current_decision_draft(project)["prompt_fingerprint"].startswith(
+        "sha256:"
+    )
 
 
 @pytest.mark.asyncio
@@ -273,6 +421,104 @@ def test_web_starts_terminology_decision_task_without_options_local(
     assert state["status"] == "completed"
     assert state["completed_segments"] == 4
     assert state["total_segments"] == 4
+
+
+def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="terminology_decision",
+        fingerprint="sha256:test",
+        prompt="test",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "source_terms_revision": 1,
+            "decision_status": "generating",
+            "rejected_proposal_ids": [],
+            "prompt_language": "zh-CN",
+        },
+    )
+    atomic_write_json(
+        run_dir / CHECKPOINT_FILE,
+        record_header(
+            "terminology_decision_checkpoint",
+            str(read_json(project, project / "project.json")["project_id"]),
+            run_id=run_id,
+            source_terms_revision=1,
+            phases={
+                "adjudication": {
+                    "alice": {
+                        "decision": {"action": "keep", "reason": "保持"},
+                        "decision_fingerprint": "sha256:test",
+                        "model_fingerprint": "sha256:model",
+                        "prompt_fingerprint": "sha256:prompt",
+                    }
+                },
+                "consistency": {},
+            },
+        ),
+    )
+    received: list[str | None] = []
+
+    async def fake_decision(_: Path, **kwargs: object) -> dict[str, object]:
+        received.append(kwargs.get("resume_run_id"))
+        progress = kwargs["on_progress"]
+        assert callable(progress)
+        progress(4, 0, 4)
+        return {"completed": 4, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
+    client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["running_run"]["run_id"] == run_id
+    assert options.json()["running_run"]["completed_steps"] == 1
+    assert options.json()["running_run"]["total_steps"] == 4
+    assert client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={
+            "stage": "terminology_decision",
+            "run_action": "resume",
+            "force": True,
+        },
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "decline"},
+    ).status_code == 400
+
+    resumed = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "resume"},
+    )
+    assert resumed.status_code == 200
+    client.get(f"/api/v1/tasks/{resumed.json()['task_id']}")
+    assert received == [run_id]
+
+    forced = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={
+            "stage": "terminology_decision",
+            "run_action": "decline",
+            "force": True,
+        },
+    )
+    assert forced.status_code == 200
+    client.get(f"/api/v1/tasks/{forced.json()['task_id']}")
+    assert received == [run_id, None]
+    assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
 
 
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
