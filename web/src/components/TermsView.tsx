@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
-import type { RelatedTerm, RelatedTermsResponse, Term, TermHitsResponse, TermsResponse } from "../types";
+import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+import { TermDecisionDialog } from "./TermDecisionDialog";
 
 interface TermForm {
   source: string;
@@ -88,11 +89,15 @@ export function TermsView({
   focusFailures = false,
   language,
   onFindSegment,
+  task,
+  onTask,
 }: {
   project: string;
   focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
+  task: TaskState | null;
+  onTask: (task: TaskState) => void;
 }) {
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
@@ -106,6 +111,7 @@ export function TermsView({
   const [clearOpen, setClearOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [decisionOpen, setDecisionOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
@@ -779,6 +785,7 @@ export function TermsView({
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
+              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => setDecisionOpen(true)}>{translate("terms.autoDecision", language)}</button>
               <button
                 className="danger-button"
                 disabled={!selectedActive.length}
@@ -798,6 +805,7 @@ export function TermsView({
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
+        {decisionOpen && <TermDecisionDialog project={project} language={language} task={task} onTask={onTask} onTerms={setData} onClose={() => setDecisionOpen(false)} />}
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>

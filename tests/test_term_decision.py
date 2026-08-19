@@ -221,6 +221,12 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     del os.environ["LLM_API_KEY"]
 
     client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["selected"] == 2
+    assert options.json()["has_pending_draft"] is True
     review = client.get(
         "/api/v1/projects/decision-demo/terms/decision"
     ).json()

@@ -21,6 +21,13 @@ from .execution import (
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .project import load_segments
+from .sqlite_storage import (
+    latest_stage_summary,
+    read_json,
+    read_jsonl,
+    record_exists,
+    utc_now,
+)
 from .stages import (
     load_terms,
     prompt_middle_digests,
@@ -29,12 +36,13 @@ from .stages import (
     run_terminology,
     run_translation,
 )
-from .sqlite_storage import (
-    latest_stage_summary,
-    read_json,
-    read_jsonl,
-    record_exists,
-    utc_now,
+from .term_decision import (
+    STAGE as TERMINOLOGY_DECISION_STAGE,
+)
+from .term_decision import (
+    current_decision_draft,
+    decision_plan,
+    run_terminology_decision,
 )
 
 
@@ -154,6 +162,44 @@ def _terminology_summary(
 
 
 def task_options(project: Path, stage: str) -> dict[str, Any]:
+    if stage == TERMINOLOGY_DECISION_STAGE:
+        library = load_terms(project)
+        if library is None or not library.get("terms"):
+            raise UsageError("没有已发布术语库可供自动决策")
+        overrides = read_json(
+            project, project / "terminology" / "overrides.json"
+        )
+        protected = {
+            str(item["normalized"])
+            for item in overrides.get("overrides", [])
+        }
+        selected = sum(
+            str(item["normalized"]) not in protected
+            and not bool(item.get("disabled", False))
+            for item in library.get("terms", [])
+        )
+        config = load_project_config(project, stage=stage)
+        plan = decision_plan(project) if selected else None
+        return {
+            "stage": stage,
+            "preset": {
+                "id": str(config["_llm_preset_id"]),
+                "model": str(config["llm"]["model"]),
+            },
+            "selected": selected,
+            "protected": len(protected),
+            "completed": 0,
+            "pending": selected,
+            "failed": 0,
+            "current_fingerprint_completed": 0,
+            "mismatched_fingerprint_completed": 0,
+            "running_run": None,
+            "has_pending_draft": current_decision_draft(project) is not None,
+            "estimated_requests": int(plan["estimated_requests"]) if plan else 0,
+            "estimated_input_tokens": (
+                int(plan["estimated_input_tokens"]) if plan else 0
+            ),
+        }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
     segments = load_segments(project)
@@ -267,12 +313,14 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        replace_draft: bool = False,
     ) -> dict[str, Any]:
         if stage not in {
             "terminology",
             "translation",
             "proofreading",
             "polishing",
+            TERMINOLOGY_DECISION_STAGE,
             "run-all",
         }:
             raise UsageError(f"未知后台阶段：{stage}")
@@ -286,6 +334,10 @@ class WebTaskManager:
         if stage == "run-all":
             if run_action is not None:
                 raise UsageError("run-all 不支持 run_action")
+        if stage == TERMINOLOGY_DECISION_STAGE and (
+            force or reuse_mixed_fingerprints or run_action is not None
+        ):
+            raise UsageError("自动术语决策不支持 force、结果复用或续作选择")
         async with self.guard:
             active_id = self.active_by_project.get(project)
             if active_id is not None:
@@ -294,7 +346,7 @@ class WebTaskManager:
                     raise UsageError(
                         f"项目已有后台任务：{active.task_id}"
                     )
-            if stage != "run-all":
+            if stage not in {"run-all", TERMINOLOGY_DECISION_STAGE}:
                 options = task_options(project, stage)
                 running_run = options["running_run"]
                 if run_action == "resume":
@@ -336,6 +388,7 @@ class WebTaskManager:
                     reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                     run_action=run_action,
                     prompt_language=prompt_language,
+                    replace_draft=replace_draft,
                 )
             )
             return state.view()
@@ -348,6 +401,7 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        replace_draft: bool = False,
     ) -> None:
         state.status = "running"
         state.started_at = utc_now()
@@ -372,7 +426,7 @@ class WebTaskManager:
             )
             with diagnostics_context, project_write_lock(state.project):
                 resume_run_id = None
-                if state.stage != "run-all":
+                if state.stage not in {"run-all", TERMINOLOGY_DECISION_STAGE}:
                     resume_run_id, _ = choose_running_run(
                         state.project,
                         state.stage,
@@ -393,7 +447,15 @@ class WebTaskManager:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
                                 usage_base = raw_usage
-                if state.stage == "terminology":
+                if state.stage == TERMINOLOGY_DECISION_STAGE:
+                    summary = await run_terminology_decision(
+                        state.project,
+                        replace_draft=replace_draft,
+                        prompt_language=prompt_language,
+                        on_progress=progress,
+                        on_usage=usage_changed,
+                    )
+                elif state.stage == "terminology":
                     summary = await run_terminology(
                         state.project,
                         scope,

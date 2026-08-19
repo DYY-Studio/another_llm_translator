@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import (
-    LLM_STAGES,
+    LLM_MODEL_STAGES,
     dump_config,
     load_config,
     resolve_global_config,
@@ -99,6 +99,13 @@ from .stages import (
     import_terms,
     publish_partial_terms,
     run_apply,
+)
+from .term_decision import (
+    apply_decision_draft,
+    decision_review_state,
+    discard_decision_draft,
+    rollback_decision,
+    save_decision_rejections,
 )
 from .user_config import effective_path, user_root, write_user
 from .web_store import WebStore
@@ -715,7 +722,7 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         resolve_global_config(config, app_root)
-        for stage in LLM_STAGES:
+        for stage in LLM_MODEL_STAGES:
             resolve_global_config(config, app_root, stage=stage)
         atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
@@ -728,7 +735,7 @@ def create_app(
                 for language in PROMPT_LANGUAGES
                 if (root / "prompts" / prompt_file(stage, language)).is_file()
             ]
-            for stage in LLM_STAGES
+            for stage in LLM_MODEL_STAGES
         }
 
     def validate_language(value: object) -> str:
@@ -779,7 +786,7 @@ def create_app(
 
     @app.get("/api/v1/global/prompts/{stage}")
     async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         return prompt_view(
@@ -793,7 +800,7 @@ def create_app(
     async def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
@@ -1464,6 +1471,63 @@ def create_app(
     async def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)
 
+    @app.get("/api/v1/projects/{name}/terms/decision")
+    async def get_term_decision(name: str) -> dict[str, Any]:
+        return decision_review_state(project(name))
+
+    @app.put("/api/v1/projects/{name}/terms/decision/rejections")
+    async def put_term_decision_rejections(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能修改术语决策草案")
+        values = payload.get("rejected_proposal_ids")
+        if not isinstance(values, list):
+            raise UsageError("rejected_proposal_ids 必须是字符串数组")
+        with project_write_lock(root):
+            return {"draft": save_decision_rejections(root, values)}
+
+    @app.post("/api/v1/projects/{name}/terms/decision/apply")
+    async def apply_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能应用术语决策")
+        with project_write_lock(root):
+            result = apply_decision_draft(
+                root,
+                confirm_all=payload.get("confirm") is True,
+                rejected_proposal_ids=[],
+            )
+            return {**result, "terms": WebStore(root).terms()}
+
+    @app.post("/api/v1/projects/{name}/terms/decision/discard")
+    async def discard_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能丢弃术语决策草案")
+        with project_write_lock(root):
+            return discard_decision_draft(
+                root, confirm=payload.get("confirm") is True
+            )
+
+    @app.post("/api/v1/projects/{name}/terms/decision/rollback")
+    async def rollback_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能撤销术语决策")
+        with project_write_lock(root):
+            result = rollback_decision(
+                root, confirm=payload.get("confirm") is True
+            )
+            return {**result, "terms": WebStore(root).terms()}
+
     @app.post("/api/v1/projects/{name}/terms/publish-partial")
     async def publish_partial_term_results(
         name: str, payload: dict[str, Any]
@@ -1553,7 +1617,7 @@ def create_app(
         content = dump_config(config)
         root = project(name)
         resolve_project_config(config, presets_root=app_root)
-        for stage in LLM_STAGES:
+        for stage in LLM_MODEL_STAGES:
             resolve_project_config(
                 config, stage=stage, presets_root=app_root
             )
@@ -1563,7 +1627,7 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
     async def get_prompt(name: str, stage: str, language: str = "zh-CN") -> dict[str, Any]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
@@ -1579,7 +1643,7 @@ def create_app(
     async def put_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
@@ -1686,6 +1750,7 @@ def create_app(
             return value
 
         force = boolean_option("force")
+        replace_draft = boolean_option("replace_draft")
         reuse_mixed_fingerprints = boolean_option(
             "reuse_mixed_fingerprints"
         )
@@ -1711,6 +1776,7 @@ def create_app(
                 if "language" in payload
                 else None
             ),
+            replace_draft=replace_draft,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
