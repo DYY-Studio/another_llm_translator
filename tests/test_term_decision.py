@@ -18,10 +18,12 @@ from app.sqlite_storage import atomic_write_json, read_json, record_header, writ
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    _consistency_states,
     _group_violations,
     _pack_batches,
     _parse_decisions,
     _recover_invalid_group_components,
+    _related_anchors,
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
@@ -288,6 +290,60 @@ def _batch_evidence(*states: dict[str, object]) -> dict[str, dict[str, object]]:
     }
 
 
+def test_consistency_states_overlay_completed_checkpoint_actions() -> None:
+    original = {
+        key: _batch_state(key, key.title())
+        for key in ("keep", "update", "disable", "review")
+    }
+    tentative = {
+        key: {**state, "preferred_translation": f"phase-one-{key}"}
+        for key, state in original.items()
+    }
+    updated = {
+        **tentative["update"],
+        "preferred_translation": "phase-two-update",
+    }
+    result = _consistency_states(
+        original,
+        tentative,
+        {
+            "keep": {"action": "keep", "reason": "保持"},
+            "update": {"action": "update", "reason": "更新", "after": updated},
+            "disable": {"action": "disable", "reason": "禁用"},
+            "review": {"action": "needs_review", "reason": "人工复核"},
+        },
+    )
+
+    assert result["keep"]["preferred_translation"] == "phase-one-keep"
+    assert result["update"]["preferred_translation"] == "phase-two-update"
+    assert result["disable"]["disabled"] is True
+    assert result["review"] == original["review"]
+    assert tentative["disable"]["disabled"] is False
+
+
+def test_related_anchors_prioritize_effective_group_dependencies(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    spec = term_normalization(load_project_config(project))
+    focus = {
+        **_batch_state("thunder", "轟雷"),
+        "aliases": ["モナークスプライト"],
+    }
+    dependency = {
+        **_batch_state("princess", "雷鳴公主"),
+        "group_primary": "モナークスプライト",
+    }
+    lexical = _batch_state("thunder-name", "轟雷ちゃん")
+
+    related = _related_anchors([focus], [lexical, dependency], spec)
+
+    assert [item["normalized"] for item in related] == [
+        "princess",
+        "thunder-name",
+    ]
+
+
 def test_decision_batch_overflow_policy_controls_local_planning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,6 +523,43 @@ def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
         "aliases": [],
         "group_primary": primary,
     }
+
+
+def test_completed_consistency_state_prevents_stale_member_chain_repair() -> None:
+    original = {
+        "princess": _batch_state("princess", "雷鳴公主"),
+        "thunder": _batch_state("thunder", "轟雷"),
+        "monarch": _batch_state("monarch", "モナークスプライト"),
+    }
+    tentative = {
+        **original,
+        "princess": {**original["princess"], "group_primary": "thunder"},
+    }
+    effective = _consistency_states(
+        original,
+        tentative,
+        {
+            "princess": {
+                "action": "update",
+                "reason": "改为直接指向根术语",
+                "after": {
+                    **original["princess"],
+                    "group_primary": "monarch",
+                },
+            }
+        },
+    )
+
+    decisions, _ = _parse_decisions(
+        llm_jsonl([_update_decision("thunder", "monarch")]),
+        [tentative["thunder"]],
+        all_forms={"雷鳴公主", "轟雷", "モナークスプライト"},
+        known_states=effective,
+        read_only_terms={"princess", "monarch"},
+        review_states=original,
+    )
+
+    assert decisions["thunder"]["after"]["group_primary"] == "monarch"
 
 
 @pytest.mark.parametrize(
@@ -1196,6 +1289,16 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
         normalized = str(kwargs["focus"][0]["normalized"])
         if phase == "consistency" and normalized == "alice":
             alice_reviewed.set()
+            return {
+                "alice": {
+                    "action": "update",
+                    "reason": "第二阶段补全译名",
+                    "after": {
+                        **kwargs["focus"][0],
+                        "preferred_translation": "爱丽丝",
+                    },
+                }
+            }
         if phase == "consistency" and normalized == "bob":
             await alice_reviewed.wait()
             raise UsageError("一致性协议错误")
@@ -1221,6 +1324,7 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
             phase = str(kwargs["phase"])
             normalized = str(kwargs["focus"][0]["normalized"])
             resumed_calls.append((phase, normalized))
+            assert kwargs["known_states"]["alice"]["preferred_translation"] == "爱丽丝"
             return {normalized: {"action": "keep", "reason": "保持"}}
 
         monkeypatch.setattr("app.term_decision._request_batch", resumed_review)
