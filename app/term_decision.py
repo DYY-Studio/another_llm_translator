@@ -924,6 +924,102 @@ def _apply_tentative(
             states[normalized] = {**states[normalized], "disabled": True}
 
 
+def _decision_dependency_graph(
+    original: dict[str, dict[str, Any]], final: dict[str, dict[str, Any]]
+) -> dict[str, set[str]]:
+    graph = {key: set() for key in original.keys() | final.keys()}
+
+    def connect(left: str, right: str) -> None:
+        graph.setdefault(left, set()).add(right)
+        graph.setdefault(right, set()).add(left)
+
+    for states in (original, final):
+        for key, state in states.items():
+            primary = state.get("group_primary")
+            if primary is not None:
+                connect(key, str(primary))
+
+    original_owners: dict[str, set[str]] = {}
+    for key, state in original.items():
+        for value in [state["source"], *state.get("aliases", [])]:
+            original_owners.setdefault(str(value), set()).add(key)
+    for key, state in final.items():
+        if key not in original:
+            continue
+        added = set(state.get("aliases", [])) - set(
+            original[key].get("aliases", [])
+        )
+        for alias in added:
+            for owner in original_owners.get(str(alias), set()):
+                connect(key, owner)
+    return graph
+
+
+def _dependency_components(
+    graph: dict[str, set[str]],
+    starts: set[str],
+    *,
+    allowed: set[str] | None = None,
+) -> list[set[str]]:
+    remaining = set(starts if allowed is None else starts & allowed)
+    components: list[set[str]] = []
+    while remaining:
+        component: set[str] = set()
+        pending = [min(remaining)]
+        while pending:
+            current = pending.pop()
+            if current in component or (allowed is not None and current not in allowed):
+                continue
+            component.add(current)
+            neighbors = graph.get(current, set())
+            if allowed is not None:
+                neighbors = neighbors & allowed
+            pending.extend(sorted(neighbors - component, reverse=True))
+        remaining -= component
+        components.append(component)
+    return components
+
+
+def _recover_invalid_group_components(
+    *,
+    original: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+    language: str,
+) -> None:
+    violations = _group_violations(final)
+    if not violations:
+        return
+    graph = _decision_dependency_graph(original, final)
+    invalid_nodes = {value for _, values in violations for value in values}
+    for component in _dependency_components(graph, invalid_nodes):
+        affected = sorted(component & decisions.keys())
+        if not affected:
+            continue
+        details = [
+            _group_violation_message(violation, language)
+            for violation in violations
+            if component.intersection(violation[1])
+        ]
+        if language == "en":
+            reason = (
+                "Automatic group validation failed; this dependency component was "
+                "restored to its pre-run state and requires manual review: "
+                + "; ".join(details)
+            )
+        else:
+            reason = (
+                "自动决策组关系校验未通过；该依赖组件已恢复为决策前状态，请人工审查："
+                + "；".join(details)
+            )
+        for normalized in affected:
+            final[normalized] = deepcopy(original[normalized])
+            decisions[normalized] = {
+                "action": "needs_review",
+                "reason": reason,
+            }
+
+
 def _proposal_id(values: list[dict[str, Any]]) -> str:
     encoded = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "TDP-" + hashlib.sha256(encoded.encode()).hexdigest()[:16].upper()
@@ -950,41 +1046,11 @@ def _build_draft(
         for key in final
         if key not in protected and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
-    parent = {key: key for key in changed}
-
-    def find(key: str) -> str:
-        while parent[key] != key:
-            parent[key] = parent[parent[key]]
-            key = parent[key]
-        return key
-
-    def union(left: str, right: str) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    for key in changed:
-        for primary in (original[key].get("group_primary"), final[key].get("group_primary")):
-            if primary in changed:
-                union(key, str(primary))
-    original_owners: dict[str, set[str]] = {}
-    for key, state in original.items():
-        for value in [state["source"], *state.get("aliases", [])]:
-            original_owners.setdefault(str(value), set()).add(key)
-    for key in changed:
-        added = set(final[key].get("aliases", [])) - set(
-            original[key].get("aliases", [])
-        )
-        for alias in added:
-            for owner in original_owners.get(alias, set()):
-                if owner in changed:
-                    union(key, owner)
-    components: dict[str, list[str]] = {}
-    for key in changed:
-        components.setdefault(find(key), []).append(key)
+    graph = _decision_dependency_graph(original, final)
+    components = _dependency_components(graph, changed, allowed=changed)
     proposals: list[dict[str, Any]] = []
-    for keys in sorted(components.values(), key=lambda value: sorted(value)):
-        keys.sort()
+    for component in sorted(components, key=lambda value: sorted(value)):
+        keys = sorted(component)
         before = [deepcopy(original[key]) for key in keys]
         after = [deepcopy(final[key]) for key in keys]
         fields = sorted(
@@ -1041,6 +1107,15 @@ def _build_draft(
 def _validate_final_states(
     project: Path, states: dict[str, dict[str, Any]]
 ) -> None:
+    violations = _group_violations(states)
+    if violations:
+        raise UsageError(
+            "术语决策生成非法组关系："
+            + "；".join(
+                _group_violation_message(violation, "zh-CN")
+                for violation in violations
+            )
+        )
     active = [
         deepcopy(state) for state in states.values() if not state.get("disabled")
     ]
@@ -1297,6 +1372,8 @@ async def run_terminology_decision(
     if final_decisions and len(decisions) != len(eligible):
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
     completed = len(decisions) + len(final_decisions)
+    total = len(eligible) * 2
+    usage_invoked = completed < total
     usage: dict[str, Any] | None = None
 
     def record_resumable_interruption(
@@ -1334,7 +1411,6 @@ async def run_terminology_decision(
             client=http_client,
             on_usage=on_usage,
         ) as llm:
-            total = len(eligible) * 2
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
@@ -1457,6 +1533,12 @@ async def run_terminology_decision(
                     final[normalized] = deepcopy(states[normalized])
             decisions = final_decisions
             usage = llm.usage_summary()
+        _recover_invalid_group_components(
+            original=states,
+            final=final,
+            decisions=decisions,
+            language=language,
+        )
         _validate_final_states(project, final)
         draft = _build_draft(
             project_id=str(metadata["project_id"]),
@@ -1490,9 +1572,10 @@ async def run_terminology_decision(
             project,
             run_dir,
             status="completed",
-            completed=len(eligible),
+            completed=total,
             failed=0,
             usage=usage,
+            usage_invoked=usage_invoked,
         )
         if existing is not None:
             old_run_id = str(existing["run_id"])

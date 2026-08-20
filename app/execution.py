@@ -1435,6 +1435,7 @@ def finalize_run(
     warnings: list[str] | None = None,
     usage: dict[str, Any] | None = None,
     failure_counts: dict[str, int] | None = None,
+    usage_invoked: bool = True,
 ) -> dict[str, Any] | None:
     manifest = read_json(project, run_dir / "manifest.json")
     manifest.update(
@@ -1453,7 +1454,9 @@ def finalize_run(
     tracked = type(invocation_count) is int or bool(
         manifest.get("continuations")
     )
-    if usage is not None or tracked:
+    if not usage_invoked:
+        usage = manifest.get("usage")
+    elif usage is not None or tracked:
         previous = manifest.get("usage")
         if type(invocation_count) is int and invocation_count > 0:
             usage = combine_usage(previous, usage)

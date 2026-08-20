@@ -18,8 +18,10 @@ from app.sqlite_storage import atomic_write_json, read_json, record_header, writ
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    _group_violations,
     _pack_batches,
     _parse_decisions,
+    _recover_invalid_group_components,
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
@@ -421,6 +423,124 @@ def test_decision_parser_allows_review_to_restore_tentative_group_state() -> Non
         review_states={"alice": original},
     )
     assert decisions["alice"]["action"] == "needs_review"
+
+
+def test_group_validation_collects_every_illegal_relationship_shape() -> None:
+    states = {
+        key: _batch_state(key, key.title())
+        for key in (
+            "self",
+            "missing-source",
+            "disabled-member",
+            "disabled-root",
+            "chain-member",
+            "chain-parent",
+            "root",
+            "cycle-a",
+            "cycle-b",
+            "cycle-c",
+        )
+    }
+    states["self"]["group_primary"] = "self"
+    states["missing-source"]["group_primary"] = "absent"
+    states["disabled-member"]["group_primary"] = "disabled-root"
+    states["disabled-root"]["disabled"] = True
+    states["chain-member"]["group_primary"] = "chain-parent"
+    states["chain-parent"]["group_primary"] = "root"
+    states["cycle-a"]["group_primary"] = "cycle-b"
+    states["cycle-b"]["group_primary"] = "cycle-c"
+    states["cycle-c"]["group_primary"] = "cycle-a"
+
+    violations = set(_group_violations(states))
+    assert ("self", ("self", "self")) in violations
+    assert ("missing", ("missing-source", "absent")) in violations
+    assert ("disabled", ("disabled-member", "disabled-root")) in violations
+    assert ("member", ("chain-member", "chain-parent")) in violations
+    assert ("cycle", ("cycle-a", "cycle-b", "cycle-c")) in violations
+
+
+def test_invalid_group_recovery_restores_alias_dependency_component() -> None:
+    original = {
+        "alice": {
+            **_batch_state("alice", "Alice"),
+            "aliases": ["Ally"],
+        },
+        "bob": _batch_state("bob", "Bob"),
+        "carol": _batch_state("carol", "Carol"),
+    }
+    final = {
+        "alice": {
+            **original["alice"],
+            "aliases": [],
+            "group_primary": "alice",
+        },
+        "bob": {**original["bob"], "aliases": ["Ally"]},
+        "carol": {**original["carol"], "preferred_translation": "卡萝尔"},
+    }
+    decisions = {
+        key: {"action": "update", "reason": "模型修改", "after": state}
+        for key, state in final.items()
+    }
+
+    _recover_invalid_group_components(
+        original=original,
+        final=final,
+        decisions=decisions,
+        language="zh-CN",
+    )
+
+    assert final["alice"] == original["alice"]
+    assert final["bob"] == original["bob"]
+    assert decisions["alice"]["action"] == "needs_review"
+    assert decisions["bob"]["action"] == "needs_review"
+    assert "alice -> alice" in decisions["alice"]["reason"]
+    assert final["carol"]["preferred_translation"] == "卡萝尔"
+    assert decisions["carol"]["action"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_cross_batch_group_cycle_becomes_manual_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        term = payload["terms"][0]
+        if payload["phase"] == "adjudication":
+            records = [
+                {
+                    "type": "decision",
+                    "normalized": term["normalized"],
+                    "action": "keep",
+                    "reason": "保持",
+                }
+            ]
+        else:
+            primary = "bob" if term["normalized"] == "alice" else "alice"
+            records = [_update_decision(term["normalized"], primary)]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(project, http_client=client)
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 0
+    assert summary["needs_review"] == 2
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert {item["normalized"] for item in draft["needs_review"]} == {
+        "alice",
+        "bob",
+    }
+    assert all("alice -> bob -> alice" in item["reason"] for item in draft["needs_review"])
 
 
 @pytest.mark.asyncio
@@ -953,6 +1073,136 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
         )
 
     assert current_decision_draft(project) is not None
+
+
+@pytest.mark.asyncio
+async def test_complete_legacy_checkpoint_recovers_invalid_group_without_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    metadata = read_json(project, project / "project.json")
+    library = read_json(project, project / "terminology" / "terms.json")
+    terms = {item["normalized"]: item for item in library["terms"]}
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="terminology_decision",
+        fingerprint="sha256:legacy",
+        prompt="legacy prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "source_terms_revision": 1,
+            "decision_status": "generating",
+            "rejected_proposal_ids": [],
+            "prompt_language": "zh-CN",
+        },
+    )
+
+    def state(normalized: str) -> dict[str, object]:
+        term = terms[normalized]
+        return {
+            "normalized": normalized,
+            "source": term["source"],
+            "category": term["category"],
+            "description": term["description"] or None,
+            "preferred_translation": term["preferred_translation"],
+            "aliases": term["aliases"],
+            "group_primary": term["group_primary"],
+            "disabled": False,
+        }
+
+    alice_after = {**state("alice"), "group_primary": "alice"}
+    bob_after = {**state("bob"), "preferred_translation": "罗伯特"}
+
+    def checkpoint_record(decision: dict[str, object]) -> dict[str, object]:
+        return {
+            "decision": decision,
+            "decision_fingerprint": "sha256:legacy-decision",
+            "model_fingerprint": "sha256:legacy-model",
+            "prompt_fingerprint": "sha256:legacy-prompt",
+        }
+
+    checkpoint_path = run_dir / CHECKPOINT_FILE
+    atomic_write_json(
+        checkpoint_path,
+        record_header(
+            "terminology_decision_checkpoint",
+            str(metadata["project_id"]),
+            run_id=run_id,
+            source_terms_revision=1,
+            phases={
+                "adjudication": {
+                    key: checkpoint_record({"action": "keep", "reason": "保持"})
+                    for key in ("alice", "bob")
+                },
+                "consistency": {
+                    "alice": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "旧模型错误地设为自身组主",
+                            "after": alice_after,
+                        }
+                    ),
+                    "bob": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "补全译名",
+                            "after": bob_after,
+                        }
+                    ),
+                },
+            },
+        ),
+    )
+    checkpoint_before = checkpoint_path.read_bytes()
+    observed_usage = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "available": True,
+        "partial": False,
+    }
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest.update(
+        completed_segment_count=4,
+        failed_segment_count=0,
+        usage=observed_usage,
+        usage_invocation_count=1,
+    )
+    write_json(project, run_dir / "manifest.json", manifest)
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("完整检查点恢复不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert summary["proposals"] == 1
+    assert summary["needs_review"] == 1
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["proposals"][0]["normalized"] == ["bob"]
+    assert draft["proposals"][0]["after"][0]["preferred_translation"] == "罗伯特"
+    assert draft["needs_review"][0]["normalized"] == "alice"
+    assert "alice -> alice" in draft["needs_review"][0]["reason"]
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["status"] == "completed"
+    assert manifest["decision_status"] == "pending"
+    assert manifest["completed_segment_count"] == 4
+    assert manifest["usage"] == observed_usage
+    assert manifest["usage_invocation_count"] == 1
+
+    applied = apply_decision_draft(project, confirm_all=True)
+    assert applied["applied"] == 1
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    assert [item["normalized"] for item in overrides["overrides"]] == ["bob"]
 
 
 @pytest.mark.asyncio
