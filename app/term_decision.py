@@ -1731,7 +1731,7 @@ async def run_terminology_decision(
             },
         )
     else:
-        run_id, run_dir = continue_run(
+        run_id, run_dir, _continuation_index = continue_run(
             project,
             resume_run_id,
             config=config,

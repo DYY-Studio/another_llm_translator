@@ -305,12 +305,18 @@ def _create_or_continue_run(
     reused_count: int,
     details: dict[str, Any] | None,
     warnings: list[str],
-) -> tuple[str | None, Path | None, Callable[[BaseException], None]]:
+) -> tuple[
+    str | None,
+    Path | None,
+    int,
+    Callable[[BaseException], None],
+]:
     run_id: str | None = None
     run_dir: Path | None = None
+    continuation_index = 0
     if not scope.dry_run:
         if resume_run_id is not None:
-            run_id, run_dir = continue_run(
+            run_id, run_dir, continuation_index = continue_run(
                 project,
                 resume_run_id,
                 config=config,
@@ -345,7 +351,7 @@ def _create_or_continue_run(
             error=error,
         )
 
-    return run_id, run_dir, fail_planning
+    return run_id, run_dir, continuation_index, fail_planning
 
 
 @dataclass
@@ -464,6 +470,7 @@ class StageRunState:
     warnings: list[str]
     run_id: str
     run_dir: Path
+    continuation_index: int = 0
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
@@ -504,7 +511,12 @@ async def _execute_stage_run(
         prompt_builder=prompt_builder,
         partition_key=prompt_partition_key,
     )
-    chunks = materialize_chunk_stream(state.run_id, state.stage, planned)
+    chunks = materialize_chunk_stream(
+        state.run_id,
+        state.stage,
+        planned,
+        continuation_index=state.continuation_index,
+    )
     if state.config["debug"]["enabled"]:
         planned_chunks = chunks
 
@@ -656,6 +668,30 @@ async def _execute_stage_run(
             "run failed run=%s error_type=%s",
             state.run_id,
             type(exc).__name__,
+        )
+        raise
+    except StorageError as exc:
+        if state.llm is not None:
+            usage = state.llm.usage_summary()
+            usage_invoked = state.llm.send_count > 0
+        else:
+            usage_invoked = False
+        finalize_run(
+            state.project,
+            state.run_dir,
+            status="failed",
+            completed=exception_completed(),
+            failed=exception_failed(),
+            warnings=[*state.warnings, f"存储失败：{exc}"],
+            usage=usage,
+            failure_counts=dict(failure_counts),
+            usage_invoked=usage_invoked,
+        )
+        logger.error(
+            "run failed run=%s error_type=%s error=%s",
+            state.run_id,
+            type(exc).__name__,
+            exc,
         )
         raise
     return finalize_run(
@@ -2155,7 +2191,7 @@ async def run_terminology(
             "source_segments": [item["source"] for item in items],
         }
 
-    run_id, run_dir, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
         project,
         "terminology",
         scope=scope,
@@ -2260,6 +2296,7 @@ async def run_terminology(
         warnings=warnings,
         run_id=run_id,
         run_dir=run_dir,
+        continuation_index=continuation_index,
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
     )
@@ -3276,7 +3313,7 @@ async def run_translation(
             ],
         }
 
-    run_id, run_dir, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
         project,
         "translation",
         scope=scope,
@@ -3531,6 +3568,7 @@ async def run_translation(
         warnings=warnings,
         run_id=run_id,
         run_dir=run_dir,
+        continuation_index=continuation_index,
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
     )
@@ -4120,7 +4158,7 @@ async def run_review(
             ],
         }
 
-    run_id, run_dir, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
         project,
         stage,
         scope=scope,
@@ -4250,6 +4288,7 @@ async def run_review(
         warnings=warnings,
         run_id=run_id,
         run_dir=run_dir,
+        continuation_index=continuation_index,
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
     )
