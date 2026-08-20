@@ -1551,6 +1551,52 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     assert applied.json()["terms"]["terms_revision"] == 1
 
 
+@pytest.mark.asyncio
+async def test_manual_review_queue_survives_apply_and_revision_change(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
+    async with httpx.AsyncClient() as http_client:
+        await run_terminology_decision(project, resume_run_id=run_id, http_client=http_client)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    # A legacy manifest has no manual-review field; it must still be treated
+    # as unresolved when the completed checkpoint is applied.
+    resumed = read_json(project, run_dir / "manifest.json")
+    resumed.pop("manual_review_resolved_normalized", None)
+    write_json(project, run_dir / "manifest.json", resumed)
+    applied = client.post(
+        "/api/v1/projects/decision-demo/terms/decision/apply",
+        json={"confirm": True},
+    )
+    assert applied.status_code == 200
+    queue = client.get("/api/v1/projects/decision-demo/terms/decision").json()[
+        "manual_review"
+    ]
+    assert queue["remaining"] == 1
+    item = queue["items"][0]
+    assert item["run_id"] == run_id
+    assert item["normalized"] == "alice"
+
+    # Manual editing changes the terminology revision, but the queue remains
+    # attached to the completed decision Run until explicitly handled.
+    terms = read_json(project, project / "terminology" / "terms.json")
+    terms["terms_revision"] = 99
+    write_json(project, project / "terminology" / "terms.json", terms)
+    resolved = client.put(
+        "/api/v1/projects/decision-demo/terms/decision/manual-review",
+        json={"run_id": run_id, "normalized": "alice", "resolved": True},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["manual_review"]["remaining"] == 0
+
+    reopened = client.put(
+        "/api/v1/projects/decision-demo/terms/decision/manual-review",
+        json={"run_id": run_id, "normalized": "alice", "resolved": False},
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["manual_review"]["remaining"] == 1
+
+
 def test_web_starts_terminology_decision_task_without_options_local(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

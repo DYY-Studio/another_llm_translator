@@ -1489,6 +1489,79 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
     return None
 
 
+def _decision_needs_review(project: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the review items that belong to one completed decision Run."""
+    path = _draft_path(project, str(manifest["run_id"]))
+    if not path.is_file():
+        raise StorageError(f"术语决策 Run 缺少草案：{manifest['run_id']}")
+    try:
+        draft = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法读取术语决策草案：{manifest['run_id']}: {exc}") from exc
+    values = draft.get("needs_review", [])
+    if not isinstance(values, list):
+        raise StorageError(f"术语决策草案人工关注项格式无效：{manifest['run_id']}")
+    resolved = {
+        str(value)
+        for value in manifest.get("manual_review_resolved_normalized", [])
+        if isinstance(value, str)
+    }
+    result: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict) or not isinstance(value.get("normalized"), str):
+            raise StorageError(f"术语决策草案人工关注项格式无效：{manifest['run_id']}")
+        result.append({**deepcopy(value), "run_id": str(manifest["run_id"]), "resolved": value["normalized"] in resolved})
+    return result
+
+
+def manual_review_state(project: Path) -> dict[str, Any]:
+    """Return the newest unresolved review item for each normalized term."""
+    latest: dict[str, dict[str, Any]] = {}
+    for manifest in list_runs(project, stage=STAGE):
+        if manifest.get("decision_status") not in {"applied", "rejected"}:
+            continue
+        for item in _decision_needs_review(project, manifest):
+            normalized = str(item["normalized"])
+            if normalized not in latest:
+                latest[normalized] = item
+    items = [latest[key] for key in sorted(latest)]
+    resolved = sum(1 for item in items if item["resolved"])
+    return {
+        "items": items,
+        "total": len(items),
+        "resolved": resolved,
+        "remaining": len(items) - resolved,
+    }
+
+
+def set_manual_review_resolved(
+    project: Path, *, run_id: str, normalized: str, resolved: bool
+) -> dict[str, Any]:
+    """Persist one review item's explicit handled state in its Run manifest."""
+    manifest = next(
+        (item for item in list_runs(project, stage=STAGE) if str(item.get("run_id")) == run_id),
+        None,
+    )
+    if manifest is None or manifest.get("decision_status") not in {"applied", "rejected"}:
+        raise UsageError("该 Run 没有可处理的人工关注项")
+    items = _decision_needs_review(project, manifest)
+    known = {str(item["normalized"]) for item in items}
+    if normalized not in known:
+        raise UsageError(f"未知人工关注术语：{normalized}")
+    values = {
+        str(value)
+        for value in manifest.get("manual_review_resolved_normalized", [])
+        if isinstance(value, str)
+    }
+    if resolved:
+        values.add(normalized)
+    else:
+        values.discard(normalized)
+    manifest["manual_review_resolved_normalized"] = sorted(values)
+    write_json(project, project / "runs" / run_id / "manifest.json", manifest)
+    return manual_review_state(project)
+
+
 def decision_review_state(project: Path) -> dict[str, Any]:
     draft = current_decision_draft(project)
     applied = _latest_applied_manifest(project)
@@ -1504,7 +1577,7 @@ def decision_review_state(project: Path) -> dict[str, Any]:
             "run_id": str(applied["run_id"]),
             "applied_terms_revision": int(applied["applied_terms_revision"]),
         }
-    return {"draft": draft, "rollback": rollback}
+    return {"draft": draft, "rollback": rollback, "manual_review": manual_review_state(project)}
 
 
 def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str, Any]:
@@ -2029,6 +2102,7 @@ def apply_decision_draft(
             decision_status="rejected",
             rejected_proposal_ids=sorted(rejected),
             applied_proposal_count=0,
+            manual_review_resolved_normalized=[],
             applied_at=utc_now(),
         )
         write_json(project, manifest_path, manifest)
@@ -2110,6 +2184,7 @@ def apply_decision_draft(
         decision_status="applied",
         rejected_proposal_ids=sorted(rejected),
         applied_proposal_count=accepted,
+        manual_review_resolved_normalized=[],
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )

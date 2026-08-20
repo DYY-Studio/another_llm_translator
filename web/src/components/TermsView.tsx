@@ -2,10 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { translate, translateError, type Language } from "../i18n";
-import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermHitsResponse, TermsResponse } from "../types";
+import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
-import { TermDecisionDialog } from "./TermDecisionDialog";
+import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
 
 interface TermForm {
   source: string;
@@ -112,6 +112,9 @@ export function TermsView({
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
+  const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
+  const [manualQueue, setManualQueue] = useState<TermDecisionManualReviewItem[]>([]);
+  const [manualFocusId, setManualFocusId] = useState<string | null>(null);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
@@ -172,6 +175,7 @@ export function TermsView({
     }
     setData(null);
     selection.reset();
+    setManualFocusId(null);
     termsRestoredRef.current = false;
   }
   if (!termsRestoredRef.current) {
@@ -196,6 +200,12 @@ export function TermsView({
     void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
       .then(setData)
       .catch((error) => setMessage(String(error)));
+  }, [project]);
+
+  useEffect(() => {
+    void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
+      .then((value) => setManualQueue(value.manual_review.items))
+      .catch(() => setManualQueue([]));
   }, [project]);
 
   useEffect(() => {
@@ -395,6 +405,57 @@ export function TermsView({
     suppressFocusScrollForDataRef.current = null;
     setForm(formFor(term));
     setMessage("");
+  }
+
+  function manualItemId(item: TermDecisionManualReviewItem) {
+    return `${item.run_id}:${item.normalized}`;
+  }
+
+  const focusedManual = manualFocusId
+    ? manualQueue.find((item) => manualItemId(item) === manualFocusId) ?? null
+    : null;
+  const openManualItems = manualQueue.filter((item) => !item.resolved);
+
+  function openDecision(tab: "proposals" | "manual" = "proposals") {
+    setDecisionInitialTab(tab);
+    setDecisionOpen(true);
+  }
+
+  function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
+    const term = data?.terms.find((value) => value.normalized === item.normalized) ?? null;
+    setDecisionOpen(false);
+    setManualFocusId(manualItemId(item));
+    setSearch("");
+    setOnlyConflicts(false);
+    setShowDisabled(Boolean(term?.disabled));
+    setEditorTab(tab);
+    if (term) {
+      selection.reset(term.normalized);
+      focusTerm(term);
+    } else {
+      selection.reset();
+      setForm(emptyForm);
+      setMessage(translate("terms.decisionManualTermMissing", language));
+    }
+  }
+
+  async function setManualResolved(item: TermDecisionManualReviewItem, resolved: boolean) {
+    try {
+      const result = await api<{ manual_review: TermDecisionReviewState["manual_review"] }>(
+        `/api/v1/projects/${project}/terms/decision/manual-review`,
+        { method: "PUT", body: JSON.stringify({ run_id: item.run_id, normalized: item.normalized, resolved }) },
+      );
+      setManualQueue(result.manual_review.items);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  function navigateManual(offset: number) {
+    if (!focusedManual) return;
+    const index = openManualItems.findIndex((item) => manualItemId(item) === manualItemId(focusedManual));
+    const next = openManualItems[index + offset] ?? openManualItems[0];
+    if (next) openManualEditor(next, editorTab === "group" ? "group" : "edit");
   }
 
   async function save(disabled: boolean) {
@@ -746,6 +807,20 @@ export function TermsView({
     }
   }
 
+  if (decisionOpen) {
+    return <TermDecisionWorkspace
+      project={project}
+      language={language}
+      task={task}
+      onTask={onTask}
+      onTerms={setData}
+      onClose={() => setDecisionOpen(false)}
+      initialTab={decisionInitialTab}
+      onManualReview={setManualQueue}
+      onNavigateToEditor={openManualEditor}
+    />;
+  }
+
   return (
     <div className="terms-workspace">
       <section className="terms-browser">
@@ -785,7 +860,8 @@ export function TermsView({
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
-              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => setDecisionOpen(true)}>{translate("terms.autoDecision", language)}</button>
+              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
+              {manualQueue.some((item) => !item.resolved) && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueue", language, { count: manualQueue.filter((item) => !item.resolved).length })}</button>}
               <button
                 className="danger-button"
                 disabled={!selectedActive.length}
@@ -805,7 +881,6 @@ export function TermsView({
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
-        {decisionOpen && <TermDecisionDialog project={project} language={language} task={task} onTask={onTask} onTerms={setData} onClose={() => setDecisionOpen(false)} />}
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>
@@ -889,6 +964,16 @@ export function TermsView({
         </div>
       </section>
       <section className="term-editor">
+        {focusedManual && <div className="manual-review-editor-bar">
+          <div><strong>{translate("terms.decisionManualEditorTitle", language)}</strong><span>{translate("terms.decisionManualProgress", language, { remaining: openManualItems.length, total: manualQueue.length, resolved: manualQueue.length - openManualItems.length })}</span></div>
+          <div className="manual-review-editor-actions">
+            <button className="quiet-button" onClick={() => openDecision("manual")}>{translate("terms.decisionBackToQueue", language)}</button>
+            <button className="quiet-button" disabled={openManualItems.length < 2} onClick={() => navigateManual(-1)}>‹</button>
+            <button className="quiet-button" disabled={openManualItems.length < 2} onClick={() => navigateManual(1)}>›</button>
+            <button className="primary-button" onClick={() => void setManualResolved(focusedManual, !focusedManual.resolved)}>{focusedManual.resolved ? translate("terms.decisionRestoreManual", language) : translate("terms.decisionMarkHandled", language)}</button>
+          </div>
+          {!data?.terms.some((term) => term.normalized === focusedManual.normalized) && <small className="error-text">{translate("terms.decisionManualTermMissing", language)}</small>}
+        </div>}
         <div className="page-heading">
           <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
