@@ -19,6 +19,7 @@ from app.sqlite_storage import atomic_write_json, read_json, record_header, writ
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    DRAFT_FILE,
     _alias_violations,
     _consistency_states,
     _group_violations,
@@ -30,6 +31,7 @@ from app.term_decision import (
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
+    manual_review_state,
     rollback_decision,
     run_terminology_decision,
     save_decision_rejections,
@@ -258,6 +260,10 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     generated = parser.parse_args(["terms-decide", "demo", "--replace-draft"])
     assert generated.command == "terms-decide"
     assert generated.replace_draft is True
+    acknowledged = parser.parse_args(
+        ["terms-decide", "demo", "--acknowledge-manual-review"]
+    )
+    assert acknowledged.acknowledge_manual_review is True
     resumed = parser.parse_args(["terms-decide", "demo", "--resume-run"])
     assert resumed.resume_run is True
     forced = parser.parse_args(["terms-decide", "demo", "--force"])
@@ -1595,6 +1601,89 @@ async def test_manual_review_queue_survives_apply_and_revision_change(tmp_path: 
     )
     assert reopened.status_code == 200
     assert reopened.json()["manual_review"]["remaining"] == 1
+
+    blocked = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+    assert blocked.status_code == 400
+    assert "未处理人工待办" in blocked.json()["error"]
+
+
+def test_manual_review_queue_replaced_only_after_new_decision_is_applied(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
+    draft = {
+        "run_id": run_id,
+        "source_terms_revision": 1,
+        "proposals": [],
+        "needs_review": [
+            {
+                "normalized": "alice",
+                "source": "Alice",
+                "reason": "旧队列",
+                "evidence": {"hit_count": 1},
+            }
+        ],
+    }
+    atomic_write_json(run_dir / DRAFT_FILE, draft)
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest.update(
+        decision_status="applied",
+        manual_review_resolved_normalized=[],
+        manual_review_replaces_previous=True,
+    )
+    write_json(project, run_dir / "manifest.json", manifest)
+    assert manual_review_state(project)["items"][0]["normalized"] == "alice"
+
+    config = load_project_config(project, stage="terminology_decision")
+    next_run_id, next_run_dir = create_run(
+        project,
+        config=config,
+        stage="terminology_decision",
+        fingerprint="sha256:new",
+        prompt="new prompt",
+        selected_count=0,
+        requested_count=0,
+        reused_count=0,
+        details={
+            "source_terms_revision": 1,
+            "decision_status": "generating",
+            "prompt_language": "zh-CN",
+        },
+    )
+    next_draft = {
+        "run_id": next_run_id,
+        "source_terms_revision": 1,
+        "proposals": [],
+        "needs_review": [
+            {
+                "normalized": "bob",
+                "source": "Bob",
+                "reason": "新队列",
+                "evidence": {"hit_count": 2},
+            }
+        ],
+    }
+    atomic_write_json(next_run_dir / DRAFT_FILE, next_draft)
+    next_manifest = read_json(project, next_run_dir / "manifest.json")
+    next_manifest.update(
+        decision_status="pending",
+        manual_review_resolved_normalized=[],
+        started_at="2099-01-01T00:00:00Z",
+    )
+    write_json(project, next_run_dir / "manifest.json", next_manifest)
+    assert manual_review_state(project)["items"][0]["normalized"] == "alice"
+
+    next_manifest.update(
+        decision_status="applied",
+        manual_review_replaces_previous=True,
+    )
+    write_json(project, next_run_dir / "manifest.json", next_manifest)
+    queue = manual_review_state(project)
+    assert [item["normalized"] for item in queue["items"]] == ["bob"]
 
 
 def test_web_starts_terminology_decision_task_without_options_local(

@@ -39,6 +39,7 @@ from .stages import (
 from .term_decision import (
     apply_decision_draft,
     current_decision_draft,
+    manual_review_state,
     rollback_decision,
     run_terminology_decision,
 )
@@ -200,6 +201,11 @@ def build_parser() -> argparse.ArgumentParser:
     terms_decide.add_argument("--dry-run", action="store_true")
     terms_decide.add_argument("--replace-draft", action="store_true")
     terms_decide.add_argument("--force", action="store_true")
+    terms_decide.add_argument(
+        "--acknowledge-manual-review",
+        action="store_true",
+        help="确认新一轮决策成功应用后会取代现有人工待办",
+    )
     terms_decide_run = terms_decide.add_mutually_exclusive_group()
     terms_decide_run.add_argument("--resume-run", action="store_true")
     terms_decide_run.add_argument("--decline-run", action="store_true")
@@ -371,6 +377,15 @@ def run(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
         warnings.extend(run_warnings)
+        if (
+            not args.dry_run
+            and not args.resume_run
+            and manual_review_state(project)["remaining"] > 0
+            and not args.acknowledge_manual_review
+        ):
+            raise UsageError(
+                "存在未处理人工待办；请使用 --acknowledge-manual-review 确认新一轮决策"
+            )
         lock = nullcontext() if args.dry_run else project_write_lock(project)
         with lock:
             summary = asyncio.run(

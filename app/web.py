@@ -1789,6 +1789,7 @@ def create_app(
 
         force = boolean_option("force")
         replace_draft = boolean_option("replace_draft")
+        acknowledge_manual_review = boolean_option("acknowledge_manual_review")
         reuse_mixed_fingerprints = boolean_option(
             "reuse_mixed_fingerprints"
         )
@@ -1815,6 +1816,7 @@ def create_app(
                 else None
             ),
             replace_draft=replace_draft,
+            acknowledge_manual_review=acknowledge_manual_review,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
