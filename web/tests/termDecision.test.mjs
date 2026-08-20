@@ -82,6 +82,13 @@ test("automatic decision dialog separates closing from task cancellation", async
   assert.match(source, /terms\.decisionManualTab/);
   assert.match(source, /manual-review-actions/);
   assert.match(source, /terms\/decision\/manual-review/);
+  const termsSource = await readFile(
+    new URL("../src/components/TermsView.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(termsSource, /manual-review-editor-bar/);
+  assert.match(termsSource, /decisionManualTermMissing/);
+  assert.match(termsSource, /openDecision\("manual"\)/);
 });
 
 test("automatic decision resume copy identifies persisted progress", async () => {
