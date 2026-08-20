@@ -317,7 +317,13 @@ export interface TermDecisionEvidence {
   hit_count: number;
   source_hit_count: number;
   alias_hit_counts: Record<string, number>;
-  samples: Array<{ file_id: string; segment_id: string; source: string }>;
+  samples: Array<{
+    file_id: string;
+    segment_id: string;
+    source: string;
+    match_view?: string;
+    matched_forms?: Array<{ kind: "source" | "alias"; value: string }>;
+  }>;
 }
 
 export interface TermDecisionProposal {
@@ -344,9 +350,24 @@ export interface TermDecisionDraft {
   rejected_proposal_ids: string[];
 }
 
+export interface TermDecisionManualReviewItem {
+  run_id: string;
+  normalized: string;
+  source: string;
+  reason: string;
+  evidence: TermDecisionEvidence;
+  resolved: boolean;
+}
+
 export interface TermDecisionReviewState {
   draft: TermDecisionDraft | null;
   rollback: { run_id: string; applied_terms_revision: number } | null;
+  manual_review: {
+    items: TermDecisionManualReviewItem[];
+    total: number;
+    resolved: number;
+    remaining: number;
+  };
 }
 
 export interface TermsResponse {

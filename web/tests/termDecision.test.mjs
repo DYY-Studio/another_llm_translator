@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { filterDecisionProposals, summarizeDecisionProposals } from "../src/termDecision.ts";
+import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, manualReviewProgress, summarizeDecisionProposals } from "../src/termDecision.ts";
 
 const state = (normalized, translation, disabled = false) => ({
   normalized,
@@ -47,9 +47,29 @@ test("summarizes accepted whole proposals", () => {
   });
 });
 
+test("renders semantic field and alias changes from states", () => {
+  const before = { ...state("Alice", null), aliases: ["Ally"] };
+  const after = { ...before, preferred_translation: "爱丽丝", group_primary: "root", aliases: ["Ally", "A"] };
+  assert.deepEqual(decisionProposalChanges(before, after), [
+    { field: "preferred_translation", before: "", after: "爱丽丝" },
+    { field: "group_primary", before: "", after: "root" },
+  ]);
+  assert.deepEqual(decisionAliasChanges(before, after), { added: ["A"], removed: [] });
+});
+
+test("filters and summarizes the persistent manual queue", () => {
+  const items = [
+    { run_id: "run", normalized: "alice", source: "Alice", reason: "group", evidence: { hit_count: 1 }, resolved: false },
+    { run_id: "run", normalized: "bob", source: "Bob", reason: "checked", evidence: { hit_count: 0 }, resolved: true },
+  ];
+  assert.deepEqual(filterManualReviewItems(items, "alice", "open").map((item) => item.normalized), ["alice"]);
+  assert.deepEqual(filterManualReviewItems(items, "", "resolved").map((item) => item.normalized), ["bob"]);
+  assert.deepEqual(manualReviewProgress(items), { total: 2, resolved: 1, remaining: 1 });
+});
+
 test("automatic decision dialog separates closing from task cancellation", async () => {
   const source = await readFile(
-    new URL("../src/components/TermDecisionDialog.tsx", import.meta.url),
+    new URL("../src/components/TermDecisionWorkspace.tsx", import.meta.url),
     "utf8",
   );
   assert.match(source, /translate\("common\.close", language\)/);
@@ -57,6 +77,11 @@ test("automatic decision dialog separates closing from task cancellation", async
   assert.match(source, /\["completed", "cancelled", "failed"\]\.includes\(task\.status\)/);
   assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
   assert.match(source, /terms\.decisionOverflowPolicy/);
+  assert.match(source, /term-decision-workspace/);
+  assert.match(source, /term-decision-bottom-actions/);
+  assert.match(source, /terms\.decisionManualTab/);
+  assert.match(source, /manual-review-actions/);
+  assert.match(source, /terms\/decision\/manual-review/);
 });
 
 test("automatic decision resume copy identifies persisted progress", async () => {
