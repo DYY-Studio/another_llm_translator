@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
@@ -18,12 +19,13 @@ from app.sqlite_storage import atomic_write_json, read_json, record_header, writ
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    _alias_violations,
     _consistency_states,
     _group_violations,
     _make_payload,
     _pack_batches,
     _parse_decisions,
-    _recover_invalid_group_components,
+    _recover_invalid_relationship_components,
     _related_anchors,
     apply_decision_draft,
     collect_term_evidence,
@@ -718,7 +720,7 @@ def test_group_validation_collects_every_illegal_relationship_shape() -> None:
     assert ("cycle", ("cycle-a", "cycle-b", "cycle-c")) in violations
 
 
-def test_invalid_group_recovery_restores_alias_dependency_component() -> None:
+def test_invalid_relationship_recovery_restores_alias_dependency_component() -> None:
     original = {
         "alice": {
             **_batch_state("alice", "Alice"),
@@ -741,11 +743,19 @@ def test_invalid_group_recovery_restores_alias_dependency_component() -> None:
         for key, state in final.items()
     }
 
-    _recover_invalid_group_components(
+    _recover_invalid_relationship_components(
         original=original,
         final=final,
         decisions=decisions,
         language="zh-CN",
+        spec=term_normalization(
+            {
+                "terminology": {
+                    "unicode_normalization": "NFKC",
+                    "case_insensitive": False,
+                }
+            }
+        ),
     )
 
     assert final["alice"] == original["alice"]
@@ -1762,6 +1772,108 @@ def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     assert evidence["bob"]["hit_count"] == 1
 
 
+def test_evidence_samples_center_the_match_and_label_forms(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path, "x" * 700 + "Alice" + " tail")
+    library = read_json(project, project / "terminology" / "terms.json")
+
+    sample = collect_term_evidence(project, library["terms"])["alice"]["samples"][0]
+
+    assert sample["match_view"] == "source"
+    assert sample["matched_forms"] == [{"kind": "source", "value": "Alice"}]
+    assert "Alice" in sample["source"]
+    assert len(sample["source"]) < 600
+
+
+def test_evidence_labels_aozora_base_and_reading_views(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path, "｜漢《かん》｜字《じ》")
+    terms = [
+        {
+            "source": "漢字",
+            "normalized": "漢字",
+            "category": "其他",
+            "aliases": [],
+        },
+        {
+            "source": "かんじ",
+            "normalized": "かんじ",
+            "category": "其他",
+            "aliases": [],
+        },
+    ]
+
+    evidence = collect_term_evidence(project, terms)
+
+    assert evidence["漢字"]["samples"][0]["match_view"] == "aozora_base"
+    assert evidence["漢字"]["samples"][0]["matched_forms"] == [
+        {"kind": "source", "value": "漢字"}
+    ]
+    assert evidence["かんじ"]["samples"][0]["match_view"] == "aozora_reading"
+    assert evidence["かんじ"]["samples"][0]["matched_forms"] == [
+        {"kind": "source", "value": "かんじ"}
+    ]
+
+
+def test_alias_transfer_requires_a_complete_relationship() -> None:
+    spec = term_normalization(
+        {
+            "terminology": {
+                "unicode_normalization": "NFKC",
+                "case_insensitive": False,
+            }
+        }
+    )
+    original = {
+        "alice": {**_batch_state("alice", "Alice"), "aliases": ["Ally"]},
+        "bob": _batch_state("bob", "Bob"),
+    }
+    final = {
+        "alice": deepcopy(original["alice"]),
+        "bob": {**original["bob"], "aliases": ["Ally"]},
+    }
+    decisions = {
+        "bob": {"action": "update", "reason": "接收简称", "after": final["bob"]}
+    }
+
+    assert _alias_violations(original, final, spec) == [
+        ("alias_transfer", ("bob", "alice", "Ally"))
+    ]
+    _recover_invalid_relationship_components(
+        original=original,
+        final=final,
+        decisions=decisions,
+        language="zh-CN",
+        spec=spec,
+    )
+    assert final == original
+    assert decisions["bob"]["action"] == "needs_review"
+
+
+def test_alias_transfer_and_source_grouping_are_valid_combinations() -> None:
+    spec = term_normalization(
+        {
+            "terminology": {
+                "unicode_normalization": "NFKC",
+                "case_insensitive": False,
+            }
+        }
+    )
+    original = {
+        "alice": {**_batch_state("alice", "Alice"), "aliases": ["Ally"]},
+        "bob": _batch_state("bob", "Bob"),
+    }
+    alias_transfer = {
+        "alice": {**original["alice"], "aliases": []},
+        "bob": {**original["bob"], "aliases": ["Ally"]},
+    }
+    assert _alias_violations(original, alias_transfer, spec) == []
+
+    source_group = {
+        "alice": {**original["alice"], "aliases": ["Ally", "Bob"]},
+        "bob": {**original["bob"], "group_primary": "alice"},
+    }
+    assert _alias_violations(original, source_group, spec) == []
+
+
 @pytest.mark.asyncio
 async def test_decision_protects_override_and_replacement_failure_keeps_draft(
     tmp_path: Path,
@@ -1859,6 +1971,61 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
     assert len(draft["proposals"]) == 1
     assert draft["proposals"][0]["kind"] == "relationship"
     assert draft["proposals"][0]["normalized"] == ["alice", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_alias_theft_is_reviewed_without_implicit_grouping(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for term in payload["terms"]:
+            if term["normalized"] == "alice":
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": "alice",
+                        "action": "update",
+                        "reason": "接收 Bob 作为 alias",
+                        "category": "人物",
+                        "description": None,
+                        "preferred_translation": "爱丽丝",
+                        "aliases": ["Ally", "Bob"],
+                        "group_primary": None,
+                    }
+                )
+            else:
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": term["normalized"],
+                        "action": "keep",
+                        "reason": "保留原状态",
+                    }
+                )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        summary = await run_terminology_decision(project, http_client=client)
+    del os.environ["LLM_API_KEY"]
+
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert summary["proposals"] == 0
+    assert summary["needs_review"] == 2
+    assert {item["normalized"] for item in draft["needs_review"]} == {"alice", "bob"}
+    assert all("alias" in item["reason"] for item in draft["needs_review"])
+    assert all(
+        item["group_primary"] is None
+        for item in draft["source_library"]["terms"]
+        if item["normalized"] in {"alice", "bob"}
+    )
 
 
 def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:

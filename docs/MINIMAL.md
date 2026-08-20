@@ -1028,6 +1028,11 @@ JSON `null` 或 `aliases` 为空数组也不能省略。`update` 表示完整目
 固定 Prompt 同时提供精简正反示例，格式修正请求会重述相同字段模板和当前批次唯一允许的
 `normalized` 集合。
 
+alias 转移必须是完整的多术语关系操作：接收方必须是启用的根术语，原所有者必须释放
+该 alias、被禁用，或在 source 转移时直接成为接收方成员。单边新增其他术语仍持有的
+source/alias、规范化后重复 alias 和把自身 source 作为 alias 都会被宿主拒绝；跨批次才能
+确认的关系冲突会恢复整个依赖组件并列入 `needs_review`，不会产生隐式归组或部分建议。
+
 第二阶段的 `terms` 和 `anchors` 输入携带只读 `disabled`，使模型能看到第一阶段及已完成
 第二阶段的实际启用状态；该字段不得出现在 decision 输出中。`keep` 保持当前启用状态，
 `disable` 软禁用，`update` 提交完整字段并启用术语。
@@ -1046,6 +1051,10 @@ override 保护、alias 碰撞和组拓扑，并在一个 SQLite 事务中写入
 术语库新 revision 和 Run 状态；全部拒绝不增加 revision。草案保留应用前快照，只有
 应用后术语 revision 未再变化时才允许以新 revision 严格撤销。失败或替换失败不会留下
 部分草案，也不会丢弃原草案。
+
+每个证据样本包含文件、Segment、命中形式及 `source` 上下文片段；片段围绕实际命中位置
+截取，并标记为普通 source、Aozora base 或 Aozora reading 视图。样本仍最多保留五个且
+优先跨文件；Anchor 使用 `compact` 策略时只移除样本，不改变命中计数。
 
 ### 术语交换
 
