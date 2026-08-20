@@ -1799,6 +1799,7 @@ class LLMClient:
         int,
         int,
         float | None,
+        str,
     ]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
@@ -1818,6 +1819,7 @@ class LLMClient:
                     0,
                     0,
                     None,
+                    "",
                 )
             content_type = response.headers.get("content-type", "")
             if content_type.split(";", 1)[0].strip().casefold() != "text/event-stream":
@@ -1837,6 +1839,7 @@ class LLMClient:
             received_bytes = 0
             first_event_latency_ms: float | None = None
             terminal = False
+            termination = ""
             terminal_spec = self.adapter.streaming_spec
             if terminal_spec is None:
                 raise ConfigError("LLM Adapter 未声明 streaming 规则")
@@ -1860,6 +1863,7 @@ class LLMClient:
                     if sentinel is not None and data == sentinel:
                         raw_events.append(data)
                         terminal = True
+                        termination = "explicit"
                         break
                     raw_events.append(data)
                     try:
@@ -1893,6 +1897,7 @@ class LLMClient:
                     )
                     if self.adapter.stream_terminal(event):
                         terminal = True
+                        termination = "explicit"
                         break
             except _StreamRetryable:
                 raise
@@ -1914,6 +1919,9 @@ class LLMClient:
                     received_bytes=received_bytes,
                     first_event_latency_ms=first_event_latency_ms,
                 ) from exc
+            if not terminal and terminal_spec["allow_clean_eof"] and event_count > 0:
+                terminal = True
+                termination = "clean_eof"
             if not terminal:
                 raise _StreamRetryable(
                     "LLM 流式响应未正常结束",
@@ -1951,6 +1959,7 @@ class LLMClient:
                 event_count,
                 received_bytes,
                 first_event_latency_ms,
+                termination,
             )
 
     async def __aenter__(self) -> "LLMClient":
@@ -2150,6 +2159,7 @@ class LLMClient:
                 int,
                 int,
                 float | None,
+                str,
             ] | None = None
             attempt_error = False
             attempt_outcome: str | None = None
@@ -2346,6 +2356,7 @@ class LLMClient:
                     stream_event_count,
                     stream_received_bytes,
                     _stream_first_event_latency_ms,
+                    stream_termination,
                 ) = stream_result
                 response_status = stream_status
                 if 200 <= stream_status < 300:
@@ -2372,12 +2383,13 @@ class LLMClient:
                             reasoning_content=normalized.reasoning_content,
                         )
                     self.logger.info(
-                        "stream complete request=%s attempt=%d status=%d events=%d bytes=%d elapsed=%.2fs",
+                        "stream complete request=%s attempt=%d status=%d events=%d bytes=%d termination=%s elapsed=%.2fs",
                         request_id,
                         attempt,
                         stream_status,
                         stream_event_count,
                         stream_received_bytes,
+                        stream_termination,
                         time.monotonic() - started,
                     )
                     if self.on_usage is not None:

@@ -59,6 +59,16 @@ def streaming_config(tmp_path: Path) -> dict:
     return current
 
 
+def set_clean_eof(current: dict, tmp_path: Path, enabled: bool) -> None:
+    definition = json.loads(
+        json.dumps(current["_llm_adapter"].definition, ensure_ascii=False)
+    )
+    definition["streaming"]["allow_clean_eof"] = enabled
+    path = tmp_path / f"adapter-clean-eof-{enabled}.json"
+    path.write_text(json.dumps(definition), encoding="utf-8")
+    current["_llm_adapter"] = load_json_adapter(path)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stream", "read_timeout_enabled", "expected_read_timeout"),
@@ -213,10 +223,100 @@ async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_openai_stream_accepts_clean_eof_and_trailing_usage(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return stream_response(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                '{"type":"segment","id":"1",'
+                                '"translation":"完成"}\n{"type":"end"}'
+                            )
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}}]},
+            {
+                "usage": {
+                    "prompt_tokens": 17,
+                    "completion_tokens": 9,
+                    "total_tokens": 26,
+                }
+            },
+            {"choices": [], "cost": "0"},
+        )
+
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    response, llm, client = await run_client(
+        current, tmp_path, handler, diagnostics=diagnostics
+    )
+    await client.aclose()
+
+    assert calls == 1
+    assert '"translation":"完成"' in response.content
+    assert llm.usage_summary() == {
+        "input_tokens": 17,
+        "output_tokens": 9,
+        "total_tokens": 26,
+        "available": True,
+        "partial": False,
+    }
+    item = diagnostics.snapshot()["requests"]["items"][0]
+    detail = diagnostics.request_detail(item["request_id"])
+    assert detail["attempts"][0]["outcome"] == "succeeded"
+    assert "termination=clean_eof" in (
+        tmp_path / "logs" / "app.log"
+    ).read_text("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_clean_eof_requires_at_least_one_event(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 1
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return stream_response()
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    os.environ["LLM_API_KEY"] = "test-key"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path / "run",
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            with pytest.raises(ExternalError, match="流式请求重试耗尽"):
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stream_retry_discards_partial_output_and_saves_failed_events(
     tmp_path: Path,
 ) -> None:
     current = streaming_config(tmp_path)
+    set_clean_eof(current, tmp_path, False)
     current["retry"]["http_max_attempts"] = 2
     current["debug"]["enabled"] = True
     calls = 0
@@ -437,6 +537,7 @@ async def test_stream_retry_preserves_retry_after_headers(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_stream_exhaustion_is_failed_not_left_retrying(tmp_path: Path) -> None:
     current = streaming_config(tmp_path)
+    set_clean_eof(current, tmp_path, False)
     current["retry"]["http_max_attempts"] = 2
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
