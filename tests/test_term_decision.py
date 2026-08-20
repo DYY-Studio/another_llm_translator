@@ -307,9 +307,169 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
             content,
             focus,
             all_forms={"Target"},
-            known_terms={"target"},
+            known_states={"target": focus[0]},
             read_only_terms={"known-anchor"},
         )
+
+
+def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
+    return {
+        "type": "decision",
+        "normalized": normalized,
+        "action": "update",
+        "reason": "调整组关系",
+        "category": "人物",
+        "description": None,
+        "preferred_translation": None,
+        "aliases": [],
+        "group_primary": primary,
+    }
+
+
+@pytest.mark.parametrize(
+    ("focus", "known_states", "records", "message"),
+    [
+        (
+            [_batch_state("alice", "Alice")],
+            {"alice": _batch_state("alice", "Alice")},
+            [_update_decision("alice", "alice")],
+            "术语组主自指：alice -> alice",
+        ),
+        (
+            [_batch_state("alice", "Alice")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": {**_batch_state("bob", "Bob"), "disabled": True},
+            },
+            [_update_decision("alice", "bob")],
+            "术语组主已禁用：alice -> bob",
+        ),
+        (
+            [_batch_state("alice", "Alice")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": {**_batch_state("bob", "Bob"), "group_primary": "carol"},
+                "carol": _batch_state("carol", "Carol"),
+            },
+            [_update_decision("alice", "bob")],
+            "术语组成员指向另一成员：alice -> bob",
+        ),
+        (
+            [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": _batch_state("bob", "Bob"),
+            },
+            [
+                _update_decision("alice", "bob"),
+                _update_decision("bob", "alice"),
+            ],
+            "术语组关系循环：alice -> bob -> alice",
+        ),
+    ],
+)
+def test_decision_parser_rejects_provable_group_violations(
+    focus: list[dict[str, object]],
+    known_states: dict[str, dict[str, object]],
+    records: list[dict[str, object]],
+    message: str,
+) -> None:
+    with pytest.raises(UsageError, match=message):
+        _parse_decisions(
+            llm_jsonl(records),
+            focus,
+            all_forms={str(state["source"]) for state in known_states.values()},
+            known_states=known_states,
+            read_only_terms=set(),
+        )
+
+
+def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
+    focus = [_batch_state("alice", "Alice")]
+    states = {
+        "alice": focus[0],
+        "bob": _batch_state("bob", "Bob"),
+    }
+    decisions, _ = _parse_decisions(
+        llm_jsonl([_update_decision("alice", "bob")]),
+        focus,
+        all_forms={"Alice", "Bob"},
+        known_states=states,
+        read_only_terms=set(),
+    )
+    assert decisions["alice"]["after"]["group_primary"] == "bob"
+
+
+def test_decision_parser_allows_review_to_restore_tentative_group_state() -> None:
+    original = _batch_state("alice", "Alice")
+    tentative = {**original, "group_primary": "alice"}
+    decisions, _ = _parse_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "alice",
+                    "action": "needs_review",
+                    "reason": "无法确定合法组主",
+                }
+            ]
+        ),
+        [tentative],
+        all_forms={"Alice"},
+        known_states={"alice": tentative},
+        read_only_terms=set(),
+        review_states={"alice": original},
+    )
+    assert decisions["alice"]["action"] == "needs_review"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "marker"),
+    [
+        ("zh-CN", "术语组主自指：alice -> alice"),
+        ("en", "self-referencing group pointer: alice -> alice"),
+    ],
+)
+async def test_decision_group_violation_enters_localized_format_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    marker: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    sent_invalid = False
+    repairs = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_invalid, repairs
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "format_correction" in payload:
+            repairs += 1
+            assert marker in payload["format_correction"]
+            assert "group_primary" in payload["format_correction"]
+            content = llm_jsonl(decision_response(payload))
+        elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
+            sent_invalid = True
+            content = llm_jsonl([_update_decision("alice", "alice")])
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(
+                project, prompt_language=language, http_client=client
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert repairs == 1
 
 
 @pytest.mark.asyncio

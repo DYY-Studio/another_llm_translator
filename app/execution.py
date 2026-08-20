@@ -523,7 +523,9 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "keep、update、disable 或 needs_review。keep/needs_review 仅含 type、normalized、"
             "action、reason；update 必须另含完整 category、description、preferred_translation、"
             "aliases、group_primary，字符串字段可为 null；disable 不得含这些字段。只为"
-            "terms[] 输出 decision，anchors[] 一条也不得输出。"
+            "terms[] 输出 decision，anchors[] 一条也不得输出。group_primary 仅表示成员直接"
+            "指向启用的根术语，根术语自身必须为 null；禁止自指、指向 disabled 术语、"
+            "成员指向成员以及任何链或循环。无法确定合法根术语时必须使用 needs_review。"
         ),
         "en": (
             "Return exactly one type=decision record for every terms[] item and copy "
@@ -532,7 +534,10 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "update also contains complete category, description, preferred_translation, "
             "aliases, and group_primary, with nullable string fields; disable contains "
             "none of those fields. Output decisions only for terms[]; never output a "
-            "decision for any anchors[] item."
+            "decision for any anchors[] item. group_primary is only a direct pointer from "
+            "a member to an enabled root, whose own group_primary must be null. Never "
+            "self-reference, point to a disabled term or another member, or form a chain "
+            "or cycle. Use needs_review when no legal root can be determined."
         ),
     },
     "translation": {

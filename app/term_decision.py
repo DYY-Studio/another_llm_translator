@@ -67,6 +67,8 @@ _STATE_FIELDS = (
 
 _PHASES = ("adjudication", "consistency")
 
+_GroupViolation = tuple[str, tuple[str, ...]]
+
 
 def _prompt_language(project: Path, requested: str | None) -> str:
     language = requested or resolve_language()
@@ -474,13 +476,91 @@ def _nullable_string(value: Any, field: str) -> str | None:
     return value or None
 
 
+def _group_violations(states: dict[str, dict[str, Any]]) -> list[_GroupViolation]:
+    active = {
+        normalized: state
+        for normalized, state in states.items()
+        if not state.get("disabled")
+    }
+    violations: list[_GroupViolation] = []
+    for normalized, state in sorted(active.items()):
+        primary = state.get("group_primary")
+        if primary is None:
+            continue
+        primary = str(primary)
+        if primary == normalized:
+            violations.append(("self", (normalized, primary)))
+            continue
+        target = states.get(primary)
+        if target is None:
+            violations.append(("missing", (normalized, primary)))
+        elif target.get("disabled"):
+            violations.append(("disabled", (normalized, primary)))
+        elif target.get("group_primary") is not None:
+            violations.append(("member", (normalized, primary)))
+
+    cycles: set[tuple[str, ...]] = set()
+    visited: set[str] = set()
+    for start in sorted(active):
+        if start in visited:
+            continue
+        path: list[str] = []
+        positions: dict[str, int] = {}
+        current = start
+        while current in active and current not in visited:
+            if current in positions:
+                cycle = path[positions[current] :]
+                if len(cycle) > 1:
+                    first = min(range(len(cycle)), key=cycle.__getitem__)
+                    cycles.add(tuple(cycle[first:] + cycle[:first]))
+                break
+            positions[current] = len(path)
+            path.append(current)
+            primary = active[current].get("group_primary")
+            if primary is None:
+                break
+            current = str(primary)
+        visited.update(path)
+    violations.extend(("cycle", cycle) for cycle in sorted(cycles))
+    return violations
+
+
+def _group_violation_message(
+    violation: _GroupViolation, language: str
+) -> str:
+    kind, values = violation
+    if kind == "cycle":
+        edge = " -> ".join((*values, values[0]))
+    else:
+        edge = f"{values[0]} -> {values[1]}"
+    if language == "en":
+        labels = {
+            "self": "self-referencing group pointer",
+            "missing": "group pointer to a missing term",
+            "disabled": "group pointer to a disabled term",
+            "member": "group pointer to another member",
+            "cycle": "group pointer cycle",
+        }
+        return f"{labels[kind]}: {edge}"
+    labels = {
+        "self": "术语组主自指",
+        "missing": "术语组主不存在",
+        "disabled": "术语组主已禁用",
+        "member": "术语组成员指向另一成员",
+        "cycle": "术语组关系循环",
+    }
+    return f"{labels[kind]}：{edge}"
+
+
 def _parse_decisions(
     content: str,
     focus: list[dict[str, Any]],
     *,
     all_forms: set[str],
-    known_terms: set[str],
+    known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
+    prompt_language: str = "zh-CN",
+    review_states: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = list(document.errors)
@@ -538,7 +618,7 @@ def _parse_decisions(
             continue
         group_primary = value.get("group_primary")
         if group_primary is not None and (
-            not isinstance(group_primary, str) or group_primary not in known_terms
+            not isinstance(group_primary, str) or group_primary not in known_states
         ):
             errors.append(f"术语决策 group_primary 无效：{normalized}")
             continue
@@ -562,6 +642,23 @@ def _parse_decisions(
                 "disabled": False,
             },
         }
+    candidate_states = dict(known_states)
+    for normalized, decision in decisions.items():
+        if decision["action"] == "update":
+            candidate_states[normalized] = decision["after"]
+        elif decision["action"] == "disable":
+            candidate_states[normalized] = {
+                **candidate_states[normalized],
+                "disabled": True,
+            }
+        elif decision["action"] == "needs_review" and review_states is not None:
+            candidate_states[normalized] = review_states[normalized]
+    focus_terms = set(expected)
+    errors.extend(
+        _group_violation_message(violation, prompt_language)
+        for violation in _group_violations(candidate_states)
+        if focus_terms.intersection(violation[1])
+    )
     missing = sorted(set(expected) - set(decisions))
     if missing:
         errors.append(f"术语决策缺少记录：{', '.join(missing[:10])}")
@@ -582,9 +679,10 @@ async def _request_batch(
     config: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
     all_forms: set[str],
-    known_terms: set[str],
+    known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
     prompt_language: str,
+    review_states: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     errors: list[str] = []
     parent_request_id: str | None = None
@@ -602,12 +700,20 @@ async def _request_batch(
                 ensure_ascii=False,
             )
             if prompt_language == "en":
+                detail = errors[0] if errors and (
+                    errors[0].startswith("self-referencing group pointer")
+                    or errors[0].startswith("group pointer")
+                ) else "invalid response"
                 payload["format_correction"] = (
                     "The previous response violated the terminology decision "
-                    "protocol and could not be accepted. "
+                    "protocol and could not be accepted: "
+                    f"{detail}. "
                     f"The only allowed decision normalized values are {allowed}. "
                     "Output exactly one decision for each terms[] item, no decision "
-                    "for any anchors[] item, and then the exact end record."
+                    "for any anchors[] item, and then the exact end record. A group "
+                    "member may point only directly to an enabled root whose own "
+                    "group_primary is null; self-references, disabled targets, chains, "
+                    "and cycles are forbidden."
                 )
             else:
                 payload["format_correction"] = (
@@ -615,7 +721,8 @@ async def _request_batch(
                     f"{errors[0] if errors else '响应无效'}。"
                     f"本批唯一允许输出的 normalized 为 {allowed}。"
                     "必须为每个 terms[] 项各输出一条 decision；不得为 anchors[] 任一项输出"
-                    " decision；最后输出精确的 end 记录。"
+                    " decision；最后输出精确的 end 记录。组成员只能直接指向启用且"
+                    "group_primary 为 null 的根术语；禁止自指、禁用目标、链和循环。"
                 )
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -634,8 +741,10 @@ async def _request_batch(
                 response.content,
                 focus,
                 all_forms=all_forms,
-                known_terms=known_terms,
+                known_states=known_states,
                 read_only_terms=read_only_terms,
+                prompt_language=prompt_language,
+                review_states=review_states,
             )
             if ignored_read_only:
                 llm.logger.warning(
@@ -1173,7 +1282,6 @@ async def run_terminology_decision(
         for state in states.values()
         for value in [str(state["source"]), *map(str, state.get("aliases", []))]
     }
-    known_terms = set(states)
     eligible_terms = {str(item["normalized"]) for item in eligible}
     checkpoint = _load_checkpoint(
         project,
@@ -1258,9 +1366,10 @@ async def run_terminology_decision(
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
-                    known_terms=known_terms,
+                    known_states=states,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
+                    review_states=states,
                 )
                 decisions.update(result)
                 records = checkpoint["phases"]["adjudication"]
@@ -1317,9 +1426,10 @@ async def run_terminology_decision(
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
-                    known_terms=known_terms,
+                    known_states=tentative,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
+                    review_states=states,
                 )
                 final_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
