@@ -67,6 +67,8 @@ _STATE_FIELDS = (
 
 _PHASES = ("adjudication", "consistency")
 
+_GroupViolation = tuple[str, tuple[str, ...]]
+
 
 def _prompt_language(project: Path, requested: str | None) -> str:
     language = requested or resolve_language()
@@ -474,13 +476,91 @@ def _nullable_string(value: Any, field: str) -> str | None:
     return value or None
 
 
+def _group_violations(states: dict[str, dict[str, Any]]) -> list[_GroupViolation]:
+    active = {
+        normalized: state
+        for normalized, state in states.items()
+        if not state.get("disabled")
+    }
+    violations: list[_GroupViolation] = []
+    for normalized, state in sorted(active.items()):
+        primary = state.get("group_primary")
+        if primary is None:
+            continue
+        primary = str(primary)
+        if primary == normalized:
+            violations.append(("self", (normalized, primary)))
+            continue
+        target = states.get(primary)
+        if target is None:
+            violations.append(("missing", (normalized, primary)))
+        elif target.get("disabled"):
+            violations.append(("disabled", (normalized, primary)))
+        elif target.get("group_primary") is not None:
+            violations.append(("member", (normalized, primary)))
+
+    cycles: set[tuple[str, ...]] = set()
+    visited: set[str] = set()
+    for start in sorted(active):
+        if start in visited:
+            continue
+        path: list[str] = []
+        positions: dict[str, int] = {}
+        current = start
+        while current in active and current not in visited:
+            if current in positions:
+                cycle = path[positions[current] :]
+                if len(cycle) > 1:
+                    first = min(range(len(cycle)), key=cycle.__getitem__)
+                    cycles.add(tuple(cycle[first:] + cycle[:first]))
+                break
+            positions[current] = len(path)
+            path.append(current)
+            primary = active[current].get("group_primary")
+            if primary is None:
+                break
+            current = str(primary)
+        visited.update(path)
+    violations.extend(("cycle", cycle) for cycle in sorted(cycles))
+    return violations
+
+
+def _group_violation_message(
+    violation: _GroupViolation, language: str
+) -> str:
+    kind, values = violation
+    if kind == "cycle":
+        edge = " -> ".join((*values, values[0]))
+    else:
+        edge = f"{values[0]} -> {values[1]}"
+    if language == "en":
+        labels = {
+            "self": "self-referencing group pointer",
+            "missing": "group pointer to a missing term",
+            "disabled": "group pointer to a disabled term",
+            "member": "group pointer to another member",
+            "cycle": "group pointer cycle",
+        }
+        return f"{labels[kind]}: {edge}"
+    labels = {
+        "self": "术语组主自指",
+        "missing": "术语组主不存在",
+        "disabled": "术语组主已禁用",
+        "member": "术语组成员指向另一成员",
+        "cycle": "术语组关系循环",
+    }
+    return f"{labels[kind]}：{edge}"
+
+
 def _parse_decisions(
     content: str,
     focus: list[dict[str, Any]],
     *,
     all_forms: set[str],
-    known_terms: set[str],
+    known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
+    prompt_language: str = "zh-CN",
+    review_states: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = list(document.errors)
@@ -538,7 +618,7 @@ def _parse_decisions(
             continue
         group_primary = value.get("group_primary")
         if group_primary is not None and (
-            not isinstance(group_primary, str) or group_primary not in known_terms
+            not isinstance(group_primary, str) or group_primary not in known_states
         ):
             errors.append(f"术语决策 group_primary 无效：{normalized}")
             continue
@@ -562,6 +642,23 @@ def _parse_decisions(
                 "disabled": False,
             },
         }
+    candidate_states = dict(known_states)
+    for normalized, decision in decisions.items():
+        if decision["action"] == "update":
+            candidate_states[normalized] = decision["after"]
+        elif decision["action"] == "disable":
+            candidate_states[normalized] = {
+                **candidate_states[normalized],
+                "disabled": True,
+            }
+        elif decision["action"] == "needs_review" and review_states is not None:
+            candidate_states[normalized] = review_states[normalized]
+    focus_terms = set(expected)
+    errors.extend(
+        _group_violation_message(violation, prompt_language)
+        for violation in _group_violations(candidate_states)
+        if focus_terms.intersection(violation[1])
+    )
     missing = sorted(set(expected) - set(decisions))
     if missing:
         errors.append(f"术语决策缺少记录：{', '.join(missing[:10])}")
@@ -582,9 +679,10 @@ async def _request_batch(
     config: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
     all_forms: set[str],
-    known_terms: set[str],
+    known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
     prompt_language: str,
+    review_states: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     errors: list[str] = []
     parent_request_id: str | None = None
@@ -602,12 +700,20 @@ async def _request_batch(
                 ensure_ascii=False,
             )
             if prompt_language == "en":
+                detail = errors[0] if errors and (
+                    errors[0].startswith("self-referencing group pointer")
+                    or errors[0].startswith("group pointer")
+                ) else "invalid response"
                 payload["format_correction"] = (
                     "The previous response violated the terminology decision "
-                    "protocol and could not be accepted. "
+                    "protocol and could not be accepted: "
+                    f"{detail}. "
                     f"The only allowed decision normalized values are {allowed}. "
                     "Output exactly one decision for each terms[] item, no decision "
-                    "for any anchors[] item, and then the exact end record."
+                    "for any anchors[] item, and then the exact end record. A group "
+                    "member may point only directly to an enabled root whose own "
+                    "group_primary is null; self-references, disabled targets, chains, "
+                    "and cycles are forbidden."
                 )
             else:
                 payload["format_correction"] = (
@@ -615,7 +721,8 @@ async def _request_batch(
                     f"{errors[0] if errors else '响应无效'}。"
                     f"本批唯一允许输出的 normalized 为 {allowed}。"
                     "必须为每个 terms[] 项各输出一条 decision；不得为 anchors[] 任一项输出"
-                    " decision；最后输出精确的 end 记录。"
+                    " decision；最后输出精确的 end 记录。组成员只能直接指向启用且"
+                    "group_primary 为 null 的根术语；禁止自指、禁用目标、链和循环。"
                 )
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -634,8 +741,10 @@ async def _request_batch(
                 response.content,
                 focus,
                 all_forms=all_forms,
-                known_terms=known_terms,
+                known_states=known_states,
                 read_only_terms=read_only_terms,
+                prompt_language=prompt_language,
+                review_states=review_states,
             )
             if ignored_read_only:
                 llm.logger.warning(
@@ -815,6 +924,102 @@ def _apply_tentative(
             states[normalized] = {**states[normalized], "disabled": True}
 
 
+def _decision_dependency_graph(
+    original: dict[str, dict[str, Any]], final: dict[str, dict[str, Any]]
+) -> dict[str, set[str]]:
+    graph = {key: set() for key in original.keys() | final.keys()}
+
+    def connect(left: str, right: str) -> None:
+        graph.setdefault(left, set()).add(right)
+        graph.setdefault(right, set()).add(left)
+
+    for states in (original, final):
+        for key, state in states.items():
+            primary = state.get("group_primary")
+            if primary is not None:
+                connect(key, str(primary))
+
+    original_owners: dict[str, set[str]] = {}
+    for key, state in original.items():
+        for value in [state["source"], *state.get("aliases", [])]:
+            original_owners.setdefault(str(value), set()).add(key)
+    for key, state in final.items():
+        if key not in original:
+            continue
+        added = set(state.get("aliases", [])) - set(
+            original[key].get("aliases", [])
+        )
+        for alias in added:
+            for owner in original_owners.get(str(alias), set()):
+                connect(key, owner)
+    return graph
+
+
+def _dependency_components(
+    graph: dict[str, set[str]],
+    starts: set[str],
+    *,
+    allowed: set[str] | None = None,
+) -> list[set[str]]:
+    remaining = set(starts if allowed is None else starts & allowed)
+    components: list[set[str]] = []
+    while remaining:
+        component: set[str] = set()
+        pending = [min(remaining)]
+        while pending:
+            current = pending.pop()
+            if current in component or (allowed is not None and current not in allowed):
+                continue
+            component.add(current)
+            neighbors = graph.get(current, set())
+            if allowed is not None:
+                neighbors = neighbors & allowed
+            pending.extend(sorted(neighbors - component, reverse=True))
+        remaining -= component
+        components.append(component)
+    return components
+
+
+def _recover_invalid_group_components(
+    *,
+    original: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+    language: str,
+) -> None:
+    violations = _group_violations(final)
+    if not violations:
+        return
+    graph = _decision_dependency_graph(original, final)
+    invalid_nodes = {value for _, values in violations for value in values}
+    for component in _dependency_components(graph, invalid_nodes):
+        affected = sorted(component & decisions.keys())
+        if not affected:
+            continue
+        details = [
+            _group_violation_message(violation, language)
+            for violation in violations
+            if component.intersection(violation[1])
+        ]
+        if language == "en":
+            reason = (
+                "Automatic group validation failed; this dependency component was "
+                "restored to its pre-run state and requires manual review: "
+                + "; ".join(details)
+            )
+        else:
+            reason = (
+                "自动决策组关系校验未通过；该依赖组件已恢复为决策前状态，请人工审查："
+                + "；".join(details)
+            )
+        for normalized in affected:
+            final[normalized] = deepcopy(original[normalized])
+            decisions[normalized] = {
+                "action": "needs_review",
+                "reason": reason,
+            }
+
+
 def _proposal_id(values: list[dict[str, Any]]) -> str:
     encoded = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "TDP-" + hashlib.sha256(encoded.encode()).hexdigest()[:16].upper()
@@ -841,41 +1046,11 @@ def _build_draft(
         for key in final
         if key not in protected and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
-    parent = {key: key for key in changed}
-
-    def find(key: str) -> str:
-        while parent[key] != key:
-            parent[key] = parent[parent[key]]
-            key = parent[key]
-        return key
-
-    def union(left: str, right: str) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    for key in changed:
-        for primary in (original[key].get("group_primary"), final[key].get("group_primary")):
-            if primary in changed:
-                union(key, str(primary))
-    original_owners: dict[str, set[str]] = {}
-    for key, state in original.items():
-        for value in [state["source"], *state.get("aliases", [])]:
-            original_owners.setdefault(str(value), set()).add(key)
-    for key in changed:
-        added = set(final[key].get("aliases", [])) - set(
-            original[key].get("aliases", [])
-        )
-        for alias in added:
-            for owner in original_owners.get(alias, set()):
-                if owner in changed:
-                    union(key, owner)
-    components: dict[str, list[str]] = {}
-    for key in changed:
-        components.setdefault(find(key), []).append(key)
+    graph = _decision_dependency_graph(original, final)
+    components = _dependency_components(graph, changed, allowed=changed)
     proposals: list[dict[str, Any]] = []
-    for keys in sorted(components.values(), key=lambda value: sorted(value)):
-        keys.sort()
+    for component in sorted(components, key=lambda value: sorted(value)):
+        keys = sorted(component)
         before = [deepcopy(original[key]) for key in keys]
         after = [deepcopy(final[key]) for key in keys]
         fields = sorted(
@@ -932,6 +1107,15 @@ def _build_draft(
 def _validate_final_states(
     project: Path, states: dict[str, dict[str, Any]]
 ) -> None:
+    violations = _group_violations(states)
+    if violations:
+        raise UsageError(
+            "术语决策生成非法组关系："
+            + "；".join(
+                _group_violation_message(violation, "zh-CN")
+                for violation in violations
+            )
+        )
     active = [
         deepcopy(state) for state in states.values() if not state.get("disabled")
     ]
@@ -1173,7 +1357,6 @@ async def run_terminology_decision(
         for state in states.values()
         for value in [str(state["source"]), *map(str, state.get("aliases", []))]
     }
-    known_terms = set(states)
     eligible_terms = {str(item["normalized"]) for item in eligible}
     checkpoint = _load_checkpoint(
         project,
@@ -1189,16 +1372,14 @@ async def run_terminology_decision(
     if final_decisions and len(decisions) != len(eligible):
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
     completed = len(decisions) + len(final_decisions)
+    total = len(eligible) * 2
+    usage_invoked = completed < total
     usage: dict[str, Any] | None = None
 
     def record_resumable_interruption(
         current_usage: dict[str, Any] | None,
     ) -> None:
         manifest = read_json(project, run_dir / "manifest.json")
-        previous_usage = manifest.get("usage")
-        invocation_count = manifest.get("usage_invocation_count")
-        if type(invocation_count) is int and invocation_count > 0:
-            current_usage = combine_usage(previous_usage, current_usage)
         manifest.update(
             status="running",
             decision_status="generating",
@@ -1206,11 +1387,18 @@ async def run_terminology_decision(
             failed_segment_count=0,
             failure_counts={},
             completed_at=None,
-            usage=current_usage or unavailable_usage(),
-            usage_invocation_count=(
-                invocation_count + 1 if type(invocation_count) is int else 1
-            ),
         )
+        if usage_invoked:
+            previous_usage = manifest.get("usage")
+            invocation_count = manifest.get("usage_invocation_count")
+            if type(invocation_count) is int and invocation_count > 0:
+                current_usage = combine_usage(previous_usage, current_usage)
+            manifest.update(
+                usage=current_usage or unavailable_usage(),
+                usage_invocation_count=(
+                    invocation_count + 1 if type(invocation_count) is int else 1
+                ),
+            )
         manifest.pop("proposal_count", None)
         manifest.pop("needs_review_count", None)
         write_json(project, run_dir / "manifest.json", manifest)
@@ -1226,7 +1414,6 @@ async def run_terminology_decision(
             client=http_client,
             on_usage=on_usage,
         ) as llm:
-            total = len(eligible) * 2
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
@@ -1258,9 +1445,10 @@ async def run_terminology_decision(
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
-                    known_terms=known_terms,
+                    known_states=states,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
+                    review_states=states,
                 )
                 decisions.update(result)
                 records = checkpoint["phases"]["adjudication"]
@@ -1317,9 +1505,10 @@ async def run_terminology_decision(
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
-                    known_terms=known_terms,
+                    known_states=tentative,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
+                    review_states=states,
                 )
                 final_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
@@ -1347,6 +1536,12 @@ async def run_terminology_decision(
                     final[normalized] = deepcopy(states[normalized])
             decisions = final_decisions
             usage = llm.usage_summary()
+        _recover_invalid_group_components(
+            original=states,
+            final=final,
+            decisions=decisions,
+            language=language,
+        )
         _validate_final_states(project, final)
         draft = _build_draft(
             project_id=str(metadata["project_id"]),
@@ -1380,9 +1575,10 @@ async def run_terminology_decision(
             project,
             run_dir,
             status="completed",
-            completed=len(eligible),
+            completed=total,
             failed=0,
             usage=usage,
+            usage_invoked=usage_invoked,
         )
         if existing is not None:
             old_run_id = str(existing["run_id"])
@@ -1401,6 +1597,9 @@ async def run_terminology_decision(
             "protected": len(protected_states),
             "proposals": len(draft["proposals"]),
             "needs_review": len(draft["needs_review"]),
+            "completed": total,
+            "failed": 0,
+            "pending": 0,
             "usage": usage or unavailable_usage(),
         }
     except asyncio.CancelledError:

@@ -103,7 +103,20 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
     assert "只包含受保护人工决定" in adjudication
     assert "可能包含受保护人工决定和第一阶段暂定状态" in consistency
     assert "不得为 anchors 输出任何决策" in consistency
+    assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in adjudication
+    assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in consistency
     assert adjudication != consistency
+
+    adjudication_en = full_prompt(
+        "terminology_decision", "Shared policy.", "en", phase="adjudication"
+    )
+    consistency_en = full_prompt(
+        "terminology_decision", "Shared policy.", "en", phase="consistency"
+    )
+    for prompt in (adjudication_en, consistency_en):
+        assert "enabled root" in prompt
+        assert "self-reference" in prompt
+        assert "chain or cycle" in prompt
 
 
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])

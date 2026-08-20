@@ -18,8 +18,10 @@ from app.sqlite_storage import atomic_write_json, read_json, record_header, writ
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
+    _group_violations,
     _pack_batches,
     _parse_decisions,
+    _recover_invalid_group_components,
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
@@ -125,6 +127,104 @@ def decision_response(payload: dict) -> list[dict]:
 
 def single_term_batches(states: list[dict], **_: object) -> tuple[list, int]:
     return [([state], []) for state in states], len(states)
+
+
+def create_complete_legacy_group_run(
+    project: Path,
+) -> tuple[str, Path, bytes, dict[str, object]]:
+    config = load_project_config(project, stage="terminology_decision")
+    metadata = read_json(project, project / "project.json")
+    library = read_json(project, project / "terminology" / "terms.json")
+    terms = {item["normalized"]: item for item in library["terms"]}
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="terminology_decision",
+        fingerprint="sha256:legacy",
+        prompt="legacy prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "source_terms_revision": 1,
+            "decision_status": "generating",
+            "rejected_proposal_ids": [],
+            "prompt_language": "zh-CN",
+        },
+    )
+
+    def state(normalized: str) -> dict[str, object]:
+        term = terms[normalized]
+        return {
+            "normalized": normalized,
+            "source": term["source"],
+            "category": term["category"],
+            "description": term["description"] or None,
+            "preferred_translation": term["preferred_translation"],
+            "aliases": term["aliases"],
+            "group_primary": term["group_primary"],
+            "disabled": False,
+        }
+
+    def checkpoint_record(decision: dict[str, object]) -> dict[str, object]:
+        return {
+            "decision": decision,
+            "decision_fingerprint": "sha256:legacy-decision",
+            "model_fingerprint": "sha256:legacy-model",
+            "prompt_fingerprint": "sha256:legacy-prompt",
+        }
+
+    checkpoint_path = run_dir / CHECKPOINT_FILE
+    atomic_write_json(
+        checkpoint_path,
+        record_header(
+            "terminology_decision_checkpoint",
+            str(metadata["project_id"]),
+            run_id=run_id,
+            source_terms_revision=1,
+            phases={
+                "adjudication": {
+                    key: checkpoint_record({"action": "keep", "reason": "保持"})
+                    for key in ("alice", "bob")
+                },
+                "consistency": {
+                    "alice": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "旧模型错误地设为自身组主",
+                            "after": {**state("alice"), "group_primary": "alice"},
+                        }
+                    ),
+                    "bob": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "补全译名",
+                            "after": {
+                                **state("bob"),
+                                "preferred_translation": "罗伯特",
+                            },
+                        }
+                    ),
+                },
+            },
+        ),
+    )
+    observed_usage: dict[str, object] = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "available": True,
+        "partial": False,
+    }
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest.update(
+        completed_segment_count=4,
+        failed_segment_count=0,
+        usage=observed_usage,
+        usage_invocation_count=1,
+    )
+    write_json(project, run_dir / "manifest.json", manifest)
+    return run_id, run_dir, checkpoint_path.read_bytes(), observed_usage
 
 
 def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> None:
@@ -307,9 +407,287 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
             content,
             focus,
             all_forms={"Target"},
-            known_terms={"target"},
+            known_states={"target": focus[0]},
             read_only_terms={"known-anchor"},
         )
+
+
+def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
+    return {
+        "type": "decision",
+        "normalized": normalized,
+        "action": "update",
+        "reason": "调整组关系",
+        "category": "人物",
+        "description": None,
+        "preferred_translation": None,
+        "aliases": [],
+        "group_primary": primary,
+    }
+
+
+@pytest.mark.parametrize(
+    ("focus", "known_states", "records", "message"),
+    [
+        (
+            [_batch_state("alice", "Alice")],
+            {"alice": _batch_state("alice", "Alice")},
+            [_update_decision("alice", "alice")],
+            "术语组主自指：alice -> alice",
+        ),
+        (
+            [_batch_state("alice", "Alice")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": {**_batch_state("bob", "Bob"), "disabled": True},
+            },
+            [_update_decision("alice", "bob")],
+            "术语组主已禁用：alice -> bob",
+        ),
+        (
+            [_batch_state("alice", "Alice")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": {**_batch_state("bob", "Bob"), "group_primary": "carol"},
+                "carol": _batch_state("carol", "Carol"),
+            },
+            [_update_decision("alice", "bob")],
+            "术语组成员指向另一成员：alice -> bob",
+        ),
+        (
+            [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")],
+            {
+                "alice": _batch_state("alice", "Alice"),
+                "bob": _batch_state("bob", "Bob"),
+            },
+            [
+                _update_decision("alice", "bob"),
+                _update_decision("bob", "alice"),
+            ],
+            "术语组关系循环：alice -> bob -> alice",
+        ),
+    ],
+)
+def test_decision_parser_rejects_provable_group_violations(
+    focus: list[dict[str, object]],
+    known_states: dict[str, dict[str, object]],
+    records: list[dict[str, object]],
+    message: str,
+) -> None:
+    with pytest.raises(UsageError, match=message):
+        _parse_decisions(
+            llm_jsonl(records),
+            focus,
+            all_forms={str(state["source"]) for state in known_states.values()},
+            known_states=known_states,
+            read_only_terms=set(),
+        )
+
+
+def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
+    focus = [_batch_state("alice", "Alice")]
+    states = {
+        "alice": focus[0],
+        "bob": _batch_state("bob", "Bob"),
+    }
+    decisions, _ = _parse_decisions(
+        llm_jsonl([_update_decision("alice", "bob")]),
+        focus,
+        all_forms={"Alice", "Bob"},
+        known_states=states,
+        read_only_terms=set(),
+    )
+    assert decisions["alice"]["after"]["group_primary"] == "bob"
+
+
+def test_decision_parser_allows_review_to_restore_tentative_group_state() -> None:
+    original = _batch_state("alice", "Alice")
+    tentative = {**original, "group_primary": "alice"}
+    decisions, _ = _parse_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "alice",
+                    "action": "needs_review",
+                    "reason": "无法确定合法组主",
+                }
+            ]
+        ),
+        [tentative],
+        all_forms={"Alice"},
+        known_states={"alice": tentative},
+        read_only_terms=set(),
+        review_states={"alice": original},
+    )
+    assert decisions["alice"]["action"] == "needs_review"
+
+
+def test_group_validation_collects_every_illegal_relationship_shape() -> None:
+    states = {
+        key: _batch_state(key, key.title())
+        for key in (
+            "self",
+            "missing-source",
+            "disabled-member",
+            "disabled-root",
+            "chain-member",
+            "chain-parent",
+            "root",
+            "cycle-a",
+            "cycle-b",
+            "cycle-c",
+        )
+    }
+    states["self"]["group_primary"] = "self"
+    states["missing-source"]["group_primary"] = "absent"
+    states["disabled-member"]["group_primary"] = "disabled-root"
+    states["disabled-root"]["disabled"] = True
+    states["chain-member"]["group_primary"] = "chain-parent"
+    states["chain-parent"]["group_primary"] = "root"
+    states["cycle-a"]["group_primary"] = "cycle-b"
+    states["cycle-b"]["group_primary"] = "cycle-c"
+    states["cycle-c"]["group_primary"] = "cycle-a"
+
+    violations = set(_group_violations(states))
+    assert ("self", ("self", "self")) in violations
+    assert ("missing", ("missing-source", "absent")) in violations
+    assert ("disabled", ("disabled-member", "disabled-root")) in violations
+    assert ("member", ("chain-member", "chain-parent")) in violations
+    assert ("cycle", ("cycle-a", "cycle-b", "cycle-c")) in violations
+
+
+def test_invalid_group_recovery_restores_alias_dependency_component() -> None:
+    original = {
+        "alice": {
+            **_batch_state("alice", "Alice"),
+            "aliases": ["Ally"],
+        },
+        "bob": _batch_state("bob", "Bob"),
+        "carol": _batch_state("carol", "Carol"),
+    }
+    final = {
+        "alice": {
+            **original["alice"],
+            "aliases": [],
+            "group_primary": "alice",
+        },
+        "bob": {**original["bob"], "aliases": ["Ally"]},
+        "carol": {**original["carol"], "preferred_translation": "卡萝尔"},
+    }
+    decisions = {
+        key: {"action": "update", "reason": "模型修改", "after": state}
+        for key, state in final.items()
+    }
+
+    _recover_invalid_group_components(
+        original=original,
+        final=final,
+        decisions=decisions,
+        language="zh-CN",
+    )
+
+    assert final["alice"] == original["alice"]
+    assert final["bob"] == original["bob"]
+    assert decisions["alice"]["action"] == "needs_review"
+    assert decisions["bob"]["action"] == "needs_review"
+    assert "alice -> alice" in decisions["alice"]["reason"]
+    assert final["carol"]["preferred_translation"] == "卡萝尔"
+    assert decisions["carol"]["action"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_cross_batch_group_cycle_becomes_manual_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        term = payload["terms"][0]
+        if payload["phase"] == "adjudication":
+            records = [
+                {
+                    "type": "decision",
+                    "normalized": term["normalized"],
+                    "action": "keep",
+                    "reason": "保持",
+                }
+            ]
+        else:
+            primary = "bob" if term["normalized"] == "alice" else "alice"
+            records = [_update_decision(term["normalized"], primary)]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(project, http_client=client)
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 0
+    assert summary["needs_review"] == 2
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert {item["normalized"] for item in draft["needs_review"]} == {
+        "alice",
+        "bob",
+    }
+    assert all("alice -> bob -> alice" in item["reason"] for item in draft["needs_review"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "marker"),
+    [
+        ("zh-CN", "术语组主自指：alice -> alice"),
+        ("en", "self-referencing group pointer: alice -> alice"),
+    ],
+)
+async def test_decision_group_violation_enters_localized_format_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    marker: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    sent_invalid = False
+    repairs = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_invalid, repairs
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "format_correction" in payload:
+            repairs += 1
+            assert marker in payload["format_correction"]
+            assert "group_primary" in payload["format_correction"]
+            content = llm_jsonl(decision_response(payload))
+        elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
+            sent_invalid = True
+            content = llm_jsonl([_update_decision("alice", "alice")])
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(
+                project, prompt_language=language, http_client=client
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert repairs == 1
 
 
 @pytest.mark.asyncio
@@ -796,6 +1174,89 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
 
 
 @pytest.mark.asyncio
+async def test_complete_legacy_checkpoint_recovers_invalid_group_without_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
+    )
+    checkpoint_path = run_dir / CHECKPOINT_FILE
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("完整检查点恢复不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert summary["proposals"] == 1
+    assert summary["needs_review"] == 1
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["proposals"][0]["normalized"] == ["bob"]
+    assert draft["proposals"][0]["after"][0]["preferred_translation"] == "罗伯特"
+    assert draft["needs_review"][0]["normalized"] == "alice"
+    assert "alice -> alice" in draft["needs_review"][0]["reason"]
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["status"] == "completed"
+    assert manifest["decision_status"] == "pending"
+    assert manifest["completed_segment_count"] == 4
+    assert manifest["usage"] == observed_usage
+    assert manifest["usage_invocation_count"] == 1
+
+    applied = apply_decision_draft(project, confirm_all=True)
+    assert applied["applied"] == 1
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    assert [item["normalized"] for item in overrides["overrides"]] == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_group_recovery_draft_failure_preserves_complete_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
+    )
+    original_atomic_write = atomic_write_json
+
+    def fail_draft_write(path: Path, value: object) -> None:
+        if path.name == "terminology_decision_draft.json":
+            raise StorageError("恢复草案写入失败")
+        original_atomic_write(path, value)
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("完整检查点恢复不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(StorageError, match="恢复草案写入失败"):
+            await run_terminology_decision(
+                project, resume_run_id=run_id, http_client=client
+            )
+
+        assert not (run_dir / "terminology_decision_draft.json").exists()
+        assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["status"] == "running"
+        assert manifest["completed_segment_count"] == 4
+        assert manifest["usage"] == observed_usage
+        assert manifest["usage_invocation_count"] == 1
+
+        monkeypatch.setattr("app.term_decision.atomic_write_json", original_atomic_write)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert current_decision_draft(project) is not None
+
+
+@pytest.mark.asyncio
 async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path)
 
@@ -872,6 +1333,60 @@ def test_web_starts_terminology_decision_task_without_options_local(
     assert state["status"] == "completed"
     assert state["completed_segments"] == 4
     assert state["total_segments"] == 4
+
+
+def test_web_resumes_complete_legacy_group_checkpoint_into_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
+    )
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("Web 恢复完整检查点不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["running_run"]["run_id"] == run_id
+    assert options.json()["running_run"]["completed_steps"] == 4
+    assert options.json()["running_run"]["total_steps"] == 4
+
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "resume"},
+    )
+    assert started.status_code == 200
+    task_id = started.json()["task_id"]
+    for _ in range(20):
+        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            break
+
+    assert state["status"] == "completed"
+    assert state["completed_segments"] == 4
+    assert state["failed_segments"] == 0
+    assert state["total_segments"] == 4
+    assert state["usage"] == observed_usage
+    assert state["summary"]["proposals"] == 1
+    assert state["summary"]["needs_review"] == 1
+    review = client.get(
+        "/api/v1/projects/decision-demo/terms/decision"
+    )
+    assert review.status_code == 200
+    assert review.json()["draft"]["run_id"] == run_id
+    assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
+    assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+
+    refreshed = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    ).json()
+    assert refreshed["running_run"] is None
+    assert refreshed["has_pending_draft"] is True
 
 
 def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
