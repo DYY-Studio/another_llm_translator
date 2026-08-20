@@ -57,6 +57,7 @@ _STREAMING_KEYS = frozenset(
         "content_events",
         "reasoning_events",
         "terminal",
+        "allow_clean_eof",
         "error_events",
         "usage",
     }
@@ -563,6 +564,11 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
         value.get("reasoning_events", []), "reasoning_events", allow_empty=True
     )
     terminal = _validate_stream_terminal(value["terminal"])
+    allow_clean_eof = value.get("allow_clean_eof", False)
+    if not isinstance(allow_clean_eof, bool):
+        raise ConfigError(
+            "LLM Adapter streaming allow_clean_eof 必须是布尔值"
+        )
     errors = value.get("error_events", [])
     if not isinstance(errors, list):
         raise ConfigError("LLM Adapter streaming error_events 必须是数组")
@@ -598,6 +604,7 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
         "content_events": content_events,
         "reasoning_events": reasoning_events,
         "terminal": terminal,
+        "allow_clean_eof": allow_clean_eof,
         "error_events": error_events,
         "usage": usage,
     }

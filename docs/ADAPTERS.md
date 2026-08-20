@@ -94,6 +94,7 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
       {"pointer": "/choices/0/delta/reasoning"}
     ],
     "terminal": {"sentinel": "[DONE]"},
+    "allow_clean_eof": false,
     "error_events": [
       {
         "when": {"pointer": "/choices/0/finish_reason", "equals": "error"},
@@ -118,17 +119,26 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
 OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
 两类互斥的流式字段。
-`terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
+`terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。
+`allow_clean_eof` 是可选布尔值，缺省为 `false`。显式启用后，HTTP 2xx 响应在已
+收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可
+作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。
+这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。读取超时、
+网络中断、SSE/UTF-8/JSON 错误和流内服务错误不属于 clean EOF，仍按原规则失败或重试。
+`error_events`
 声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
 是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
 HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以
 同时报告外层 HTTP 200 和上游 HTTP 504。`usage` 的三个候选指针数组逐事件观察，
 每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
 
-宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在收到终止事件前
-断流或遇到流内服务错误时丢弃完整聚合正文，并按既有 HTTP 尝试次数重试；不会
-隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug 模式才保存原始
-SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
+宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在未满足显式终止
+或已声明的 clean EOF 前断流、或遇到流内服务错误时丢弃完整聚合正文，并按既有
+HTTP 尝试次数重试；不会隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug
+模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制
+完整生成时间。内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；
+Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他
+供应商字段作为隐式终止标记。
 
 ### 响应边界
 

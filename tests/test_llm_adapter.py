@@ -577,6 +577,8 @@ def streaming_definition() -> dict[str, object]:
 def test_json_adapter_streaming_selectors_and_request_body(tmp_path: Path) -> None:
     adapter = load_json_adapter(write_adapter(tmp_path, streaming_definition()))
     assert adapter.streaming_supported is True
+    assert adapter.streaming_spec is not None
+    assert adapter.streaming_spec["allow_clean_eof"] is False
     _, body = adapter.build_request(
         api_key="secret",
         model="model",
@@ -646,6 +648,10 @@ def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
         (lambda value: value["streaming"].update({"transport": "json"}), "transport"),
         (lambda value: value["streaming"].update({"content_events": []}), "非空数组"),
         (lambda value: value["streaming"].update({"terminal": {"exists": True}}), "必须声明 sentinel 或 when"),
+        (
+            lambda value: value["streaming"].update({"allow_clean_eof": "yes"}),
+            "allow_clean_eof 必须是布尔值",
+        ),
         (
             lambda value: value["streaming"]["content_events"][0].update(
                 {"when": {"pointer": "/type", "exists": False}}

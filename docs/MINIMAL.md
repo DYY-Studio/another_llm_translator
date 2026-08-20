@@ -1420,12 +1420,16 @@ HTTP 重试：
 - 退避使用有上限的指数退避和 jitter。
 
 启用流式时，宿主要求响应为 UTF-8 SSE，并严格处理 CRLF/LF、注释、多行 `data:`
-和任意 HTTP chunk 边界。OpenAI-compatible 使用 `[DONE]`，OpenAI Responses
-使用 `response.completed`，Anthropic 使用 `message_stop`，Gemini 使用最终
-`finishReason`；每条流必须命中对应终止事件。宿主在后台聚合正文、reasoning 和
-声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件前超时、
-读取超时、EOF、流内服务错误或 HTTP 可重试错误会清空本次聚合并沿
-`http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生重复计费。
+和任意 HTTP chunk 边界。Adapter 的 `terminal` 声明显式终止方式：OpenAI-compatible
+使用 `[DONE]`，OpenAI Responses 使用 `response.completed`，Anthropic 使用
+`message_stop`，Gemini 使用最终 `finishReason`。Adapter 可额外显式设置
+`streaming.allow_clean_eof=true`，此时 HTTP 2xx、至少收到一个合法事件且自然到达
+body EOF 也算传输终止；缺省为 false，其他内置 Adapter 仍要求显式终止事件。EOF 前
+的所有事件都会被读取，尾部 usage 不会因缺少 `[DONE]` 而丢失。宿主在后台聚合正文、
+reasoning 和声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件
+前超时、读取超时、未启用 clean EOF 的 EOF、流内服务错误或 HTTP 可重试错误会清空
+本次聚合并沿 `http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生
+重复计费。
 Provider 可能在外层 HTTP 200 的 SSE 中报告最终错误（例如
 `finish_reason=error`、上游状态 504）；这类事件按流内错误处理，不会进入格式
 修复或保存半成品。诊断和 Debug 同时保留实际 `http_status` 与可选的
