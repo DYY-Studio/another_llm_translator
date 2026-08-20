@@ -32,6 +32,13 @@ interface TermsCacheEntry {
   scrollTop: number;
 }
 
+const emptyManualReview: TermDecisionReviewState["manual_review"] = {
+  items: [],
+  total: 0,
+  resolved: 0,
+  remaining: 0,
+};
+
 // Survives tab switches so returning renders the term list instantly. Keyed
 // by project; cleared when the project changes so cached data never leaks
 // across projects.
@@ -114,6 +121,8 @@ export function TermsView({
   const [decisionOpen, setDecisionOpen] = useState(false);
   const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
   const [manualQueue, setManualQueue] = useState<TermDecisionManualReviewItem[]>([]);
+  const [manualReview, setManualReview] = useState(emptyManualReview);
+  const [decisionDraftPending, setDecisionDraftPending] = useState(false);
   const [manualFocusId, setManualFocusId] = useState<string | null>(null);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
@@ -204,8 +213,16 @@ export function TermsView({
 
   useEffect(() => {
     void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
-      .then((value) => setManualQueue(value.manual_review.items))
-      .catch(() => setManualQueue([]));
+      .then((value) => {
+        setManualQueue(value.manual_review.items);
+        setManualReview(value.manual_review);
+        setDecisionDraftPending(Boolean(value.draft));
+      })
+      .catch(() => {
+        setManualQueue([]);
+        setManualReview(emptyManualReview);
+        setDecisionDraftPending(false);
+      });
   }, [project]);
 
   useEffect(() => {
@@ -417,8 +434,15 @@ export function TermsView({
   const openManualItems = manualQueue.filter((item) => !item.resolved);
 
   function openDecision(tab: "proposals" | "manual" = "proposals") {
+    if (tab === "manual" && decisionDraftPending) return;
     setDecisionInitialTab(tab);
     setDecisionOpen(true);
+  }
+
+  function updateDecisionReview(value: TermDecisionReviewState) {
+    setManualQueue(value.manual_review.items);
+    setManualReview(value.manual_review);
+    setDecisionDraftPending(Boolean(value.draft));
   }
 
   function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
@@ -446,6 +470,7 @@ export function TermsView({
         { method: "PUT", body: JSON.stringify({ run_id: item.run_id, normalized: item.normalized, resolved }) },
       );
       setManualQueue(result.manual_review.items);
+      setManualReview(result.manual_review);
     } catch (error) {
       setMessage(String(error));
     }
@@ -816,7 +841,7 @@ export function TermsView({
       onTerms={setData}
       onClose={() => setDecisionOpen(false)}
       initialTab={decisionInitialTab}
-      onManualReview={setManualQueue}
+      onReviewState={updateDecisionReview}
       onNavigateToEditor={openManualEditor}
     />;
   }
@@ -861,7 +886,7 @@ export function TermsView({
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
-              {manualQueue.some((item) => !item.resolved) && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueue", language, { count: manualQueue.filter((item) => !item.resolved).length })}</button>}
+              {!decisionDraftPending && manualReview.total > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
               <button
                 className="danger-button"
                 disabled={!selectedActive.length}
@@ -965,7 +990,7 @@ export function TermsView({
       </section>
       <section className="term-editor">
         {focusedManual && <div className="manual-review-editor-bar">
-          <div><strong>{translate("terms.decisionManualEditorTitle", language)}</strong><span>{translate("terms.decisionManualProgress", language, { remaining: openManualItems.length, total: manualQueue.length, resolved: manualQueue.length - openManualItems.length })}</span></div>
+          <div><strong>{translate("terms.decisionManualEditorTitle", language)}</strong><span>{translate("terms.decisionManualProgress", language, { remaining: manualReview.remaining, total: manualReview.total, resolved: manualReview.resolved })}</span></div>
           <div className="manual-review-editor-actions">
             <button className="quiet-button" onClick={() => openDecision("manual")}>{translate("terms.decisionBackToQueue", language)}</button>
             <button className="quiet-button" disabled={openManualItems.length < 2} onClick={() => navigateManual(-1)}>‹</button>
