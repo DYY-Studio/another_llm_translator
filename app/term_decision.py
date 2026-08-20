@@ -929,7 +929,14 @@ async def _request_batch(
                 ensure_ascii=False,
             )
             if prompt_language == "en":
-                detail = errors[0] if errors else "invalid response"
+                detail = (
+                    errors[0]
+                    if errors
+                    and errors[0].startswith(
+                        ("self-referencing group pointer", "group pointer", "alias ", "term ")
+                    )
+                    else "invalid response"
+                )
                 payload["format_correction"] = (
                     "The previous response violated the terminology decision "
                     "protocol and could not be accepted: "
