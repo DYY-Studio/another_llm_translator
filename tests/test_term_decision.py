@@ -20,6 +20,7 @@ from app.term_decision import (
     CHECKPOINT_FILE,
     _consistency_states,
     _group_violations,
+    _make_payload,
     _pack_batches,
     _parse_decisions,
     _recover_invalid_group_components,
@@ -319,6 +320,30 @@ def test_consistency_states_overlay_completed_checkpoint_actions() -> None:
     assert result["disable"]["disabled"] is True
     assert result["review"] == original["review"]
     assert tentative["disable"]["disabled"] is False
+
+
+def test_decision_payload_exposes_read_only_disabled_state() -> None:
+    focus = {**_batch_state("focus", "Focus"), "disabled": True}
+    anchor = _batch_state("anchor", "Anchor")
+    payload = _make_payload(
+        phase="consistency",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=_batch_evidence(focus, anchor),
+    )
+
+    assert payload["terms"][0]["disabled"] is True
+    assert payload["anchors"][0]["disabled"] is False
+    phase_one = _make_payload(
+        phase="adjudication",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=_batch_evidence(focus, anchor),
+    )
+    assert "disabled" not in phase_one["terms"][0]
+    assert "disabled" not in phase_one["anchors"][0]
 
 
 def test_related_anchors_prioritize_effective_group_dependencies(

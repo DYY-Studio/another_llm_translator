@@ -242,9 +242,12 @@ def _ordered_states(states: Iterable[dict[str, Any]], spec: Any) -> list[dict[st
 
 
 def _payload_term(
-    state: dict[str, Any], evidence: dict[str, dict[str, Any]]
+    state: dict[str, Any],
+    evidence: dict[str, dict[str, Any]],
+    *,
+    include_disabled: bool,
 ) -> dict[str, Any]:
-    return {
+    value = {
         key: deepcopy(state[key])
         for key in (
             "normalized",
@@ -256,6 +259,9 @@ def _payload_term(
             "group_primary",
         )
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
+    if include_disabled:
+        value["disabled"] = bool(state["disabled"])
+    return value
 
 
 def _compact_anchor_evidence(
@@ -363,11 +369,18 @@ def _make_payload(
     anchors: list[dict[str, Any]],
     evidence: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    include_disabled = phase == "consistency"
     return {
         "phase": phase,
         "target_language": target_language,
-        "terms": [_payload_term(item, evidence) for item in focus],
-        "anchors": [_payload_term(item, evidence) for item in anchors],
+        "terms": [
+            _payload_term(item, evidence, include_disabled=include_disabled)
+            for item in focus
+        ],
+        "anchors": [
+            _payload_term(item, evidence, include_disabled=include_disabled)
+            for item in anchors
+        ],
     }
 
 
