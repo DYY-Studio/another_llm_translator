@@ -242,9 +242,12 @@ def _ordered_states(states: Iterable[dict[str, Any]], spec: Any) -> list[dict[st
 
 
 def _payload_term(
-    state: dict[str, Any], evidence: dict[str, dict[str, Any]]
+    state: dict[str, Any],
+    evidence: dict[str, dict[str, Any]],
+    *,
+    include_disabled: bool,
 ) -> dict[str, Any]:
-    return {
+    value = {
         key: deepcopy(state[key])
         for key in (
             "normalized",
@@ -256,6 +259,9 @@ def _payload_term(
             "group_primary",
         )
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
+    if include_disabled:
+        value["disabled"] = bool(state["disabled"])
+    return value
 
 
 def _compact_anchor_evidence(
@@ -293,6 +299,25 @@ def _related_anchors(
         for item in focus
         for value in [item["source"], *item.get("aliases", [])]
     ]
+    focus_primaries = {
+        normalize_term(str(item["group_primary"]), spec)
+        for item in focus
+        if item.get("group_primary") is not None
+    }
+
+    def direct_group_relation(item: dict[str, Any]) -> bool:
+        item_forms = {
+            normalize_term(str(value), spec)
+            for value in [item["source"], *item.get("aliases", [])]
+        }
+        primary = item.get("group_primary")
+        item_primary = (
+            normalize_term(str(primary), spec) if primary is not None else None
+        )
+        return bool(
+            focus_primaries.intersection(item_forms)
+            or (item_primary is not None and item_primary in focus_forms)
+        )
 
     def related_to_focus(item: dict[str, Any]) -> bool:
         if focus_keys.intersection(_relation_keys(item, spec)):
@@ -307,12 +332,19 @@ def _related_anchors(
             for right in item_forms
         )
 
+    direct = [
+        item
+        for item in candidates
+        if str(item["normalized"]) not in focus_ids and direct_group_relation(item)
+    ]
+    direct_ids = {str(item["normalized"]) for item in direct}
     related = [
         item
         for item in candidates
-        if str(item["normalized"]) not in focus_ids and related_to_focus(item)
+        if str(item["normalized"]) not in focus_ids | direct_ids
+        and related_to_focus(item)
     ]
-    return related[:RELATED_ANCHOR_LIMIT]
+    return [*direct, *related][:RELATED_ANCHOR_LIMIT]
 
 
 def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -337,11 +369,18 @@ def _make_payload(
     anchors: list[dict[str, Any]],
     evidence: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    include_disabled = phase == "consistency"
     return {
         "phase": phase,
         "target_language": target_language,
-        "terms": [_payload_term(item, evidence) for item in focus],
-        "anchors": [_payload_term(item, evidence) for item in anchors],
+        "terms": [
+            _payload_term(item, evidence, include_disabled=include_disabled)
+            for item in focus
+        ],
+        "anchors": [
+            _payload_term(item, evidence, include_disabled=include_disabled)
+            for item in anchors
+        ],
     }
 
 
@@ -946,6 +985,19 @@ def _apply_tentative(
             states[normalized] = {**states[normalized], "disabled": True}
 
 
+def _consistency_states(
+    original: dict[str, dict[str, Any]],
+    tentative: dict[str, dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    result = deepcopy(tentative)
+    _apply_tentative(result, decisions)
+    for normalized, decision in decisions.items():
+        if decision["action"] == "needs_review":
+            result[normalized] = deepcopy(original[normalized])
+    return result
+
+
 def _decision_dependency_graph(
     original: dict[str, dict[str, Any]], final: dict[str, dict[str, Any]]
 ) -> dict[str, set[str]]:
@@ -1493,10 +1545,15 @@ async def run_terminology_decision(
             )
             tentative = deepcopy(states)
             _apply_tentative(tentative, decisions)
-            phase_two_focus = [tentative[item["normalized"]] for item in eligible]
+            phase_two_state = _consistency_states(
+                states, tentative, final_decisions
+            )
+            phase_two_focus = [
+                phase_two_state[item["normalized"]] for item in eligible
+            ]
             phase_two_anchors = [
                 *protected_states,
-                *[tentative[item["normalized"]] for item in eligible],
+                *[phase_two_state[item["normalized"]] for item in eligible],
             ]
             remaining_phase_two = [
                 item
@@ -1527,7 +1584,7 @@ async def run_terminology_decision(
                     config=config,
                     evidence=evidence,
                     all_forms=all_forms,
-                    known_states=tentative,
+                    known_states=phase_two_state,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
                     review_states=states,
@@ -1551,11 +1608,7 @@ async def run_terminology_decision(
                 review_consistency,
                 max_parallel=int(config["execution"]["max_parallel"]),
             )
-            final = deepcopy(tentative)
-            _apply_tentative(final, final_decisions)
-            for normalized, decision in final_decisions.items():
-                if decision["action"] == "needs_review":
-                    final[normalized] = deepcopy(states[normalized])
+            final = _consistency_states(states, tentative, final_decisions)
             decisions = final_decisions
             usage = llm.usage_summary()
         _recover_invalid_group_components(
