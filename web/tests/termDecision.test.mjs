@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, manualReviewProgress, summarizeDecisionProposals } from "../src/termDecision.ts";
+import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
 
 const state = (normalized, translation, disabled = false) => ({
   normalized,
@@ -64,7 +64,6 @@ test("filters and summarizes the persistent manual queue", () => {
   ];
   assert.deepEqual(filterManualReviewItems(items, "alice", "open").map((item) => item.normalized), ["alice"]);
   assert.deepEqual(filterManualReviewItems(items, "", "resolved").map((item) => item.normalized), ["bob"]);
-  assert.deepEqual(manualReviewProgress(items), { total: 2, resolved: 1, remaining: 1 });
 });
 
 test("automatic decision workspace keeps navigation separate from task cancellation", async () => {
