@@ -106,6 +106,7 @@ from .term_decision import (
     discard_decision_draft,
     rollback_decision,
     save_decision_rejections,
+    set_manual_review_resolved,
 )
 from .user_config import effective_path, user_root, write_user
 from .web_store import WebStore
@@ -1502,6 +1503,28 @@ def create_app(
             raise UsageError("rejected_proposal_ids 必须是字符串数组")
         with project_write_lock(root):
             return {"draft": save_decision_rejections(root, values)}
+
+    @app.put("/api/v1/projects/{name}/terms/decision/manual-review")
+    async def put_term_decision_manual_review(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        run_id = payload.get("run_id")
+        normalized = payload.get("normalized")
+        resolved = payload.get("resolved")
+        if not isinstance(run_id, str) or not run_id:
+            raise UsageError("run_id 必须是非空字符串")
+        if not isinstance(normalized, str) or not normalized:
+            raise UsageError("normalized 必须是非空字符串")
+        if not isinstance(resolved, bool):
+            raise UsageError("resolved 必须是布尔值")
+        with project_write_lock(root):
+            return {"manual_review": set_manual_review_resolved(
+                root,
+                run_id=run_id,
+                normalized=normalized,
+                resolved=resolved,
+            )}
 
     @app.post("/api/v1/projects/{name}/terms/decision/apply")
     async def apply_term_decision(
