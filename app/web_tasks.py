@@ -43,6 +43,7 @@ from .term_decision import (
     current_decision_draft,
     decision_checkpoint_progress,
     decision_plan,
+    manual_review_state,
     run_terminology_decision,
 )
 
@@ -330,6 +331,7 @@ class WebTaskManager:
         run_action: str | None,
         prompt_language: str | None = None,
         replace_draft: bool = False,
+        acknowledge_manual_review: bool = False,
     ) -> dict[str, Any]:
         if stage not in {
             "terminology",
@@ -361,6 +363,14 @@ class WebTaskManager:
                     )
             selected_count = 0
             if stage == TERMINOLOGY_DECISION_STAGE:
+                if (
+                    run_action != "resume"
+                    and not acknowledge_manual_review
+                    and manual_review_state(project)["remaining"] > 0
+                ):
+                    raise UsageError(
+                        "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
+                    )
                 running = find_running_runs(project, stage)
                 if run_action == "resume":
                     if not running:

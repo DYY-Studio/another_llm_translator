@@ -1515,15 +1515,20 @@ def _decision_needs_review(project: Path, manifest: dict[str, Any]) -> list[dict
 
 
 def manual_review_state(project: Path) -> dict[str, Any]:
-    """Return the newest unresolved review item for each normalized term."""
+    """Return the active manual-review queue for the latest decision epoch."""
     latest: dict[str, dict[str, Any]] = {}
     for manifest in list_runs(project, stage=STAGE):
-        if manifest.get("decision_status") not in {"applied", "rejected"}:
-            continue
-        for item in _decision_needs_review(project, manifest):
-            normalized = str(item["normalized"])
-            if normalized not in latest:
-                latest[normalized] = item
+        status = manifest.get("decision_status")
+        is_replacement = manifest.get("manual_review_replaces_previous") is True
+        if status in {"applied", "rejected"}:
+            for item in _decision_needs_review(project, manifest):
+                normalized = str(item["normalized"])
+                if normalized not in latest:
+                    latest[normalized] = item
+        # The marker is retained when the Run is rolled back.  In that case
+        # its own items are no longer active, but older queues must not revive.
+        if is_replacement:
+            break
     items = [latest[key] for key in sorted(latest)]
     resolved = sum(1 for item in items if item["resolved"])
     return {
@@ -1548,6 +1553,12 @@ def set_manual_review_resolved(
     known = {str(item["normalized"]) for item in items}
     if normalized not in known:
         raise UsageError(f"未知人工关注术语：{normalized}")
+    active = {
+        (str(item["run_id"]), str(item["normalized"]))
+        for item in manual_review_state(project)["items"]
+    }
+    if (run_id, normalized) not in active:
+        raise UsageError("该人工关注项已被更新的术语决策队列取代")
     values = {
         str(value)
         for value in manifest.get("manual_review_resolved_normalized", [])
@@ -2103,6 +2114,7 @@ def apply_decision_draft(
             rejected_proposal_ids=sorted(rejected),
             applied_proposal_count=0,
             manual_review_resolved_normalized=[],
+            manual_review_replaces_previous=True,
             applied_at=utc_now(),
         )
         write_json(project, manifest_path, manifest)
@@ -2185,6 +2197,7 @@ def apply_decision_draft(
         rejected_proposal_ids=sorted(rejected),
         applied_proposal_count=accepted,
         manual_review_resolved_normalized=[],
+        manual_review_replaces_previous=True,
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )

@@ -85,11 +85,6 @@ export function filterManualReviewItems(
   });
 }
 
-export function manualReviewProgress(items: TermDecisionManualReviewItem[]) {
-  const resolved = items.filter((item) => item.resolved).length;
-  return { total: items.length, resolved, remaining: items.length - resolved };
-}
-
 export function summarizeDecisionProposals(
   proposals: TermDecisionProposal[],
   rejected: ReadonlySet<string>,

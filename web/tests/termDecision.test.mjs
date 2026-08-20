@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, manualReviewProgress, summarizeDecisionProposals } from "../src/termDecision.ts";
+import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
 
 const state = (normalized, translation, disabled = false) => ({
   normalized,
@@ -64,21 +64,23 @@ test("filters and summarizes the persistent manual queue", () => {
   ];
   assert.deepEqual(filterManualReviewItems(items, "alice", "open").map((item) => item.normalized), ["alice"]);
   assert.deepEqual(filterManualReviewItems(items, "", "resolved").map((item) => item.normalized), ["bob"]);
-  assert.deepEqual(manualReviewProgress(items), { total: 2, resolved: 1, remaining: 1 });
 });
 
-test("automatic decision dialog separates closing from task cancellation", async () => {
+test("automatic decision workspace keeps navigation separate from task cancellation", async () => {
   const source = await readFile(
     new URL("../src/components/TermDecisionWorkspace.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /translate\("common\.close", language\)/);
+  assert.doesNotMatch(source, /translate\("common\.close", language\)/);
   assert.match(source, /translate\("terms\.decisionCloseHint", language\)/);
   assert.match(source, /\["completed", "cancelled", "failed"\]\.includes\(task\.status\)/);
   assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
   assert.match(source, /terms\.decisionOverflowPolicy/);
   assert.match(source, /term-decision-workspace/);
-  assert.match(source, /term-decision-bottom-actions/);
+  assert.doesNotMatch(source, /term-decision-bottom-actions/);
+  assert.match(source, /settings-action-heading/);
+  assert.match(source, /acknowledge_manual_review/);
+  assert.match(source, /decisionManualReplaceConfirm/);
   assert.match(source, /terms\.decisionManualTab/);
   assert.match(source, /manual-review-actions/);
   assert.match(source, /terms\/decision\/manual-review/);
@@ -89,6 +91,8 @@ test("automatic decision dialog separates closing from task cancellation", async
   assert.match(termsSource, /manual-review-editor-bar/);
   assert.match(termsSource, /decisionManualTermMissing/);
   assert.match(termsSource, /openDecision\("manual"\)/);
+  assert.match(termsSource, /manualReviewQueueProgress/);
+  assert.match(termsSource, /decisionDraftPending/);
 });
 
 test("automatic decision resume copy identifies persisted progress", async () => {
