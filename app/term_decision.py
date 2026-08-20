@@ -587,15 +587,6 @@ def _parse_decisions(
             errors.append(f"术语决策 reason 必须是非空字符串：{normalized}")
             continue
         simple_keys = {"type", "normalized", "action", "reason"}
-        if action != "update":
-            if set(value) != simple_keys:
-                errors.append(f"{action} 决策包含额外字段：{normalized}")
-                continue
-            decisions[normalized] = {
-                "action": action,
-                "reason": reason.strip(),
-            }
-            continue
         update_keys = simple_keys | {
             "category",
             "description",
@@ -603,8 +594,24 @@ def _parse_decisions(
             "aliases",
             "group_primary",
         }
-        if set(value) != update_keys:
-            errors.append(f"update 决策字段不完整：{normalized}")
+        expected_keys = update_keys if action == "update" else simple_keys
+        if set(value) != expected_keys:
+            missing_keys = sorted(expected_keys - set(value))
+            extra_keys = sorted(set(value) - expected_keys)
+            details = []
+            if missing_keys:
+                details.append(f"缺少字段 {', '.join(missing_keys)}")
+            if extra_keys:
+                details.append(f"禁止字段 {', '.join(extra_keys)}")
+            errors.append(
+                f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
+            )
+            continue
+        if action != "update":
+            decisions[normalized] = {
+                "action": action,
+                "reason": reason.strip(),
+            }
             continue
         aliases = value.get("aliases")
         if not isinstance(aliases, list) or not all(
@@ -709,8 +716,16 @@ async def _request_batch(
                     "protocol and could not be accepted: "
                     f"{detail}. "
                     f"The only allowed decision normalized values are {allowed}. "
-                    "Output exactly one decision for each terms[] item, no decision "
-                    "for any anchors[] item, and then the exact end record. A group "
+                    "Output exactly one decision for each terms[] item and no decision "
+                    "for any anchors[] item. Every action requires a non-empty string "
+                    "reason. keep, disable, and needs_review contain exactly type, "
+                    "normalized, action, reason. update contains exactly type, normalized, "
+                    "action, reason, category, description, preferred_translation, aliases, "
+                    "group_primary; all nine keys are required even when a value is null or "
+                    "aliases is []. Nullable values must use JSON null, not an empty string. "
+                    "description may only copy the current terms[] description verbatim or be "
+                    "null. aliases may only use existing source/alias forms visible in this "
+                    "request. Output the exact end record last. A group "
                     "member may point only directly to an enabled root whose own "
                     "group_primary is null; self-references, disabled targets, chains, "
                     "and cycles are forbidden."
@@ -720,8 +735,15 @@ async def _request_batch(
                     "上次响应不符合术语决策协议："
                     f"{errors[0] if errors else '响应无效'}。"
                     f"本批唯一允许输出的 normalized 为 {allowed}。"
-                    "必须为每个 terms[] 项各输出一条 decision；不得为 anchors[] 任一项输出"
-                    " decision；最后输出精确的 end 记录。组成员只能直接指向启用且"
+                    "必须为每个 terms[] 项各输出一条 decision，不得为 anchors[] 任一项输出"
+                    " decision。每种 action 都必须有非空字符串 reason。keep、disable、"
+                    "needs_review 必须且只能含 type、normalized、action、reason。update 必须"
+                    "且只能含 type、normalized、action、reason、category、description、"
+                    "preferred_translation、aliases、group_primary；九个键全部必填，即使值为"
+                    " null 或 aliases=[] 也不能省略。可空值必须用 JSON null，不能用空字符串。"
+                    "description 只能逐字保持当前 terms[] 值或为 null；aliases 只能使用本次"
+                    "输入中可见的既有 source/alias 原文。最后输出精确的 end 记录。组成员"
+                    "只能直接指向启用且"
                     "group_primary 为 null 的根术语；禁止自指、禁用目标、链和循环。"
                 )
         messages = render_messages(prompt, payload)

@@ -412,6 +412,49 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        (
+            {
+                "type": "decision",
+                "normalized": "target",
+                "action": "update",
+                "reason": "补全译名",
+                "category": "人物",
+                "description": None,
+                "preferred_translation": "目标",
+                "aliases": [],
+            },
+            "update 决策字段无效：target（缺少字段 group_primary）",
+        ),
+        (
+            {
+                "type": "decision",
+                "normalized": "target",
+                "action": "keep",
+                "reason": "保持",
+                "category": "人物",
+            },
+            "keep 决策字段无效：target（禁止字段 category）",
+        ),
+    ],
+)
+def test_decision_parser_reports_exact_field_mismatch(
+    record: dict[str, object], message: str
+) -> None:
+    focus = [_batch_state("target", "Target")]
+    with pytest.raises(UsageError) as error:
+        _parse_decisions(
+            llm_jsonl([record]),
+            focus,
+            all_forms={"Target"},
+            known_states={"target": focus[0]},
+            read_only_terms=set(),
+        )
+    assert message in str(error.value)
+
+
 def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
     return {
         "type": "decision",
@@ -721,6 +764,15 @@ async def test_decision_format_repair_lists_exact_target_scope(
             assert "anchors" in correction
             if language == "en":
                 assert "未知术语" not in correction
+                assert "Every action requires a non-empty string reason" in correction
+                assert "all nine keys are required" in correction
+                assert "description may only copy" in correction
+                assert "aliases may only use existing source/alias forms" in correction
+            else:
+                assert "每种 action 都必须有非空字符串 reason" in correction
+                assert "九个键全部必填" in correction
+                assert "description 只能逐字保持" in correction
+                assert "aliases 只能使用" in correction
             content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(
@@ -749,6 +801,59 @@ async def test_decision_format_repair_lists_exact_target_scope(
     assert summary["proposals"] == 1
     assert calls == 8
     assert repairs == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+async def test_update_without_reason_is_repaired_with_complete_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    sent_invalid = False
+    repairs = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_invalid, repairs
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "format_correction" in payload:
+            repairs += 1
+            correction = str(payload["format_correction"])
+            assert "reason" in correction
+            assert "category" in correction
+            assert "description" in correction
+            assert "preferred_translation" in correction
+            assert "aliases" in correction
+            assert "group_primary" in correction
+            content = llm_jsonl(decision_response(payload))
+        elif (
+            not sent_invalid
+            and payload["phase"] == "adjudication"
+            and payload["terms"][0]["normalized"] == "alice"
+        ):
+            sent_invalid = True
+            invalid = decision_response(payload)[0]
+            invalid.pop("reason")
+            content = llm_jsonl([invalid])
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(
+                project, prompt_language=language, http_client=client
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert repairs == 1
 
 
 @pytest.mark.asyncio
