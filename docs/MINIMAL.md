@@ -1019,6 +1019,15 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 包括第一阶段暂定状态，所有 anchors 始终只读且不得输出 decision。模型只能保留、更新、软移除或标为
 `needs_review`；不能修改 source/normalized、虚构 alias 或新增 description。
 
+固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action
+都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、
+`normalized`、`action`、`reason`；`update` 还必须输出 `category`、`description`、
+`preferred_translation`、`aliases`、`group_primary`，这些键全部必填，即使可空字段为
+JSON `null` 或 `aliases` 为空数组也不能省略。`update` 表示完整目标状态；
+`description` 只能保留当前值或清空，alias 只能选用输入中可见的既有源文形式。
+固定 Prompt 同时提供精简正反示例，格式修正请求会重述相同字段模板和当前批次唯一允许的
+`normalized` 集合。
+
 两个阶段分别按当前 Preset 的 `max_parallel` 有界并发，第一阶段全部完成并形成统一
 暂定状态后才进入第二阶段。每个完整校验通过的批次原子写入 Run 检查点；用户取消或
 进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
