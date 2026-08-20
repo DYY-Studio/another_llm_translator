@@ -123,6 +123,7 @@ export function TermsView({
   const [manualReview, setManualReview] = useState(emptyManualReview);
   const [decisionDraftPending, setDecisionDraftPending] = useState(false);
   const [manualFocusId, setManualFocusId] = useState<string | null>(null);
+  const [termActionsOpen, setTermActionsOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
@@ -875,28 +876,36 @@ export function TermsView({
               <span>{translate("terms.conflicts", language)} {data?.conflict_count ?? 0}</span>
             </div>
           </div>
-          <div className="batch-toolbar segment-batch-toolbar">
+          <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
-              {!decisionDraftPending && manualReview.total > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
-              <button
+              {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
+              {selectedActive.length > 0 && <button
                 className="danger-button"
-                disabled={!selectedActive.length}
-                onClick={() => setRemoveOpen(true)}
-              >{translate("terms.removeSelected", language)}</button>
-              <button
-                className="danger-button"
-                disabled={!selectedTerms.length}
-                onClick={() => setDeleteOpen(true)}
-              >{translate("terms.deletePermanently", language)}</button>
-              <button
-                className="danger-button"
-                disabled={saving || !canClearStage}
-                onClick={() => setClearOpen(true)}
-              >{translate("terms.clearStage", language)}</button>
+                onClick={() => { setTermActionsOpen(false); setRemoveOpen(true); }}
+              >{translate("terms.removeSelected", language)}</button>}
+              <details
+                className="term-actions-menu"
+                open={termActionsOpen}
+                onToggle={(event) => setTermActionsOpen(event.currentTarget.open)}
+              >
+                <summary className="quiet-button">{translate("terms.moreActions", language)}</summary>
+                <div className="term-actions-popover">
+                  <button
+                    className="danger-button"
+                    disabled={!selectedTerms.length}
+                    onClick={() => { setTermActionsOpen(false); setDeleteOpen(true); }}
+                  >{translate("terms.deletePermanently", language)}</button>
+                  <button
+                    className="danger-button"
+                    disabled={saving || !canClearStage}
+                    onClick={() => { setTermActionsOpen(false); setClearOpen(true); }}
+                  >{translate("terms.clearStage", language)}</button>
+                </div>
+              </details>
             </div>
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
