@@ -4,13 +4,19 @@ import asyncio
 import json
 import math
 import os
+from collections import Counter
 from pathlib import Path
 
 import httpx
 import pytest
 
 from app.config import load_global_config
-from app.errors import ExternalError, FatalExternalError, RequestSizeError
+from app.errors import (
+    ExternalError,
+    FatalExternalError,
+    RequestSizeError,
+    StorageError,
+)
 from app.execution import (
     CJK_RE,
     ChunkPlan,
@@ -23,17 +29,20 @@ from app.execution import (
     classify_stage_states,
     combine_usage,
     contiguous_groups,
+    continue_run,
+    create_run,
+    dispatch_chunks,
     estimate_messages,
     estimate_messages_upper_bound,
     estimate_single_segment_preflight,
     estimate_tokens,
     finalize_run,
     full_prompt,
-    dispatch_chunks,
     iter_chunk_plans,
     localize_request_ids,
     materialize_chunk_stream,
     render_messages,
+    save_debug_chunks,
     select_scope,
     stage_fingerprint,
 )
@@ -42,13 +51,14 @@ from app.project import init_project
 from app.sqlite_storage import (
     append_jsonl,
     latest_stage_states,
-    record_header,
     read_json,
+    read_jsonl,
+    record_header,
     terminology_scan_state,
     write_json,
 )
+from app.stages import StageRunState, _execute_stage_run
 from tests.test_foundation import make_app_root
-
 
 ROOT = Path(__file__).parents[1]
 
@@ -481,6 +491,185 @@ def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:
     ]
     chunks = list(materialize_chunk_stream("RUN-X", "translation", plans))
     assert all(chunk.chunk_id and "RUN-X" in chunk.chunk_id for chunk in chunks)
+
+
+def test_materialize_chunk_stream_namespaces_continuation_chunks() -> None:
+    plan = ChunkPlan(
+        file_id="F0001",
+        segments=tuple(segments()[:1]),
+        payload={},
+        estimated_input_tokens=1,
+    )
+
+    fresh = list(materialize_chunk_stream("RUN-X", "translation", [plan]))
+    resumed = list(
+        materialize_chunk_stream(
+            "RUN-X",
+            "translation",
+            [plan],
+            continuation_index=3,
+        )
+    )
+
+    assert fresh[0].chunk_id == "CHK-RUN-X-TR-F0001-C00001"
+    assert resumed[0].chunk_id == "CHK-RUN-X-TR-R0003-F0001-C00001"
+
+
+def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> None:
+    project = _finalize_project(tmp_path)
+    current = config()
+    metadata = read_json(project, project / "project.json")
+    run_id, run_dir = create_run(
+        project,
+        config=current,
+        stage="translation",
+        fingerprint="fingerprint",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    plan = ChunkPlan(
+        file_id="F0001",
+        segments=tuple(segments()[:1]),
+        payload={},
+        estimated_input_tokens=1,
+    )
+    fresh = next(materialize_chunk_stream(run_id, "translation", [plan]))
+    save_debug_chunks(
+        project,
+        run_dir,
+        str(metadata["project_id"]),
+        run_id,
+        "translation",
+        [fresh],
+    )
+
+    resumed_id, resumed_dir, continuation_index = continue_run(
+        project,
+        run_id,
+        config=current,
+        stage="translation",
+        fingerprint="fingerprint",
+        prompt="prompt",
+        scope=Scope(),
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    assert resumed_id == run_id
+    assert continuation_index == 1
+    resumed = next(
+        materialize_chunk_stream(
+            resumed_id,
+            "translation",
+            [plan],
+            continuation_index=continuation_index,
+        )
+    )
+    save_debug_chunks(
+        project,
+        resumed_dir,
+        str(metadata["project_id"]),
+        resumed_id,
+        "translation",
+        [resumed],
+    )
+
+    records = read_jsonl(project, run_dir / "chunks.jsonl")
+    assert [record["record_id"] for record in records] == [
+        "CHK-" + run_id + "-TR-F0001-C00001",
+        "CHK-" + run_id + "-TR-R0001-F0001-C00001",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stage_storage_error_finalizes_run_without_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _finalize_project(tmp_path)
+    current = config()
+    current["debug"]["enabled"] = True
+    metadata = read_json(project, project / "project.json")
+    run_id, run_dir = create_run(
+        project,
+        config=current,
+        stage="translation",
+        fingerprint="fingerprint",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    state = StageRunState(
+        project=project,
+        stage="translation",
+        config=current,
+        metadata=metadata,
+        segments=segments(),
+        prompt="prompt",
+        fingerprint="fingerprint",
+        resume_run_id=None,
+        warnings=[],
+        run_id=run_id,
+        run_dir=run_dir,
+    )
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    def fail_debug(*_: object) -> None:
+        raise StorageError("duplicate debug chunk")
+
+    monkeypatch.setattr("app.stages.save_debug_chunks", fail_debug)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def noop_one(_: object) -> None:
+        return None
+
+    async def noop_zero() -> None:
+        return None
+
+    async def never_process(*_: object) -> None:
+        raise AssertionError("storage failure must happen before dispatch")
+
+    try:
+        with pytest.raises(StorageError, match="duplicate debug chunk"):
+            await _execute_stage_run(
+                state,
+                request_segments=[segments()[0]],
+                part_original={},
+                original_parts={},
+                preflight_failed=[],
+                limiter=SlidingWindowLimiter(0, 0),
+                payload_builder=lambda _: {},
+                prompt_builder=lambda _: "prompt",
+                prompt_partition_key=lambda _: None,
+                process_once=never_process,
+                record_preflight_failure=noop_one,
+                record_context_failure=noop_one,
+                before_finalize=noop_zero,
+                completed_count=lambda: 0,
+                failed_count=lambda: 0,
+                exception_completed=lambda: 0,
+                exception_failed=lambda: 0,
+                failure_counts=Counter(),
+                http_client=client,
+            )
+    finally:
+        await client.aclose()
+
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["status"] == "failed"
+    assert manifest["completed_segment_count"] == 0
+    assert manifest["failed_segment_count"] == 0
+    assert any("duplicate debug chunk" in warning for warning in manifest["warnings"])
+    assert requests == 0
 
 
 def test_chunk_builder_only_crosses_gaps_made_entirely_of_empty_segments() -> None:
