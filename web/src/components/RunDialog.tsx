@@ -4,6 +4,10 @@ import type { RunDecision, TaskOptions } from "../types";
 
 type ResultPolicy = "pending" | "reuse" | "force";
 
+function overflowModeLabel(mode: "error" | "trim" | "compact", language: Language) {
+  return translate(`terms.decisionOverflow${mode[0].toUpperCase()}${mode.slice(1)}`, language);
+}
+
 export function RunDialog({
   options,
   onClose,
@@ -21,8 +25,16 @@ export function RunDialog({
   const [resultPolicy, setResultPolicy] = useState<ResultPolicy | null>(
     options.mismatched_fingerprint_completed ? null : "pending",
   );
+  const decisionMode = options.stage === "terminology_decision";
   const resuming = runAction === "resume";
-  const ready = resuming || resultPolicy !== null;
+  const ready = decisionMode
+    ? !options.running_run || resuming || resultPolicy === "force"
+    : resuming || resultPolicy !== null;
+
+  function chooseRunAction(action: "resume" | "decline") {
+    setRunAction(action);
+    if (decisionMode && action === "decline") setResultPolicy("force");
+  }
 
   function submit() {
     if (!ready) return;
@@ -44,8 +56,8 @@ export function RunDialog({
       >
         <div className="page-heading">
           <div>
-            <h2 id="run-dialog-title">{translate("runDialog.title", language, { stage: translate(`stage.${options.stage}`, language) })}</h2>
-            <p>{translate("runDialog.subtitle", language)}</p>
+            <h2 id="run-dialog-title">{translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(`stage.${options.stage}`, language) })}</h2>
+            <p>{decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}</p>
           </div>
         </div>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
@@ -59,6 +71,14 @@ export function RunDialog({
           <span><strong>{options.pending}</strong>{translate("runDialog.pending", language)}</span>
           <span><strong>{options.failed}</strong>{translate("runDialog.failed", language)}</span>
         </div>
+        {decisionMode && <div className="run-decision-info">
+          <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
+          <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
+          {options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
+            soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
+            mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
+          })}</span>}
+        </div>}
 
         {options.running_run && (
           <fieldset className="decision-group">
@@ -67,17 +87,17 @@ export function RunDialog({
               <input
                 type="radio"
                 checked={runAction === "resume"}
-                onChange={() => setRunAction("resume")}
+                onChange={() => chooseRunAction("resume")}
               />
-              <span><strong>{translate("runDialog.resumeOriginal", language)}</strong><small>{translate("runDialog.resumeHint", language)}</small></span>
+              <span><strong>{translate(decisionMode ? "terms.decisionResume" : "runDialog.resumeOriginal", language)}</strong><small>{decisionMode ? translate("terms.decisionResumeHint", language, { completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? options.selected * 2 }) : translate("runDialog.resumeHint", language)}</small></span>
             </label>
             <label className="radio-option decision-option">
               <input
                 type="radio"
                 checked={runAction === "decline"}
-                onChange={() => setRunAction("decline")}
+                onChange={() => chooseRunAction("decline")}
               />
-              <span><strong>{translate("runDialog.endOriginal", language)}</strong><small>{translate("runDialog.declinedHint", language, { runId: options.running_run.run_id })}</small></span>
+              <span><strong>{translate(decisionMode ? "terms.decisionForce" : "runDialog.endOriginal", language)}</strong><small>{decisionMode ? translate("terms.decisionForceHint", language) : translate("runDialog.declinedHint", language, { runId: options.running_run.run_id })}</small></span>
             </label>
             <div className="run-details">
               <span>{translate("runDialog.originalScope", language)}<code>{JSON.stringify(options.running_run.scope)}</code></span>
@@ -87,7 +107,7 @@ export function RunDialog({
           </fieldset>
         )}
 
-        {!resuming && (
+        {!resuming && !decisionMode && (
           <fieldset className="decision-group">
             <legend>{translate("runDialog.existingResults", language)}</legend>
             {options.mismatched_fingerprint_completed ? (
@@ -131,6 +151,17 @@ export function RunDialog({
             </label>
           </fieldset>
         )}
+        {!resuming && decisionMode && options.running_run && <fieldset className="decision-group">
+          <legend>{translate("terms.decisionForce", language)}</legend>
+          <label className="radio-option decision-option">
+            <input
+              type="radio"
+              checked={resultPolicy === "force"}
+              onChange={() => setResultPolicy("force")}
+            />
+            <span><strong>{translate("terms.decisionForce", language)}</strong><small>{translate("terms.decisionForceHint", language)}</small></span>
+          </label>
+        </fieldset>}
 
         <div className="modal-actions">
           <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>

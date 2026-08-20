@@ -46,6 +46,35 @@ export function decisionAliasChanges(before: TermDecisionState, after: TermDecis
   };
 }
 
+export type DecisionRelationshipRole = "primary" | "member" | null;
+
+export function decisionRelationshipRole(
+  state: TermDecisionState,
+  states: TermDecisionState[],
+): DecisionRelationshipRole {
+  if (state.group_primary && states.some((item) => item.normalized === state.group_primary)) {
+    return "member";
+  }
+  if (!state.group_primary && states.some((item) => item.group_primary === state.normalized)) {
+    return "primary";
+  }
+  return null;
+}
+
+export function decisionRelationshipSummary(states: TermDecisionState[]) {
+  return states.flatMap((state) => {
+    if (state.group_primary || !states.some((item) => item.group_primary === state.normalized)) {
+      return [];
+    }
+    return [{
+      primary: state.source,
+      members: states
+        .filter((item) => item.group_primary === state.normalized)
+        .map((item) => item.source),
+    }];
+  });
+}
+
 export function filterDecisionProposals(
   proposals: TermDecisionProposal[],
   query: string,
