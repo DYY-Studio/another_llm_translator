@@ -4,12 +4,16 @@ import { translate, type Language } from "../i18n";
 import {
   decisionAliasChanges,
   decisionProposalChanges,
+  decisionRelationshipRole,
+  decisionRelationshipSummary,
   filterDecisionProposals,
   filterManualReviewItems,
   summarizeDecisionProposals,
   type DecisionProposalStatus,
 } from "../termDecision";
+import { RunDialog } from "./RunDialog";
 import type {
+  RunDecision,
   TaskOptions,
   TaskState,
   TermDecisionEvidence,
@@ -25,10 +29,6 @@ type DecisionTab = "proposals" | "manual";
 
 function valueOrDash(value: string) {
   return value || "—";
-}
-
-function overflowModeLabel(mode: "error" | "trim" | "compact", language: Language) {
-  return translate(`terms.decisionOverflow${mode[0].toUpperCase()}${mode.slice(1)}`, language);
 }
 
 function fieldLabel(field: string, language: Language) {
@@ -91,8 +91,21 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle }:
   const changes = proposal.before.flatMap((before, index) => {
     const after = proposal.after[index];
     if (!after) return [];
-    return { before, after, fields: decisionProposalChanges(before, after), aliases: decisionAliasChanges(before, after) };
+    return {
+      before,
+      after,
+      fields: decisionProposalChanges(before, after),
+      aliases: decisionAliasChanges(before, after),
+      role: proposal.kind === "relationship" ? decisionRelationshipRole(after, proposal.after) : null,
+    };
+  }).sort((left, right) => {
+    if (proposal.kind !== "relationship") return 0;
+    const roleOrder = { primary: 0, member: 1 } as const;
+    return (roleOrder[left.role ?? "member"] ?? 2) - (roleOrder[right.role ?? "member"] ?? 2);
   });
+  const relationshipGroups = proposal.kind === "relationship"
+    ? decisionRelationshipSummary(proposal.after)
+    : [];
   return <article className={`term-decision-proposal ${rejected ? "rejected" : ""}`}>
     <header className="term-decision-proposal-heading">
       <div className="decision-proposal-title">
@@ -105,9 +118,14 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle }:
         <button disabled={busy || running} onClick={onToggle}>{rejected ? translate("terms.decisionRestore", language) : translate("terms.decisionReject", language)}</button>
       </div>
     </header>
-    {proposal.kind === "relationship" && <div className="decision-relationship-summary">{proposal.after.map((state) => <span key={state.normalized}>{state.source} · {groupValue(state, proposal.after, language)}{state.aliases.length ? ` · ${translate("terms.decisionAliasCount", language, { count: state.aliases.length })}` : ""}</span>)}</div>}
-    <div className="decision-change-list">{changes.map(({ before, after, fields, aliases }) => <div className="decision-term-change" key={before.normalized}>
-      <div className="decision-term-change-heading"><strong>{before.source}</strong><span>{after.disabled ? translate("terms.decisionDisabledState", language) : translate("terms.decisionEnabledState", language)}</span></div>
+    {proposal.kind === "relationship" && relationshipGroups.length > 0 && <div className="decision-relationship-summary">
+      {relationshipGroups.map((group) => <div className="decision-relationship-group" key={group.primary}>
+        <span><strong>{translate("terms.decisionRelationshipPrimary", language, { source: group.primary })}</strong></span>
+        <span><strong>{translate("terms.decisionRelationshipMembers", language, { sources: group.members.join(language === "zh-CN" ? "、" : ", ") })}</strong></span>
+      </div>)}
+    </div>}
+    <div className="decision-change-list">{changes.map(({ before, after, fields, aliases, role }) => <div className="decision-term-change" key={before.normalized}>
+      <div className="decision-term-change-heading"><div><strong>{before.source}</strong>{role && <span className={`decision-relation-role ${role}`}>{translate(role === "primary" ? "terms.groupPrimary" : "terms.groupMember", language)}</span>}</div><span>{after.disabled ? translate("terms.decisionDisabledState", language) : translate("terms.decisionEnabledState", language)}</span></div>
       {fields.map((change) => <div className="decision-field-change" key={change.field}>
         <span className="decision-field-label">{fieldLabel(change.field, language)}</span>
         <span className="decision-old-value">{changeValue(change.field, change.before, before, proposal.before, language)}</span>
@@ -150,7 +168,8 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [runChoice, setRunChoice] = useState<"resume" | "force">("resume");
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [replaceDraft, setReplaceDraft] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const running = Boolean(task && task.project === project && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
 
@@ -164,7 +183,6 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     try {
       const nextOptions = await optionsRequest;
       setOptions(nextOptions);
-      if (!nextOptions.running_run) setRunChoice("resume");
     } catch (error) {
       setMessage(String(error));
     }
@@ -210,17 +228,22 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     setPage(next);
     contentRef.current?.scrollTo({ top: 0 });
   }
-  async function generate() {
-    const replace = Boolean(review?.draft);
-    if (replace && !window.confirm(translate("terms.decisionReplaceConfirm", language))) return;
-    const force = Boolean(options?.running_run && runChoice === "force");
+  function openRunDialog(replace: boolean) {
+    if (!options || options.selected === 0) return;
+    setReplaceDraft(replace);
+    setRunDialogOpen(true);
+  }
+  async function startDecision(decision: RunDecision) {
+    const resuming = decision.run_action === "resume";
+    if (replaceDraft && !window.confirm(translate("terms.decisionReplaceConfirm", language))) return;
+    const force = decision.force;
     if (force && !window.confirm(translate("terms.decisionForceConfirm", language))) return;
-    const resuming = Boolean(options?.running_run && runChoice === "resume");
     if (!resuming && (review?.manual_review.remaining ?? 0) > 0 && !window.confirm(translate("terms.decisionManualReplaceConfirm", language, { remaining: review?.manual_review.remaining ?? 0, total: review?.manual_review.total ?? 0 }))) return;
+    setRunDialogOpen(false);
     setBusy(true);
     setMessage("");
     try {
-      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, { method: "POST", body: JSON.stringify({ stage: "terminology_decision", language, replace_draft: replace, force, reuse_mixed_fingerprints: false, acknowledge_manual_review: !resuming, run_action: options?.running_run ? (force ? "decline" : "resume") : null }) });
+      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, { method: "POST", body: JSON.stringify({ stage: "terminology_decision", language, replace_draft: replaceDraft, force, reuse_mixed_fingerprints: false, acknowledge_manual_review: !resuming, run_action: decision.run_action }) });
       onTask(next);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   }
@@ -268,18 +291,16 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
         <div><p className="term-decision-back"><button className="link-button" onClick={onClose}>← {translate("terms.decisionBackToLibrary", language)}</button></p><h1>{translate("terms.decisionTitle", language)}</h1><p>{translate("terms.decisionHint", language)}</p></div>
         <div className="button-group">
           {review?.draft && <button className="danger-button" disabled={busy || running} onClick={() => mutate("discard", translate("terms.decisionDiscardConfirm", language))}>{translate("terms.decisionDiscard", language)}</button>}
-          {review?.draft && <button className="quiet-button" disabled={busy || running} onClick={generate}>{translate("terms.decisionRegenerate", language)}</button>}
+          {review?.draft && <button className="quiet-button" disabled={busy || running || !options} onClick={() => openRunDialog(true)}>{translate("terms.decisionRegenerate", language)}</button>}
           {review?.draft && <button className="primary-button" disabled={busy || running} onClick={() => mutate("apply", translate("terms.decisionApplyConfirm", language, summary))}>{translate("terms.decisionApply", language)}</button>}
-          {!review?.draft && <button className="primary-button" disabled={busy || running || !options || options.selected === 0} onClick={generate}>{options?.running_run ? runChoice === "resume" ? translate("terms.decisionResume", language) : translate("terms.decisionForce", language) : translate("terms.decisionGenerate", language)}</button>}
+          {!review?.draft && <button className="primary-button" disabled={busy || running || !options || options.selected === 0} onClick={() => openRunDialog(false)}>{translate("terms.decisionGenerate", language)}</button>}
           {!review?.draft && review?.rollback && <button disabled={busy || running} onClick={() => mutate("rollback", translate("terms.decisionRollbackConfirm", language))}>{translate("terms.decisionRollback", language)}</button>}
         </div>
       </header>
-      {options && <div className="term-decision-options"><span>{translate("terms.decisionPreset", language)} <strong>{options.preset.id}</strong> · {options.preset.model}</span><span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span><span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>{options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, { soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language), mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language) })}</span>}</div>}
       {review?.draft && <div className="term-decision-warning"><strong>{translate("terms.decisionRevisionWarning", language)}</strong><span>{translate("terms.decisionRevisionWarningHint", language)}</span></div>}
       {message && <p className="inline-message error-text">{message}</p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
         {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
-        {!running && options?.running_run && <fieldset className="decision-group term-decision-resume"><legend>{translate("terms.decisionUnfinished", language)}</legend><label className="radio-option decision-option"><input type="radio" checked={runChoice === "resume"} onChange={() => setRunChoice("resume")} /><span><strong>{translate("terms.decisionResume", language)}</strong><small>{translate("terms.decisionResumeHint", language, { completed: options.running_run?.completed_steps ?? 0, total: options.running_run?.total_steps ?? options.selected * 2 })}</small></span></label><label className="radio-option decision-option"><input type="radio" checked={runChoice === "force"} onChange={() => setRunChoice("force")} /><span><strong>{translate("terms.decisionForce", language)}</strong><small>{translate("terms.decisionForceHint", language)}</small></span></label></fieldset>}
         {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist"><button className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}
         <div className="term-decision-content" ref={contentRef}>
           {tab === "proposals" && review?.draft && <><div className="term-decision-summary"><span>{translate("terms.decisionAccepted", language)} {summary.accepted}</span><span>{translate("terms.decisionRejected", language)} {summary.rejected}</span><span>{translate("terms.decisionDisabled", language)} {summary.disabled}</span><span>{translate("terms.decisionTranslations", language)} {summary.translations}</span><span>{translate("terms.decisionStructural", language)} {summary.structural}</span></div>{review.draft.needs_review.length > 0 && <div className="term-decision-review-preview"><strong>{translate("terms.decisionNeedsReview", language)} {review.draft.needs_review.length}</strong><span>{translate("terms.decisionNeedsReviewHint", language)}</span><div>{review.draft.needs_review.slice(0, 3).map((item) => <span key={item.normalized}>{item.source}</span>)}</div></div>}<div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionSearch", language)} /><select value={kind} onChange={(event) => { setKind(event.target.value); setPage(0); }}><option value="">{translate("terms.decisionAllKinds", language)}</option><option value="term_update">{translate("terms.decisionTermUpdate", language)}</option><option value="relationship">{translate("terms.decisionRelationship", language)}</option></select><select value={status} onChange={(event) => { setStatus(event.target.value as DecisionProposalStatus); setPage(0); }}><option value="all">{translate("terms.decisionAllStatus", language)}</option><option value="accepted">{translate("terms.decisionAcceptedStatus", language)}</option><option value="rejected">{translate("terms.decisionRejectedStatus", language)}</option></select><Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></div><div className="term-decision-list">{visible.map((proposal) => <ProposalCard key={proposal.proposal_id} proposal={proposal} rejected={rejected.has(proposal.proposal_id)} busy={busy} running={running} language={language} onToggle={() => void setRejected(proposal.proposal_id, !rejected.has(proposal.proposal_id))} />)}</div>{!visible.length && <p className="diagnostics-empty">{translate("terms.decisionNoMatch", language)}</p>}<Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></>}
@@ -287,6 +308,12 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
           {!review?.draft && tab === "proposals" && !running && <p className="diagnostics-empty">{translate("terms.decisionNoDraft", language)}</p>}
         </div>
       </>}
+      {runDialogOpen && options && <RunDialog
+        options={options}
+        language={language}
+        onClose={() => { setRunDialogOpen(false); setReplaceDraft(false); }}
+        onStart={(decision) => { void startDecision(decision); }}
+      />}
     </section>
   );
 }

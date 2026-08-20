@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { decisionAliasChanges, decisionProposalChanges, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
+import { decisionAliasChanges, decisionProposalChanges, decisionRelationshipRole, decisionRelationshipSummary, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
 
 const state = (normalized, translation, disabled = false) => ({
   normalized,
@@ -57,6 +57,16 @@ test("renders semantic field and alias changes from states", () => {
   assert.deepEqual(decisionAliasChanges(before, after), { added: ["A"], removed: [] });
 });
 
+test("summarizes relationship components with primary and member roles", () => {
+  const primary = { ...state("Alice", "爱丽丝"), source: "Alice" };
+  const member = { ...state("Aly", "爱丽丝"), source: "Aly", group_primary: "Alice" };
+  const states = [member, primary];
+  assert.deepEqual(decisionRelationshipSummary(states), [{ primary: "Alice", members: ["Aly"] }]);
+  assert.equal(decisionRelationshipRole(primary, states), "primary");
+  assert.equal(decisionRelationshipRole(member, states), "member");
+  assert.equal(decisionRelationshipRole(state("Standalone", null), states), null);
+});
+
 test("filters and summarizes the persistent manual queue", () => {
   const items = [
     { run_id: "run", normalized: "alice", source: "Alice", reason: "group", evidence: { hit_count: 1 }, resolved: false },
@@ -74,16 +84,29 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.doesNotMatch(source, /translate\("common\.close", language\)/);
   assert.match(source, /translate\("terms\.decisionCloseHint", language\)/);
   assert.match(source, /\["completed", "cancelled", "failed"\]\.includes\(task\.status\)/);
-  assert.match(source, /run_action: options\?\.running_run \? \(force \? "decline" : "resume"\) : null/);
-  assert.match(source, /terms\.decisionOverflowPolicy/);
+  assert.match(source, /run_action: decision\.run_action/);
+  assert.match(source, /<RunDialog/);
+  assert.match(source, /decisionRelationshipSummary/);
+  assert.match(source, /decisionRelationshipRole/);
+  assert.match(source, /terms\.decisionRelationshipPrimary/);
+  assert.match(source, /terms\.decisionRelationshipMembers/);
   assert.match(source, /term-decision-workspace/);
   assert.doesNotMatch(source, /term-decision-bottom-actions/);
+  assert.doesNotMatch(source, /term-decision-options/);
+  assert.doesNotMatch(source, /term-decision-resume/);
   assert.match(source, /settings-action-heading/);
   assert.match(source, /acknowledge_manual_review/);
   assert.match(source, /decisionManualReplaceConfirm/);
   assert.match(source, /terms\.decisionManualTab/);
   assert.match(source, /manual-review-actions/);
   assert.match(source, /terms\/decision\/manual-review/);
+  const dialogSource = await readFile(
+    new URL("../src/components/RunDialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(dialogSource, /runDialog\.decisionTitle/);
+  assert.match(dialogSource, /decisionMode/);
+  assert.match(dialogSource, /resultPolicy === "force"/);
   const termsSource = await readFile(
     new URL("../src/components/TermsView.tsx", import.meta.url),
     "utf8",
