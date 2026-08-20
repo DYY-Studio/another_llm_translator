@@ -519,25 +519,91 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     },
     "terminology_decision": {
         "zh-CN": (
-            "terms[] 每项必须恰好输出一条 type=decision，照录 normalized。action 只能为"
-            "keep、update、disable 或 needs_review。keep/needs_review 仅含 type、normalized、"
-            "action、reason；update 必须另含完整 category、description、preferred_translation、"
-            "aliases、group_primary，字符串字段可为 null；disable 不得含这些字段。只为"
-            "terms[] 输出 decision，anchors[] 一条也不得输出。group_primary 仅表示成员直接"
-            "指向启用的根术语，根术语自身必须为 null；禁止自指、指向 disabled 术语、"
-            "成员指向成员以及任何链或循环。无法确定合法根术语时必须使用 needs_review。"
+            "以下固定输出协议优先于可编辑中段。\n"
+            "【目标与只读数据】terms[] 是唯一决策目标：每项必须恰好输出一条 decision，"
+            "并逐字照录其 normalized。建议按 terms[] 顺序输出。anchors[] 和各项 evidence "
+            "均为只读数据：可用于判断，但 anchors[] 一条也不得输出，source、evidence、"
+            "命中计数和 samples 也不得出现在输出中。\n"
+            "【精确字段模板】字段是否存在由 action 决定，不存在可选输出键：\n"
+            "1. keep、disable、needs_review：必须且只能有 type、normalized、action、reason。\n"
+            "2. update：必须且只能有 type、normalized、action、reason、category、description、"
+            "preferred_translation、aliases、group_primary。九个键全部必填；值为 null 或"
+            " aliases=[] 时也不得省略键。\n"
+            "type 必须为字符串 \"decision\"；action 只能为 keep、update、disable 或"
+            " needs_review；每种 action（包括 update）都必须提供非空字符串 reason。\n"
+            "【update 字段值】category、description、preferred_translation、group_primary "
+            "的值为字符串或 JSON null，禁止用空字符串代替 null。aliases 必须是 JSON "
+            "字符串数组，允许 []。description 只能逐字保持当前 terms[] 值或清为 null，"
+            "不得补写、改写或概括。aliases 只能选用本次输入中可见的既有 source/alias "
+            "原文，不得从 evidence、样本文本或常识创造，不得重复。group_primary 只能为"
+            " null，或直接指向启用且自身 group_primary=null 的根术语 normalized；禁止自指、"
+            "指向 disabled 术语、成员指向成员以及任何链或循环。无法确定合法根术语时使用"
+            " needs_review。update 表示完整目标状态，不是只列变化字段。\n"
+            "【action 含义】keep 原样保留；update 修改一个或多个可修改字段；disable 软禁用；"
+            "needs_review 表示证据不足、保留运行前状态并交由人工处理。\n"
+            "【正确 JSONL 示例】\n"
+            '{"type":"decision","normalized":"alice","action":"update",'
+            '"reason":"补全人名译名","category":"女性人名","description":null,'
+            '"preferred_translation":"爱丽丝","aliases":[],"group_primary":null}\n'
+            '{"type":"decision","normalized":"academy","action":"keep",'
+            '"reason":"现有译名与类别一致"}\n'
+            '{"type":"decision","normalized":"incidental","action":"disable",'
+            '"reason":"普通词且无术语价值"}\n'
+            '{"type":"decision","normalized":"uncertain","action":"needs_review",'
+            '"reason":"证据不足，无法确定合法组主"}\n'
+            '{"type":"end"}\n'
+            "【错误示例】update 缺少 reason 或任何 nullable 键：键仍是必填；keep 带 category："
+            "出现禁用的额外字段；输入 description=null 却写入说明：非法新写；aliases 写入"
+            "输入中不存在的形式：虚构 alias；输出 anchor、group_primary 指向自身、使用"
+            " Markdown 代码围栏或在 end 后继续输出：均非法。"
         ),
         "en": (
-            "Return exactly one type=decision record for every terms[] item and copy "
-            "normalized verbatim. action is keep, update, disable, or needs_review. "
-            "keep/needs_review contain only type, normalized, action, and reason; "
-            "update also contains complete category, description, preferred_translation, "
-            "aliases, and group_primary, with nullable string fields; disable contains "
-            "none of those fields. Output decisions only for terms[]; never output a "
-            "decision for any anchors[] item. group_primary is only a direct pointer from "
-            "a member to an enabled root, whose own group_primary must be null. Never "
-            "self-reference, point to a disabled term or another member, or form a chain "
-            "or cycle. Use needs_review when no legal root can be determined."
+            "The following fixed output contract takes precedence over the editable middle.\n"
+            "[Targets and read-only data] terms[] are the only decision targets. Return "
+            "exactly one decision for every item and copy its normalized value verbatim; "
+            "prefer terms[] order. anchors[] and every evidence object are read-only data: "
+            "use them for judgment, but never output an anchor decision or output source, "
+            "evidence, hit counts, or samples.\n"
+            "[Exact field templates] The action determines which keys exist; there are no "
+            "optional output keys:\n"
+            "1. keep, disable, and needs_review must contain exactly type, normalized, "
+            "action, and reason.\n"
+            "2. update must contain exactly type, normalized, action, reason, category, "
+            "description, preferred_translation, aliases, and group_primary. All nine keys "
+            "are required even when a value is null or aliases is [].\n"
+            'type must be the string "decision". action must be keep, update, disable, or '
+            "needs_review. Every action, including update, requires a non-empty string reason.\n"
+            "[update values] category, description, preferred_translation, and group_primary "
+            "are strings or JSON null; never use an empty string instead of null. aliases "
+            "must be a JSON array of strings and may be []. description may only copy the "
+            "current terms[] value verbatim or be cleared to null; never add, rewrite, or "
+            "summarize it. aliases may only select existing source/alias forms visible in "
+            "this request; never invent a form from evidence, samples, or outside knowledge, "
+            "and never duplicate one. group_primary must be null or point directly to an "
+            "enabled root normalized whose own group_primary is null. Never self-reference, "
+            "point to a disabled term or another member, or form a chain or cycle. Use "
+            "needs_review when no legal root is certain. update describes the complete target "
+            "state, not only changed fields.\n"
+            "[Action meanings] keep preserves the state; update changes one or more mutable "
+            "fields; disable is a soft disable; needs_review preserves the pre-run state for "
+            "human review because evidence is insufficient.\n"
+            "[Valid JSONL example]\n"
+            '{"type":"decision","normalized":"alice","action":"update",'
+            '"reason":"complete the person-name translation","category":"person name",'
+            '"description":null,"preferred_translation":"Alice","aliases":[],'
+            '"group_primary":null}\n'
+            '{"type":"decision","normalized":"academy","action":"keep",'
+            '"reason":"the existing translation and category are consistent"}\n'
+            '{"type":"decision","normalized":"incidental","action":"disable",'
+            '"reason":"an ordinary word with no terminology value"}\n'
+            '{"type":"decision","normalized":"uncertain","action":"needs_review",'
+            '"reason":"evidence is insufficient to determine a legal root"}\n'
+            '{"type":"end"}\n'
+            "[Invalid examples] An update missing reason or any nullable key is invalid because "
+            "the keys remain required. A keep with category has a forbidden extra key. Adding "
+            "text when the input description is null invents a description. An alias absent "
+            "from the input invents a source form. Outputting an anchor, self-referencing "
+            "group_primary, using a Markdown code fence, or writing anything after end is invalid."
         ),
     },
     "translation": {

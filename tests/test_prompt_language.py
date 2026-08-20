@@ -119,6 +119,62 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
         assert "chain or cycle" in prompt
 
 
+@pytest.mark.parametrize(
+    ("language", "middle", "markers"),
+    [
+        (
+            "zh-CN",
+            "__共享判断政策__",
+            (
+                "以下固定输出协议优先于可编辑中段",
+                "不存在可选输出键",
+                "九个键全部必填",
+                "每种 action（包括 update）都必须提供非空字符串 reason",
+                "禁止用空字符串代替 null",
+                "description 只能逐字保持当前 terms[] 值或清为 null",
+                "不得从 evidence、样本文本或常识创造",
+                "update 表示完整目标状态，不是只列变化字段",
+                "【正确 JSONL 示例】",
+                "【错误示例】",
+            ),
+        ),
+        (
+            "en",
+            "__SHARED_JUDGMENT_POLICY__",
+            (
+                "fixed output contract takes precedence over the editable middle",
+                "there are no optional output keys",
+                "All nine keys are required",
+                "Every action, including update, requires a non-empty string reason",
+                "never use an empty string instead of null",
+                "description may only copy the current terms[] value verbatim or be cleared to null",
+                "never invent a form from evidence, samples, or outside knowledge",
+                "update describes the complete target state, not only changed fields",
+                "[Valid JSONL example]",
+                "[Invalid examples]",
+            ),
+        ),
+    ],
+)
+def test_terminology_decision_prompt_defines_unambiguous_output_contract(
+    language: str,
+    middle: str,
+    markers: tuple[str, ...],
+) -> None:
+    for phase in ("adjudication", "consistency"):
+        prompt = full_prompt(
+            "terminology_decision", middle, language, phase=phase
+        )
+        assert prompt.index(middle) < prompt.index(markers[0])
+        for marker in markers:
+            assert marker in prompt
+        assert '"action":"update"' in prompt
+        assert '"action":"keep"' in prompt
+        assert '"action":"disable"' in prompt
+        assert '"action":"needs_review"' in prompt
+        assert prompt.count('{"type":"end"}') == 2
+
+
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
 def test_segment_prompts_require_translated_aozora_ruby_base(stage: str) -> None:
     zh = full_prompt(stage, "项目要求。", "zh-CN")
