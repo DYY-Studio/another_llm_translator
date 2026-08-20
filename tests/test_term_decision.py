@@ -129,6 +129,104 @@ def single_term_batches(states: list[dict], **_: object) -> tuple[list, int]:
     return [([state], []) for state in states], len(states)
 
 
+def create_complete_legacy_group_run(
+    project: Path,
+) -> tuple[str, Path, bytes, dict[str, object]]:
+    config = load_project_config(project, stage="terminology_decision")
+    metadata = read_json(project, project / "project.json")
+    library = read_json(project, project / "terminology" / "terms.json")
+    terms = {item["normalized"]: item for item in library["terms"]}
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="terminology_decision",
+        fingerprint="sha256:legacy",
+        prompt="legacy prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "source_terms_revision": 1,
+            "decision_status": "generating",
+            "rejected_proposal_ids": [],
+            "prompt_language": "zh-CN",
+        },
+    )
+
+    def state(normalized: str) -> dict[str, object]:
+        term = terms[normalized]
+        return {
+            "normalized": normalized,
+            "source": term["source"],
+            "category": term["category"],
+            "description": term["description"] or None,
+            "preferred_translation": term["preferred_translation"],
+            "aliases": term["aliases"],
+            "group_primary": term["group_primary"],
+            "disabled": False,
+        }
+
+    def checkpoint_record(decision: dict[str, object]) -> dict[str, object]:
+        return {
+            "decision": decision,
+            "decision_fingerprint": "sha256:legacy-decision",
+            "model_fingerprint": "sha256:legacy-model",
+            "prompt_fingerprint": "sha256:legacy-prompt",
+        }
+
+    checkpoint_path = run_dir / CHECKPOINT_FILE
+    atomic_write_json(
+        checkpoint_path,
+        record_header(
+            "terminology_decision_checkpoint",
+            str(metadata["project_id"]),
+            run_id=run_id,
+            source_terms_revision=1,
+            phases={
+                "adjudication": {
+                    key: checkpoint_record({"action": "keep", "reason": "保持"})
+                    for key in ("alice", "bob")
+                },
+                "consistency": {
+                    "alice": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "旧模型错误地设为自身组主",
+                            "after": {**state("alice"), "group_primary": "alice"},
+                        }
+                    ),
+                    "bob": checkpoint_record(
+                        {
+                            "action": "update",
+                            "reason": "补全译名",
+                            "after": {
+                                **state("bob"),
+                                "preferred_translation": "罗伯特",
+                            },
+                        }
+                    ),
+                },
+            },
+        ),
+    )
+    observed_usage: dict[str, object] = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "available": True,
+        "partial": False,
+    }
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest.update(
+        completed_segment_count=4,
+        failed_segment_count=0,
+        usage=observed_usage,
+        usage_invocation_count=1,
+    )
+    write_json(project, run_dir / "manifest.json", manifest)
+    return run_id, run_dir, checkpoint_path.read_bytes(), observed_usage
+
+
 def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> None:
     config_path = make_app_root(tmp_path) / "config" / "config.toml"
     source = config_path.read_text(encoding="utf-8")
@@ -1080,99 +1178,10 @@ async def test_complete_legacy_checkpoint_recovers_invalid_group_without_request
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
-    config = load_project_config(project, stage="terminology_decision")
-    metadata = read_json(project, project / "project.json")
-    library = read_json(project, project / "terminology" / "terms.json")
-    terms = {item["normalized"]: item for item in library["terms"]}
-    run_id, run_dir = create_run(
-        project,
-        config=config,
-        stage="terminology_decision",
-        fingerprint="sha256:legacy",
-        prompt="legacy prompt",
-        selected_count=2,
-        requested_count=2,
-        reused_count=0,
-        details={
-            "source_terms_revision": 1,
-            "decision_status": "generating",
-            "rejected_proposal_ids": [],
-            "prompt_language": "zh-CN",
-        },
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
     )
-
-    def state(normalized: str) -> dict[str, object]:
-        term = terms[normalized]
-        return {
-            "normalized": normalized,
-            "source": term["source"],
-            "category": term["category"],
-            "description": term["description"] or None,
-            "preferred_translation": term["preferred_translation"],
-            "aliases": term["aliases"],
-            "group_primary": term["group_primary"],
-            "disabled": False,
-        }
-
-    alice_after = {**state("alice"), "group_primary": "alice"}
-    bob_after = {**state("bob"), "preferred_translation": "罗伯特"}
-
-    def checkpoint_record(decision: dict[str, object]) -> dict[str, object]:
-        return {
-            "decision": decision,
-            "decision_fingerprint": "sha256:legacy-decision",
-            "model_fingerprint": "sha256:legacy-model",
-            "prompt_fingerprint": "sha256:legacy-prompt",
-        }
-
     checkpoint_path = run_dir / CHECKPOINT_FILE
-    atomic_write_json(
-        checkpoint_path,
-        record_header(
-            "terminology_decision_checkpoint",
-            str(metadata["project_id"]),
-            run_id=run_id,
-            source_terms_revision=1,
-            phases={
-                "adjudication": {
-                    key: checkpoint_record({"action": "keep", "reason": "保持"})
-                    for key in ("alice", "bob")
-                },
-                "consistency": {
-                    "alice": checkpoint_record(
-                        {
-                            "action": "update",
-                            "reason": "旧模型错误地设为自身组主",
-                            "after": alice_after,
-                        }
-                    ),
-                    "bob": checkpoint_record(
-                        {
-                            "action": "update",
-                            "reason": "补全译名",
-                            "after": bob_after,
-                        }
-                    ),
-                },
-            },
-        ),
-    )
-    checkpoint_before = checkpoint_path.read_bytes()
-    observed_usage = {
-        "input_tokens": 120,
-        "output_tokens": 30,
-        "total_tokens": 150,
-        "available": True,
-        "partial": False,
-    }
-    manifest = read_json(project, run_dir / "manifest.json")
-    manifest.update(
-        completed_segment_count=4,
-        failed_segment_count=0,
-        usage=observed_usage,
-        usage_invocation_count=1,
-    )
-    write_json(project, run_dir / "manifest.json", manifest)
 
     async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
         raise AssertionError("完整检查点恢复不得重新请求模型")
@@ -1203,6 +1212,48 @@ async def test_complete_legacy_checkpoint_recovers_invalid_group_without_request
     assert applied["applied"] == 1
     overrides = read_json(project, project / "terminology" / "overrides.json")
     assert [item["normalized"] for item in overrides["overrides"]] == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_group_recovery_draft_failure_preserves_complete_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
+    )
+    original_atomic_write = atomic_write_json
+
+    def fail_draft_write(path: Path, value: object) -> None:
+        if path.name == "terminology_decision_draft.json":
+            raise StorageError("恢复草案写入失败")
+        original_atomic_write(path, value)
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("完整检查点恢复不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(StorageError, match="恢复草案写入失败"):
+            await run_terminology_decision(
+                project, resume_run_id=run_id, http_client=client
+            )
+
+        assert not (run_dir / "terminology_decision_draft.json").exists()
+        assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["status"] == "running"
+        assert manifest["completed_segment_count"] == 4
+        assert manifest["usage"] == observed_usage
+        assert manifest["usage_invocation_count"] == 1
+
+        monkeypatch.setattr("app.term_decision.atomic_write_json", original_atomic_write)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=client
+        )
+
+    assert current_decision_draft(project) is not None
 
 
 @pytest.mark.asyncio
@@ -1282,6 +1333,60 @@ def test_web_starts_terminology_decision_task_without_options_local(
     assert state["status"] == "completed"
     assert state["completed_segments"] == 4
     assert state["total_segments"] == 4
+
+
+def test_web_resumes_complete_legacy_group_checkpoint_into_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, checkpoint_before, observed_usage = (
+        create_complete_legacy_group_run(project)
+    )
+
+    async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
+        raise AssertionError("Web 恢复完整检查点不得重新请求模型")
+
+    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    assert options.json()["running_run"]["run_id"] == run_id
+    assert options.json()["running_run"]["completed_steps"] == 4
+    assert options.json()["running_run"]["total_steps"] == 4
+
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "resume"},
+    )
+    assert started.status_code == 200
+    task_id = started.json()["task_id"]
+    for _ in range(20):
+        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            break
+
+    assert state["status"] == "completed"
+    assert state["completed_segments"] == 4
+    assert state["failed_segments"] == 0
+    assert state["total_segments"] == 4
+    assert state["usage"] == observed_usage
+    assert state["summary"]["proposals"] == 1
+    assert state["summary"]["needs_review"] == 1
+    review = client.get(
+        "/api/v1/projects/decision-demo/terms/decision"
+    )
+    assert review.status_code == 200
+    assert review.json()["draft"]["run_id"] == run_id
+    assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
+    assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+
+    refreshed = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    ).json()
+    assert refreshed["running_run"] is None
+    assert refreshed["has_pending_draft"] is True
 
 
 def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(

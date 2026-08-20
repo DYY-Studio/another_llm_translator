@@ -1380,10 +1380,6 @@ async def run_terminology_decision(
         current_usage: dict[str, Any] | None,
     ) -> None:
         manifest = read_json(project, run_dir / "manifest.json")
-        previous_usage = manifest.get("usage")
-        invocation_count = manifest.get("usage_invocation_count")
-        if type(invocation_count) is int and invocation_count > 0:
-            current_usage = combine_usage(previous_usage, current_usage)
         manifest.update(
             status="running",
             decision_status="generating",
@@ -1391,11 +1387,18 @@ async def run_terminology_decision(
             failed_segment_count=0,
             failure_counts={},
             completed_at=None,
-            usage=current_usage or unavailable_usage(),
-            usage_invocation_count=(
-                invocation_count + 1 if type(invocation_count) is int else 1
-            ),
         )
+        if usage_invoked:
+            previous_usage = manifest.get("usage")
+            invocation_count = manifest.get("usage_invocation_count")
+            if type(invocation_count) is int and invocation_count > 0:
+                current_usage = combine_usage(previous_usage, current_usage)
+            manifest.update(
+                usage=current_usage or unavailable_usage(),
+                usage_invocation_count=(
+                    invocation_count + 1 if type(invocation_count) is int else 1
+                ),
+            )
         manifest.pop("proposal_count", None)
         manifest.pop("needs_review_count", None)
         write_json(project, run_dir / "manifest.json", manifest)
@@ -1594,6 +1597,9 @@ async def run_terminology_decision(
             "protected": len(protected_states),
             "proposals": len(draft["proposals"]),
             "needs_review": len(draft["needs_review"]),
+            "completed": total,
+            "failed": 0,
+            "pending": 0,
             "usage": usage or unavailable_usage(),
         }
     except asyncio.CancelledError:
