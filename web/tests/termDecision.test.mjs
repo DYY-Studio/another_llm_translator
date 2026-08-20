@@ -116,6 +116,18 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.match(termsSource, /openDecision\("manual"\)/);
   assert.match(termsSource, /manualReviewQueueProgress/);
   assert.match(termsSource, /decisionDraftPending/);
+  assert.match(termsSource, /manualReview\.remaining > 0/);
+  assert.doesNotMatch(termsSource, /manualReview\.total > 0/);
+  assert.match(termsSource, /selectedActive\.length > 0/);
+  assert.match(termsSource, /term-actions-menu/);
+  assert.match(termsSource, /term-actions-popover/);
+  assert.match(termsSource, /terms\.moreActions/);
+  const messages = await readFile(
+    new URL("../src/i18n.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(messages, /"terms\.moreActions": "更多操作"/);
+  assert.match(messages, /"terms\.moreActions": "More actions"/);
 });
 
 test("automatic decision resume copy identifies persisted progress", async () => {
