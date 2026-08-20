@@ -540,6 +540,12 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             " null，或直接指向启用且自身 group_primary=null 的根术语 normalized；禁止自指、"
             "指向 disabled 术语、成员指向成员以及任何链或循环。无法确定合法根术语时使用"
             " needs_review。update 表示完整目标状态，不是只列变化字段。\n"
+            "新增其他术语已有 source/alias 作为 aliases 是多术语组合操作：接收方必须是启用的"
+            "根术语；原 alias 所有者必须在同一组合中删除该 alias 或被禁用。若新增的是另一"
+            "术语的 source，该术语只能被禁用，或在同一组合中直接成为接收方的成员。不得只在"
+            "一个术语上偷偷接收别人的形式；无法同时表达所有受影响术语时使用 needs_review。\n"
+            "合法转移示例：原所有者的 update 同时删除 Ally，启用根术语的 update 同时加入"
+            " Ally；两条记录必须属于同一完整组合。\n"
             "【action 含义】keep 原样保留，包括保持当前 disabled；update 修改一个或多个"
             "可修改字段并使术语启用；disable 软禁用；"
             "needs_review 表示证据不足、保留运行前状态并交由人工处理。\n"
@@ -556,7 +562,8 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             '{"type":"end"}\n'
             "【错误示例】update 缺少 reason 或任何 nullable 键：键仍是必填；keep 带 category："
             "出现禁用的额外字段；输入 description=null 却写入说明：非法新写；aliases 写入"
-            "输入中不存在的形式：虚构 alias；输出 anchor、group_primary 指向自身、使用"
+            "输入中不存在的形式：虚构 alias；只新增其他术语仍在使用的 alias、让非根术语接收"
+            "alias、输出 anchor、group_primary 指向自身、使用"
             " Markdown 代码围栏或在 end 后继续输出：均非法。"
         ),
         "en": (
@@ -588,6 +595,14 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "point to a disabled term or another member, or form a chain or cycle. Use "
             "needs_review when no legal root is certain. update describes the complete target "
             "state, not only changed fields.\n"
+            "Adding another term's existing source or alias is a multi-term operation: the "
+            "receiver must be an enabled root, and the previous alias owner must remove that "
+            "alias or be disabled in the same operation. If the added form is another term's "
+            "source, that term must be disabled or become a direct member of the receiver in "
+            "the same operation. Never steal a form in only one decision; use needs_review when "
+            "all affected terms cannot be represented.\n"
+            "Valid transfer example: the old owner's update removes Ally while an enabled root's "
+            "update adds Ally; both records belong to the same complete proposal.\n"
             "[Action meanings] keep preserves the state, including the current disabled value; "
             "update changes one or more mutable fields and enables the term; disable is a soft "
             "disable; needs_review preserves the pre-run state for "
@@ -607,7 +622,8 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "[Invalid examples] An update missing reason or any nullable key is invalid because "
             "the keys remain required. A keep with category has a forbidden extra key. Adding "
             "text when the input description is null invents a description. An alias absent "
-            "from the input invents a source form. Outputting an anchor, self-referencing "
+            "from the input invents a source form. Adding an alias still retained by another "
+            "term, letting a non-root receive an alias, outputting an anchor, self-referencing "
             "group_primary, using a Markdown code fence, or writing anything after end is invalid."
         ),
     },

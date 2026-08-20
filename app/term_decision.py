@@ -52,7 +52,7 @@ STAGE = "terminology_decision"
 DRAFT_FILE = "terminology_decision_draft.json"
 CHECKPOINT_FILE = "terminology_decision_checkpoint.json"
 EVIDENCE_SAMPLE_LIMIT = 5
-EVIDENCE_SNIPPET_LIMIT = 600
+EVIDENCE_CONTEXT_RADIUS = 60
 RELATED_ANCHOR_LIMIT = 24
 _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 _DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
@@ -68,6 +68,7 @@ _STATE_FIELDS = (
 _PHASES = ("adjudication", "consistency")
 
 _GroupViolation = tuple[str, tuple[str, ...]]
+_AliasViolation = tuple[str, tuple[str, ...]]
 
 
 def _prompt_language(project: Path, requested: str | None) -> str:
@@ -158,7 +159,8 @@ def collect_term_evidence(
     sample_files: dict[str, set[str]] = {key: set() for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
-        views = [normalize_term(value, spec) for value in aozora_match_views(source)]
+        raw_views = list(aozora_match_views(source))
+        views = [normalize_term(value, spec) for value in raw_views]
         candidates: set[str] = set()
         for view in views:
             candidates.update(
@@ -186,20 +188,61 @@ def collect_term_evidence(
                 if kind == "alias":
                     item["alias_hit_counts"][original] += 1
             samples = item["samples"]
-            if len(samples) < EVIDENCE_SAMPLE_LIMIT:
-                file_id = str(segment["file_id"])
-                sample = {
-                    "file_id": file_id,
-                    "segment_id": str(segment["segment_id"]),
-                    "source": source[:EVIDENCE_SNIPPET_LIMIT],
-                }
-                if file_id not in sample_files[normalized]:
-                    samples.insert(len(sample_files[normalized]), sample)
-                    sample_files[normalized].add(file_id)
-                else:
-                    samples.append(sample)
-                del samples[EVIDENCE_SAMPLE_LIMIT:]
+            file_id = str(segment["file_id"])
+            if len(samples) < EVIDENCE_SAMPLE_LIMIT and file_id not in sample_files[normalized]:
+                view_name, excerpt = _evidence_excerpt(
+                    views,
+                    matched,
+                    raw_views=raw_views,
+                    source=source,
+                    spec=spec,
+                )
+                samples.append(
+                    {
+                        "file_id": file_id,
+                        "segment_id": str(segment["segment_id"]),
+                        "source": excerpt,
+                        "match_view": view_name,
+                        "matched_forms": [
+                            {"kind": kind, "value": original}
+                            for kind, original in matched
+                        ],
+                    }
+                )
+                sample_files[normalized].add(file_id)
     return evidence
+
+
+def _evidence_excerpt(
+    views: list[str],
+    matched: list[tuple[str, str]],
+    *,
+    raw_views: list[str],
+    source: str,
+    spec: Any,
+) -> tuple[str, str]:
+    """Return a bounded, labelled context excerpt around the first hit."""
+    for index, view in enumerate(views):
+        for _, original in matched:
+            form = normalize_term(original, spec)
+            position = view.find(form)
+            if position < 0:
+                continue
+            start = max(0, position - EVIDENCE_CONTEXT_RADIUS)
+            end = min(len(view), position + len(form) + EVIDENCE_CONTEXT_RADIUS)
+            raw_view = raw_views[index]
+            if len(raw_view) == len(view):
+                excerpt = raw_view[start:end]
+            else:
+                excerpt = view[start:end]
+            if len(raw_views) == 1:
+                view_name = "source"
+            elif index == 0:
+                view_name = "aozora_base"
+            else:
+                view_name = "aozora_reading"
+            return view_name, excerpt
+    return "source", source[: EVIDENCE_CONTEXT_RADIUS * 2]
 
 
 def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
@@ -591,6 +634,135 @@ def _group_violation_message(
     return f"{labels[kind]}：{edge}"
 
 
+def _normalized_aliases(
+    state: dict[str, Any], spec: Any
+) -> dict[str, str]:
+    """Map normalized alias forms to their first visible spelling."""
+    result: dict[str, str] = {}
+    for value in state.get("aliases", []):
+        text = str(value)
+        normalized = normalize_term(text, spec)
+        if normalized:
+            result.setdefault(normalized, text)
+    return result
+
+
+def _alias_violations(
+    original: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    spec: Any,
+) -> list[_AliasViolation]:
+    """Find newly introduced alias ownership that is not an explicit relation."""
+    owners: dict[str, set[str]] = {}
+    for normalized, state in original.items():
+        values = [state.get("source", ""), *state.get("aliases", [])]
+        for value in values:
+            form = normalize_term(str(value), spec)
+            if form:
+                owners.setdefault(form, set()).add(normalized)
+
+    violations: list[_AliasViolation] = []
+    for normalized, state in final.items():
+        alias_forms = [
+            normalize_term(str(value), spec) for value in state.get("aliases", [])
+        ]
+        aliases = _normalized_aliases(state, spec)
+        original_state = original.get(normalized, {})
+        original_alias_forms = [
+            normalize_term(str(value), spec)
+            for value in original_state.get("aliases", [])
+        ]
+        if len(alias_forms) != len(set(alias_forms)) and (
+            len(original_alias_forms) == len(set(original_alias_forms))
+            or alias_forms != original_alias_forms
+        ):
+            violations.append(("duplicate_alias", (normalized, normalized)))
+        source_form = normalize_term(str(state.get("source", "")), spec)
+        original_source_form = normalize_term(
+            str(original_state.get("source", "")), spec
+        )
+        original_self_aliases = set(original_alias_forms) & {
+            normalized,
+            original_source_form,
+        }
+        for alias_form in aliases:
+            if (alias_form == normalized or alias_form == source_form) and (
+                alias_form not in original_self_aliases
+                or alias_forms != original_alias_forms
+            ):
+                violations.append(("self_alias", (normalized, alias_form)))
+
+        original_aliases = _normalized_aliases(original_state, spec)
+        added = set(aliases) - set(original_aliases)
+        if not added:
+            continue
+        if state.get("disabled"):
+            violations.extend(
+                ("disabled_receiver", (normalized, alias_form))
+                for alias_form in sorted(added)
+            )
+            continue
+        if state.get("group_primary") is not None:
+            violations.extend(
+                ("non_root_receiver", (normalized, str(state["group_primary"]), alias_form))
+                for alias_form in sorted(added)
+            )
+            continue
+        for alias_form in sorted(added):
+            alias_owners = owners.get(alias_form, set())
+            if not alias_owners:
+                violations.append(("unknown_alias", (normalized, alias_form)))
+                continue
+            for owner in sorted(alias_owners - {normalized}):
+                owner_state = final.get(owner)
+                if owner_state is None:
+                    violations.append(("unknown_owner", (normalized, owner, alias_form)))
+                    continue
+                owner_primary = owner_state.get("group_primary")
+                same_root = owner_primary is not None and str(owner_primary) == normalized
+                released = alias_form not in _normalized_aliases(owner_state, spec)
+                owner_source = normalize_term(str(owner_state.get("source", "")), spec)
+                source_transfer = alias_form == owner_source
+                if owner_state.get("disabled") or (
+                    source_transfer and same_root
+                ) or (not source_transfer and released):
+                    continue
+                violations.append(("alias_transfer", (normalized, owner, alias_form)))
+    return violations
+
+
+def _alias_violation_message(violation: _AliasViolation, language: str) -> str:
+    kind, values = violation
+    if kind == "alias_transfer":
+        receiver, owner, alias = values
+        if language == "en":
+            return f"alias {alias} remains owned by {owner} while added to {receiver}"
+        return f"alias {alias} 已由 {owner} 保留却被新增到 {receiver}"
+    if kind == "self_alias":
+        if language == "en":
+            return f"term {values[0]} contains its own source as alias {values[1]}"
+        return f"术语 {values[0]} 将自身原文 {values[1]} 作为 alias"
+    if kind == "non_root_receiver":
+        if language == "en":
+            return f"alias receiver {values[0]} is not a root term"
+        return f"alias 接收方 {values[0]} 不是组根术语"
+    if kind == "disabled_receiver":
+        if language == "en":
+            return f"disabled term {values[0]} cannot receive alias {values[1]}"
+        return f"已禁用术语 {values[0]} 不能接收 alias {values[1]}"
+    if kind == "unknown_alias":
+        if language == "en":
+            return f"alias {values[1]} has no known owner"
+        return f"alias {values[1]} 没有已知所有者"
+    if kind == "unknown_owner":
+        if language == "en":
+            return f"alias {values[2]} points to missing owner {values[1]}"
+        return f"alias {values[2]} 指向不存在的所有者 {values[1]}"
+    if language == "en":
+        return f"term {values[0]} contains duplicate normalized aliases"
+    return f"术语 {values[0]} 含有重复的规范化 alias"
+
+
 def _parse_decisions(
     content: str,
     focus: list[dict[str, Any]],
@@ -600,6 +772,7 @@ def _parse_decisions(
     read_only_terms: set[str],
     prompt_language: str = "zh-CN",
     review_states: dict[str, dict[str, Any]] | None = None,
+    spec: Any | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = list(document.errors)
@@ -662,6 +835,15 @@ def _parse_decisions(
         if any(alias not in all_forms for alias in aliases):
             errors.append(f"术语决策发明了源文 alias：{normalized}")
             continue
+        if spec is not None:
+            alias_forms = [normalize_term(alias, spec) for alias in aliases]
+            source_form = normalize_term(str(expected[normalized]["source"]), spec)
+            if len(alias_forms) != len(set(alias_forms)):
+                errors.append(f"术语决策 aliases 规范化后重复：{normalized}")
+                continue
+            if any(alias_form in {normalized, source_form} for alias_form in alias_forms):
+                errors.append(f"术语决策 aliases 不得包含自身 source：{normalized}")
+                continue
         group_primary = value.get("group_primary")
         if group_primary is not None and (
             not isinstance(group_primary, str) or group_primary not in known_states
@@ -729,6 +911,7 @@ async def _request_batch(
     read_only_terms: set[str],
     prompt_language: str,
     review_states: dict[str, dict[str, Any]],
+    spec: Any,
 ) -> dict[str, dict[str, Any]]:
     errors: list[str] = []
     parent_request_id: str | None = None
@@ -746,10 +929,14 @@ async def _request_batch(
                 ensure_ascii=False,
             )
             if prompt_language == "en":
-                detail = errors[0] if errors and (
-                    errors[0].startswith("self-referencing group pointer")
-                    or errors[0].startswith("group pointer")
-                ) else "invalid response"
+                detail = (
+                    errors[0]
+                    if errors
+                    and errors[0].startswith(
+                        ("self-referencing group pointer", "group pointer", "alias ", "term ")
+                    )
+                    else "invalid response"
+                )
                 payload["format_correction"] = (
                     "The previous response violated the terminology decision "
                     "protocol and could not be accepted: "
@@ -764,7 +951,10 @@ async def _request_batch(
                     "aliases is []. Nullable values must use JSON null, not an empty string. "
                     "description may only copy the current terms[] description verbatim or be "
                     "null. aliases may only use existing source/alias forms visible in this "
-                    "request. Output the exact end record last. A group "
+                    "request. Adding another term's existing form requires a complete multi-term "
+                    "transfer: the receiver is an enabled root and the old owner releases the "
+                    "form, is disabled, or becomes its direct member when the form is that owner's "
+                    "source. Output the exact end record last. A group "
                     "member may point only directly to an enabled root whose own "
                     "group_primary is null; self-references, disabled targets, chains, "
                     "and cycles are forbidden."
@@ -781,7 +971,8 @@ async def _request_batch(
                     "preferred_translation、aliases、group_primary；九个键全部必填，即使值为"
                     " null 或 aliases=[] 也不能省略。可空值必须用 JSON null，不能用空字符串。"
                     "description 只能逐字保持当前 terms[] 值或为 null；aliases 只能使用本次"
-                    "输入中可见的既有 source/alias 原文。最后输出精确的 end 记录。组成员"
+                    "输入中可见的既有 source/alias 原文；接收其他术语的形式必须同时表达完整"
+                    "多术语转移，不能单边偷取。最后输出精确的 end 记录。组成员"
                     "只能直接指向启用且"
                     "group_primary 为 null 的根术语；禁止自指、禁用目标、链和循环。"
                 )
@@ -806,6 +997,7 @@ async def _request_batch(
                 read_only_terms=read_only_terms,
                 prompt_language=prompt_language,
                 review_states=review_states,
+                spec=spec,
             )
             if ignored_read_only:
                 llm.logger.warning(
@@ -999,7 +1191,9 @@ def _consistency_states(
 
 
 def _decision_dependency_graph(
-    original: dict[str, dict[str, Any]], final: dict[str, dict[str, Any]]
+    original: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    spec: Any,
 ) -> dict[str, set[str]]:
     graph = {key: set() for key in original.keys() | final.keys()}
 
@@ -1016,13 +1210,19 @@ def _decision_dependency_graph(
     original_owners: dict[str, set[str]] = {}
     for key, state in original.items():
         for value in [state["source"], *state.get("aliases", [])]:
-            original_owners.setdefault(str(value), set()).add(key)
+            form = normalize_term(str(value), spec)
+            if form:
+                original_owners.setdefault(form, set()).add(key)
     for key, state in final.items():
         if key not in original:
             continue
-        added = set(state.get("aliases", [])) - set(
-            original[key].get("aliases", [])
-        )
+        added = {
+            normalize_term(str(value), spec)
+            for value in state.get("aliases", [])
+        } - {
+            normalize_term(str(value), spec)
+            for value in original[key].get("aliases", [])
+        }
         for alias in added:
             for owner in original_owners.get(str(alias), set()):
                 connect(key, owner)
@@ -1054,36 +1254,67 @@ def _dependency_components(
     return components
 
 
-def _recover_invalid_group_components(
+def _relationship_violation_nodes(violation: _GroupViolation | _AliasViolation) -> set[str]:
+    kind, values = violation
+    if kind in {
+        "self_alias",
+        "duplicate_alias",
+        "disabled_receiver",
+        "unknown_alias",
+    }:
+        return {values[0]}
+    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner"}:
+        return set(values[:2])
+    return set(values)
+
+
+def _relationship_violation_message(
+    violation: _GroupViolation | _AliasViolation, language: str
+) -> str:
+    kind = violation[0]
+    if kind in {"self", "missing", "disabled", "member", "cycle"}:
+        return _group_violation_message(violation, language)
+    return _alias_violation_message(violation, language)
+
+
+def _recover_invalid_relationship_components(
     *,
     original: dict[str, dict[str, Any]],
     final: dict[str, dict[str, Any]],
     decisions: dict[str, dict[str, Any]],
     language: str,
+    spec: Any,
 ) -> None:
-    violations = _group_violations(final)
+    violations: list[_GroupViolation | _AliasViolation] = [
+        *_group_violations(final),
+        *_alias_violations(original, final, spec),
+    ]
     if not violations:
         return
-    graph = _decision_dependency_graph(original, final)
-    invalid_nodes = {value for _, values in violations for value in values}
+    graph = _decision_dependency_graph(original, final, spec)
+    invalid_nodes = {
+        node
+        for violation in violations
+        for node in _relationship_violation_nodes(violation)
+    }
     for component in _dependency_components(graph, invalid_nodes):
         affected = sorted(component & decisions.keys())
         if not affected:
             continue
         details = [
-            _group_violation_message(violation, language)
+            _relationship_violation_message(violation, language)
             for violation in violations
-            if component.intersection(violation[1])
+            if component.intersection(_relationship_violation_nodes(violation))
         ]
         if language == "en":
             reason = (
-                "Automatic group validation failed; this dependency component was "
+                "Automatic terminology relationship validation failed; this dependency component was "
                 "restored to its pre-run state and requires manual review: "
                 + "; ".join(details)
             )
         else:
             reason = (
-                "自动决策组关系校验未通过；该依赖组件已恢复为决策前状态，请人工审查："
+                "自动决策术语关系校验未通过；该依赖组件已恢复为决策前状态，请人工审查："
                 + "；".join(details)
             )
         for normalized in affected:
@@ -1114,13 +1345,14 @@ def _build_draft(
     source_overrides: dict[str, Any],
     model_fingerprint: str,
     prompt_fingerprint: str,
+    spec: Any,
 ) -> dict[str, Any]:
     changed = {
         key
         for key in final
         if key not in protected and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
-    graph = _decision_dependency_graph(original, final)
+    graph = _decision_dependency_graph(original, final, spec)
     components = _dependency_components(graph, changed, allowed=changed)
     proposals: list[dict[str, Any]] = []
     for component in sorted(components, key=lambda value: sorted(value)):
@@ -1179,14 +1411,19 @@ def _build_draft(
 
 
 def _validate_final_states(
-    project: Path, states: dict[str, dict[str, Any]]
+    project: Path,
+    states: dict[str, dict[str, Any]],
+    *,
+    original: dict[str, dict[str, Any]],
+    spec: Any,
 ) -> None:
     violations = _group_violations(states)
+    violations.extend(_alias_violations(original, states, spec))
     if violations:
         raise UsageError(
-            "术语决策生成非法组关系："
+            "术语决策生成非法术语关系："
             + "；".join(
-                _group_violation_message(violation, "zh-CN")
+                _relationship_violation_message(violation, "zh-CN")
                 for violation in violations
             )
         )
@@ -1211,7 +1448,7 @@ def _decision_fingerprint(
 ) -> str:
     data = {
         "stage": STAGE,
-        "rules_version": 2,
+        "rules_version": 3,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
@@ -1523,6 +1760,7 @@ async def run_terminology_decision(
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
                     review_states=states,
+                    spec=spec,
                 )
                 decisions.update(result)
                 records = checkpoint["phases"]["adjudication"]
@@ -1588,6 +1826,7 @@ async def run_terminology_decision(
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
                     review_states=states,
+                    spec=spec,
                 )
                 final_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
@@ -1611,13 +1850,14 @@ async def run_terminology_decision(
             final = _consistency_states(states, tentative, final_decisions)
             decisions = final_decisions
             usage = llm.usage_summary()
-        _recover_invalid_group_components(
+        _recover_invalid_relationship_components(
             original=states,
             final=final,
             decisions=decisions,
             language=language,
+            spec=spec,
         )
-        _validate_final_states(project, final)
+        _validate_final_states(project, final, original=states, spec=spec)
         draft = _build_draft(
             project_id=str(metadata["project_id"]),
             run_id=run_id,
@@ -1636,6 +1876,7 @@ async def run_terminology_decision(
             prompt_fingerprint=_composite_fingerprint(
                 checkpoint, "prompt_fingerprint"
             ),
+            spec=spec,
         )
         atomic_write_json(_draft_path(project, run_id), draft)
         manifest = read_json(project, run_dir / "manifest.json")
