@@ -1255,12 +1255,20 @@ def materialize_chunk_stream(
     run_id: str,
     stage: str,
     plans: Iterable[ChunkPlan],
+    *,
+    continuation_index: int = 0,
 ) -> Iterable[ChunkPlan]:
     code = STAGE_CODES[stage]
+    continuation_suffix = (
+        f"-R{continuation_index:04d}" if continuation_index else ""
+    )
     for index, plan in enumerate(plans, start=1):
         yield replace(
             plan,
-            chunk_id=f"CHK-{run_id}-{code}-{plan.file_id}-C{index:05d}",
+            chunk_id=(
+                f"CHK-{run_id}-{code}{continuation_suffix}-"
+                f"{plan.file_id}-C{index:05d}"
+            ),
         )
 
 
@@ -1460,7 +1468,7 @@ def continue_run(
     selected_count: int,
     requested_count: int,
     reused_count: int,
-) -> tuple[str, Path]:
+) -> tuple[str, Path, int]:
     run_dir = project / "runs" / run_id
     manifest = read_json(project, run_dir / "manifest.json")
     if manifest.get("status") != "running" or manifest.get("stage") != stage:
@@ -1497,7 +1505,7 @@ def continue_run(
     )
     manifest["continuations"] = continuations
     write_json(project, run_dir / "manifest.json", manifest)
-    return run_id, run_dir
+    return run_id, run_dir, index
 
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
