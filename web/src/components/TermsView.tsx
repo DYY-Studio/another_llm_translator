@@ -120,7 +120,6 @@ export function TermsView({
   const [exportOpen, setExportOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
   const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
-  const [manualQueue, setManualQueue] = useState<TermDecisionManualReviewItem[]>([]);
   const [manualReview, setManualReview] = useState(emptyManualReview);
   const [decisionDraftPending, setDecisionDraftPending] = useState(false);
   const [manualFocusId, setManualFocusId] = useState<string | null>(null);
@@ -214,12 +213,10 @@ export function TermsView({
   useEffect(() => {
     void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
       .then((value) => {
-        setManualQueue(value.manual_review.items);
         setManualReview(value.manual_review);
         setDecisionDraftPending(Boolean(value.draft));
       })
       .catch(() => {
-        setManualQueue([]);
         setManualReview(emptyManualReview);
         setDecisionDraftPending(false);
       });
@@ -429,9 +426,9 @@ export function TermsView({
   }
 
   const focusedManual = manualFocusId
-    ? manualQueue.find((item) => manualItemId(item) === manualFocusId) ?? null
+    ? manualReview.items.find((item) => manualItemId(item) === manualFocusId) ?? null
     : null;
-  const openManualItems = manualQueue.filter((item) => !item.resolved);
+  const openManualItems = manualReview.items.filter((item) => !item.resolved);
 
   function openDecision(tab: "proposals" | "manual" = "proposals") {
     if (tab === "manual" && decisionDraftPending) return;
@@ -440,7 +437,6 @@ export function TermsView({
   }
 
   function updateDecisionReview(value: TermDecisionReviewState) {
-    setManualQueue(value.manual_review.items);
     setManualReview(value.manual_review);
     setDecisionDraftPending(Boolean(value.draft));
   }
@@ -469,7 +465,6 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/decision/manual-review`,
         { method: "PUT", body: JSON.stringify({ run_id: item.run_id, normalized: item.normalized, resolved }) },
       );
-      setManualQueue(result.manual_review.items);
       setManualReview(result.manual_review);
     } catch (error) {
       setMessage(String(error));
