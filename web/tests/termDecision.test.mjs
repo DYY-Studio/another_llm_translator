@@ -107,6 +107,11 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.match(dialogSource, /runDialog\.decisionTitle/);
   assert.match(dialogSource, /decisionMode/);
   assert.match(dialogSource, /resultPolicy === "force"/);
+  assert.match(dialogSource, /checked=\{runAction === "decline"\}/);
+  assert.doesNotMatch(
+    dialogSource,
+    /!resuming && decisionMode && options\.running_run && <fieldset className="decision-group">/,
+  );
   const termsSource = await readFile(
     new URL("../src/components/TermsView.tsx", import.meta.url),
     "utf8",
