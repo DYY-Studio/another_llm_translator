@@ -179,13 +179,14 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
             str(item["normalized"])
             for item in overrides.get("overrides", [])
         }
-        selected = sum(
+        has_eligible = any(
             str(item["normalized"]) not in protected
             and not bool(item.get("disabled", False))
             for item in library.get("terms", [])
         )
         config = load_project_config(project, stage=stage)
-        plan = decision_plan(project) if selected else None
+        plan = decision_plan(project) if has_eligible else None
+        selected = len(plan["eligible"]) if plan else 0
         running_run = _running_run(project, stage, config)
         if running_run is not None:
             compatible, reason = decision_resume_compatibility(
@@ -204,7 +205,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
                 "model": str(config["llm"]["model"]),
             },
             "selected": selected,
-            "protected": len(protected),
+            "protected": len(plan["protected"]) if plan else len(protected),
             "overflow_policy": {
                 "allow_soft_target_overflow": bool(
                     config["terminology_decision"]["allow_soft_target_overflow"]
