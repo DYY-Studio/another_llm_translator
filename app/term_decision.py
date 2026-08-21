@@ -56,6 +56,16 @@ EVIDENCE_CONTEXT_RADIUS = 60
 RELATED_ANCHOR_LIMIT = 24
 _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 _DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
+_SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
+_SIMPLE_ACTION_REDUNDANT_FIELDS = frozenset(
+    {
+        "category",
+        "description",
+        "preferred_translation",
+        "aliases",
+        "group_primary",
+    }
+)
 _STATE_FIELDS = (
     "category",
     "description",
@@ -773,12 +783,14 @@ def _parse_decisions(
     prompt_language: str = "zh-CN",
     review_states: dict[str, dict[str, Any]] | None = None,
     spec: Any | None = None,
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
+) -> tuple[dict[str, dict[str, Any]], list[str], list[tuple[str, str]]]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = list(document.errors)
     expected = {str(item["normalized"]): item for item in focus}
     decisions: dict[str, dict[str, Any]] = {}
     ignored_read_only: list[str] = []
+    seen_targets: set[str] = set()
+    normalized_redundant: list[tuple[str, str]] = []
     for value in document.records:
         normalized = value.get("normalized")
         action = value.get("action")
@@ -788,9 +800,10 @@ def _parse_decisions(
                 continue
             errors.append(f"未知术语决策 normalized：{normalized}")
             continue
-        if normalized in decisions:
+        if normalized in seen_targets:
             errors.append(f"术语决策重复：{normalized}")
             continue
+        seen_targets.add(normalized)
         if action not in _DECISION_ACTIONS:
             errors.append(f"术语决策 action 无效：{normalized}")
             continue
@@ -798,28 +811,44 @@ def _parse_decisions(
         if not isinstance(reason, str) or not reason.strip():
             errors.append(f"术语决策 reason 必须是非空字符串：{normalized}")
             continue
-        simple_keys = {"type", "normalized", "action", "reason"}
-        update_keys = simple_keys | {
+        update_keys = _SIMPLE_ACTION_KEYS | {
             "category",
             "description",
             "preferred_translation",
             "aliases",
             "group_primary",
         }
-        expected_keys = update_keys if action == "update" else simple_keys
-        if set(value) != expected_keys:
-            missing_keys = sorted(expected_keys - set(value))
-            extra_keys = sorted(set(value) - expected_keys)
+        if action == "update":
+            if set(value) != update_keys:
+                missing_keys = sorted(update_keys - set(value))
+                extra_keys = sorted(set(value) - update_keys)
+                details = []
+                if missing_keys:
+                    details.append(f"缺少字段 {', '.join(missing_keys)}")
+                if extra_keys:
+                    details.append(f"禁止字段 {', '.join(extra_keys)}")
+                errors.append(
+                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
+                )
+                continue
+        else:
+            missing_keys = sorted(_SIMPLE_ACTION_KEYS - set(value))
+            extra_keys = set(value) - _SIMPLE_ACTION_KEYS
+            unknown_extra_keys = sorted(
+                extra_keys - _SIMPLE_ACTION_REDUNDANT_FIELDS
+            )
             details = []
             if missing_keys:
                 details.append(f"缺少字段 {', '.join(missing_keys)}")
+            if unknown_extra_keys:
+                details.append(f"禁止字段 {', '.join(unknown_extra_keys)}")
+            if details:
+                errors.append(
+                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
+                )
+                continue
             if extra_keys:
-                details.append(f"禁止字段 {', '.join(extra_keys)}")
-            errors.append(
-                f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
-            )
-            continue
-        if action != "update":
+                normalized_redundant.append((normalized, action))
             decisions[normalized] = {
                 "action": action,
                 "reason": reason.strip(),
@@ -887,14 +916,14 @@ def _parse_decisions(
         for violation in _group_violations(candidate_states)
         if focus_terms.intersection(violation[1])
     )
-    missing = sorted(set(expected) - set(decisions))
+    missing = sorted(set(expected) - seen_targets)
     if missing:
         errors.append(f"术语决策缺少记录：{', '.join(missing[:10])}")
     if not document.complete:
         errors.append("术语决策响应缺少 end")
     if errors:
         raise UsageError("；".join(errors[:10]))
-    return decisions, ignored_read_only
+    return decisions, ignored_read_only, normalized_redundant
 
 
 async def _request_batch(
@@ -989,7 +1018,7 @@ async def _request_batch(
             parent_request_id=parent_request_id,
         )
         try:
-            decisions, ignored_read_only = _parse_decisions(
+            decisions, ignored_read_only, normalized_redundant = _parse_decisions(
                 response.content,
                 focus,
                 all_forms=all_forms,
@@ -1005,6 +1034,22 @@ async def _request_batch(
                     request_id,
                     len(ignored_read_only),
                     ",".join(dict.fromkeys(ignored_read_only[:10])),
+                )
+            if normalized_redundant:
+                llm.logger.warning(
+                    "normalized redundant terminology fields request=%s count=%d "
+                    "actions=%s normalized=%s",
+                    request_id,
+                    len(normalized_redundant),
+                    ",".join(
+                        sorted({action for _, action in normalized_redundant})
+                    ),
+                    ",".join(
+                        dict.fromkeys(
+                            normalized
+                            for normalized, _ in normalized_redundant
+                        )
+                    )[:200],
                 )
             return decisions
         except UsageError as exc:
@@ -1448,7 +1493,7 @@ def _decision_fingerprint(
 ) -> str:
     data = {
         "stage": STAGE,
-        "rules_version": 3,
+        "rules_version": 4,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),

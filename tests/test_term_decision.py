@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -523,9 +524,9 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
                 "normalized": "target",
                 "action": "keep",
                 "reason": "保持",
-                "category": "人物",
+                "source": "Target",
             },
-            "keep 决策字段无效：target（禁止字段 category）",
+            "keep 决策字段无效：target（禁止字段 source）",
         ),
     ],
 )
@@ -542,6 +543,83 @@ def test_decision_parser_reports_exact_field_mismatch(
             read_only_terms=set(),
         )
     assert message in str(error.value)
+
+
+def test_simple_actions_drop_only_known_redundant_state_fields() -> None:
+    focus = [
+        _batch_state("keep-term", "Keep"),
+        _batch_state("disable-term", "Disable"),
+        _batch_state("review-term", "Review"),
+    ]
+    records = []
+    for state, action in zip(
+        focus, ("keep", "disable", "needs_review"), strict=True
+    ):
+        records.append(
+            {
+                "type": "decision",
+                "normalized": state["normalized"],
+                "action": action,
+                "reason": f"{action} reason",
+                # These values are deliberately malformed.  They are known
+                # state fields and must not be inspected or applied for a
+                # simple action.
+                "category": {"ignored": True},
+                "description": 123,
+                "preferred_translation": ["ignored"],
+                "aliases": "not-an-array",
+                "group_primary": 42,
+            }
+        )
+
+    decisions, ignored_read_only, normalized_redundant = _parse_decisions(
+        llm_jsonl(records),
+        focus,
+        all_forms={"Keep", "Disable", "Review"},
+        known_states={str(item["normalized"]): item for item in focus},
+        read_only_terms=set(),
+    )
+
+    assert ignored_read_only == []
+    assert normalized_redundant == [
+        ("keep-term", "keep"),
+        ("disable-term", "disable"),
+        ("review-term", "needs_review"),
+    ]
+    assert decisions == {
+        str(item["normalized"]): {
+            "action": action,
+            "reason": f"{action} reason",
+        }
+        for item, action in zip(
+            focus, ("keep", "disable", "needs_review"), strict=True
+        )
+    }
+
+
+def test_simple_action_field_error_does_not_report_target_as_missing() -> None:
+    focus = [_batch_state("target", "Target")]
+    with pytest.raises(UsageError) as error:
+        _parse_decisions(
+            llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": "target",
+                        "action": "keep",
+                        "reason": "保持",
+                        "disabled": False,
+                    }
+                ]
+            ),
+            focus,
+            all_forms={"Target"},
+            known_states={"target": focus[0]},
+            read_only_terms=set(),
+        )
+    message = str(error.value)
+    assert "禁止字段 disabled" in message
+    assert "缺少记录" not in message
 
 
 def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
@@ -583,7 +661,7 @@ def test_completed_consistency_state_prevents_stale_member_chain_repair() -> Non
         },
     )
 
-    decisions, _ = _parse_decisions(
+    decisions, _, _ = _parse_decisions(
         llm_jsonl([_update_decision("thunder", "monarch")]),
         [tentative["thunder"]],
         all_forms={"雷鳴公主", "轟雷", "モナークスプライト"},
@@ -659,7 +737,7 @@ def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
         "alice": focus[0],
         "bob": _batch_state("bob", "Bob"),
     }
-    decisions, _ = _parse_decisions(
+    decisions, _, _ = _parse_decisions(
         llm_jsonl([_update_decision("alice", "bob")]),
         focus,
         all_forms={"Alice", "Bob"},
@@ -672,7 +750,7 @@ def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
 def test_decision_parser_allows_review_to_restore_tentative_group_state() -> None:
     original = _batch_state("alice", "Alice")
     tentative = {**original, "group_primary": "alice"}
-    decisions, _ = _parse_decisions(
+    decisions, _, _ = _parse_decisions(
         llm_jsonl(
             [
                 {
@@ -935,6 +1013,69 @@ async def test_decision_format_repair_lists_exact_target_scope(
     assert summary["proposals"] == 1
     assert calls == 8
     assert repairs == 4
+
+
+@pytest.mark.asyncio
+async def test_redundant_simple_fields_are_logged_without_format_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    calls = 0
+    corrections = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls, corrections
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "format_correction" in payload:
+            corrections += 1
+        records = decision_response(payload)
+        for record in records:
+            if record["action"] != "update":
+                record.update(
+                    {
+                        "category": "错误类别",
+                        "description": "不应写入",
+                        "preferred_translation": "错误译名",
+                        "aliases": ["错误别名"],
+                        "group_primary": "错误组主",
+                    }
+                )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    messages: list[str] = []
+
+    class CaptureWarning(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    capture_handler = CaptureWarning(level=logging.WARNING)
+    decision_logger = logging.getLogger("another_llm_translator")
+    decision_logger.addHandler(capture_handler)
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(project, http_client=client)
+    finally:
+        del os.environ["LLM_API_KEY"]
+        decision_logger.removeHandler(capture_handler)
+        capture_handler.close()
+
+    assert summary["proposals"] == 1
+    assert calls == 4
+    assert corrections == 0
+    assert "normalized redundant terminology fields" in "\n".join(messages)
+    assert any(
+        "request=REQ-" in message
+        and "count=1" in message
+        and "normalized=bob" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio

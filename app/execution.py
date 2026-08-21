@@ -532,6 +532,14 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             " aliases=[] 时也不得省略键。\n"
             "type 必须为字符串 \"decision\"；action 只能为 keep、update、disable 或"
             " needs_review；每种 action（包括 update）都必须提供非空字符串 reason。\n"
+            "即使 terms[] 输入中的 category、description、preferred_translation、aliases、"
+            "group_primary 已有非空值，keep、disable、needs_review 也只能输出上述四个键；"
+            "正确示例仍是"
+            '{"type":"decision","normalized":"ship","action":"disable","reason":"普通词"}'
+            "或"
+            '{"type":"decision","normalized":"uncertain","action":"needs_review",'
+            '"reason":"证据不足"}。错误示例是 disable 或 needs_review 复制 category、'
+            "preferred_translation 等状态字段。\n"
             "【update 字段值】category、description、preferred_translation、group_primary "
             "的值为字符串或 JSON null，禁止用空字符串代替 null。aliases 必须是 JSON "
             "字符串数组，允许 []。description 只能逐字保持当前 terms[] 值或清为 null，"
@@ -560,8 +568,10 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             '{"type":"decision","normalized":"uncertain","action":"needs_review",'
             '"reason":"证据不足，无法确定合法组主"}\n'
             '{"type":"end"}\n'
-            "【错误示例】update 缺少 reason 或任何 nullable 键：键仍是必填；keep 带 category："
-            "出现禁用的额外字段；输入 description=null 却写入说明：非法新写；aliases 写入"
+            "【错误示例】update 缺少 reason 或任何 nullable 键：键仍是必填；即使输入已有类别"
+            "和译名，disable/needs_review 仍复制 category、preferred_translation、aliases、"
+            "group_primary 等字段：出现禁用的额外字段；输入 description=null 却写入说明：非法新写；"
+            "aliases 写入"
             "输入中不存在的形式：虚构 alias；只新增其他术语仍在使用的 alias、让非根术语接收"
             "alias、输出 anchor、group_primary 指向自身、使用"
             " Markdown 代码围栏或在 end 后继续输出：均非法。"
@@ -584,6 +594,14 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "are required even when a value is null or aliases is [].\n"
             'type must be the string "decision". action must be keep, update, disable, or '
             "needs_review. Every action, including update, requires a non-empty string reason.\n"
+            "Even when terms[] contains non-null category, description, preferred_translation, "
+            "aliases, or group_primary, keep, disable, and needs_review still contain only "
+            "the four keys above. Correct examples remain "
+            '{"type":"decision","normalized":"ship","action":"disable","reason":"ordinary word"}'
+            " and "
+            '{"type":"decision","normalized":"uncertain","action":"needs_review",'
+            '"reason":"insufficient evidence"}. An invalid response copies category or '
+            "preferred_translation (or other state fields) into disable or needs_review.\n"
             "[update values] category, description, preferred_translation, and group_primary "
             "are strings or JSON null; never use an empty string instead of null. aliases "
             "must be a JSON array of strings and may be []. description may only copy the "
@@ -620,7 +638,9 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             '"reason":"evidence is insufficient to determine a legal root"}\n'
             '{"type":"end"}\n'
             "[Invalid examples] An update missing reason or any nullable key is invalid because "
-            "the keys remain required. A keep with category has a forbidden extra key. Adding "
+            "the keys remain required. Even with existing category and translation, a disable or "
+            "needs_review that copies category, preferred_translation, aliases, or group_primary "
+            "has forbidden extra keys. A keep with category also violates the exact contract. Adding "
             "text when the input description is null invents a description. An alias absent "
             "from the input invents a source form. Adding an alias still retained by another "
             "term, letting a non-root receive an alias, outputting an anchor, self-referencing "
