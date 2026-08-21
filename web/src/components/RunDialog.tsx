@@ -161,18 +161,6 @@ export function RunDialog({
             </label>
           </fieldset>
         )}
-        {!resuming && decisionMode && options.running_run && <fieldset className="decision-group">
-          <legend>{translate("terms.decisionForce", language)}</legend>
-          <label className="radio-option decision-option">
-            <input
-              type="radio"
-              checked={resultPolicy === "force"}
-              onChange={() => setResultPolicy("force")}
-            />
-            <span><strong>{translate("terms.decisionForce", language)}</strong><small>{translate("terms.decisionForceHint", language)}</small></span>
-          </label>
-        </fieldset>}
-
         <div className="modal-actions">
           <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
           <button className="primary-button" disabled={!ready} onClick={submit}>
