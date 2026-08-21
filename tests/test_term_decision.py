@@ -25,6 +25,7 @@ from app.term_decision import (
     _apply_tentative,
     _consistency_states,
     _group_violations,
+    _hard_components,
     _make_payload,
     _merge_phase_decisions,
     _pack_batches,
@@ -34,6 +35,7 @@ from app.term_decision import (
     apply_decision_draft,
     collect_term_evidence,
     current_decision_draft,
+    decision_plan,
     manual_review_state,
     rollback_decision,
     run_terminology_decision,
@@ -427,6 +429,84 @@ def test_related_anchors_prioritize_effective_group_dependencies(
         "princess",
         "thunder-name",
     ]
+
+
+def test_hard_components_join_groups_and_normalized_form_owners(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    spec = term_normalization(load_project_config(project))
+    root = {**_batch_state("root", "Root"), "aliases": ["Shared"]}
+    member = {**_batch_state("member", "Member"), "group_primary": "root"}
+    owner = _batch_state("owner", "Ｓｈａｒｅｄ")
+    separate = _batch_state("separate", "Elsewhere")
+
+    components = _hard_components([root, member, owner, separate], spec)
+
+    assert [
+        [item["normalized"] for item in component] for component in components
+    ] == [["member", "owner", "root"], ["separate"]]
+
+
+def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["chunking"]["target_chunk_input_tokens"] = 50
+    config["llm"]["context_window_tokens"] = 100
+    config["llm"]["context_safety_margin_tokens"] = 0
+    config["execution"]["input_tokens_per_minute"] = 0
+    root = _batch_state("root", "Root")
+    member = {**_batch_state("member", "Member"), "group_primary": "root"}
+    evidence = _batch_evidence(root, member)
+
+    def estimate(messages: list[dict[str, str]], _: float) -> int:
+        payload = json.loads(messages[1]["content"])
+        return 30 * len(payload["terms"])
+
+    monkeypatch.setattr("app.term_decision.estimate_messages", estimate)
+    spec = term_normalization(config)
+    batches, _ = _pack_batches(
+        [root, member],
+        phase="adjudication",
+        target_language="简体中文",
+        anchors=[],
+        evidence=evidence,
+        prompt="prompt",
+        config=config,
+        spec=spec,
+    )
+    assert {item["normalized"] for item in batches[0][0]} == {"root", "member"}
+
+    config["llm"]["context_window_tokens"] = 50
+    with pytest.raises(RequestSizeError, match=r"Root.*Member|Member.*Root"):
+        _pack_batches(
+            [root, member],
+            phase="adjudication",
+            target_language="简体中文",
+            anchors=[],
+            evidence=evidence,
+            prompt="prompt",
+            config=config,
+            spec=spec,
+        )
+
+
+def test_dry_run_plans_second_phase_instead_of_doubling_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    observed: list[tuple[str, int]] = []
+
+    def planned(states: list[dict], *, phase: str, anchors: list[dict], **_: object):
+        observed.append((phase, len(anchors)))
+        return ([(states, anchors)], 10 if phase == "adjudication" else 25)
+
+    monkeypatch.setattr("app.term_decision._pack_batches", planned)
+    plan = decision_plan(project)
+
+    assert observed == [("adjudication", 0), ("consistency", 2)]
+    assert plan["estimated_requests"] == 2
+    assert plan["estimated_input_tokens"] == 35
 
 
 def test_decision_batch_overflow_policy_controls_local_planning(
