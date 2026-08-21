@@ -831,34 +831,6 @@ def _alias_violation_message(violation: _AliasViolation, language: str) -> str:
     return f"术语 {values[0]} 含有重复的规范化 alias"
 
 
-def _parse_decisions(
-    content: str,
-    focus: list[dict[str, Any]],
-    *,
-    visible_states: list[dict[str, Any]],
-    known_states: dict[str, dict[str, Any]],
-    read_only_terms: set[str],
-    prompt_language: str = "zh-CN",
-    review_states: dict[str, dict[str, Any]] | None = None,
-    spec: Any | None = None,
-    phase: str = "adjudication",
-) -> tuple[dict[str, dict[str, Any]], list[str], list[tuple[str, str]]]:
-    result = _analyze_decisions(
-        content,
-        focus,
-        visible_states=visible_states,
-        known_states=known_states,
-        read_only_terms=read_only_terms,
-        prompt_language=prompt_language,
-        review_states=review_states,
-        spec=spec,
-        phase=phase,
-    )
-    if result[3]:
-        raise UsageError("；".join(error["message"] for error in result[3][:10]))
-    return result[0], result[1], result[2]
-
-
 def _analyze_decisions(
     content: str,
     focus: list[dict[str, Any]],
