@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 
@@ -2563,6 +2563,52 @@ def _apply_debug_content_injections(
     return response
 
 
+_Item = TypeVar("_Item")
+_Result = TypeVar("_Result")
+
+
+async def run_bounded(
+    items: Iterable[_Item],
+    worker: Callable[[_Item], Awaitable[_Result]],
+    *,
+    max_parallel: int,
+) -> list[_Result]:
+    """Run worker over items with at most max_parallel in-flight tasks."""
+    if max_parallel < 1:
+        raise ConfigError("max_parallel 必须是正整数")
+    iterator = iter(items)
+    pending: dict[asyncio.Task[_Result], int] = {}
+    results: dict[int, _Result] = {}
+    next_index = 0
+
+    def fill() -> None:
+        nonlocal next_index
+        while len(pending) < max_parallel:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+            task = asyncio.create_task(worker(item))
+            pending[task] = next_index
+            next_index += 1
+
+    fill()
+    try:
+        while pending:
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                index = pending.pop(task)
+                results[index] = task.result()
+            fill()
+    except BaseException:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
+    return [results[index] for index in range(next_index)]
+
+
 async def dispatch_chunks(
     chunks: Iterable[ChunkPlan],
     worker: Callable[[ChunkPlan], Awaitable[Any]],
@@ -2653,37 +2699,7 @@ async def dispatch_chunks(
         return [results[index] for index in range(next_index)]
     if mode != "parallel":
         raise ConfigError(f"未知调度模式：{mode}")
-    iterator = iter(chunks)
-    pending: dict[asyncio.Task[Any], int] = {}
-    results: dict[int, Any] = {}
-    next_index = 0
-
-    def fill() -> None:
-        nonlocal next_index
-        while len(pending) < max_parallel:
-            try:
-                chunk = next(iterator)
-            except StopIteration:
-                return
-            task = asyncio.create_task(worker(chunk))
-            pending[task] = next_index
-            next_index += 1
-
-    fill()
-    try:
-        while pending:
-            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                index = pending.pop(task)
-                results[index] = task.result()
-            fill()
-    except BaseException:
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        raise
-    return [results[index] for index in range(next_index)]
+    return await run_bounded(chunks, worker, max_parallel=max_parallel)
 
 
 _SUPPORTED_FENCE_LABELS = {"", "jsonl", "ndjson", "json"}

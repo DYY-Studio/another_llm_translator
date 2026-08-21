@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from itertools import pairwise
 from pathlib import Path
@@ -28,6 +28,7 @@ from .execution import (
     full_prompt,
     parse_jsonl_document,
     render_messages,
+    run_bounded,
     unavailable_usage,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
@@ -1286,48 +1287,6 @@ async def _request_batch(
     raise error
 
 
-async def _dispatch_batches(
-    batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
-    worker: Callable[
-        [list[dict[str, Any]], list[dict[str, Any]]],
-        Awaitable[None],
-    ],
-    *,
-    max_parallel: int,
-) -> None:
-    iterator = iter(batches)
-    pending: set[asyncio.Task[None]] = set()
-
-    def fill() -> None:
-        while len(pending) < max_parallel:
-            try:
-                focus, anchors = next(iterator)
-            except StopIteration:
-                return
-            pending.add(asyncio.create_task(worker(focus, anchors)))
-
-    fill()
-    try:
-        while pending:
-            done, still_pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
-            )
-            pending = still_pending
-            try:
-                for task in done:
-                    task.result()
-            except BaseException:
-                pending.update(done)
-                raise
-            fill()
-    except BaseException:
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        raise
-
-
 def _checkpoint_path(project: Path, run_id: str) -> Path:
     return project / "runs" / run_id / CHECKPOINT_FILE
 
@@ -2208,8 +2167,9 @@ async def run_terminology_decision(
             )
 
             async def adjudicate(
-                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+                batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
             ) -> None:
+                focus, anchors = batch
                 nonlocal completed
                 result = await _request_batch(
                     llm,
@@ -2239,7 +2199,7 @@ async def run_terminology_decision(
                 if on_progress:
                     on_progress(completed, 0, total)
 
-            await _dispatch_batches(
+            await run_bounded(
                 phase_one,
                 adjudicate,
                 max_parallel=int(config["execution"]["max_parallel"]),
@@ -2275,8 +2235,9 @@ async def run_terminology_decision(
             )
 
             async def review_consistency(
-                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+                batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
             ) -> None:
+                focus, anchors = batch
                 nonlocal completed
                 result = await _request_batch(
                     llm,
@@ -2306,7 +2267,7 @@ async def run_terminology_decision(
                 if on_progress:
                     on_progress(completed, 0, total)
 
-            await _dispatch_batches(
+            await run_bounded(
                 phase_two,
                 review_consistency,
                 max_parallel=int(config["execution"]["max_parallel"]),
