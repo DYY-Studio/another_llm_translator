@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from itertools import pairwise
 from pathlib import Path
@@ -28,6 +28,7 @@ from .execution import (
     full_prompt,
     parse_jsonl_document,
     render_messages,
+    run_bounded,
     unavailable_usage,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
@@ -76,7 +77,6 @@ _STATE_FIELDS = (
 _PHASES = ("adjudication", "consistency")
 
 _GroupViolation = tuple[str, tuple[str, ...]]
-_AliasViolation = tuple[str, tuple[str, ...]]
 
 
 def _prompt_language(project: Path, requested: str | None) -> str:
@@ -204,7 +204,6 @@ def collect_term_evidence(
                     views,
                     matched,
                     raw_views=raw_views,
-                    source=source,
                     spec=spec,
                 )
                 samples.append(
@@ -228,7 +227,6 @@ def _evidence_excerpt(
     matched: list[tuple[str, str]],
     *,
     raw_views: list[str],
-    source: str,
     spec: Any,
 ) -> tuple[str, str]:
     """Return a bounded, labelled context excerpt around the first hit."""
@@ -252,7 +250,7 @@ def _evidence_excerpt(
             else:
                 view_name = "aozora_reading"
             return view_name, excerpt
-    return "source", source[: EVIDENCE_CONTEXT_RADIUS * 2]
+    raise StorageError("术语决策证据摘录无法定位命中形式")
 
 
 def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
@@ -514,9 +512,7 @@ def _pack_batches(
         )
 
     def overflow_reason() -> str:
-        if hard_limit == context_limit:
-            return "context"
-        if hard_limit == itpm_limit:
+        if hard_limit == itpm_limit and itpm_limit < context_limit:
             return "itpm"
         return "context"
 
@@ -710,7 +706,7 @@ def _alias_violations(
     original: dict[str, dict[str, Any]],
     final: dict[str, dict[str, Any]],
     spec: Any,
-) -> list[_AliasViolation]:
+) -> list[_GroupViolation]:
     """Find newly introduced alias ownership that is not an explicit relation."""
     owners: dict[str, set[str]] = {}
     for normalized, state in original.items():
@@ -720,7 +716,7 @@ def _alias_violations(
             if form:
                 owners.setdefault(form, set()).add(normalized)
 
-    violations: list[_AliasViolation] = []
+    violations: list[_GroupViolation] = []
     for normalized, state in final.items():
         alias_forms = [
             normalize_term(str(value), spec) for value in state.get("aliases", [])
@@ -799,7 +795,7 @@ def _alias_violations(
     return violations
 
 
-def _alias_violation_message(violation: _AliasViolation, language: str) -> str:
+def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
     kind, values = violation
     if kind == "alias_transfer":
         receiver, owner, alias = values
@@ -829,34 +825,6 @@ def _alias_violation_message(violation: _AliasViolation, language: str) -> str:
     if language == "en":
         return f"term {values[0]} contains duplicate normalized aliases"
     return f"术语 {values[0]} 含有重复的规范化 alias"
-
-
-def _parse_decisions(
-    content: str,
-    focus: list[dict[str, Any]],
-    *,
-    visible_states: list[dict[str, Any]],
-    known_states: dict[str, dict[str, Any]],
-    read_only_terms: set[str],
-    prompt_language: str = "zh-CN",
-    review_states: dict[str, dict[str, Any]] | None = None,
-    spec: Any | None = None,
-    phase: str = "adjudication",
-) -> tuple[dict[str, dict[str, Any]], list[str], list[tuple[str, str]]]:
-    result = _analyze_decisions(
-        content,
-        focus,
-        visible_states=visible_states,
-        known_states=known_states,
-        read_only_terms=read_only_terms,
-        prompt_language=prompt_language,
-        review_states=review_states,
-        spec=spec,
-        phase=phase,
-    )
-    if result[3]:
-        raise UsageError("；".join(error["message"] for error in result[3][:10]))
-    return result[0], result[1], result[2]
 
 
 def _analyze_decisions(
@@ -1314,48 +1282,6 @@ async def _request_batch(
     raise error
 
 
-async def _dispatch_batches(
-    batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
-    worker: Callable[
-        [list[dict[str, Any]], list[dict[str, Any]]],
-        Awaitable[None],
-    ],
-    *,
-    max_parallel: int,
-) -> None:
-    iterator = iter(batches)
-    pending: set[asyncio.Task[None]] = set()
-
-    def fill() -> None:
-        while len(pending) < max_parallel:
-            try:
-                focus, anchors = next(iterator)
-            except StopIteration:
-                return
-            pending.add(asyncio.create_task(worker(focus, anchors)))
-
-    fill()
-    try:
-        while pending:
-            done, still_pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
-            )
-            pending = still_pending
-            try:
-                for task in done:
-                    task.result()
-            except BaseException:
-                pending.update(done)
-                raise
-            fill()
-    except BaseException:
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        raise
-
-
 def _checkpoint_path(project: Path, run_id: str) -> Path:
     return project / "runs" / run_id / CHECKPOINT_FILE
 
@@ -1607,7 +1533,7 @@ def _dependency_components(
 
 
 def _relationship_violation_nodes(
-    violation: _GroupViolation | _AliasViolation,
+    violation: _GroupViolation,
 ) -> set[str]:
     kind, values = violation
     if kind in {
@@ -1623,7 +1549,7 @@ def _relationship_violation_nodes(
 
 
 def _relationship_violation_message(
-    violation: _GroupViolation | _AliasViolation, language: str
+    violation: _GroupViolation, language: str
 ) -> str:
     kind = violation[0]
     if kind in {"self", "missing", "disabled", "member", "cycle"}:
@@ -1639,7 +1565,7 @@ def _recover_invalid_relationship_components(
     language: str,
     spec: Any,
 ) -> None:
-    violations: list[_GroupViolation | _AliasViolation] = [
+    violations: list[_GroupViolation] = [
         *_group_violations(final),
         *_alias_violations(original, final, spec),
     ]
@@ -2236,8 +2162,9 @@ async def run_terminology_decision(
             )
 
             async def adjudicate(
-                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+                batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
             ) -> None:
+                focus, anchors = batch
                 nonlocal completed
                 result = await _request_batch(
                     llm,
@@ -2267,7 +2194,7 @@ async def run_terminology_decision(
                 if on_progress:
                     on_progress(completed, 0, total)
 
-            await _dispatch_batches(
+            await run_bounded(
                 phase_one,
                 adjudicate,
                 max_parallel=int(config["execution"]["max_parallel"]),
@@ -2303,8 +2230,9 @@ async def run_terminology_decision(
             )
 
             async def review_consistency(
-                focus: list[dict[str, Any]], anchors: list[dict[str, Any]]
+                batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
             ) -> None:
+                focus, anchors = batch
                 nonlocal completed
                 result = await _request_batch(
                     llm,
@@ -2334,7 +2262,7 @@ async def run_terminology_decision(
                 if on_progress:
                     on_progress(completed, 0, total)
 
-            await _dispatch_batches(
+            await run_bounded(
                 phase_two,
                 review_consistency,
                 max_parallel=int(config["execution"]["max_parallel"]),
@@ -2414,12 +2342,7 @@ async def run_terminology_decision(
             "pending": 0,
             "usage": usage or unavailable_usage(),
         }
-    except asyncio.CancelledError as exc:
-        if "llm" in locals():
-            usage = llm.usage_summary()
-        record_resumable_interruption(usage, exc)
-        raise
-    except Exception as exc:
+    except BaseException as exc:
         if "llm" in locals():
             usage = llm.usage_summary()
         record_resumable_interruption(usage, exc)
@@ -2557,10 +2480,7 @@ def apply_decision_draft(
             "aliases": list(state.get("aliases", [])),
             "disabled": bool(state.get("disabled")),
         }
-        if state.get("group_primary") is not None:
-            override["group_primary"] = state["group_primary"]
-        else:
-            override["group_primary"] = None
+        override["group_primary"] = state.get("group_primary")
         overrides[normalized] = override
         if override["disabled"]:
             current.pop(normalized, None)

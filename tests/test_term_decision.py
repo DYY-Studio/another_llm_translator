@@ -28,6 +28,7 @@ from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
     _alias_violations,
+    _analyze_decisions,
     _apply_tentative,
     _consistency_states,
     _group_violations,
@@ -35,7 +36,6 @@ from app.term_decision import (
     _make_payload,
     _merge_phase_decisions,
     _pack_batches,
-    _parse_decisions,
     _recover_invalid_relationship_components,
     _related_anchors,
     apply_decision_draft,
@@ -629,14 +629,23 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
             },
         ]
     )
-    with pytest.raises(UsageError, match="未知术语决策 normalized：not-an-anchor"):
-        _parse_decisions(
-            content,
-            focus,
-            visible_states=focus,
-            known_states={"target": focus[0]},
-            read_only_terms={"known-anchor"},
-        )
+    decisions, ignored_read_only, _, errors, _, batch_error = _analyze_decisions(
+        content,
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms={"known-anchor"},
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    assert decisions == {"target": {"action": "keep", "reason": "保持"}}
+    assert ignored_read_only == []
+    assert len(errors) == 1
+    assert errors[0]["code"] == "unknown_record"
+    assert "未知术语决策 normalized：not-an-anchor" in errors[0]["message"]
+    assert batch_error is True
 
 
 @pytest.mark.parametrize(
@@ -668,15 +677,19 @@ def test_decision_parser_reports_exact_field_mismatch(
     record: dict[str, object], message: str
 ) -> None:
     focus = [_batch_state("target", "Target")]
-    with pytest.raises(UsageError) as error:
-        _parse_decisions(
-            llm_jsonl([record]),
-            focus,
-            visible_states=focus,
-            known_states={"target": focus[0]},
-            read_only_terms=set(),
-        )
-    assert message in str(error.value)
+    _, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl([record]),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    assert len(errors) == 1
+    assert message in errors[0]["message"]
 
 
 def test_simple_actions_accept_only_matching_redundant_state_fields() -> None:
@@ -701,14 +714,21 @@ def test_simple_actions_accept_only_matching_redundant_state_fields() -> None:
             }
         )
 
-    decisions, ignored_read_only, normalized_redundant = _parse_decisions(
-        llm_jsonl(records),
-        focus,
-        visible_states=focus,
-        known_states={str(item["normalized"]): item for item in focus},
-        read_only_terms=set(),
+    decisions, ignored_read_only, normalized_redundant, errors, _, _ = (
+        _analyze_decisions(
+            llm_jsonl(records),
+            focus,
+            visible_states=focus,
+            known_states={str(item["normalized"]): item for item in focus},
+            read_only_terms=set(),
+            prompt_language="zh-CN",
+            review_states=None,
+            spec=None,
+            phase="adjudication",
+        )
     )
 
+    assert errors == []
     assert ignored_read_only == []
     assert normalized_redundant == [
         ("keep-term", "keep"),
@@ -726,25 +746,28 @@ def test_simple_actions_accept_only_matching_redundant_state_fields() -> None:
 
 def test_simple_action_field_error_does_not_report_target_as_missing() -> None:
     focus = [_batch_state("target", "Target")]
-    with pytest.raises(UsageError) as error:
-        _parse_decisions(
-            llm_jsonl(
-                [
-                    {
-                        "type": "decision",
-                        "normalized": "target",
-                        "action": "keep",
-                        "reason": "保持",
-                        "disabled": False,
-                    }
-                ]
-            ),
-            focus,
-            visible_states=focus,
-            known_states={"target": focus[0]},
-            read_only_terms=set(),
-        )
-    message = str(error.value)
+    *_, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "keep",
+                    "reason": "保持",
+                    "disabled": False,
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    message = "；".join(error["message"] for error in errors)
     assert "禁止字段 disabled" in message
     assert "缺少记录" not in message
 
@@ -784,15 +807,19 @@ def test_completed_consistency_state_prevents_stale_member_chain_repair() -> Non
         },
     )
 
-    decisions, _, _ = _parse_decisions(
+    decisions, _, _, errors, _, _ = _analyze_decisions(
         llm_jsonl([_update_decision("thunder", "monarch")]),
         [tentative["thunder"]],
         visible_states=list(effective.values()),
         known_states=effective,
         read_only_terms={"princess", "monarch"},
+        prompt_language="zh-CN",
         review_states=original,
+        spec=None,
+        phase="adjudication",
     )
 
+    assert errors == []
     assert decisions["thunder"]["after"]["group_primary"] == "monarch"
 
 
@@ -844,14 +871,18 @@ def test_decision_parser_rejects_provable_group_violations(
     records: list[dict[str, object]],
     message: str,
 ) -> None:
-    with pytest.raises(UsageError, match=message):
-        _parse_decisions(
-            llm_jsonl(records),
-            focus,
-            visible_states=list(known_states.values()),
-            known_states=known_states,
-            read_only_terms=set(),
-        )
+    _, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(records),
+        focus,
+        visible_states=list(known_states.values()),
+        known_states=known_states,
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    assert message in [error["message"] for error in errors]
 
 
 def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
@@ -860,20 +891,25 @@ def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
         "alice": focus[0],
         "bob": _batch_state("bob", "Bob"),
     }
-    decisions, _, _ = _parse_decisions(
+    decisions, _, _, errors, _, _ = _analyze_decisions(
         llm_jsonl([_update_decision("alice", "bob")]),
         focus,
         visible_states=list(states.values()),
         known_states=states,
         read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
     )
+    assert errors == []
     assert decisions["alice"]["after"]["group_primary"] == "bob"
 
 
 def test_decision_parser_allows_review_to_restore_tentative_group_state() -> None:
     original = _batch_state("alice", "Alice")
     tentative = {**original, "group_primary": "alice"}
-    decisions, _, _ = _parse_decisions(
+    decisions, _, _, errors, _, _ = _analyze_decisions(
         llm_jsonl(
             [
                 {
@@ -888,8 +924,12 @@ def test_decision_parser_allows_review_to_restore_tentative_group_state() -> Non
         visible_states=[tentative],
         known_states={"alice": tentative},
         read_only_terms=set(),
+        prompt_language="zh-CN",
         review_states={"alice": original},
+        spec=None,
+        phase="adjudication",
     )
+    assert errors == []
     assert decisions["alice"]["action"] == "needs_review"
 
 
@@ -910,36 +950,45 @@ def test_empty_patch_only_resolves_prior_review_or_reenables_disabled() -> None:
         }
         for normalized in ("reviewed", "disabled")
     ]
-    decisions, _, _ = _parse_decisions(
+    decisions, _, _, errors, _, _ = _analyze_decisions(
         llm_jsonl(records),
         [reviewed, disabled],
         visible_states=[reviewed, disabled],
         known_states={"reviewed": reviewed, "disabled": disabled},
         read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
         phase="consistency",
     )
+    assert errors == []
     assert decisions["reviewed"]["after"]["disabled"] is False
     assert decisions["disabled"]["after"]["disabled"] is False
 
-    with pytest.raises(UsageError, match="changes 不得为空"):
-        _parse_decisions(
-            llm_jsonl(
-                [
-                    {
-                        "type": "decision",
-                        "normalized": "ordinary",
-                        "action": "update",
-                        "reason": "无变化",
-                        "changes": {},
-                    }
-                ]
-            ),
-            [ordinary],
-            visible_states=[ordinary],
-            known_states={"ordinary": ordinary},
-            read_only_terms=set(),
-            phase="consistency",
-        )
+    _, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "ordinary",
+                    "action": "update",
+                    "reason": "无变化",
+                    "changes": {},
+                }
+            ]
+        ),
+        [ordinary],
+        visible_states=[ordinary],
+        known_states={"ordinary": ordinary},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="consistency",
+    )
+    assert len(errors) == 1
+    assert errors[0]["code"] == "empty_patch"
+    assert "changes 不得为空" in errors[0]["message"]
 
 
 def test_group_validation_collects_every_illegal_relationship_shape() -> None:
