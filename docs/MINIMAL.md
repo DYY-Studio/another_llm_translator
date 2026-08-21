@@ -1021,28 +1021,33 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 
 固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action
 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、
-`normalized`、`action`、`reason`；`update` 还必须输出 `category`、`description`、
-`preferred_translation`、`aliases`、`group_primary`，这些键全部必填，即使可空字段为
-JSON `null` 或 `aliases` 为空数组也不能省略。`update` 表示完整目标状态；
+`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。Patch 只能包含
+实际修改的 `category`、`description`、`preferred_translation`、`aliases`、
+`group_primary`；宿主将它应用于输入状态并生成完整 `after`。空 Patch 只允许第二阶段
+显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。
 `description` 只能保留当前值或清空，alias 只能选用输入中可见的既有源文形式。
-固定 Prompt 同时提供精简正反示例，格式修正请求会重述相同字段模板和当前批次唯一允许的
-`normalized` 集合。
+格式修正请求携带结构化错误、上轮无效记录、已接受项和本轮唯一目标；完整校验通过的
+无关关系组件不会重复请求。连续出现相同错误时，各未决硬关系组件独立修正，但组件内部
+不可拆分。批级 JSONL、end 或未知记录错误仍使该次请求整体未决。
 
 alias 转移必须是完整的多术语关系操作：接收方必须是启用的根术语，原所有者必须释放
 该 alias、被禁用，或在 source 转移时直接成为接收方成员。单边新增其他术语仍持有的
 source/alias、规范化后重复 alias 和把自身 source 作为 alias 都会被宿主拒绝；跨批次才能
 确认的关系冲突会恢复整个依赖组件并列入 `needs_review`，不会产生隐式归组或部分建议。
 
-第二阶段的 `terms` 和 `anchors` 输入携带只读 `disabled`，使模型能看到第一阶段及已完成
-第二阶段的实际启用状态；该字段不得出现在 decision 输出中。`keep` 保持当前启用状态，
-`disable` 软禁用，`update` 提交完整字段并启用术语。
+第二阶段的 `terms` 和 `anchors` 输入携带只读 `disabled`，`terms` 还携带只读的第一阶段
+action/reason；该字段不得出现在 decision 输出中。第二阶段 `keep` 保留第一阶段 disposition
+及理由，只有显式 `update`、`disable`、`needs_review` 才覆盖；第二阶段 `needs_review`
+恢复运行前状态。`disable` 软禁用，`update` 应用 Patch 并启用术语。
 
 两个阶段分别按当前 Preset 的 `max_parallel` 有界并发，第一阶段全部完成并形成统一
 暂定状态后才进入第二阶段。每个完整校验通过的批次原子写入 Run 检查点；用户取消或
 进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
 和 Prompt。续作剩余第二阶段前，宿主将已完成的第二阶段检查点叠加到第一阶段暂定状态，
 并用这一不可变快照生成 focus、anchors 和关系校验状态；当前并发兄弟批次不会动态互相影响。
-源术语 revision 已变化时拒绝续作。强制重做会结束旧 Run 并忽略检查点。
+源术语 revision 或决策规则版本已变化时，在创建 continuation 前拒绝续作。旧规则 Run
+必须由用户显式结束并强制新建，不提供双协议兼容路径。中断 manifest 只记录安全错误码、
+原因码、最后 request ID 和完成步数，不保存 Prompt、响应或术语正文。强制重做会结束旧 Run 并忽略检查点。
 检查点不是草案，不能审核或应用。
 
 完整结果保存为绑定源术语 revision、模型和 Prompt 指纹的待处理草案。单术语建议可

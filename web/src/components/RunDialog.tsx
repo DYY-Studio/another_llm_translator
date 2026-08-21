@@ -20,10 +20,14 @@ export function RunDialog({
   language: Language;
 }) {
   const [runAction, setRunAction] = useState<"resume" | "decline" | null>(
-    options.running_run ? "resume" : null,
+    options.running_run
+      ? options.running_run.resume_compatible === false ? "decline" : "resume"
+      : null,
   );
   const [resultPolicy, setResultPolicy] = useState<ResultPolicy | null>(
-    options.mismatched_fingerprint_completed ? null : "pending",
+    options.running_run?.resume_compatible === false
+      ? "force"
+      : options.mismatched_fingerprint_completed ? null : "pending",
   );
   const decisionMode = options.stage === "terminology_decision";
   const resuming = runAction === "resume";
@@ -83,10 +87,16 @@ export function RunDialog({
         {options.running_run && (
           <fieldset className="decision-group">
             <legend>{translate("runDialog.unfinishedRun", language)}</legend>
+            {options.running_run.resume_compatible === false && (
+              <div className="warning-banner run-warning">
+                {translate("terms.decisionResumeIncompatible", language)} {options.running_run.resume_incompatibility_reason}
+              </div>
+            )}
             <label className="radio-option decision-option">
               <input
                 type="radio"
                 checked={runAction === "resume"}
+                disabled={options.running_run.resume_compatible === false}
                 onChange={() => chooseRunAction("resume")}
               />
               <span><strong>{translate(decisionMode ? "terms.decisionResume" : "runDialog.resumeOriginal", language)}</strong><small>{decisionMode ? translate("terms.decisionResumeHint", language, { completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? options.selected * 2 }) : translate("runDialog.resumeHint", language)}</small></span>

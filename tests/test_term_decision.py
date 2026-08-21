@@ -22,9 +22,11 @@ from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
     _alias_violations,
+    _apply_tentative,
     _consistency_states,
     _group_violations,
     _make_payload,
+    _merge_phase_decisions,
     _pack_batches,
     _parse_decisions,
     _recover_invalid_relationship_components,
@@ -37,6 +39,7 @@ from app.term_decision import (
     run_terminology_decision,
     save_decision_rejections,
 )
+from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
@@ -114,11 +117,11 @@ def decision_response(payload: dict) -> list[dict]:
                     "normalized": "alice",
                     "action": "update",
                     "reason": "补全译名并清理说明",
-                    "category": "女性人名",
-                    "description": None,
-                    "preferred_translation": "爱丽丝",
-                    "aliases": ["Ally"],
-                    "group_primary": None,
+                    "changes": {
+                        "category": "女性人名",
+                        "description": None,
+                        "preferred_translation": "爱丽丝",
+                    },
                 }
             )
         else:
@@ -190,6 +193,7 @@ def create_complete_legacy_group_run(
             str(metadata["project_id"]),
             run_id=run_id,
             source_terms_revision=1,
+            decision_rules_version=DECISION_RULES_VERSION,
             phases={
                 "adjudication": {
                     key: checkpoint_record({"action": "keep", "reason": "保持"})
@@ -332,7 +336,11 @@ def test_consistency_states_overlay_completed_checkpoint_actions() -> None:
 
 
 def test_decision_payload_exposes_read_only_disabled_state() -> None:
-    focus = {**_batch_state("focus", "Focus"), "disabled": True}
+    focus = {
+        **_batch_state("focus", "Focus"),
+        "disabled": True,
+        "_prior_decision": {"action": "needs_review", "reason": "第一阶段"},
+    }
     anchor = _batch_state("anchor", "Anchor")
     payload = _make_payload(
         phase="consistency",
@@ -343,7 +351,12 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
     )
 
     assert payload["terms"][0]["disabled"] is True
+    assert payload["terms"][0]["prior_decision"] == {
+        "action": "needs_review",
+        "reason": "第一阶段",
+    }
     assert payload["anchors"][0]["disabled"] is False
+    assert "prior_decision" not in payload["anchors"][0]
     phase_one = _make_payload(
         phase="adjudication",
         target_language="简体中文",
@@ -353,6 +366,44 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
     )
     assert "disabled" not in phase_one["terms"][0]
     assert "disabled" not in phase_one["anchors"][0]
+
+
+def test_phase_two_keep_preserves_every_phase_one_disposition() -> None:
+    original = {
+        key: _batch_state(key, key.title())
+        for key in ("keep", "update", "disable", "review")
+    }
+    adjudication = {
+        "keep": {"action": "keep", "reason": "一保留"},
+        "update": {
+            "action": "update",
+            "reason": "一更新",
+            "after": {**original["update"], "preferred_translation": "更新"},
+        },
+        "disable": {"action": "disable", "reason": "一禁用"},
+        "review": {"action": "needs_review", "reason": "一人工"},
+    }
+    tentative = deepcopy(original)
+    _apply_tentative(tentative, adjudication)
+    consistency = {
+        key: {"action": "keep", "reason": "二保持"} for key in original
+    }
+    merged = _merge_phase_decisions(
+        original=original,
+        tentative=tentative,
+        final=deepcopy(tentative),
+        adjudication=adjudication,
+        consistency=consistency,
+        language="zh-CN",
+    )
+
+    assert {key: value["action"] for key, value in merged.items()} == {
+        "keep": "keep",
+        "update": "update",
+        "disable": "disable",
+        "review": "needs_review",
+    }
+    assert merged["review"]["reason"] == "一人工"
 
 
 def test_related_anchors_prioritize_effective_group_dependencies(
@@ -496,7 +547,7 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
         _parse_decisions(
             content,
             focus,
-            all_forms={"Target"},
+            visible_states=focus,
             known_states={"target": focus[0]},
             read_only_terms={"known-anchor"},
         )
@@ -511,12 +562,9 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
                 "normalized": "target",
                 "action": "update",
                 "reason": "补全译名",
-                "category": "人物",
-                "description": None,
-                "preferred_translation": "目标",
-                "aliases": [],
+                "changes": {"category": "人物"},
             },
-            "update 决策字段无效：target（缺少字段 group_primary）",
+            "术语决策 changes 未修改状态：target",
         ),
         (
             {
@@ -538,44 +586,39 @@ def test_decision_parser_reports_exact_field_mismatch(
         _parse_decisions(
             llm_jsonl([record]),
             focus,
-            all_forms={"Target"},
+            visible_states=focus,
             known_states={"target": focus[0]},
             read_only_terms=set(),
         )
     assert message in str(error.value)
 
 
-def test_simple_actions_drop_only_known_redundant_state_fields() -> None:
+def test_simple_actions_accept_only_matching_redundant_state_fields() -> None:
     focus = [
         _batch_state("keep-term", "Keep"),
         _batch_state("disable-term", "Disable"),
         _batch_state("review-term", "Review"),
     ]
     records = []
-    for state, action in zip(
-        focus, ("keep", "disable", "needs_review"), strict=True
-    ):
+    for state, action in zip(focus, ("keep", "disable", "needs_review"), strict=True):
         records.append(
             {
                 "type": "decision",
                 "normalized": state["normalized"],
                 "action": action,
                 "reason": f"{action} reason",
-                # These values are deliberately malformed.  They are known
-                # state fields and must not be inspected or applied for a
-                # simple action.
-                "category": {"ignored": True},
-                "description": 123,
-                "preferred_translation": ["ignored"],
-                "aliases": "not-an-array",
-                "group_primary": 42,
+                "category": state["category"],
+                "description": state["description"],
+                "preferred_translation": state["preferred_translation"],
+                "aliases": state["aliases"],
+                "group_primary": state["group_primary"],
             }
         )
 
     decisions, ignored_read_only, normalized_redundant = _parse_decisions(
         llm_jsonl(records),
         focus,
-        all_forms={"Keep", "Disable", "Review"},
+        visible_states=focus,
         known_states={str(item["normalized"]): item for item in focus},
         read_only_terms=set(),
     )
@@ -591,9 +634,7 @@ def test_simple_actions_drop_only_known_redundant_state_fields() -> None:
             "action": action,
             "reason": f"{action} reason",
         }
-        for item, action in zip(
-            focus, ("keep", "disable", "needs_review"), strict=True
-        )
+        for item, action in zip(focus, ("keep", "disable", "needs_review"), strict=True)
     }
 
 
@@ -613,7 +654,7 @@ def test_simple_action_field_error_does_not_report_target_as_missing() -> None:
                 ]
             ),
             focus,
-            all_forms={"Target"},
+            visible_states=focus,
             known_states={"target": focus[0]},
             read_only_terms=set(),
         )
@@ -628,11 +669,7 @@ def _update_decision(normalized: str, primary: str | None) -> dict[str, object]:
         "normalized": normalized,
         "action": "update",
         "reason": "调整组关系",
-        "category": "人物",
-        "description": None,
-        "preferred_translation": None,
-        "aliases": [],
-        "group_primary": primary,
+        "changes": {"group_primary": primary},
     }
 
 
@@ -664,7 +701,7 @@ def test_completed_consistency_state_prevents_stale_member_chain_repair() -> Non
     decisions, _, _ = _parse_decisions(
         llm_jsonl([_update_decision("thunder", "monarch")]),
         [tentative["thunder"]],
-        all_forms={"雷鳴公主", "轟雷", "モナークスプライト"},
+        visible_states=list(effective.values()),
         known_states=effective,
         read_only_terms={"princess", "monarch"},
         review_states=original,
@@ -725,7 +762,7 @@ def test_decision_parser_rejects_provable_group_violations(
         _parse_decisions(
             llm_jsonl(records),
             focus,
-            all_forms={str(state["source"]) for state in known_states.values()},
+            visible_states=list(known_states.values()),
             known_states=known_states,
             read_only_terms=set(),
         )
@@ -740,7 +777,7 @@ def test_decision_parser_accepts_direct_member_to_enabled_root() -> None:
     decisions, _, _ = _parse_decisions(
         llm_jsonl([_update_decision("alice", "bob")]),
         focus,
-        all_forms={"Alice", "Bob"},
+        visible_states=list(states.values()),
         known_states=states,
         read_only_terms=set(),
     )
@@ -762,12 +799,61 @@ def test_decision_parser_allows_review_to_restore_tentative_group_state() -> Non
             ]
         ),
         [tentative],
-        all_forms={"Alice"},
+        visible_states=[tentative],
         known_states={"alice": tentative},
         read_only_terms=set(),
         review_states={"alice": original},
     )
     assert decisions["alice"]["action"] == "needs_review"
+
+
+def test_empty_patch_only_resolves_prior_review_or_reenables_disabled() -> None:
+    reviewed = {
+        **_batch_state("reviewed", "Reviewed"),
+        "_prior_decision": {"action": "needs_review", "reason": "证据不足"},
+    }
+    disabled = {**_batch_state("disabled", "Disabled"), "disabled": True}
+    ordinary = _batch_state("ordinary", "Ordinary")
+    records = [
+        {
+            "type": "decision",
+            "normalized": normalized,
+            "action": "update",
+            "reason": "明确恢复",
+            "changes": {},
+        }
+        for normalized in ("reviewed", "disabled")
+    ]
+    decisions, _, _ = _parse_decisions(
+        llm_jsonl(records),
+        [reviewed, disabled],
+        visible_states=[reviewed, disabled],
+        known_states={"reviewed": reviewed, "disabled": disabled},
+        read_only_terms=set(),
+        phase="consistency",
+    )
+    assert decisions["reviewed"]["after"]["disabled"] is False
+    assert decisions["disabled"]["after"]["disabled"] is False
+
+    with pytest.raises(UsageError, match="changes 不得为空"):
+        _parse_decisions(
+            llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": "ordinary",
+                        "action": "update",
+                        "reason": "无变化",
+                        "changes": {},
+                    }
+                ]
+            ),
+            [ordinary],
+            visible_states=[ordinary],
+            known_states={"ordinary": ordinary},
+            read_only_terms=set(),
+            phase="consistency",
+        )
 
 
 def test_group_validation_collects_every_illegal_relationship_shape() -> None:
@@ -856,7 +942,13 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+
+    def cross_referenced_batches(states: list[dict], **_: object) -> tuple[list, int]:
+        return [([state], [other]) for state, other in zip(states, reversed(states))], 2
+
+    monkeypatch.setattr(
+        "app.term_decision._pack_batches", cross_referenced_batches
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -893,7 +985,9 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
         "alice",
         "bob",
     }
-    assert all("alice -> bob -> alice" in item["reason"] for item in draft["needs_review"])
+    assert all(
+        "alice -> bob -> alice" in item["reason"] for item in draft["needs_review"]
+    )
 
 
 @pytest.mark.asyncio
@@ -920,8 +1014,10 @@ async def test_decision_group_violation_enters_localized_format_repair(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "format_correction" in payload:
             repairs += 1
-            assert marker in payload["format_correction"]
-            assert "group_primary" in payload["format_correction"]
+            correction = payload["format_correction"]
+            assert marker in correction["errors"][0]["message"]
+            assert correction["errors"][0]["code"] == "invalid_relationship"
+            assert correction["target_normalized"] == ["alice"]
             content = llm_jsonl(decision_response(payload))
         elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
             sent_invalid = True
@@ -946,15 +1042,11 @@ async def test_decision_group_violation_enters_localized_format_repair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("language", "marker"),
-    [("zh-CN", "本批唯一允许输出"), ("en", "The only allowed decision normalized")],
-)
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
 async def test_decision_format_repair_lists_exact_target_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     language: str,
-    marker: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -967,24 +1059,15 @@ async def test_decision_format_repair_lists_exact_target_scope(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "format_correction" in payload:
             repairs += 1
-            correction = str(payload["format_correction"])
-            assert marker in correction
-            assert json.dumps(
-                [item["normalized"] for item in payload["terms"]],
-                ensure_ascii=False,
-            ) in correction
-            assert "anchors" in correction
-            if language == "en":
-                assert "未知术语" not in correction
-                assert "Every action requires a non-empty string reason" in correction
-                assert "all nine keys are required" in correction
-                assert "description may only copy" in correction
-                assert "aliases may only use existing source/alias forms" in correction
-            else:
-                assert "每种 action 都必须有非空字符串 reason" in correction
-                assert "九个键全部必填" in correction
-                assert "description 只能逐字保持" in correction
-                assert "aliases 只能使用" in correction
+            correction = payload["format_correction"]
+            assert correction["target_normalized"] == [
+                item["normalized"] for item in payload["terms"]
+            ]
+            assert correction["accepted_normalized"] == []
+            assert correction["errors"][0]["code"] == "unknown_record"
+            assert correction["previous_invalid_records"][0]["normalized"] == (
+                "not-an-anchor"
+            )
             content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(
@@ -1016,6 +1099,62 @@ async def test_decision_format_repair_lists_exact_target_scope(
 
 
 @pytest.mark.asyncio
+async def test_format_repair_preserves_valid_records_and_retries_only_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
+        return [(states, [])], 1
+
+    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    adjudication_scopes: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        scope = [item["normalized"] for item in payload["terms"]]
+        if payload["phase"] == "adjudication":
+            adjudication_scopes.append(scope)
+            if len(adjudication_scopes) == 1:
+                content = llm_jsonl(
+                    [
+                        {
+                            "type": "decision",
+                            "normalized": "alice",
+                            "action": "keep",
+                            "reason": "已验证",
+                        },
+                        {
+                            "type": "decision",
+                            "normalized": "bob",
+                            "action": "keep",
+                        },
+                    ]
+                )
+            else:
+                correction = payload["format_correction"]
+                assert correction["accepted_normalized"] == ["alice"]
+                assert correction["target_normalized"] == ["bob"]
+                assert correction["previous_invalid_records"][0]["normalized"] == "bob"
+                content = llm_jsonl(decision_response(payload))
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await run_terminology_decision(project, http_client=client)
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert adjudication_scopes == [["alice", "bob"], ["bob"]]
+
+
+@pytest.mark.asyncio
 async def test_redundant_simple_fields_are_logged_without_format_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1032,15 +1171,17 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
         if "format_correction" in payload:
             corrections += 1
         records = decision_response(payload)
+        terms = {item["normalized"]: item for item in payload["terms"]}
         for record in records:
             if record["action"] != "update":
+                term = terms[record["normalized"]]
                 record.update(
                     {
-                        "category": "错误类别",
-                        "description": "不应写入",
-                        "preferred_translation": "错误译名",
-                        "aliases": ["错误别名"],
-                        "group_primary": "错误组主",
+                        "category": term["category"],
+                        "description": term["description"],
+                        "preferred_translation": term["preferred_translation"],
+                        "aliases": term["aliases"],
+                        "group_primary": term["group_primary"],
                     }
                 )
         return httpx.Response(
@@ -1095,13 +1236,14 @@ async def test_update_without_reason_is_repaired_with_complete_contract(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "format_correction" in payload:
             repairs += 1
-            correction = str(payload["format_correction"])
-            assert "reason" in correction
-            assert "category" in correction
-            assert "description" in correction
-            assert "preferred_translation" in correction
-            assert "aliases" in correction
-            assert "group_primary" in correction
+            correction = payload["format_correction"]
+            assert correction["errors"][0]["code"] == "invalid_reason"
+            assert correction["previous_invalid_records"][0]["changes"] == {
+                "category": "女性人名",
+                "description": None,
+                "preferred_translation": "爱丽丝",
+            }
+            assert correction["target_normalized"] == ["alice"]
             content = llm_jsonl(decision_response(payload))
         elif (
             not sent_invalid
@@ -1181,9 +1323,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert applied["terms_revision"] == 2
     alice = next(
         item
-        for item in read_json(project, project / "terminology" / "terms.json")[
-            "terms"
-        ]
+        for item in read_json(project, project / "terminology" / "terms.json")["terms"]
         if item["normalized"] == "alice"
     )
     assert alice["preferred_translation"] == "爱丽丝"
@@ -1209,9 +1349,7 @@ async def test_decision_ignores_extra_read_only_anchor_records(
     ) -> tuple[list, int]:
         batches = []
         for index, state in enumerate(states):
-            references = (
-                [states[1 - index]] if phase == "consistency" else []
-            )
+            references = [states[1 - index]] if phase == "consistency" else []
             batches.append(([state], references))
         return batches, len(batches)
 
@@ -1248,7 +1386,11 @@ async def test_decision_ignores_extra_read_only_anchor_records(
             200,
             json={
                 "choices": [{"message": {"content": llm_jsonl(records)}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
             },
         )
 
@@ -1352,9 +1494,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
         run_id = runs[0].name
         manifest = read_json(project, runs[0] / "manifest.json")
         assert manifest["status"] == "running"
-        checkpoint = json.loads(
-            (runs[0] / CHECKPOINT_FILE).read_text(encoding="utf-8")
-        )
+        checkpoint = json.loads((runs[0] / CHECKPOINT_FILE).read_text(encoding="utf-8"))
         assert set(checkpoint["phases"]["adjudication"]) == {"alice"}
 
         library_path = project / "terminology" / "terms.json"
@@ -1396,9 +1536,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
     manifest = read_json(project, project / "runs" / run_id / "manifest.json")
     assert len(manifest["continuations"]) == 1
     assert manifest["usage_invocation_count"] == 2
-    assert current_decision_draft(project)["prompt_fingerprint"].startswith(
-        "sha256:"
-    )
+    assert current_decision_draft(project)["prompt_fingerprint"].startswith("sha256:")
 
 
 @pytest.mark.asyncio
@@ -1555,7 +1693,9 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
         async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
             raise AssertionError("完整检查点续作不应再次请求模型")
 
-        monkeypatch.setattr("app.term_decision.atomic_write_json", original_atomic_write)
+        monkeypatch.setattr(
+            "app.term_decision.atomic_write_json", original_atomic_write
+        )
         monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
@@ -1639,7 +1779,9 @@ async def test_legacy_group_recovery_draft_failure_preserves_complete_run(
         assert manifest["usage"] == observed_usage
         assert manifest["usage_invocation_count"] == 1
 
-        monkeypatch.setattr("app.term_decision.atomic_write_json", original_atomic_write)
+        monkeypatch.setattr(
+            "app.term_decision.atomic_write_json", original_atomic_write
+        )
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
         )
@@ -1678,9 +1820,7 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
         "allow_soft_target_overflow": True,
         "anchor_overflow_mode": "error",
     }
-    review = client.get(
-        "/api/v1/projects/decision-demo/terms/decision"
-    ).json()
+    review = client.get("/api/v1/projects/decision-demo/terms/decision").json()
     proposal_id = review["draft"]["proposals"][0]["proposal_id"]
     rejected = client.put(
         "/api/v1/projects/decision-demo/terms/decision/rejections",
@@ -1699,11 +1839,15 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manual_review_queue_survives_apply_and_revision_change(tmp_path: Path) -> None:
+async def test_manual_review_queue_survives_apply_and_revision_change(
+    tmp_path: Path,
+) -> None:
     project = create_decision_project(tmp_path)
     run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
     async with httpx.AsyncClient() as http_client:
-        await run_terminology_decision(project, resume_run_id=run_id, http_client=http_client)
+        await run_terminology_decision(
+            project, resume_run_id=run_id, http_client=http_client
+        )
     client = TestClient(create_app(projects_root=project.parent))
 
     # A legacy manifest has no manual-review field; it must still be treated
@@ -1894,9 +2038,7 @@ def test_web_resumes_complete_legacy_group_checkpoint_into_review(
     assert state["usage"] == observed_usage
     assert state["summary"]["proposals"] == 1
     assert state["summary"]["needs_review"] == 1
-    review = client.get(
-        "/api/v1/projects/decision-demo/terms/decision"
-    )
+    review = client.get("/api/v1/projects/decision-demo/terms/decision")
     assert review.status_code == 200
     assert review.json()["draft"]["run_id"] == run_id
     assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
@@ -1937,6 +2079,7 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
             str(read_json(project, project / "project.json")["project_id"]),
             run_id=run_id,
             source_terms_revision=1,
+            decision_rules_version=DECISION_RULES_VERSION,
             phases={
                 "adjudication": {
                     "alice": {
@@ -1968,22 +2111,33 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
     assert options.json()["running_run"]["run_id"] == run_id
     assert options.json()["running_run"]["completed_steps"] == 1
     assert options.json()["running_run"]["total_steps"] == 4
-    assert client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision"},
-    ).status_code == 400
-    assert client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={
-            "stage": "terminology_decision",
-            "run_action": "resume",
-            "force": True,
-        },
-    ).status_code == 400
-    assert client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision", "run_action": "decline"},
-    ).status_code == 400
+    assert options.json()["running_run"]["resume_compatible"] is True
+    assert options.json()["running_run"]["resume_incompatibility_reason"] is None
+    assert (
+        client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={
+                "stage": "terminology_decision",
+                "run_action": "resume",
+                "force": True,
+            },
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision", "run_action": "decline"},
+        ).status_code
+        == 400
+    )
 
     resumed = client.post(
         "/api/v1/projects/decision-demo/tasks",
@@ -2034,6 +2188,36 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
     assert options.status_code == 200
     assert options.json()["running_run"]["completed_steps"] == 0
     assert options.json()["running_run"]["total_steps"] == 4
+    interruption = options.json()["running_run"]["last_interruption"]
+    assert interruption["error_code"] == "usage_error"
+    assert interruption["reason"] == "unexpected_error"
+    assert interruption["completed_steps"] == 0
+    assert interruption["total_steps"] == 4
+
+
+def test_old_decision_checkpoint_is_visible_but_cannot_resume(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
+    checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    checkpoint.pop("decision_rules_version")
+    atomic_write_json(run_dir / CHECKPOINT_FILE, checkpoint)
+
+    client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    running = options.json()["running_run"]
+    assert running["run_id"] == run_id
+    assert running["resume_compatible"] is False
+    assert "不兼容" in running["resume_incompatibility_reason"]
+
+    resumed = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "resume"},
+    )
+    assert resumed.status_code == 400
+    assert "强制新建" in resumed.json()["error"]
 
 
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
@@ -2172,7 +2356,11 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
         seen_terms.append([item["normalized"] for item in payload["terms"]])
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": llm_jsonl(decision_response(payload))}}]},
+            json={
+                "choices": [
+                    {"message": {"content": llm_jsonl(decision_response(payload))}}
+                ]
+            },
         )
 
     os.environ["LLM_API_KEY"] = "test"
@@ -2208,27 +2396,36 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
         for term in payload["terms"]:
-            if term["normalized"] == "alice":
+            if payload["phase"] == "adjudication" and term["normalized"] == "alice":
                 records.append(
                     {
                         "type": "decision",
                         "normalized": "alice",
                         "action": "update",
                         "reason": "转移简称",
-                        "category": "人物",
-                        "description": None,
-                        "preferred_translation": "爱丽丝",
-                        "aliases": ["Ally", "Bob"],
-                        "group_primary": None,
+                        "changes": {
+                            "description": None,
+                            "preferred_translation": "爱丽丝",
+                            "aliases": ["Ally", "Bob"],
+                        },
                     }
                 )
-            else:
+            elif payload["phase"] == "adjudication":
                 records.append(
                     {
                         "type": "decision",
                         "normalized": "bob",
                         "action": "disable",
                         "reason": "并入 Alice",
+                    }
+                )
+            else:
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": term["normalized"],
+                        "action": "keep",
+                        "reason": "关系一致",
                     }
                 )
         return httpx.Response(
@@ -2250,7 +2447,7 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
 
 
 @pytest.mark.asyncio
-async def test_alias_theft_is_reviewed_without_implicit_grouping(
+async def test_provable_alias_theft_exhausts_local_repair_without_implicit_grouping(
     tmp_path: Path,
 ) -> None:
     project = create_decision_project(tmp_path)
@@ -2266,11 +2463,11 @@ async def test_alias_theft_is_reviewed_without_implicit_grouping(
                         "normalized": "alice",
                         "action": "update",
                         "reason": "接收 Bob 作为 alias",
-                        "category": "人物",
-                        "description": None,
-                        "preferred_translation": "爱丽丝",
-                        "aliases": ["Ally", "Bob"],
-                        "group_primary": None,
+                        "changes": {
+                            "description": None,
+                            "preferred_translation": "爱丽丝",
+                            "aliases": ["Ally", "Bob"],
+                        },
                     }
                 )
             else:
@@ -2287,21 +2484,10 @@ async def test_alias_theft_is_reviewed_without_implicit_grouping(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        summary = await run_terminology_decision(project, http_client=client)
+    with pytest.raises(UsageError, match="格式修正重试耗尽"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await run_terminology_decision(project, http_client=client)
     del os.environ["LLM_API_KEY"]
-
-    draft = current_decision_draft(project)
-    assert draft is not None
-    assert summary["proposals"] == 0
-    assert summary["needs_review"] == 2
-    assert {item["normalized"] for item in draft["needs_review"]} == {"alice", "bob"}
-    assert all("alias" in item["reason"] for item in draft["needs_review"])
-    assert all(
-        item["group_primary"] is None
-        for item in draft["source_library"]["terms"]
-        if item["normalized"] in {"alice", "bob"}
-    )
 
 
 def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
@@ -2420,9 +2606,7 @@ def test_atomic_apply_failure_preserves_terms(
         ],
         rejected_proposal_ids=[],
         source_library=before,
-        source_overrides=read_json(
-            project, project / "terminology" / "overrides.json"
-        ),
+        source_overrides=read_json(project, project / "terminology" / "overrides.json"),
     )
     (run_dir / "terminology_decision_draft.json").write_text(
         json.dumps(draft), encoding="utf-8"

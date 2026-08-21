@@ -43,6 +43,7 @@ from .term_decision import (
     current_decision_draft,
     decision_checkpoint_progress,
     decision_plan,
+    decision_resume_compatibility,
     manual_review_state,
     run_terminology_decision,
 )
@@ -68,13 +69,16 @@ def _running_run(
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
     old_config = load_run_config(project / "runs" / run_id)
-    return {
+    result = {
         "run_id": run_id,
         "started_at": manifest.get("started_at"),
         "scope": manifest.get("scope"),
         "previous": _endpoint_summary(old_config),
         "current": _endpoint_summary(current_config),
     }
+    if isinstance(manifest.get("last_interruption"), dict):
+        result["last_interruption"] = manifest["last_interruption"]
+    return result
 
 
 def _stage_summary(
@@ -184,10 +188,15 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         plan = decision_plan(project) if selected else None
         running_run = _running_run(project, stage, config)
         if running_run is not None:
+            compatible, reason = decision_resume_compatibility(
+                project, str(running_run["run_id"])
+            )
             running_run["completed_steps"] = decision_checkpoint_progress(
                 project, str(running_run["run_id"])
             )
             running_run["total_steps"] = selected * 2
+            running_run["resume_compatible"] = compatible
+            running_run["resume_incompatibility_reason"] = reason
         return {
             "stage": stage,
             "preset": {
@@ -377,6 +386,13 @@ class WebTaskManager:
                         raise UsageError(f"{stage} 没有可续用的 running Run")
                     if force:
                         raise UsageError("续用 Run 时不能同时指定 force")
+                    compatible, reason = decision_resume_compatibility(
+                        project, str(running[0]["run_id"])
+                    )
+                    if not compatible:
+                        raise UsageError(
+                            f"{reason}；请结束旧 Run 并强制新建"
+                        )
                 elif running:
                     if run_action != "decline" or not force:
                         raise UsageError(
