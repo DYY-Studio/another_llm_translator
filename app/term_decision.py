@@ -77,7 +77,6 @@ _STATE_FIELDS = (
 _PHASES = ("adjudication", "consistency")
 
 _GroupViolation = tuple[str, tuple[str, ...]]
-_AliasViolation = tuple[str, tuple[str, ...]]
 
 
 def _prompt_language(project: Path, requested: str | None) -> str:
@@ -205,7 +204,6 @@ def collect_term_evidence(
                     views,
                     matched,
                     raw_views=raw_views,
-                    source=source,
                     spec=spec,
                 )
                 samples.append(
@@ -229,7 +227,6 @@ def _evidence_excerpt(
     matched: list[tuple[str, str]],
     *,
     raw_views: list[str],
-    source: str,
     spec: Any,
 ) -> tuple[str, str]:
     """Return a bounded, labelled context excerpt around the first hit."""
@@ -253,7 +250,7 @@ def _evidence_excerpt(
             else:
                 view_name = "aozora_reading"
             return view_name, excerpt
-    return "source", source[: EVIDENCE_CONTEXT_RADIUS * 2]
+    raise StorageError("术语决策证据摘录无法定位命中形式")
 
 
 def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
@@ -515,9 +512,7 @@ def _pack_batches(
         )
 
     def overflow_reason() -> str:
-        if hard_limit == context_limit:
-            return "context"
-        if hard_limit == itpm_limit:
+        if hard_limit == itpm_limit and itpm_limit < context_limit:
             return "itpm"
         return "context"
 
@@ -711,7 +706,7 @@ def _alias_violations(
     original: dict[str, dict[str, Any]],
     final: dict[str, dict[str, Any]],
     spec: Any,
-) -> list[_AliasViolation]:
+) -> list[_GroupViolation]:
     """Find newly introduced alias ownership that is not an explicit relation."""
     owners: dict[str, set[str]] = {}
     for normalized, state in original.items():
@@ -721,7 +716,7 @@ def _alias_violations(
             if form:
                 owners.setdefault(form, set()).add(normalized)
 
-    violations: list[_AliasViolation] = []
+    violations: list[_GroupViolation] = []
     for normalized, state in final.items():
         alias_forms = [
             normalize_term(str(value), spec) for value in state.get("aliases", [])
@@ -800,7 +795,7 @@ def _alias_violations(
     return violations
 
 
-def _alias_violation_message(violation: _AliasViolation, language: str) -> str:
+def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
     kind, values = violation
     if kind == "alias_transfer":
         receiver, owner, alias = values
@@ -1538,7 +1533,7 @@ def _dependency_components(
 
 
 def _relationship_violation_nodes(
-    violation: _GroupViolation | _AliasViolation,
+    violation: _GroupViolation,
 ) -> set[str]:
     kind, values = violation
     if kind in {
@@ -1554,7 +1549,7 @@ def _relationship_violation_nodes(
 
 
 def _relationship_violation_message(
-    violation: _GroupViolation | _AliasViolation, language: str
+    violation: _GroupViolation, language: str
 ) -> str:
     kind = violation[0]
     if kind in {"self", "missing", "disabled", "member", "cycle"}:
@@ -1570,7 +1565,7 @@ def _recover_invalid_relationship_components(
     language: str,
     spec: Any,
 ) -> None:
-    violations: list[_GroupViolation | _AliasViolation] = [
+    violations: list[_GroupViolation] = [
         *_group_violations(final),
         *_alias_violations(original, final, spec),
     ]
@@ -2347,12 +2342,7 @@ async def run_terminology_decision(
             "pending": 0,
             "usage": usage or unavailable_usage(),
         }
-    except asyncio.CancelledError as exc:
-        if "llm" in locals():
-            usage = llm.usage_summary()
-        record_resumable_interruption(usage, exc)
-        raise
-    except Exception as exc:
+    except BaseException as exc:
         if "llm" in locals():
             usage = llm.usage_summary()
         record_resumable_interruption(usage, exc)
@@ -2490,10 +2480,7 @@ def apply_decision_draft(
             "aliases": list(state.get("aliases", [])),
             "disabled": bool(state.get("disabled")),
         }
-        if state.get("group_primary") is not None:
-            override["group_primary"] = state["group_primary"]
-        else:
-            override["group_primary"] = None
+        override["group_primary"] = state.get("group_primary")
         overrides[normalized] = override
         if override["disabled"]:
             current.pop(normalized, None)
