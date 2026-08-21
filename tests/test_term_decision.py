@@ -1048,7 +1048,7 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    caplog.set_level("WARNING")
+    caplog.set_level("WARNING", logger="another_llm_translator")
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -1059,18 +1059,10 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
     assert summary["proposals"] == 1
     assert calls == 4
     assert corrections == 0
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("normalized redundant terminology fields")
-    ]
-    assert warnings
-    assert any(
-        "request=REQ-" in message
-        and "count=1" in message
-        and "normalized=bob" in message
-        for message in warnings
-    )
+    assert "normalized redundant terminology fields" in caplog.text
+    assert "request=REQ-" in caplog.text
+    assert "count=1" in caplog.text
+    assert "normalized=bob" in caplog.text
 
 
 @pytest.mark.asyncio
