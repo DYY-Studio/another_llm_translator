@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -1018,7 +1019,6 @@ async def test_decision_format_repair_lists_exact_target_scope(
 async def test_redundant_simple_fields_are_logged_without_format_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1048,21 +1048,34 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    caplog.set_level("WARNING", logger="another_llm_translator")
+    messages: list[str] = []
+
+    class CaptureWarning(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    capture_handler = CaptureWarning(level=logging.WARNING)
+    decision_logger = logging.getLogger("another_llm_translator")
+    decision_logger.addHandler(capture_handler)
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(project, http_client=client)
     finally:
         del os.environ["LLM_API_KEY"]
+        decision_logger.removeHandler(capture_handler)
+        capture_handler.close()
 
     assert summary["proposals"] == 1
     assert calls == 4
     assert corrections == 0
-    assert "normalized redundant terminology fields" in caplog.text
-    assert "request=REQ-" in caplog.text
-    assert "count=1" in caplog.text
-    assert "normalized=bob" in caplog.text
+    assert "normalized redundant terminology fields" in "\n".join(messages)
+    assert any(
+        "request=REQ-" in message
+        and "count=1" in message
+        and "normalized=bob" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
