@@ -52,10 +52,12 @@ def test_full_prompt_assembles_prefix_middle_suffix_in_order(
     middle = f"__MIDDLE_{stage}_{language}__"
     prompt = full_prompt(stage, f" {middle} ", language)
 
-    assert prompt.index(prefix_marker) < prompt.index(middle) < prompt.index(
-        suffix_marker
+    assert (
+        prompt.index(prefix_marker) < prompt.index(middle) < prompt.index(suffix_marker)
     )
-    assert prompt.endswith('{"type":"end"}。' if language == "zh-CN" else '{"type":"end"}.')
+    assert prompt.endswith(
+        '{"type":"end"}。' if language == "zh-CN" else '{"type":"end"}.'
+    )
 
 
 def test_fixed_prompts_define_data_and_output_boundaries() -> None:
@@ -103,7 +105,7 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
     assert "只包含受保护人工决定" in adjudication
     assert "可能包含受保护人工决定和第一阶段暂定状态" in consistency
     assert "不得为 anchors 输出任何决策" in consistency
-    assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in adjudication
+    assert "changes 是 Patch" in adjudication
     assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in consistency
     assert adjudication != consistency
 
@@ -127,21 +129,14 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
             "__共享判断政策__",
             (
                 "以下固定输出协议优先于可编辑中段",
-                "不存在可选输出键",
-                "九个键全部必填",
-                "每种 action（包括 update）都必须提供非空字符串 reason",
-                "禁止用空字符串代替 null",
-                "description 只能逐字保持当前 terms[] 值或清为 null",
-                "不得从 evidence、样本文本或常识创造",
-                "update 表示完整目标状态，不是只列变化字段",
-                "多术语组合操作",
-                "不得只在一个术语上偷偷接收别人的形式",
-                "第二阶段输入的 disabled 是当前禁用状态",
-                "update 修改一个或多个可修改字段并使术语启用",
-                "即使 terms[] 输入中的 category",
-                "disable/needs_review 仍复制",
-                "【正确 JSONL 示例】",
-                "【错误示例】",
+                "update 必须且只能含 type、normalized、action、reason、changes",
+                "changes 是 Patch",
+                "中实际需要修改的键",
+                "description 只能保持当前值或清为 null",
+                "本次 terms[]/anchors[] 中可见",
+                "空 changes 只用于第二阶段",
+                "keep 保留上一阶段有效裁决",
+                "只有显式 update、disable、needs_review 才覆盖第一阶段",
             ),
         ),
         (
@@ -149,21 +144,14 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
             "__SHARED_JUDGMENT_POLICY__",
             (
                 "fixed output contract takes precedence over the editable middle",
-                "there are no optional output keys",
-                "All nine keys are required",
-                "Every action, including update, requires a non-empty string reason",
-                "never use an empty string instead of null",
-                "description may only copy the current terms[] value verbatim or be cleared to null",
-                "never invent a form from evidence, samples, or outside knowledge",
-                "update describes the complete target state, not only changed fields",
-                "multi-term operation",
-                "Never steal a form in only one decision",
-                "In phase two, input disabled is the current disabled state",
-                "update changes one or more mutable fields and enables the term",
-                "Even when terms[] contains non-null category",
-                "a disable or needs_review that copies category",
-                "[Valid JSONL example]",
-                "[Invalid examples]",
+                "update contains exactly type, normalized, action, reason, changes",
+                "changes is a Patch",
+                "only fields actually changed",
+                "description may only retain its current value or become null",
+                "visible in this request",
+                "Empty changes is allowed only in phase two",
+                "keep preserves the prior-phase disposition",
+                "only an explicit phase-two update, disable, or needs_review overrides it",
             ),
         ),
     ],
@@ -174,9 +162,7 @@ def test_terminology_decision_prompt_defines_unambiguous_output_contract(
     markers: tuple[str, ...],
 ) -> None:
     for phase in ("adjudication", "consistency"):
-        prompt = full_prompt(
-            "terminology_decision", middle, language, phase=phase
-        )
+        prompt = full_prompt("terminology_decision", middle, language, phase=phase)
         assert prompt.index(middle) < prompt.index(markers[0])
         for marker in markers:
             assert marker in prompt
@@ -299,15 +285,18 @@ def test_fingerprint_is_language_agnostic_and_tracks_any_language_change(
 
     zh_digest = digests["zh-CN"]
     en_digest = digests["en"]
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": zh_digest, "en": en_digest}
-    ) == baseline
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": zh_digest, "en": "x"}
-    ) != baseline
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": "x", "en": en_digest}
-    ) != baseline
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": zh_digest, "en": en_digest})
+        == baseline
+    )
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": zh_digest, "en": "x"})
+        != baseline
+    )
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": "x", "en": en_digest})
+        != baseline
+    )
 
 
 @pytest.mark.asyncio
@@ -368,10 +357,12 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     tmp_path: Path,
 ) -> None:
     projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(
-        projects_root=projects_root,
-        app_root=tmp_path / "app-root",
-    ))
+    client = TestClient(
+        create_app(
+            projects_root=projects_root,
+            app_root=tmp_path / "app-root",
+        )
+    )
     zh = client.get("/api/v1/global/prompts/translation").json()
     en = client.get(
         "/api/v1/global/prompts/translation", params={"language": "en"}
@@ -385,24 +376,33 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     decision = client.get("/api/v1/global/prompts/terminology_decision").json()
     assert set(decision["assembled_phases"]) == {"adjudication", "consistency"}
     assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
-    assert "当前是第二阶段“跨术语一致性复核”" in decision["assembled_phases"]["consistency"]
+    assert (
+        "当前是第二阶段“跨术语一致性复核”"
+        in decision["assembled_phases"]["consistency"]
+    )
 
-    assert client.put(
-        "/api/v1/global/prompts/translation",
-        json={"language": "fr", "content": "x"},
-    ).status_code == 400
+    assert (
+        client.put(
+            "/api/v1/global/prompts/translation",
+            json={"language": "fr", "content": "x"},
+        ).status_code
+        == 400
+    )
 
-    assert client.put(
-        "/api/v1/global/prompts/translation",
-        json={"language": "en", "content": "EN MIDDLE"},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/api/v1/global/prompts/translation",
+            json={"language": "en", "content": "EN MIDDLE"},
+        ).status_code
+        == 200
+    )
     saved = client.get(
         "/api/v1/global/prompts/translation", params={"language": "en"}
     ).json()
     assert saved["content"] == "EN MIDDLE"
-    assert (
-        tmp_path / "user-root" / "prompts" / "translation.en.middle.txt"
-    ).read_text(encoding="utf-8") == "EN MIDDLE"
+    assert (tmp_path / "user-root" / "prompts" / "translation.en.middle.txt").read_text(
+        encoding="utf-8"
+    ) == "EN MIDDLE"
 
 
 def test_web_task_start_forwards_language(

@@ -45,6 +45,7 @@ from .sqlite_storage import (
     utc_now,
     write_json,
 )
+from .term_decision_protocol import terminology_decision_protocol
 
 STAGE_FILES = {
     "translation": "translation.jsonl",
@@ -169,9 +170,7 @@ async def _iter_sse_data(
         yield "\n".join(data_lines), received_bytes
 
 
-CJK_RE = re.compile(
-    r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
-)
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 
 @dataclass(frozen=True)
@@ -234,9 +233,7 @@ def select_scope(
         requested = set(scope.segment_ids)
         if not requested:
             raise UsageError("segment_ids 不能为空")
-        selected = [
-            item for item in selected if str(item["segment_id"]) in requested
-        ]
+        selected = [item for item in selected if str(item["segment_id"]) in requested]
         found = {str(item["segment_id"]) for item in selected}
         missing = sorted(requested - found)
         if missing:
@@ -267,9 +264,7 @@ def stage_result_path(project: Path, stage: str) -> Path:
     return project / "stages" / filename
 
 
-def load_stage_history(
-    project: Path, stage: str
-) -> list[dict[str, Any]]:
+def load_stage_history(project: Path, stage: str) -> list[dict[str, Any]]:
     return read_jsonl(project, stage_result_path(project, stage))
 
 
@@ -342,9 +337,7 @@ def _make_stage_selection(
     force: bool,
 ) -> StageSelection:
     reusable = [
-        segment
-        for segment in selected_list
-        if str(segment["segment_id"]) in completed
+        segment for segment in selected_list if str(segment["segment_id"]) in completed
     ]
     work = (
         selected_list
@@ -361,9 +354,7 @@ def _make_stage_selection(
         if str(segment["segment_id"]) in completed
         and latest_status.get(str(segment["segment_id"])) == "failed"
     )
-    reusable_ids = {
-        str(segment["segment_id"]) for segment in reusable
-    }
+    reusable_ids = {str(segment["segment_id"]) for segment in reusable}
     fingerprints = frozenset(
         str(completed[segment_id]["stage_fingerprint"])
         for segment_id in reusable_ids
@@ -497,7 +488,7 @@ _REVIEW_SUFFIX: dict[str, str] = {
 _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     "terminology": {
         "zh-CN": (
-            "每个术语一条 type=\"term\" 记录，仅含必填非空字符串 source、category，"
+            '每个术语一条 type="term" 记录，仅含必填非空字符串 source、category，'
             "以及可选字符串 description、preferred_translation 和字符串数组 aliases。"
             "source 与 aliases 必须是 source_segments 中同一术语的源文形式；目标"
             "译名只放 preferred_translation。人物性别仅在可靠时写入 category。"
@@ -530,7 +521,7 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "2. update：必须且只能有 type、normalized、action、reason、category、description、"
             "preferred_translation、aliases、group_primary。九个键全部必填；值为 null 或"
             " aliases=[] 时也不得省略键。\n"
-            "type 必须为字符串 \"decision\"；action 只能为 keep、update、disable 或"
+            'type 必须为字符串 "decision"；action 只能为 keep、update、disable 或'
             " needs_review；每种 action（包括 update）都必须提供非空字符串 reason。\n"
             "即使 terms[] 输入中的 category、description、preferred_translation、aliases、"
             "group_primary 已有非空值，keep、disable、needs_review 也只能输出上述四个键；"
@@ -718,9 +709,9 @@ def full_prompt(
         raise UsageError(f"不支持的 Prompt 语言：{language}")
     if stage not in _STAGE_PREFIX:
         raise UsageError(f"阶段没有 LLM Prompt：{stage}")
-    if (
-        phase is not None
-        and (stage != "terminology_decision" or phase not in _TERMINOLOGY_DECISION_PHASE_PREFIX)
+    if phase is not None and (
+        stage != "terminology_decision"
+        or phase not in _TERMINOLOGY_DECISION_PHASE_PREFIX
     ):
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
     prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[stage][language]}"
@@ -734,9 +725,12 @@ def full_prompt(
         for requirement in document_requirements
         if isinstance(requirement, str) and requirement.strip()
     )
-    suffix_parts.extend(
-        (_STAGE_SUFFIX[stage][language], _COMMON_SUFFIX[language])
+    stage_suffix = (
+        terminology_decision_protocol(language)
+        if stage == "terminology_decision"
+        else _STAGE_SUFFIX[stage][language]
     )
+    suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{middle.strip()}\n\n{' '.join(suffix_parts)}"
 
 
@@ -770,9 +764,7 @@ def stage_fingerprint(
             "context": config["context"][stage],
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,
-            "document_adapter_options": config.get(
-                "_document_adapter_options", {}
-            ),
+            "document_adapter_options": config.get("_document_adapter_options", {}),
             "document_adapters": config.get("_document_adapters", {}),
             "document_adapter_prompt_requirements": config.get(
                 "_document_adapter_prompt_requirements", {}
@@ -794,9 +786,7 @@ def stage_fingerprint(
                     }
                     for summary in config.get("_translation_validators", [])
                 ],
-                "exhausted_mode": config["validation"]["translation"][
-                    "exhausted_mode"
-                ],
+                "exhausted_mode": config["validation"]["translation"]["exhausted_mode"],
             }
     encoded = json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -818,9 +808,7 @@ def estimate_messages(messages: list[dict[str, str]], factor: float) -> int:
     return math.ceil(estimate_tokens(rendered) * factor)
 
 
-def estimate_messages_upper_bound(
-    messages: list[dict[str, str]], factor: float
-) -> int:
+def estimate_messages_upper_bound(messages: list[dict[str, str]], factor: float) -> int:
     """Return a safe upper bound for the exact message estimate.
 
     The exact estimator assigns at most 1.1 tokens to every serialized
@@ -976,13 +964,16 @@ def contiguous_groups(
             )
         else:
             part_key = _segment_part_key(segment)
-            gap_is_empty = same_part and current_index > previous_index and all(
-                (*part_key, line_index) in empty_positions
-                for line_index in range(previous_index + 1, current_index)
+            gap_is_empty = (
+                same_part
+                and current_index > previous_index
+                and all(
+                    (*part_key, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
             )
         if gap_is_empty and (
-            partition_key is None
-            or partition_key(previous) == partition_key(segment)
+            partition_key is None or partition_key(previous) == partition_key(segment)
         ):
             groups[-1].append(segment)
         else:
@@ -1042,16 +1033,17 @@ def _iter_contiguous_groups(
             can_append = gap_is_empty
         else:
             part_key = _segment_part_key(segment)
-            gap_is_empty = same_part and current_index > previous_index and all(
-                (*part_key, line_index) in empty_positions
-                for line_index in range(previous_index + 1, current_index)
+            gap_is_empty = (
+                same_part
+                and current_index > previous_index
+                and all(
+                    (*part_key, line_index) in empty_positions
+                    for line_index in range(previous_index + 1, current_index)
+                )
             )
-            can_append = same_part and (
-                current_index == previous_index or gap_is_empty
-            )
+            can_append = same_part and (current_index == previous_index or gap_is_empty)
         if can_append and (
-            partition_key is None
-            or partition_key(previous) == partition_key(segment)
+            partition_key is None or partition_key(previous) == partition_key(segment)
         ):
             current.append(segment)
             continue
@@ -1147,10 +1139,7 @@ def iter_chunk_plans(
                     estimated_input_tokens=current_estimate,
                 )
 
-    if (
-        config["execution"]["scheduling_mode"] != "ordered_by_file"
-        or cross_boundary
-    ):
+    if config["execution"]["scheduling_mode"] != "ordered_by_file" or cross_boundary:
         yield from plan_groups(
             _iter_contiguous_groups(
                 work,
@@ -1205,10 +1194,7 @@ def _validate_request_estimate(
             f"单 Segment Prompt 超过模型硬限制：{segment['segment_id']}",
             reason="context",
         )
-    if (
-        input_tokens_per_minute > 0
-        and estimated > input_tokens_per_minute
-    ):
+    if input_tokens_per_minute > 0 and estimated > input_tokens_per_minute:
         raise RequestSizeError(
             f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
             reason="itpm",
@@ -1279,15 +1265,12 @@ def materialize_chunk_stream(
     continuation_index: int = 0,
 ) -> Iterable[ChunkPlan]:
     code = STAGE_CODES[stage]
-    continuation_suffix = (
-        f"-R{continuation_index:04d}" if continuation_index else ""
-    )
+    continuation_suffix = f"-R{continuation_index:04d}" if continuation_index else ""
     for index, plan in enumerate(plans, start=1):
         yield replace(
             plan,
             chunk_id=(
-                f"CHK-{run_id}-{code}{continuation_suffix}-"
-                f"{plan.file_id}-C{index:05d}"
+                f"CHK-{run_id}-{code}{continuation_suffix}-{plan.file_id}-C{index:05d}"
             ),
         )
 
@@ -1415,9 +1398,7 @@ def choose_running_run(
         )
     interactive = sys.stdin.isatty() if interactive is None else interactive
     if action is None and not interactive:
-        raise UsageError(
-            f"{warning}；非交互环境必须指定 --resume-run 或 --decline-run"
-        )
+        raise UsageError(f"{warning}；非交互环境必须指定 --resume-run 或 --decline-run")
     if action is None:
         old_config = load_run_config(project / "runs" / run_id)
         current_config = load_project_config(project, stage=stage)
@@ -1566,9 +1547,7 @@ def finalize_run(
         completed_at=utc_now(),
     )
     invocation_count = manifest.get("usage_invocation_count")
-    tracked = type(invocation_count) is int or bool(
-        manifest.get("continuations")
-    )
+    tracked = type(invocation_count) is int or bool(manifest.get("continuations"))
     if not usage_invoked:
         usage = manifest.get("usage")
     elif usage is not None or tracked:
@@ -1600,9 +1579,7 @@ def unavailable_usage() -> dict[str, Any]:
     }
 
 
-def combine_usage(
-    previous: Any, current: Any
-) -> dict[str, Any]:
+def combine_usage(previous: Any, current: Any) -> dict[str, Any]:
     observed = []
     incomplete = False
     for index, value in enumerate((previous, current)):
@@ -1660,9 +1637,7 @@ def save_debug_chunks(
                 stage=stage,
                 chunk_id=chunk.chunk_id,
                 file_id=chunk.file_id,
-                segment_ids=[
-                    str(segment["segment_id"]) for segment in chunk.segments
-                ],
+                segment_ids=[str(segment["segment_id"]) for segment in chunk.segments],
                 estimated_input_tokens=chunk.estimated_input_tokens,
             ),
         )
@@ -1731,24 +1706,21 @@ class SlidingWindowLimiter:
                     while self.records and now - self.records[0][0] >= 60:
                         self.records.popleft()
                     pace_wait = 0.0
-                    if self.requests_per_minute > 0 and self.last_admitted_at is not None:
+                    if (
+                        self.requests_per_minute > 0
+                        and self.last_admitted_at is not None
+                    ):
                         pace_wait = max(
                             0.0,
-                            self.last_admitted_at
-                            + 60 / self.requests_per_minute
-                            - now,
+                            self.last_admitted_at + 60 / self.requests_per_minute - now,
                         )
                     request_full = (
                         self.requests_per_minute > 0
                         and len(self.records) >= self.requests_per_minute
                     )
-                    token_full = (
-                        self.input_tokens_per_minute > 0
-                        and (
-                            sum(tokens for _, tokens in self.records)
-                            + estimated_tokens
-                            > self.input_tokens_per_minute
-                        )
+                    token_full = self.input_tokens_per_minute > 0 and (
+                        sum(tokens for _, tokens in self.records) + estimated_tokens
+                        > self.input_tokens_per_minute
                     )
                     window_wait = 0.0
                     if request_full or token_full:
@@ -1897,9 +1869,7 @@ class LLMClient:
                     try:
                         event = json.loads(data)
                     except json.JSONDecodeError as exc:
-                        raise ExternalError(
-                            "LLM 流式 SSE data 不是合法 JSON"
-                        ) from exc
+                        raise ExternalError("LLM 流式 SSE data 不是合法 JSON") from exc
                     if not isinstance(event, dict):
                         raise ExternalError("LLM 流式 SSE data 必须是 JSON 对象")
                     stream_error = self.adapter.stream_error_details(event)
@@ -1911,18 +1881,12 @@ class LLMClient:
                             received_bytes=received_bytes,
                             first_event_latency_ms=first_event_latency_ms,
                             status=status,
-                            provider_error_status=(
-                                stream_error.provider_error_status
-                            ),
+                            provider_error_status=(stream_error.provider_error_status),
                         )
                     for key, value in self.adapter.extract_stream_usage(event).items():
                         usage_values[key] = value
-                    content_parts.extend(
-                        self.adapter.stream_content_deltas(event)
-                    )
-                    reasoning_parts.extend(
-                        self.adapter.stream_reasoning_deltas(event)
-                    )
+                    content_parts.extend(self.adapter.stream_content_deltas(event))
+                    reasoning_parts.extend(self.adapter.stream_reasoning_deltas(event))
                     if self.adapter.stream_terminal(event):
                         terminal = True
                         termination = "explicit"
@@ -2177,18 +2141,21 @@ class LLMClient:
                 )
             started = time.monotonic()
             response_status: int | None = None
-            stream_result: tuple[
-                int,
-                str,
-                dict[str, str],
-                LLMResponse,
-                dict[str, int],
-                list[str],
-                int,
-                int,
-                float | None,
-                str,
-            ] | None = None
+            stream_result: (
+                tuple[
+                    int,
+                    str,
+                    dict[str, str],
+                    LLMResponse,
+                    dict[str, int],
+                    list[str],
+                    int,
+                    int,
+                    float | None,
+                    str,
+                ]
+                | None
+            ) = None
             attempt_error = False
             attempt_outcome: str | None = None
             attempt_provider_error_status: int | None = None
@@ -2452,7 +2419,10 @@ class LLMClient:
                         segment_indexes = []
                         for index, line in enumerate(lines):
                             value = json.loads(line)
-                            if isinstance(value, dict) and value.get("type") == "segment":
+                            if (
+                                isinstance(value, dict)
+                                and value.get("type") == "segment"
+                            ):
                                 segment_indexes.append(index)
                         if segment_indexes:
                             lines.pop(segment_indexes[-1])
@@ -2480,9 +2450,7 @@ class LLMClient:
                     normalized = normalize_llm_response(parsed)
                 except Exception:
                     if diagnostics is not None:
-                        diagnostics.fail_request(
-                            request_id, "response_parse_error"
-                        )
+                        diagnostics.fail_request(request_id, "response_parse_error")
                     raise
                 if diagnostics is not None:
                     diagnostics.complete_request(
@@ -2493,15 +2461,11 @@ class LLMClient:
                 extracted = self.adapter.extract_usage(response_data)
                 if extracted is not None:
                     self.usage = Usage(
-                        input_tokens=(
-                            self.usage.input_tokens + extracted.input_tokens
-                        ),
+                        input_tokens=(self.usage.input_tokens + extracted.input_tokens),
                         output_tokens=(
                             self.usage.output_tokens + extracted.output_tokens
                         ),
-                        total_tokens=(
-                            self.usage.total_tokens + extracted.total_tokens
-                        ),
+                        total_tokens=(self.usage.total_tokens + extracted.total_tokens),
                     )
                     self.usage_observed = True
                 elif self.adapter.usage_pointers is not None:
@@ -2516,7 +2480,9 @@ class LLMClient:
                     elapsed,
                 )
                 return normalized, request_id
-            retryable = response.status_code in {408, 429} or response.status_code >= 500
+            retryable = (
+                response.status_code in {408, 429} or response.status_code >= 500
+            )
             await self._debug_attempt(
                 request_id,
                 attempt,
@@ -2565,9 +2531,7 @@ class LLMClient:
                     elapsed,
                 )
                 if diagnostics is not None:
-                    diagnostics.fail_request(
-                        request_id, "request_configuration_error"
-                    )
+                    diagnostics.fail_request(request_id, "request_configuration_error")
                 raise FatalExternalError(
                     f"请求或端点配置错误：HTTP {response.status_code}"
                 )
@@ -2717,9 +2681,7 @@ def _apply_debug_content_injections(
                 segment_indexes.append(index)
         if segment_indexes:
             lines.pop(segment_indexes[-1])
-            return LLMResponse(
-                "\n".join(lines), response.reasoning_content
-            )
+            return LLMResponse("\n".join(lines), response.reasoning_content)
     except (
         KeyError,
         IndexError,
@@ -2765,10 +2727,9 @@ async def dispatch_chunks(
                 return False
             reserved: set[str] = set()
             for index, file_ids_for_chunk, chunk in buffered:
-                if (
-                    file_ids_for_chunk.isdisjoint(active_files)
-                    and file_ids_for_chunk.isdisjoint(reserved)
-                ):
+                if file_ids_for_chunk.isdisjoint(
+                    active_files
+                ) and file_ids_for_chunk.isdisjoint(reserved):
                     buffered.remove((index, file_ids_for_chunk, chunk))
                     start(index, file_ids_for_chunk, chunk)
                     return True
@@ -2841,9 +2802,7 @@ async def dispatch_chunks(
     fill()
     try:
         while pending:
-            done, _ = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 index = pending.pop(task)
                 results[index] = task.result()
@@ -2873,14 +2832,10 @@ _THOUGHT_BLOCK_TAGS = (
 def normalize_llm_response(response: LLMResponse) -> LLMResponse:
     embedded = _extract_embedded_reasoning(response.content)
     if response.reasoning_content and embedded.reasoning_content:
-        raise ExternalError(
-            "LLM 响应同时包含结构化和 content 内嵌思考正文"
-        )
+        raise ExternalError("LLM 响应同时包含结构化和 content 内嵌思考正文")
     return LLMResponse(
         content=embedded.content,
-        reasoning_content=(
-            response.reasoning_content or embedded.reasoning_content
-        ),
+        reasoning_content=(response.reasoning_content or embedded.reasoning_content),
     )
 
 
@@ -2895,14 +2850,8 @@ def _extract_embedded_reasoning(content: str) -> LLMResponse:
             return LLMResponse(stripped.strip(), None)
         thought = stripped[len(opening) : closing_at]
         remainder = stripped[closing_at + len(closing) :].lstrip()
-        if any(
-            tag in thought
-            for pair in _THOUGHT_BLOCK_TAGS
-            for tag in pair
-        ) or any(
-            remainder.startswith(tag)
-            for pair in _THOUGHT_BLOCK_TAGS
-            for tag in pair
+        if any(tag in thought for pair in _THOUGHT_BLOCK_TAGS for tag in pair) or any(
+            remainder.startswith(tag) for pair in _THOUGHT_BLOCK_TAGS for tag in pair
         ):
             return LLMResponse(stripped.strip(), None)
         return LLMResponse(remainder, thought)
@@ -2916,11 +2865,7 @@ def extract_jsonl_content(content: str) -> str:
         body = match.group("body").strip()
         if label in _SUPPORTED_FENCE_LABELS and body:
             outside = normalized[: match.start()] + normalized[match.end() :]
-            if any(
-                tag in outside
-                for pair in _THOUGHT_BLOCK_TAGS
-                for tag in pair
-            ):
+            if any(tag in outside for pair in _THOUGHT_BLOCK_TAGS for tag in pair):
                 return normalized.strip()
             return body
     return normalized.strip()
@@ -2948,6 +2893,8 @@ def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
             continue
         item_type = value.get("type")
         if item_type == "end":
+            if set(value) != {"type"}:
+                errors.append(f"第 {line_number} 行 end 记录含有额外字段")
             seen_end = True
             continue
         if item_type != record_type:

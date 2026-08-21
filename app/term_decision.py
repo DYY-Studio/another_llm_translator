@@ -7,6 +7,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from copy import deepcopy
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,14 @@ from .stages import (
     normalize_term,
     term_normalization,
 )
+from .term_decision_protocol import (
+    DECISION_ACTIONS,
+    DECISION_RULES_VERSION,
+    PATCH_FIELDS,
+    SIMPLE_ACTION_KEYS,
+    UPDATE_ACTION_KEYS,
+    format_correction,
+)
 
 STAGE = "terminology_decision"
 DRAFT_FILE = "terminology_decision_draft.json"
@@ -55,17 +64,6 @@ EVIDENCE_SAMPLE_LIMIT = 5
 EVIDENCE_CONTEXT_RADIUS = 60
 RELATED_ANCHOR_LIMIT = 24
 _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
-_DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
-_SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
-_SIMPLE_ACTION_REDUNDANT_FIELDS = frozenset(
-    {
-        "category",
-        "description",
-        "preferred_translation",
-        "aliases",
-        "group_primary",
-    }
-)
 _STATE_FIELDS = (
     "category",
     "description",
@@ -97,8 +95,7 @@ def _prompt(project: Path, language: str) -> dict[str, str]:
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{path.name}: {exc}") from exc
     return {
-        phase: full_prompt(STAGE, middle, language, phase=phase)
-        for phase in _PHASES
+        phase: full_prompt(STAGE, middle, language, phase=phase) for phase in _PHASES
     }
 
 
@@ -199,7 +196,10 @@ def collect_term_evidence(
                     item["alias_hit_counts"][original] += 1
             samples = item["samples"]
             file_id = str(segment["file_id"])
-            if len(samples) < EVIDENCE_SAMPLE_LIMIT and file_id not in sample_files[normalized]:
+            if (
+                len(samples) < EVIDENCE_SAMPLE_LIMIT
+                and file_id not in sample_files[normalized]
+            ):
                 view_name, excerpt = _evidence_excerpt(
                     views,
                     matched,
@@ -283,7 +283,9 @@ def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
     return tuple(sorted(keys))
 
 
-def _ordered_states(states: Iterable[dict[str, Any]], spec: Any) -> list[dict[str, Any]]:
+def _ordered_states(
+    states: Iterable[dict[str, Any]], spec: Any
+) -> list[dict[str, Any]]:
     return sorted(
         states,
         key=lambda state: (
@@ -292,6 +294,45 @@ def _ordered_states(states: Iterable[dict[str, Any]], spec: Any) -> list[dict[st
             str(state["normalized"]),
         ),
     )
+
+
+def _hard_components(
+    states: list[dict[str, Any]], spec: Any
+) -> list[list[dict[str, Any]]]:
+    """Return indivisible groups formed by durable group and form ownership edges."""
+    by_normalized = {str(state["normalized"]): state for state in states}
+    edges = {normalized: set() for normalized in by_normalized}
+    owners: dict[str, set[str]] = {}
+    for normalized, state in by_normalized.items():
+        primary = state.get("group_primary")
+        if primary is not None and str(primary) in by_normalized:
+            edges[normalized].add(str(primary))
+            edges[str(primary)].add(normalized)
+        for raw in [state["source"], *state.get("aliases", [])]:
+            form = normalize_term(str(raw), spec)
+            if form:
+                owners.setdefault(form, set()).add(normalized)
+    for form_owners in owners.values():
+        ordered = sorted(form_owners)
+        for left, right in pairwise(ordered):
+            edges[left].add(right)
+            edges[right].add(left)
+
+    components: list[list[dict[str, Any]]] = []
+    remaining = set(by_normalized)
+    while remaining:
+        first = min(remaining)
+        pending = [first]
+        component: set[str] = set()
+        while pending:
+            normalized = pending.pop()
+            if normalized in component:
+                continue
+            component.add(normalized)
+            pending.extend(sorted(edges[normalized] - component, reverse=True))
+        remaining.difference_update(component)
+        components.append([by_normalized[key] for key in sorted(component)])
+    return components
 
 
 def _payload_term(
@@ -314,6 +355,12 @@ def _payload_term(
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
     if include_disabled:
         value["disabled"] = bool(state["disabled"])
+    prior_decision = state.get("_prior_decision")
+    if include_disabled and isinstance(prior_decision, dict):
+        value["prior_decision"] = {
+            "action": prior_decision["action"],
+            "reason": prior_decision["reason"],
+        }
     return value
 
 
@@ -334,10 +381,7 @@ def _compact_anchor_evidence(
 
 
 def _compact_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {**deepcopy(anchor), "_compact_evidence": True}
-        for anchor in anchors
-    ]
+    return [{**deepcopy(anchor), "_compact_evidence": True} for anchor in anchors]
 
 
 def _related_anchors(
@@ -402,9 +446,8 @@ def _related_anchors(
 
 def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
     soft_target = int(config["chunking"]["target_chunk_input_tokens"])
-    context_limit = (
-        int(config["llm"]["context_window_tokens"])
-        - int(config["llm"]["context_safety_margin_tokens"])
+    context_limit = int(config["llm"]["context_window_tokens"]) - int(
+        config["llm"]["context_safety_margin_tokens"]
     )
     itpm_limit = int(config["execution"]["input_tokens_per_minute"])
     hard_limit = min(
@@ -450,9 +493,7 @@ def _pack_batches(
 ) -> tuple[list[tuple[list[dict[str, Any]], list[dict[str, Any]]]], int]:
     soft_target, hard_limit, context_limit, itpm_limit = _request_limits(config)
     decision_config = config["terminology_decision"]
-    allow_soft_overflow = bool(
-        decision_config["allow_soft_target_overflow"]
-    )
+    allow_soft_overflow = bool(decision_config["allow_soft_target_overflow"])
     anchor_overflow_mode = str(decision_config["anchor_overflow_mode"])
     token_factor = float(config["execution"]["token_safety_factor"])
 
@@ -480,23 +521,23 @@ def _pack_batches(
         return "context"
 
     def fail_size(
-        state: dict[str, Any],
+        component: list[dict[str, Any]],
         estimate: int,
         *,
         limit: int,
         reason: str,
         detail: str,
     ) -> None:
+        sources = ", ".join(str(state["source"]) for state in component[:5])
         raise RequestSizeError(
-            f"术语 {state['source']} 的自动决策请求估算 {estimate} tokens，"
+            f"不可拆术语组件 [{sources}] 的自动决策请求估算 {estimate} tokens，"
             f"限制 {limit} tokens；{detail}",
             reason=reason,
         )
 
-    def prepare_single(
+    def prepare_component(
         focus: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], int]:
-        state = focus[0]
         selected_anchors = _related_anchors(focus, anchors, spec)
         had_anchors = bool(selected_anchors)
         estimate = estimate_for(focus, selected_anchors)
@@ -515,7 +556,7 @@ def _pack_batches(
                     else "完整术语证据和 Anchors 仍超过硬限制"
                 )
                 fail_size(
-                    state,
+                    focus,
                     estimate,
                     limit=hard_limit,
                     reason=overflow_reason(),
@@ -523,7 +564,7 @@ def _pack_batches(
                 )
         if estimate > soft_target and not allow_soft_overflow:
             fail_size(
-                state,
+                focus,
                 estimate,
                 limit=soft_target,
                 reason="context",
@@ -535,25 +576,37 @@ def _pack_batches(
     total = 0
     current: list[dict[str, Any]] = []
     batch_limit = min(soft_target, hard_limit)
-    for state in _ordered_states(states, spec):
-        proposed = [*current, state]
+    components = _hard_components(states, spec)
+    soft_rank = {
+        str(state["normalized"]): index
+        for index, state in enumerate(_ordered_states(states, spec))
+    }
+    components.sort(
+        key=lambda component: (
+            min(soft_rank[str(state["normalized"])] for state in component),
+            tuple(str(state["normalized"]) for state in component),
+        )
+    )
+    for component in components:
+        ordered_component = _ordered_states(component, spec)
+        proposed = [*current, *ordered_component]
         related = _related_anchors(proposed, anchors, spec)
         estimate = estimate_for(proposed, related)
         if current and estimate > batch_limit:
-            previous_anchors, previous_estimate = prepare_single(current)
+            previous_anchors, previous_estimate = prepare_component(current)
             batches.append((current, previous_anchors))
             total += previous_estimate
-            current = [state]
+            current = ordered_component
             continue
         if not current and estimate > batch_limit:
-            selected_anchors, single_estimate = prepare_single([state])
-            batches.append(([state], selected_anchors))
+            selected_anchors, single_estimate = prepare_component(ordered_component)
+            batches.append((ordered_component, selected_anchors))
             total += single_estimate
             current = []
             continue
         current = proposed
     if current:
-        selected_anchors, final_estimate = prepare_single(current)
+        selected_anchors, final_estimate = prepare_component(current)
         total += final_estimate
         batches.append((current, selected_anchors))
     return batches, total
@@ -617,9 +670,7 @@ def _group_violations(states: dict[str, dict[str, Any]]) -> list[_GroupViolation
     return violations
 
 
-def _group_violation_message(
-    violation: _GroupViolation, language: str
-) -> str:
+def _group_violation_message(violation: _GroupViolation, language: str) -> str:
     kind, values = violation
     if kind == "cycle":
         edge = " -> ".join((*values, values[0]))
@@ -644,9 +695,7 @@ def _group_violation_message(
     return f"{labels[kind]}：{edge}"
 
 
-def _normalized_aliases(
-    state: dict[str, Any], spec: Any
-) -> dict[str, str]:
+def _normalized_aliases(state: dict[str, Any], spec: Any) -> dict[str, str]:
     """Map normalized alias forms to their first visible spelling."""
     result: dict[str, str] = {}
     for value in state.get("aliases", []):
@@ -714,7 +763,10 @@ def _alias_violations(
             continue
         if state.get("group_primary") is not None:
             violations.extend(
-                ("non_root_receiver", (normalized, str(state["group_primary"]), alias_form))
+                (
+                    "non_root_receiver",
+                    (normalized, str(state["group_primary"]), alias_form),
+                )
                 for alias_form in sorted(added)
             )
             continue
@@ -726,16 +778,22 @@ def _alias_violations(
             for owner in sorted(alias_owners - {normalized}):
                 owner_state = final.get(owner)
                 if owner_state is None:
-                    violations.append(("unknown_owner", (normalized, owner, alias_form)))
+                    violations.append(
+                        ("unknown_owner", (normalized, owner, alias_form))
+                    )
                     continue
                 owner_primary = owner_state.get("group_primary")
-                same_root = owner_primary is not None and str(owner_primary) == normalized
+                same_root = (
+                    owner_primary is not None and str(owner_primary) == normalized
+                )
                 released = alias_form not in _normalized_aliases(owner_state, spec)
                 owner_source = normalize_term(str(owner_state.get("source", "")), spec)
                 source_transfer = alias_form == owner_source
-                if owner_state.get("disabled") or (
-                    source_transfer and same_root
-                ) or (not source_transfer and released):
+                if (
+                    owner_state.get("disabled")
+                    or (source_transfer and same_root)
+                    or (not source_transfer and released)
+                ):
                     continue
                 violations.append(("alias_transfer", (normalized, owner, alias_form)))
     return violations
@@ -777,20 +835,79 @@ def _parse_decisions(
     content: str,
     focus: list[dict[str, Any]],
     *,
-    all_forms: set[str],
+    visible_states: list[dict[str, Any]],
     known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
     prompt_language: str = "zh-CN",
     review_states: dict[str, dict[str, Any]] | None = None,
     spec: Any | None = None,
+    phase: str = "adjudication",
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[tuple[str, str]]]:
+    result = _analyze_decisions(
+        content,
+        focus,
+        visible_states=visible_states,
+        known_states=known_states,
+        read_only_terms=read_only_terms,
+        prompt_language=prompt_language,
+        review_states=review_states,
+        spec=spec,
+        phase=phase,
+    )
+    if result[3]:
+        raise UsageError("；".join(error["message"] for error in result[3][:10]))
+    return result[0], result[1], result[2]
+
+
+def _analyze_decisions(
+    content: str,
+    focus: list[dict[str, Any]],
+    *,
+    visible_states: list[dict[str, Any]],
+    known_states: dict[str, dict[str, Any]],
+    read_only_terms: set[str],
+    prompt_language: str,
+    review_states: dict[str, dict[str, Any]] | None,
+    spec: Any | None,
+    phase: str,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    list[str],
+    list[tuple[str, str]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    bool,
+]:
     document = parse_jsonl_document(content, record_type="decision")
-    errors = list(document.errors)
+    errors = [
+        {"code": "invalid_document", "message": message} for message in document.errors
+    ]
+    batch_error = bool(document.errors)
     expected = {str(item["normalized"]): item for item in focus}
     decisions: dict[str, dict[str, Any]] = {}
     ignored_read_only: list[str] = []
     seen_targets: set[str] = set()
     normalized_redundant: list[tuple[str, str]] = []
+    invalid_records: list[dict[str, Any]] = []
+    raw_by_normalized: dict[str, dict[str, Any]] = {}
+    visible_forms = {
+        str(value)
+        for state in visible_states
+        for value in [state["source"], *state.get("aliases", [])]
+    }
+    visible_normalized = {str(state["normalized"]) for state in visible_states}
+
+    def reject(code: str, message: str, value: dict[str, Any]) -> None:
+        normalized = value.get("normalized")
+        errors.append(
+            {
+                "code": code,
+                "message": message,
+                **({"normalized": normalized} if isinstance(normalized, str) else {}),
+            }
+        )
+        invalid_records.append(deepcopy(value))
+
     for value in document.records:
         normalized = value.get("normalized")
         action = value.get("action")
@@ -798,53 +915,61 @@ def _parse_decisions(
             if isinstance(normalized, str) and normalized in read_only_terms:
                 ignored_read_only.append(normalized)
                 continue
-            errors.append(f"未知术语决策 normalized：{normalized}")
+            reject("unknown_record", f"未知术语决策 normalized：{normalized}", value)
+            batch_error = True
             continue
         if normalized in seen_targets:
-            errors.append(f"术语决策重复：{normalized}")
+            reject("duplicate_record", f"术语决策重复：{normalized}", value)
             continue
         seen_targets.add(normalized)
-        if action not in _DECISION_ACTIONS:
-            errors.append(f"术语决策 action 无效：{normalized}")
+        raw_by_normalized[normalized] = value
+        if action not in DECISION_ACTIONS:
+            reject("invalid_action", f"术语决策 action 无效：{normalized}", value)
             continue
         reason = value.get("reason")
         if not isinstance(reason, str) or not reason.strip():
-            errors.append(f"术语决策 reason 必须是非空字符串：{normalized}")
+            reject(
+                "invalid_reason",
+                f"术语决策 reason 必须是非空字符串：{normalized}",
+                value,
+            )
             continue
-        update_keys = _SIMPLE_ACTION_KEYS | {
-            "category",
-            "description",
-            "preferred_translation",
-            "aliases",
-            "group_primary",
-        }
         if action == "update":
-            if set(value) != update_keys:
-                missing_keys = sorted(update_keys - set(value))
-                extra_keys = sorted(set(value) - update_keys)
+            if set(value) != UPDATE_ACTION_KEYS:
+                missing_keys = sorted(UPDATE_ACTION_KEYS - set(value))
+                extra_keys = sorted(set(value) - UPDATE_ACTION_KEYS)
                 details = []
                 if missing_keys:
                     details.append(f"缺少字段 {', '.join(missing_keys)}")
                 if extra_keys:
                     details.append(f"禁止字段 {', '.join(extra_keys)}")
-                errors.append(
-                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
+                reject(
+                    "invalid_fields",
+                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）",
+                    value,
                 )
                 continue
         else:
-            missing_keys = sorted(_SIMPLE_ACTION_KEYS - set(value))
-            extra_keys = set(value) - _SIMPLE_ACTION_KEYS
-            unknown_extra_keys = sorted(
-                extra_keys - _SIMPLE_ACTION_REDUNDANT_FIELDS
-            )
+            missing_keys = sorted(SIMPLE_ACTION_KEYS - set(value))
+            extra_keys = set(value) - SIMPLE_ACTION_KEYS
+            unknown_extra_keys = sorted(extra_keys - PATCH_FIELDS)
             details = []
             if missing_keys:
                 details.append(f"缺少字段 {', '.join(missing_keys)}")
             if unknown_extra_keys:
                 details.append(f"禁止字段 {', '.join(unknown_extra_keys)}")
+            mismatched = sorted(
+                key
+                for key in extra_keys & PATCH_FIELDS
+                if value[key] != expected[normalized].get(key)
+            )
+            if mismatched:
+                details.append(f"冗余字段与当前状态不一致 {', '.join(mismatched)}")
             if details:
-                errors.append(
-                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）"
+                reject(
+                    "invalid_fields",
+                    f"{action} 决策字段无效：{normalized}（{'；'.join(details)}）",
+                    value,
                 )
                 continue
             if extra_keys:
@@ -854,50 +979,110 @@ def _parse_decisions(
                 "reason": reason.strip(),
             }
             continue
-        aliases = value.get("aliases")
-        if not isinstance(aliases, list) or not all(
-            isinstance(alias, str) and alias.strip() for alias in aliases
+        changes = value.get("changes")
+        if not isinstance(changes, dict) or not set(changes) <= PATCH_FIELDS:
+            reject("invalid_patch", f"术语决策 changes 无效：{normalized}", value)
+            continue
+        prior = expected[normalized].get("_prior_decision")
+        empty_allowed = (
+            phase == "consistency"
+            and isinstance(prior, dict)
+            and prior.get("action") == "needs_review"
+        ) or bool(expected[normalized].get("disabled"))
+        if not changes and not empty_allowed:
+            reject("empty_patch", f"术语决策 changes 不得为空：{normalized}", value)
+            continue
+        after = _term_state(expected[normalized])
+        patch_invalid = False
+        for key, patch_value in changes.items():
+            if key == "aliases":
+                if not isinstance(patch_value, list) or not all(
+                    isinstance(alias, str) and alias.strip() for alias in patch_value
+                ):
+                    reject(
+                        "invalid_aliases", f"术语决策 aliases 无效：{normalized}", value
+                    )
+                    patch_invalid = True
+                    break
+                aliases = [alias.strip() for alias in patch_value]
+                if len(aliases) != len(set(aliases)):
+                    reject(
+                        "invalid_aliases", f"术语决策 aliases 重复：{normalized}", value
+                    )
+                    patch_invalid = True
+                    break
+                if any(alias not in visible_forms for alias in aliases):
+                    reject(
+                        "invisible_alias",
+                        f"术语决策发明了源文 alias：{normalized}",
+                        value,
+                    )
+                    patch_invalid = True
+                    break
+                after[key] = aliases
+            elif key == "group_primary":
+                if patch_value is not None and (
+                    not isinstance(patch_value, str)
+                    or patch_value not in visible_normalized
+                ):
+                    reject(
+                        "invisible_group_primary",
+                        f"术语决策 group_primary 无效：{normalized}",
+                        value,
+                    )
+                    patch_invalid = True
+                    break
+                after[key] = patch_value
+            else:
+                try:
+                    parsed = _nullable_string(patch_value, key)
+                except UsageError as exc:
+                    reject("invalid_patch_value", str(exc), value)
+                    patch_invalid = True
+                    break
+                if key == "description" and parsed not in {
+                    None,
+                    expected[normalized].get("description") or None,
+                }:
+                    reject(
+                        "invented_description",
+                        f"术语决策不得新写 description：{normalized}",
+                        value,
+                    )
+                    patch_invalid = True
+                    break
+                after[key] = parsed
+        if patch_invalid:
+            continue
+        if changes and all(
+            after[key] == expected[normalized].get(key) for key in changes
         ):
-            errors.append(f"术语决策 aliases 无效：{normalized}")
+            reject("no_op_patch", f"术语决策 changes 未修改状态：{normalized}", value)
             continue
-        aliases = list(dict.fromkeys(alias.strip() for alias in aliases))
-        if any(alias not in all_forms for alias in aliases):
-            errors.append(f"术语决策发明了源文 alias：{normalized}")
-            continue
+        aliases = after["aliases"]
         if spec is not None:
             alias_forms = [normalize_term(alias, spec) for alias in aliases]
             source_form = normalize_term(str(expected[normalized]["source"]), spec)
             if len(alias_forms) != len(set(alias_forms)):
-                errors.append(f"术语决策 aliases 规范化后重复：{normalized}")
+                reject(
+                    "invalid_aliases",
+                    f"术语决策 aliases 规范化后重复：{normalized}",
+                    value,
+                )
                 continue
-            if any(alias_form in {normalized, source_form} for alias_form in alias_forms):
-                errors.append(f"术语决策 aliases 不得包含自身 source：{normalized}")
+            if any(
+                alias_form in {normalized, source_form} for alias_form in alias_forms
+            ):
+                reject(
+                    "self_alias",
+                    f"术语决策 aliases 不得包含自身 source：{normalized}",
+                    value,
+                )
                 continue
-        group_primary = value.get("group_primary")
-        if group_primary is not None and (
-            not isinstance(group_primary, str) or group_primary not in known_states
-        ):
-            errors.append(f"术语决策 group_primary 无效：{normalized}")
-            continue
-        original_description = expected[normalized].get("description") or None
-        description = _nullable_string(value.get("description"), "description")
-        if description not in {None, original_description}:
-            errors.append(f"术语决策不得新写 description：{normalized}")
-            continue
         decisions[normalized] = {
             "action": action,
             "reason": reason.strip(),
-            "after": {
-                **_term_state(expected[normalized]),
-                "category": _nullable_string(value.get("category"), "category"),
-                "description": description,
-                "preferred_translation": _nullable_string(
-                    value.get("preferred_translation"), "preferred_translation"
-                ),
-                "aliases": aliases,
-                "group_primary": group_primary,
-                "disabled": False,
-            },
+            "after": {**after, "disabled": False},
         }
     candidate_states = dict(known_states)
     for normalized, decision in decisions.items():
@@ -911,19 +1096,60 @@ def _parse_decisions(
         elif decision["action"] == "needs_review" and review_states is not None:
             candidate_states[normalized] = review_states[normalized]
     focus_terms = set(expected)
-    errors.extend(
-        _group_violation_message(violation, prompt_language)
-        for violation in _group_violations(candidate_states)
-        if focus_terms.intersection(violation[1])
-    )
+    relationship_errors: list[tuple[str, str]] = []
+    for violation in _group_violations(candidate_states):
+        affected = focus_terms.intersection(violation[1])
+        for normalized in affected:
+            relationship_errors.append(
+                (normalized, _group_violation_message(violation, prompt_language))
+            )
+    if spec is not None:
+        visible_map = {
+            str(state["normalized"]): known_states[str(state["normalized"])]
+            for state in visible_states
+            if str(state["normalized"]) in known_states
+        }
+        candidate_visible = {**visible_map}
+        candidate_visible.update(
+            (normalized, candidate_states[normalized]) for normalized in focus_terms
+        )
+        for violation in _alias_violations(visible_map, candidate_visible, spec):
+            for normalized in focus_terms.intersection(violation[1][:2]):
+                relationship_errors.append(
+                    (normalized, _alias_violation_message(violation, prompt_language))
+                )
+    for normalized, message in relationship_errors:
+        errors.append(
+            {
+                "code": "invalid_relationship",
+                "message": message,
+                "normalized": normalized,
+            }
+        )
+        decisions.pop(normalized, None)
+        if (
+            normalized in raw_by_normalized
+            and raw_by_normalized[normalized] not in invalid_records
+        ):
+            invalid_records.append(deepcopy(raw_by_normalized[normalized]))
     missing = sorted(set(expected) - seen_targets)
     if missing:
-        errors.append(f"术语决策缺少记录：{', '.join(missing[:10])}")
-    if not document.complete:
-        errors.append("术语决策响应缺少 end")
-    if errors:
-        raise UsageError("；".join(errors[:10]))
-    return decisions, ignored_read_only, normalized_redundant
+        errors.extend(
+            {
+                "code": "missing_record",
+                "message": f"术语决策缺少记录：{normalized}",
+                "normalized": normalized,
+            }
+            for normalized in missing
+        )
+    return (
+        decisions,
+        ignored_read_only,
+        normalized_redundant,
+        errors,
+        invalid_records,
+        batch_error,
+    )
 
 
 async def _request_batch(
@@ -935,98 +1161,106 @@ async def _request_batch(
     prompt: str,
     config: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
-    all_forms: set[str],
     known_states: dict[str, dict[str, Any]],
     read_only_terms: set[str],
     prompt_language: str,
     review_states: dict[str, dict[str, Any]],
     spec: Any,
 ) -> dict[str, dict[str, Any]]:
-    errors: list[str] = []
+    accepted: dict[str, dict[str, Any]] = {}
+    unresolved = {str(item["normalized"]) for item in focus}
+    by_normalized = {str(item["normalized"]): item for item in focus}
+    component_by_term = {
+        str(item["normalized"]): {str(member["normalized"]) for member in component}
+        for component in _hard_components(focus, spec)
+        for item in component
+    }
+    previous_errors: list[dict[str, Any]] = []
+    previous_invalid: list[dict[str, Any]] = []
+    previous_signature: tuple[tuple[str, str | None], ...] | None = None
     parent_request_id: str | None = None
-    for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
-        payload = _make_payload(
-            phase=phase,
-            target_language=str(config["project"]["target_language"]),
-            focus=focus,
-            anchors=anchors,
-            evidence=_compact_anchor_evidence(evidence, anchors),
-        )
-        if attempt:
-            allowed = json.dumps(
-                [str(item["normalized"]) for item in focus],
-                ensure_ascii=False,
+    last_request_id: str | None = None
+    max_attempts = int(config["retry"]["format_max_attempts"])
+    for attempt in range(max_attempts + 1):
+        signature = tuple(
+            sorted(
+                (str(error["code"]), error.get("normalized"))
+                for error in previous_errors
             )
-            if prompt_language == "en":
-                detail = (
-                    errors[0]
-                    if errors
-                    and errors[0].startswith(
-                        ("self-referencing group pointer", "group pointer", "alias ", "term ")
-                    )
-                    else "invalid response"
-                )
-                payload["format_correction"] = (
-                    "The previous response violated the terminology decision "
-                    "protocol and could not be accepted: "
-                    f"{detail}. "
-                    f"The only allowed decision normalized values are {allowed}. "
-                    "Output exactly one decision for each terms[] item and no decision "
-                    "for any anchors[] item. Every action requires a non-empty string "
-                    "reason. keep, disable, and needs_review contain exactly type, "
-                    "normalized, action, reason. update contains exactly type, normalized, "
-                    "action, reason, category, description, preferred_translation, aliases, "
-                    "group_primary; all nine keys are required even when a value is null or "
-                    "aliases is []. Nullable values must use JSON null, not an empty string. "
-                    "description may only copy the current terms[] description verbatim or be "
-                    "null. aliases may only use existing source/alias forms visible in this "
-                    "request. Adding another term's existing form requires a complete multi-term "
-                    "transfer: the receiver is an enabled root and the old owner releases the "
-                    "form, is disabled, or becomes its direct member when the form is that owner's "
-                    "source. Output the exact end record last. A group "
-                    "member may point only directly to an enabled root whose own "
-                    "group_primary is null; self-references, disabled targets, chains, "
-                    "and cycles are forbidden."
-                )
-            else:
-                payload["format_correction"] = (
-                    "上次响应不符合术语决策协议："
-                    f"{errors[0] if errors else '响应无效'}。"
-                    f"本批唯一允许输出的 normalized 为 {allowed}。"
-                    "必须为每个 terms[] 项各输出一条 decision，不得为 anchors[] 任一项输出"
-                    " decision。每种 action 都必须有非空字符串 reason。keep、disable、"
-                    "needs_review 必须且只能含 type、normalized、action、reason。update 必须"
-                    "且只能含 type、normalized、action、reason、category、description、"
-                    "preferred_translation、aliases、group_primary；九个键全部必填，即使值为"
-                    " null 或 aliases=[] 也不能省略。可空值必须用 JSON null，不能用空字符串。"
-                    "description 只能逐字保持当前 terms[] 值或为 null；aliases 只能使用本次"
-                    "输入中可见的既有 source/alias 原文；接收其他术语的形式必须同时表达完整"
-                    "多术语转移，不能单边偷取。最后输出精确的 end 记录。组成员"
-                    "只能直接指向启用且"
-                    "group_primary 为 null 的根术语；禁止自指、禁用目标、链和循环。"
-                )
-        messages = render_messages(prompt, payload)
-        request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-        estimate = estimate_messages(
-            messages, float(config["execution"]["token_safety_factor"])
         )
-        response, _ = await llm.chat(
-            messages=messages,
-            temperature=float(config["llm"]["temperature_terminology_decision"]),
-            estimated_input_tokens=estimate,
-            request_id=request_id,
-            parent_request_id=parent_request_id,
-        )
-        try:
-            decisions, ignored_read_only, normalized_redundant = _parse_decisions(
+        isolate = bool(attempt and signature and signature == previous_signature)
+        if isolate:
+            pending_groups = []
+            seen_groups: set[tuple[str, ...]] = set()
+            for normalized in sorted(unresolved):
+                group = tuple(sorted(component_by_term[normalized] & unresolved))
+                if group and group not in seen_groups:
+                    seen_groups.add(group)
+                    pending_groups.append(set(group))
+        else:
+            pending_groups = [set(unresolved)]
+        round_errors: list[dict[str, Any]] = []
+        round_invalid: list[dict[str, Any]] = []
+        for target_ids in pending_groups:
+            request_focus = [
+                by_normalized[normalized] for normalized in sorted(target_ids)
+            ]
+            accepted_anchors = [
+                accepted[normalized].get("after", known_states[normalized])
+                for normalized in sorted(accepted)
+            ]
+            request_anchors = [*anchors, *accepted_anchors]
+            payload = _make_payload(
+                phase=phase,
+                target_language=str(config["project"]["target_language"]),
+                focus=request_focus,
+                anchors=request_anchors,
+                evidence=_compact_anchor_evidence(evidence, request_anchors),
+            )
+            if attempt:
+                payload["format_correction"] = format_correction(
+                    language=prompt_language,
+                    errors=previous_errors,
+                    previous_invalid_records=previous_invalid,
+                    accepted_normalized=sorted(accepted),
+                    target_normalized=sorted(target_ids),
+                )
+            messages = render_messages(prompt, payload)
+            request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
+            last_request_id = request_id
+            estimate = estimate_messages(
+                messages, float(config["execution"]["token_safety_factor"])
+            )
+            response, _ = await llm.chat(
+                messages=messages,
+                temperature=float(config["llm"]["temperature_terminology_decision"]),
+                estimated_input_tokens=estimate,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+            )
+            (
+                decisions,
+                ignored_read_only,
+                normalized_redundant,
+                errors,
+                invalid_records,
+                batch_error,
+            ) = _analyze_decisions(
                 response.content,
-                focus,
-                all_forms=all_forms,
-                known_states=known_states,
-                read_only_terms=read_only_terms,
+                request_focus,
+                visible_states=[*request_focus, *request_anchors],
+                known_states={
+                    **known_states,
+                    **{
+                        normalized: decision.get("after", known_states[normalized])
+                        for normalized, decision in accepted.items()
+                    },
+                },
+                read_only_terms=read_only_terms | set(accepted),
                 prompt_language=prompt_language,
                 review_states=review_states,
                 spec=spec,
+                phase=phase,
             )
             if ignored_read_only:
                 llm.logger.warning(
@@ -1041,21 +1275,43 @@ async def _request_batch(
                     "actions=%s normalized=%s",
                     request_id,
                     len(normalized_redundant),
-                    ",".join(
-                        sorted({action for _, action in normalized_redundant})
-                    ),
+                    ",".join(sorted({action for _, action in normalized_redundant})),
                     ",".join(
                         dict.fromkeys(
-                            normalized
-                            for normalized, _ in normalized_redundant
+                            normalized for normalized, _ in normalized_redundant
                         )
                     )[:200],
                 )
-            return decisions
-        except UsageError as exc:
-            errors = [str(exc)]
+            if not batch_error:
+                accepted.update(decisions)
+                failed_ids = {
+                    str(error["normalized"])
+                    for error in errors
+                    if isinstance(error.get("normalized"), str)
+                }
+                expanded = set().union(
+                    *(component_by_term[normalized] for normalized in failed_ids),
+                    set(),
+                )
+                for normalized in expanded:
+                    accepted.pop(normalized, None)
+                unresolved.difference_update(decisions)
+                unresolved.update(expanded)
+            round_errors.extend(errors)
+            round_invalid.extend(invalid_records)
             parent_request_id = request_id
-    raise UsageError("术语决策格式修正重试耗尽：" + "；".join(errors[:5]))
+        if not unresolved:
+            return accepted
+        previous_signature = signature
+        previous_errors = round_errors
+        previous_invalid = round_invalid
+    detail = "；".join(error["message"] for error in previous_errors[:5])
+    error = UsageError(f"术语决策格式修正重试耗尽：{detail}")
+    error.params = {
+        "reason": "format_retries_exhausted",
+        "request_id": last_request_id,
+    }
+    raise error
 
 
 async def _dispatch_batches(
@@ -1121,6 +1377,19 @@ def decision_checkpoint_progress(project: Path, run_id: str) -> int:
     return completed
 
 
+def decision_resume_compatibility(project: Path, run_id: str) -> tuple[bool, str | None]:
+    path = _checkpoint_path(project, run_id)
+    if not path.is_file():
+        return False, "旧 Run 缺少术语决策检查点规则版本"
+    try:
+        checkpoint = _read_checkpoint_file(path)
+    except StorageError:
+        return False, "旧 Run 的术语决策检查点不可读"
+    if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
+        return False, "旧 Run 使用不兼容的术语决策输出协议"
+    return True, None
+
+
 def _read_checkpoint_file(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -1131,15 +1400,14 @@ def _read_checkpoint_file(path: Path) -> dict[str, Any]:
     return value
 
 
-def _new_checkpoint(
-    project_id: str, run_id: str, revision: int
-) -> dict[str, Any]:
+def _new_checkpoint(project_id: str, run_id: str, revision: int) -> dict[str, Any]:
     return record_header(
         "terminology_decision_checkpoint",
         project_id,
         record_id=f"TERMINOLOGY-DECISION-CHECKPOINT-{run_id}",
         run_id=run_id,
         source_terms_revision=revision,
+        decision_rules_version=DECISION_RULES_VERSION,
         phases={phase: {} for phase in _PHASES},
     )
 
@@ -1165,6 +1433,8 @@ def _load_checkpoint(
         or checkpoint.get("source_terms_revision") != revision
     ):
         raise UsageError("术语决策检查点与当前 Run 或术语 revision 不一致")
+    if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
+        raise UsageError("术语决策检查点规则版本不兼容；请显式结束旧 Run 并强制新建")
     phases = checkpoint.get("phases")
     if not isinstance(phases, dict):
         raise StorageError("术语决策检查点 phases 无效")
@@ -1235,6 +1505,44 @@ def _consistency_states(
     return result
 
 
+def _merge_phase_decisions(
+    *,
+    original: dict[str, dict[str, Any]],
+    tentative: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    adjudication: dict[str, dict[str, Any]],
+    consistency: dict[str, dict[str, Any]],
+    language: str,
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for normalized, first in adjudication.items():
+        second = consistency[normalized]
+        if second["action"] == "keep":
+            merged[normalized] = deepcopy(first)
+            continue
+        merged[normalized] = deepcopy(second)
+        if second["action"] == "needs_review":
+            continue
+        first_changed = any(
+            original[normalized][field] != tentative[normalized][field]
+            for field in _STATE_FIELDS
+        )
+        second_changed = any(
+            tentative[normalized][field] != final[normalized][field]
+            for field in _STATE_FIELDS
+        )
+        if first_changed and second_changed:
+            if language == "en":
+                merged[normalized]["reason"] = (
+                    f"Phase one: {first['reason']}; phase two: {second['reason']}"
+                )
+            else:
+                merged[normalized]["reason"] = (
+                    f"第一阶段：{first['reason']}；第二阶段：{second['reason']}"
+                )
+    return merged
+
+
 def _decision_dependency_graph(
     original: dict[str, dict[str, Any]],
     final: dict[str, dict[str, Any]],
@@ -1262,8 +1570,7 @@ def _decision_dependency_graph(
         if key not in original:
             continue
         added = {
-            normalize_term(str(value), spec)
-            for value in state.get("aliases", [])
+            normalize_term(str(value), spec) for value in state.get("aliases", [])
         } - {
             normalize_term(str(value), spec)
             for value in original[key].get("aliases", [])
@@ -1299,7 +1606,9 @@ def _dependency_components(
     return components
 
 
-def _relationship_violation_nodes(violation: _GroupViolation | _AliasViolation) -> set[str]:
+def _relationship_violation_nodes(
+    violation: _GroupViolation | _AliasViolation,
+) -> set[str]:
     kind, values = violation
     if kind in {
         "self_alias",
@@ -1371,7 +1680,9 @@ def _recover_invalid_relationship_components(
 
 
 def _proposal_id(values: list[dict[str, Any]]) -> str:
-    encoded = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        values, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return "TDP-" + hashlib.sha256(encoded.encode()).hexdigest()[:16].upper()
 
 
@@ -1395,7 +1706,8 @@ def _build_draft(
     changed = {
         key
         for key in final
-        if key not in protected and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
+        if key not in protected
+        and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
     graph = _decision_dependency_graph(original, final, spec)
     components = _dependency_components(graph, changed, allowed=changed)
@@ -1472,14 +1784,10 @@ def _validate_final_states(
                 for violation in violations
             )
         )
-    active = [
-        deepcopy(state) for state in states.values() if not state.get("disabled")
-    ]
+    active = [deepcopy(state) for state in states.values() if not state.get("disabled")]
     built = build_term_library_rows(project, active, {})
     built_by_key = {str(item["normalized"]): item for item in built}
-    expected_keys = {
-        key for key, state in states.items() if not state.get("disabled")
-    }
+    expected_keys = {key for key, state in states.items() if not state.get("disabled")}
     if set(built_by_key) != expected_keys:
         raise UsageError("术语决策生成了不完整的最终术语集合")
     for normalized in expected_keys:
@@ -1493,7 +1801,7 @@ def _decision_fingerprint(
 ) -> str:
     data = {
         "stage": STAGE,
-        "rules_version": 4,
+        "rules_version": DECISION_RULES_VERSION,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
@@ -1507,7 +1815,9 @@ def _decision_fingerprint(
         "terminology": config["terminology"],
         "terminology_decision": config["terminology_decision"],
     }
-    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
 
 
@@ -1527,14 +1837,14 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
         if not path.is_file():
             raise StorageError(f"术语决策 Run 缺少草案：{manifest['run_id']}")
         draft = json.loads(path.read_text(encoding="utf-8"))
-        draft["rejected_proposal_ids"] = list(
-            manifest.get("rejected_proposal_ids", [])
-        )
+        draft["rejected_proposal_ids"] = list(manifest.get("rejected_proposal_ids", []))
         return draft
     return None
 
 
-def _decision_needs_review(project: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+def _decision_needs_review(
+    project: Path, manifest: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Read the review items that belong to one completed decision Run."""
     path = _draft_path(project, str(manifest["run_id"]))
     if not path.is_file():
@@ -1542,7 +1852,9 @@ def _decision_needs_review(project: Path, manifest: dict[str, Any]) -> list[dict
     try:
         draft = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise StorageError(f"无法读取术语决策草案：{manifest['run_id']}: {exc}") from exc
+        raise StorageError(
+            f"无法读取术语决策草案：{manifest['run_id']}: {exc}"
+        ) from exc
     values = draft.get("needs_review", [])
     if not isinstance(values, list):
         raise StorageError(f"术语决策草案人工关注项格式无效：{manifest['run_id']}")
@@ -1555,7 +1867,13 @@ def _decision_needs_review(project: Path, manifest: dict[str, Any]) -> list[dict
     for value in values:
         if not isinstance(value, dict) or not isinstance(value.get("normalized"), str):
             raise StorageError(f"术语决策草案人工关注项格式无效：{manifest['run_id']}")
-        result.append({**deepcopy(value), "run_id": str(manifest["run_id"]), "resolved": value["normalized"] in resolved})
+        result.append(
+            {
+                **deepcopy(value),
+                "run_id": str(manifest["run_id"]),
+                "resolved": value["normalized"] in resolved,
+            }
+        )
     return result
 
 
@@ -1589,10 +1907,17 @@ def set_manual_review_resolved(
 ) -> dict[str, Any]:
     """Persist one review item's explicit handled state in its Run manifest."""
     manifest = next(
-        (item for item in list_runs(project, stage=STAGE) if str(item.get("run_id")) == run_id),
+        (
+            item
+            for item in list_runs(project, stage=STAGE)
+            if str(item.get("run_id")) == run_id
+        ),
         None,
     )
-    if manifest is None or manifest.get("decision_status") not in {"applied", "rejected"}:
+    if manifest is None or manifest.get("decision_status") not in {
+        "applied",
+        "rejected",
+    }:
         raise UsageError("该 Run 没有可处理的人工关注项")
     items = _decision_needs_review(project, manifest)
     known = {str(item["normalized"]) for item in items}
@@ -1633,7 +1958,11 @@ def decision_review_state(project: Path) -> dict[str, Any]:
             "run_id": str(applied["run_id"]),
             "applied_terms_revision": int(applied["applied_terms_revision"]),
         }
-    return {"draft": draft, "rollback": rollback, "manual_review": manual_review_state(project)}
+    return {
+        "draft": draft,
+        "rollback": rollback,
+        "manual_review": manual_review_state(project),
+    }
 
 
 def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str, Any]:
@@ -1641,16 +1970,12 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
     if library is None or not library.get("terms"):
         raise UsageError("没有已发布术语库可供自动决策")
     config = load_project_config(project, stage=STAGE)
-    overrides_document = read_json(
-        project, project / "terminology" / "overrides.json"
-    )
+    overrides_document = read_json(project, project / "terminology" / "overrides.json")
     protected = {
-        str(item["normalized"])
-        for item in overrides_document.get("overrides", [])
+        str(item["normalized"]) for item in overrides_document.get("overrides", [])
     }
     states = {
-        str(item["normalized"]): _term_state(item)
-        for item in library.get("terms", [])
+        str(item["normalized"]): _term_state(item) for item in library.get("terms", [])
     }
     eligible = [
         state
@@ -1659,20 +1984,35 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
     ]
     if not eligible:
         raise UsageError("已发布术语全部受到人工 override 保护")
-    evidence = collect_term_evidence(
-        project, list(library.get("terms", [])), config
-    )
+    evidence = collect_term_evidence(project, list(library.get("terms", [])), config)
     language = _prompt_language(project, prompt_language)
     prompts = _prompt(project, language)
     spec = term_normalization(config)
     protected_states = [states[key] for key in sorted(protected & set(states))]
-    batches, tokens = _pack_batches(
+    phase_one, phase_one_tokens = _pack_batches(
         eligible,
         phase="adjudication",
         target_language=str(config["project"]["target_language"]),
         anchors=protected_states,
         evidence=evidence,
         prompt=prompts["adjudication"],
+        config=config,
+        spec=spec,
+    )
+    simulated_focus = [
+        {
+            **deepcopy(state),
+            "_prior_decision": {"action": "keep", "reason": "dry-run"},
+        }
+        for state in eligible
+    ]
+    phase_two, phase_two_tokens = _pack_batches(
+        simulated_focus,
+        phase="consistency",
+        target_language=str(config["project"]["target_language"]),
+        anchors=[*protected_states, *eligible],
+        evidence=evidence,
+        prompt=prompts["consistency"],
         config=config,
         spec=spec,
     )
@@ -1688,9 +2028,9 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         "prompts": prompts,
         "spec": spec,
         "protected_states": protected_states,
-        "phase_one": batches,
-        "estimated_requests": len(batches) * 2,
-        "estimated_input_tokens": tokens * 2,
+        "phase_one": phase_one,
+        "estimated_requests": len(phase_one) + len(phase_two),
+        "estimated_input_tokens": phase_one_tokens + phase_two_tokens,
     }
 
 
@@ -1720,16 +2060,19 @@ async def run_terminology_decision(
     language = plan["language"]
     prompts = plan["prompts"]
     fingerprint = _decision_fingerprint(config, prompts, library)
-    model_fingerprint = "sha256:" + hashlib.sha256(
-        json.dumps(
-            {
-                "model": config["llm"]["model"],
-                "adapter": config.get("_llm_adapter_hash"),
-                "preset": config.get("_llm_preset_hash"),
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    model_fingerprint = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                {
+                    "model": config["llm"]["model"],
+                    "adapter": config.get("_llm_adapter_hash"),
+                    "preset": config.get("_llm_preset_hash"),
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    )
     prompt_fingerprints = {
         phase: "sha256:" + hashlib.sha256(prompts[phase].encode()).hexdigest()
         for phase in _PHASES
@@ -1745,6 +2088,13 @@ async def run_terminology_decision(
         )
         if int(resume_manifest.get("source_terms_revision", -1)) != revision:
             raise UsageError("术语库 revision 已变化，不能续用自动决策 Run")
+        compatible, incompatibility_reason = decision_resume_compatibility(
+            project, resume_run_id
+        )
+        if not compatible:
+            raise UsageError(
+                f"{incompatibility_reason}；请显式结束旧 Run 并强制新建"
+            )
         resumed_steps = decision_checkpoint_progress(project, resume_run_id)
     if dry_run:
         return {
@@ -1792,11 +2142,6 @@ async def run_terminology_decision(
         int(config["execution"]["requests_per_minute"]),
         int(config["execution"]["input_tokens_per_minute"]),
     )
-    all_forms = {
-        value
-        for state in states.values()
-        for value in [str(state["source"]), *map(str, state.get("aliases", []))]
-    }
     eligible_terms = {str(item["normalized"]) for item in eligible}
     checkpoint = _load_checkpoint(
         project,
@@ -1818,8 +2163,27 @@ async def run_terminology_decision(
 
     def record_resumable_interruption(
         current_usage: dict[str, Any] | None,
+        error: BaseException,
     ) -> None:
         manifest = read_json(project, run_dir / "manifest.json")
+        params = getattr(error, "params", {})
+        reason = params.get("reason") if isinstance(params, dict) else None
+        request_id = params.get("request_id") if isinstance(params, dict) else None
+        if not isinstance(reason, str):
+            reason = (
+                "cancelled"
+                if isinstance(error, asyncio.CancelledError)
+                else "unexpected_error"
+            )
+        interruption = {
+            "at": utc_now(),
+            "error_code": getattr(error, "code", "cancelled"),
+            "reason": reason,
+            "completed_steps": completed,
+            "total_steps": total,
+        }
+        if isinstance(request_id, str) and request_id.startswith("REQ-"):
+            interruption["request_id"] = request_id
         manifest.update(
             status="running",
             decision_status="generating",
@@ -1827,6 +2191,7 @@ async def run_terminology_decision(
             failed_segment_count=0,
             failure_counts={},
             completed_at=None,
+            last_interruption=interruption,
         )
         if usage_invoked:
             previous_usage = manifest.get("usage")
@@ -1857,9 +2222,7 @@ async def run_terminology_decision(
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
-                item
-                for item in eligible
-                if str(item["normalized"]) not in decisions
+                item for item in eligible if str(item["normalized"]) not in decisions
             ]
             phase_one, _ = _pack_batches(
                 remaining_phase_one,
@@ -1884,7 +2247,6 @@ async def run_terminology_decision(
                     prompt=prompts["adjudication"],
                     config=config,
                     evidence=evidence,
-                    all_forms=all_forms,
                     known_states=states,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
@@ -1912,11 +2274,13 @@ async def run_terminology_decision(
             )
             tentative = deepcopy(states)
             _apply_tentative(tentative, decisions)
-            phase_two_state = _consistency_states(
-                states, tentative, final_decisions
-            )
+            phase_two_state = _consistency_states(states, tentative, final_decisions)
             phase_two_focus = [
-                phase_two_state[item["normalized"]] for item in eligible
+                {
+                    **deepcopy(phase_two_state[item["normalized"]]),
+                    "_prior_decision": deepcopy(decisions[item["normalized"]]),
+                }
+                for item in eligible
             ]
             phase_two_anchors = [
                 *protected_states,
@@ -1950,7 +2314,6 @@ async def run_terminology_decision(
                     prompt=prompts["consistency"],
                     config=config,
                     evidence=evidence,
-                    all_forms=all_forms,
                     known_states=phase_two_state,
                     read_only_terms={str(item["normalized"]) for item in anchors},
                     prompt_language=language,
@@ -1977,7 +2340,14 @@ async def run_terminology_decision(
                 max_parallel=int(config["execution"]["max_parallel"]),
             )
             final = _consistency_states(states, tentative, final_decisions)
-            decisions = final_decisions
+            decisions = _merge_phase_decisions(
+                original=states,
+                tentative=tentative,
+                final=final,
+                adjudication=decisions,
+                consistency=final_decisions,
+                language=language,
+            )
             usage = llm.usage_summary()
         _recover_invalid_relationship_components(
             original=states,
@@ -1999,12 +2369,8 @@ async def run_terminology_decision(
             fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
             source_library=deepcopy(library),
             source_overrides=deepcopy(overrides_document),
-            model_fingerprint=_composite_fingerprint(
-                checkpoint, "model_fingerprint"
-            ),
-            prompt_fingerprint=_composite_fingerprint(
-                checkpoint, "prompt_fingerprint"
-            ),
+            model_fingerprint=_composite_fingerprint(checkpoint, "model_fingerprint"),
+            prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
             spec=spec,
         )
         atomic_write_json(_draft_path(project, run_id), draft)
@@ -2015,6 +2381,7 @@ async def run_terminology_decision(
             needs_review_count=len(draft["needs_review"]),
             protected_term_count=len(protected_states),
         )
+        manifest.pop("last_interruption", None)
         write_json(project, run_dir / "manifest.json", manifest)
         usage = finalize_run(
             project,
@@ -2047,15 +2414,15 @@ async def run_terminology_decision(
             "pending": 0,
             "usage": usage or unavailable_usage(),
         }
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         if "llm" in locals():
             usage = llm.usage_summary()
-        record_resumable_interruption(usage)
+        record_resumable_interruption(usage, exc)
         raise
-    except Exception:
+    except Exception as exc:
         if "llm" in locals():
             usage = llm.usage_summary()
-        record_resumable_interruption(usage)
+        record_resumable_interruption(usage, exc)
         raise
 
 
@@ -2066,9 +2433,7 @@ def _pending_manifest(project: Path, run_id: str) -> dict[str, Any]:
     return manifest
 
 
-def save_decision_rejections(
-    project: Path, proposal_ids: list[str]
-) -> dict[str, Any]:
+def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str, Any]:
     draft = current_decision_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
@@ -2169,9 +2534,7 @@ def apply_decision_draft(
             "rejected": len(rejected),
             "terms_revision": int(library["terms_revision"]),
         }
-    overrides_document = read_json(
-        project, project / "terminology" / "overrides.json"
-    )
+    overrides_document = read_json(project, project / "terminology" / "overrides.json")
     overrides = {
         str(item["normalized"]): deepcopy(item)
         for item in overrides_document.get("overrides", [])
@@ -2180,8 +2543,7 @@ def apply_decision_draft(
     if protected.intersection(after_states):
         raise UsageError("术语决策试图修改受保护的人工 override")
     current = {
-        str(item["normalized"]): deepcopy(item)
-        for item in library.get("terms", [])
+        str(item["normalized"]): deepcopy(item) for item in library.get("terms", [])
     }
     for normalized, state in after_states.items():
         if normalized not in current:

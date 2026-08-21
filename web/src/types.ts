@@ -266,6 +266,16 @@ export interface TaskOptions {
     current: { model: string; endpoint: string };
     completed_steps?: number;
     total_steps?: number;
+    resume_compatible?: boolean;
+    resume_incompatibility_reason?: string | null;
+    last_interruption?: {
+      at: string;
+      error_code: string;
+      reason: string;
+      request_id?: string;
+      completed_steps: number;
+      total_steps: number;
+    };
   } | null;
 }
 
