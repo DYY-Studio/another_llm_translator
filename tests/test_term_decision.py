@@ -16,7 +16,13 @@ from app.errors import ConfigError, RequestSizeError, StorageError, UsageError
 from app.execution import create_run
 from app.main import build_parser
 from app.project import init_project
-from app.sqlite_storage import atomic_write_json, read_json, record_header, write_json
+from app.sqlite_storage import (
+    atomic_write_json,
+    list_runs,
+    read_json,
+    record_header,
+    write_json,
+)
 from app.stages import term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
@@ -2273,6 +2279,47 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
     assert interruption["reason"] == "unexpected_error"
     assert interruption["completed_steps"] == 0
     assert interruption["total_steps"] == 4
+
+
+@pytest.mark.asyncio
+async def test_format_exhaustion_records_only_safe_request_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
+        return [(states, [])], 1
+
+    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = decision_response(payload)
+        for record in records:
+            record.pop("reason")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    with pytest.raises(UsageError, match="格式修正重试耗尽") as caught:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await run_terminology_decision(project, http_client=client)
+
+    request_id = caught.value.params["request_id"]
+    assert isinstance(request_id, str) and request_id.startswith("REQ-")
+    manifest = list_runs(project, stage="terminology_decision")[0]
+    assert manifest["last_interruption"] == {
+        "at": manifest["last_interruption"]["at"],
+        "error_code": "usage_error",
+        "reason": "format_retries_exhausted",
+        "request_id": request_id,
+        "completed_steps": 0,
+        "total_steps": 4,
+    }
+    serialized = json.dumps(manifest["last_interruption"], ensure_ascii=False)
+    assert "Alice" not in serialized
+    assert "模型" not in serialized
 
 
 def test_old_decision_checkpoint_is_visible_but_cannot_resume(tmp_path: Path) -> None:
