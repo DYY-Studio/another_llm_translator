@@ -23,14 +23,16 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
-from app.stages import term_normalization
+from app.stages import build_term_library_rows, term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
     _alias_violations,
     _analyze_decisions,
     _apply_tentative,
+    _automatic_phase_two_anchors,
     _consistency_states,
+    _effective_conflicts,
     _group_violations,
     _hard_components,
     _make_payload,
@@ -42,6 +44,7 @@ from app.term_decision import (
     collect_term_evidence,
     current_decision_draft,
     decision_plan,
+    discard_decision_draft,
     manual_review_state,
     rollback_decision,
     run_terminology_decision,
@@ -115,6 +118,65 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
     return project
 
 
+def write_pending_decision_draft(
+    project: Path,
+    *,
+    run_id: str,
+    after: list[dict[str, object]],
+    rules_version: int = DECISION_RULES_VERSION,
+) -> Path:
+    metadata = read_json(project, project / "project.json")
+    library = read_json(project, project / "terminology" / "terms.json")
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    run_dir = project / "runs" / run_id
+    run_dir.mkdir()
+    draft = record_header(
+        "terminology_decision_draft",
+        str(metadata["project_id"]),
+        record_id=f"DRAFT-{run_id}",
+        run_id=run_id,
+        status="pending",
+        source_terms_revision=int(library["terms_revision"]),
+        decision_rules_version=rules_version,
+        decision_fingerprint="sha256:test",
+        model_fingerprint="sha256:model",
+        prompt_fingerprint="sha256:prompt",
+        proposals=[
+            {
+                "proposal_id": "TDP-TEST",
+                "kind": "term_update",
+                "normalized": [str(item["normalized"]) for item in after],
+                "before": [],
+                "after": after,
+                "changes": [],
+                "reason": "测试草案",
+                "evidence": {},
+            }
+        ],
+        needs_review=[],
+        rejected_proposal_ids=[],
+        source_library=library,
+        source_overrides=overrides,
+    )
+    atomic_write_json(run_dir / DRAFT_FILE, draft)
+    write_json(
+        project,
+        run_dir / "manifest.json",
+        record_header(
+            "run",
+            str(metadata["project_id"]),
+            record_id=run_id,
+            run_id=run_id,
+            stage="terminology_decision",
+            status="completed",
+            started_at="2026-01-01T00:00:00+00:00",
+            decision_status="pending",
+            rejected_proposal_ids=[],
+        ),
+    )
+    return run_dir / DRAFT_FILE
+
+
 def decision_response(payload: dict) -> list[dict]:
     values = []
     for term in payload["terms"]:
@@ -146,6 +208,22 @@ def decision_response(payload: dict) -> list[dict]:
 
 def single_term_batches(states: list[dict], **_: object) -> tuple[list, int]:
     return [([state], []) for state in states], len(states)
+
+
+def single_term_batches_with_anchors(
+    states: list[dict], *, anchors: list[dict], **_: object
+) -> tuple[list, int]:
+    return [
+        (
+            [state],
+            [
+                anchor
+                for anchor in anchors
+                if anchor["normalized"] != state["normalized"]
+            ],
+        )
+        for state in states
+    ], len(states)
 
 
 def create_complete_legacy_group_run(
@@ -343,6 +421,77 @@ def test_consistency_states_overlay_completed_checkpoint_actions() -> None:
     assert tentative["disable"]["disabled"] is False
 
 
+def test_automatic_phase_two_anchors_require_effective_resolution() -> None:
+    keys = (
+        "certain",
+        "phase-one-review",
+        "conflicted",
+        "disabled",
+        "resolved-on-resume",
+        "reopened-on-resume",
+        "cycle-a",
+        "cycle-b",
+    )
+    eligible = [_batch_state(key, key.title()) for key in keys]
+    states = {str(state["normalized"]): state for state in eligible}
+    states["disabled"] = {**states["disabled"], "disabled": True}
+    states["cycle-a"] = {**states["cycle-a"], "group_primary": "cycle-b"}
+    states["cycle-b"] = {**states["cycle-b"], "group_primary": "cycle-a"}
+    adjudication = {
+        "certain": {"action": "update", "reason": "已决定"},
+        "phase-one-review": {"action": "needs_review", "reason": "不确定"},
+        "conflicted": {"action": "keep", "reason": "暂时保持"},
+        "disabled": {"action": "disable", "reason": "禁用"},
+        "resolved-on-resume": {"action": "needs_review", "reason": "第一阶段不确定"},
+        "reopened-on-resume": {"action": "update", "reason": "第一阶段已决定"},
+        "cycle-a": {"action": "update", "reason": "形成跨批次关系"},
+        "cycle-b": {"action": "update", "reason": "形成跨批次关系"},
+    }
+    consistency = {
+        "phase-one-review": {"action": "keep", "reason": "保留人工复核"},
+        "resolved-on-resume": {"action": "update", "reason": "续作前已解决"},
+        "reopened-on-resume": {"action": "needs_review", "reason": "续作前重开"},
+    }
+    conflicts = {
+        key: {
+            "categories": [],
+            "preferred_translations": [],
+            "alias_primaries": [],
+            "group_claims": [],
+        }
+        for key in keys
+    }
+    conflicts["conflicted"]["group_claims"] = [
+        {
+            "entry": "conflicted",
+            "claimed_by": "certain",
+            "alias": "Conflict",
+            "reason": "policy",
+        }
+    ]
+
+    anchors = _automatic_phase_two_anchors(
+        eligible,
+        states,
+        adjudication,
+        consistency,
+        conflicts,
+        term_normalization(
+            {
+                "terminology": {
+                    "unicode_normalization": "NFKC",
+                    "case_insensitive": False,
+                }
+            }
+        ),
+    )
+
+    assert [state["normalized"] for state in anchors] == [
+        "certain",
+        "resolved-on-resume",
+    ]
+
+
 def test_decision_payload_exposes_read_only_disabled_state() -> None:
     focus = {
         **_batch_state("focus", "Focus"),
@@ -376,6 +525,37 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
     assert "disabled" not in phase_one["anchors"][0]
 
 
+def test_decision_payload_exposes_only_nonempty_read_only_conflicts() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = _batch_state("anchor", "Anchor")
+    conflicts = {
+        "focus": {
+            "categories": ["人物", "地点"],
+            "preferred_translations": ["福克斯", "弗克斯"],
+            "alias_primaries": [],
+            "group_claims": [],
+        },
+        "anchor": {
+            "categories": [],
+            "preferred_translations": [],
+            "alias_primaries": [],
+            "group_claims": [],
+        },
+    }
+
+    payload = _make_payload(
+        phase="adjudication",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=_batch_evidence(focus, anchor),
+        conflicts=conflicts,
+    )
+
+    assert payload["terms"][0]["conflicts"] == conflicts["focus"]
+    assert "conflicts" not in payload["anchors"][0]
+
+
 def test_phase_two_keep_preserves_every_phase_one_disposition() -> None:
     original = {
         key: _batch_state(key, key.title())
@@ -393,9 +573,7 @@ def test_phase_two_keep_preserves_every_phase_one_disposition() -> None:
     }
     tentative = deepcopy(original)
     _apply_tentative(tentative, adjudication)
-    consistency = {
-        key: {"action": "keep", "reason": "二保持"} for key in original
-    }
+    consistency = {key: {"action": "keep", "reason": "二保持"} for key in original}
     merged = _merge_phase_decisions(
         original=original,
         tentative=tentative,
@@ -447,9 +625,10 @@ def test_hard_components_join_groups_and_normalized_form_owners(tmp_path: Path) 
 
     components = _hard_components([root, member, owner, separate], spec)
 
-    assert [
-        [item["normalized"] for item in component] for component in components
-    ] == [["member", "owner", "root"], ["separate"]]
+    assert [[item["normalized"] for item in component] for component in components] == [
+        ["member", "owner", "root"],
+        ["separate"],
+    ]
 
 
 def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
@@ -646,6 +825,204 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
     assert errors[0]["code"] == "unknown_record"
     assert "未知术语决策 normalized：not-an-anchor" in errors[0]["message"]
     assert batch_error is True
+
+
+def test_scalar_conflicts_require_explicit_resolution_and_allow_new_values() -> None:
+    focus = [
+        {
+            **_batch_state("target", "Target"),
+            "category": None,
+            "preferred_translation": None,
+        }
+    ]
+    conflicts = {
+        "target": {
+            "categories": ["人物", "地点"],
+            "preferred_translations": ["塔吉特", "塔盖特"],
+            "alias_primaries": [],
+            "group_claims": [],
+        }
+    }
+
+    _, _, _, keep_errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "keep",
+                    "reason": "保持",
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+        conflicts=conflicts,
+    )
+    assert [error["code"] for error in keep_errors] == ["unresolved_conflict"]
+
+    _, _, _, partial_errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "update",
+                    "reason": "只处理类别",
+                    "changes": {"category": "角色"},
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+        conflicts=conflicts,
+    )
+    assert [error["code"] for error in partial_errors] == ["unresolved_conflict"]
+    assert "preferred_translation" in partial_errors[0]["message"]
+
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "update",
+                    "reason": "依据全文采用更一致的新值",
+                    "changes": {
+                        "category": "核心角色",
+                        "preferred_translation": "目标者",
+                    },
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+        conflicts=conflicts,
+    )
+    assert errors == []
+    assert decisions["target"]["after"]["category"] == "核心角色"
+    assert decisions["target"]["after"]["preferred_translation"] == "目标者"
+
+
+def test_phase_two_keep_preserves_prior_review_with_scalar_conflicts() -> None:
+    focus = {
+        **_batch_state("target", "Target"),
+        "category": None,
+        "_prior_decision": {"action": "needs_review", "reason": "类别冲突"},
+    }
+    conflicts = {
+        "target": {
+            "categories": ["人物", "地点"],
+            "preferred_translations": [],
+            "alias_primaries": [],
+            "group_claims": [],
+        }
+    }
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "keep",
+                    "reason": "仍需人工确认",
+                }
+            ]
+        ),
+        [focus],
+        visible_states=[focus],
+        known_states={"target": focus},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="consistency",
+        conflicts=conflicts,
+    )
+    assert errors == []
+    assert decisions["target"]["action"] == "keep"
+
+
+def test_description_patch_allows_rewrite_and_clear_but_rejects_type_and_noop() -> None:
+    rewrite = {**_batch_state("rewrite", "Rewrite"), "description": "旧说明；重复说明"}
+    clear = {**_batch_state("clear", "Clear"), "description": "无助于区分的说明"}
+    states = {"rewrite": rewrite, "clear": clear}
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "rewrite",
+                    "action": "update",
+                    "reason": "依据当前说明与源文样本整理",
+                    "changes": {"description": "作品中的核心角色"},
+                },
+                {
+                    "type": "decision",
+                    "normalized": "clear",
+                    "action": "update",
+                    "reason": "现有说明没有区分作用",
+                    "changes": {"description": None},
+                },
+            ]
+        ),
+        [rewrite, clear],
+        visible_states=[rewrite, clear],
+        known_states=states,
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    assert errors == []
+    assert decisions["rewrite"]["after"]["description"] == "作品中的核心角色"
+    assert decisions["clear"]["after"]["description"] is None
+
+    for value, code in (
+        (" 旧说明；重复说明 ", "no_op_patch"),
+        (1, "invalid_patch_value"),
+    ):
+        _, _, _, errors, _, _ = _analyze_decisions(
+            llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": "rewrite",
+                        "action": "update",
+                        "reason": "测试宿主校验",
+                        "changes": {"description": value},
+                    }
+                ]
+            ),
+            [rewrite],
+            visible_states=[rewrite],
+            known_states={"rewrite": rewrite},
+            read_only_terms=set(),
+            prompt_language="zh-CN",
+            review_states=None,
+            spec=None,
+            phase="adjudication",
+        )
+        assert [error["code"] for error in errors] == [code]
 
 
 @pytest.mark.parametrize(
@@ -1081,9 +1458,7 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
     def cross_referenced_batches(states: list[dict], **_: object) -> tuple[list, int]:
         return [([state], [other]) for state, other in zip(states, reversed(states))], 2
 
-    monkeypatch.setattr(
-        "app.term_decision._pack_batches", cross_referenced_batches
-    )
+    monkeypatch.setattr("app.term_decision._pack_batches", cross_referenced_batches)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1474,6 +1849,149 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
 
 
 @pytest.mark.asyncio
+async def test_grounded_description_rewrite_has_full_draft_diff_apply_and_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    rewritten = "女性主角，源文中亦称 Ally"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for term in payload["terms"]:
+            if payload["phase"] == "adjudication" and term["normalized"] == "alice":
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": "alice",
+                        "action": "update",
+                        "reason": "当前说明与 Alice Ally 样本支持精简改写",
+                        "changes": {"description": rewritten},
+                    }
+                )
+            else:
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": term["normalized"],
+                        "action": "keep",
+                        "reason": "保持当前有效裁决",
+                    }
+                )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology_decision(project, http_client=client)
+
+    draft = current_decision_draft(project)
+    assert draft is not None
+    proposal = draft["proposals"][0]
+    assert proposal["changes"] == ["description"]
+    assert proposal["before"][0]["description"] == "unhelpful"
+    assert proposal["after"][0]["description"] == rewritten
+
+    apply_decision_draft(project, confirm_all=True)
+    applied = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "alice"
+    )
+    assert applied["description"] == rewritten
+
+    rollback_decision(project, confirm=True)
+    restored = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "alice"
+    )
+    assert restored["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_conflict_candidates_reach_both_phases_and_new_resolution_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    library = read_json(project, project / "terminology" / "terms.json")
+    alice = next(term for term in library["terms"] if term["normalized"] == "alice")
+    alice["category"] = None
+    alice["preferred_translation"] = None
+    alice["conflicts"]["categories"] = ["人物", "主角"]
+    alice["conflicts"]["preferred_translations"] = ["爱丽丝", "艾丽丝"]
+    write_json(project, project / "terminology" / "terms.json", library)
+    seen: dict[str, dict[str, list[object]]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for term in payload["terms"]:
+            if term["normalized"] == "alice":
+                seen[payload["phase"]] = term["conflicts"]
+                if payload["phase"] == "adjudication":
+                    records.append(
+                        {
+                            "type": "decision",
+                            "normalized": "alice",
+                            "action": "update",
+                            "reason": "源文与全书上下文支持新的统一写法",
+                            "changes": {
+                                "category": "核心角色",
+                                "preferred_translation": "艾莉丝",
+                            },
+                        }
+                    )
+                    continue
+            records.append(
+                {
+                    "type": "decision",
+                    "normalized": term["normalized"],
+                    "action": "keep",
+                    "reason": "保持当前有效裁决",
+                }
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        summary = await run_terminology_decision(project, http_client=client)
+
+    expected = {
+        "categories": ["人物", "主角"],
+        "preferred_translations": ["爱丽丝", "艾丽丝"],
+        "alias_primaries": [],
+        "group_claims": [],
+    }
+    assert seen == {"adjudication": expected, "consistency": expected}
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["decision_rules_version"] == DECISION_RULES_VERSION
+    assert draft["proposals"][0]["conflicts"]["alice"] == expected
+    assert draft["proposals"][0]["after"][0]["category"] == "核心角色"
+    assert draft["proposals"][0]["after"][0]["preferred_translation"] == ("艾莉丝")
+
+    applied = apply_decision_draft(project, confirm_all=True)
+    assert applied["run_id"] == summary["run_id"]
+    updated = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "alice"
+    )
+    assert updated["category"] == "核心角色"
+    assert updated["preferred_translation"] == "艾莉丝"
+    assert updated["conflicts"] == {
+        "categories": [],
+        "preferred_translations": [],
+        "alias_primaries": [],
+        "group_claims": [],
+    }
+
+
+@pytest.mark.asyncio
 async def test_decision_ignores_extra_read_only_anchor_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1587,6 +2105,63 @@ async def test_decision_runs_batches_concurrently_with_phase_barrier(
 
     assert maximum == 2
     assert current_decision_draft(project) is not None
+
+
+@pytest.mark.asyncio
+async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    library = read_json(project, project / "terminology" / "terms.json")
+    alice = next(term for term in library["terms"] if term["normalized"] == "alice")
+    alice["category"] = None
+    alice["conflicts"]["categories"] = ["人物", "核心角色"]
+    write_json(project, project / "terminology" / "terms.json", library)
+    observed: dict[str, list[str]] = {}
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        if phase == "adjudication":
+            action = "needs_review" if normalized == "alice" else "keep"
+            return {normalized: {"action": action, "reason": "第一阶段判断"}}
+        observed[normalized] = [
+            str(anchor["normalized"]) for anchor in kwargs["anchors"]
+        ]
+        return {normalized: {"action": "keep", "reason": "保持有效裁决"}}
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    monkeypatch.setattr(
+        "app.term_decision._pack_batches", single_term_batches_with_anchors
+    )
+    monkeypatch.setattr("app.term_decision._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        await run_terminology_decision(project, http_client=client)
+
+    assert observed["alice"] == ["bob"]
+    assert "alice" not in observed["bob"]
+    draft = current_decision_draft(project)
+    assert draft["needs_review"][0]["normalized"] == "alice"
+    assert draft["needs_review"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
+    client = TestClient(create_app(projects_root=project.parent))
+    review = client.get("/api/v1/projects/decision-demo/terms/decision")
+    assert review.status_code == 200
+    assert review.json()["draft"]["needs_review"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
+
+    apply_decision_draft(project, confirm_all=True)
+    queue = client.get("/api/v1/projects/decision-demo/terms/decision").json()[
+        "manual_review"
+    ]
+    assert queue["items"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1732,11 +2307,21 @@ async def test_decision_error_keeps_completed_batches_resumable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("completed_action", "expected_anchor"),
+    [("update", True), ("needs_review", False)],
+)
 async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_action: str,
+    expected_anchor: bool,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+
+    monkeypatch.setattr(
+        "app.term_decision._pack_batches", single_term_batches_with_anchors
+    )
     alice_reviewed = asyncio.Event()
 
     async def failing_review(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -1744,6 +2329,13 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
         normalized = str(kwargs["focus"][0]["normalized"])
         if phase == "consistency" and normalized == "alice":
             alice_reviewed.set()
+            if completed_action == "needs_review":
+                return {
+                    "alice": {
+                        "action": "needs_review",
+                        "reason": "第二阶段仍不确定",
+                    }
+                }
             return {
                 "alice": {
                     "action": "update",
@@ -1779,7 +2371,12 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
             phase = str(kwargs["phase"])
             normalized = str(kwargs["focus"][0]["normalized"])
             resumed_calls.append((phase, normalized))
-            assert kwargs["known_states"]["alice"]["preferred_translation"] == "爱丽丝"
+            expected_translation = "爱丽丝" if completed_action == "update" else None
+            assert kwargs["known_states"]["alice"]["preferred_translation"] == (
+                expected_translation
+            )
+            anchor_ids = {str(anchor["normalized"]) for anchor in kwargs["anchors"]}
+            assert ("alice" in anchor_ids) is expected_anchor
             return {normalized: {"action": "keep", "reason": "保持"}}
 
         monkeypatch.setattr("app.term_decision._request_batch", resumed_review)
@@ -2371,11 +2968,13 @@ async def test_format_exhaustion_records_only_safe_request_diagnostics(
     assert "模型" not in serialized
 
 
-def test_old_decision_checkpoint_is_visible_but_cannot_resume(tmp_path: Path) -> None:
+def test_rule_five_decision_checkpoint_is_visible_but_cannot_resume(
+    tmp_path: Path,
+) -> None:
     project = create_decision_project(tmp_path)
     run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
-    checkpoint.pop("decision_rules_version")
+    checkpoint["decision_rules_version"] = 5
     atomic_write_json(run_dir / CHECKPOINT_FILE, checkpoint)
 
     client = TestClient(create_app(projects_root=project.parent))
@@ -2396,6 +2995,45 @@ def test_old_decision_checkpoint_is_visible_but_cannot_resume(tmp_path: Path) ->
     assert "强制新建" in resumed.json()["error"]
 
 
+def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    bob = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "bob"
+    )
+    path = write_pending_decision_draft(
+        project,
+        run_id="RUN-RULE-5",
+        rules_version=5,
+        after=[
+            {
+                "normalized": "bob",
+                "source": bob["source"],
+                "category": bob["category"],
+                "description": bob["description"] or None,
+                "preferred_translation": "罗伯特",
+                "aliases": bob["aliases"],
+                "group_primary": bob["group_primary"],
+                "disabled": False,
+            }
+        ],
+    )
+
+    assert current_decision_draft(project)["decision_rules_version"] == 5
+    assert save_decision_rejections(project, [])["rejected_proposal_ids"] == []
+    with pytest.raises(UsageError, match="规则版本不兼容"):
+        apply_decision_draft(project, confirm_all=True)
+    assert path.is_file()
+    assert discard_decision_draft(project, confirm=True) == {
+        "discarded": True,
+        "run_id": "RUN-RULE-5",
+    }
+    assert current_decision_draft(project) is None
+
+
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path, "｜Alice《アリス》 Ally\nBob")
     library = read_json(project, project / "terminology" / "terms.json")
@@ -2406,6 +3044,61 @@ def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     assert evidence["alice"]["source_hit_count"] == 1
     assert evidence["alice"]["alias_hit_counts"] == {"Ally": 1}
     assert evidence["bob"]["hit_count"] == 1
+
+
+def test_single_file_evidence_fills_five_distinct_segments_in_source_order(
+    tmp_path: Path,
+) -> None:
+    lines = ["Alice Alice first", *[f"Alice sample {index}" for index in range(2, 7)]]
+    project = create_decision_project(tmp_path, "\n".join(lines))
+    library = read_json(project, project / "terminology" / "terms.json")
+
+    evidence = collect_term_evidence(project, library["terms"])["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert evidence["source_hit_count"] == 6
+    assert [sample["segment_id"] for sample in evidence["samples"]] == [
+        f"F0001-S{index:06d}" for index in range(1, 6)
+    ]
+    assert len({sample["segment_id"] for sample in evidence["samples"]}) == 5
+
+
+def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"source-{index}.txt"
+        path.write_text(
+            f"Alice file {index} first\nAlice file {index} second",
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="multi-file-evidence",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert [
+        (sample["file_id"], sample["segment_id"]) for sample in evidence["samples"]
+    ] == [
+        ("F0001", "F0001-S000001"),
+        ("F0002", "F0002-S000001"),
+        ("F0003", "F0003-S000001"),
+        ("F0001", "F0001-S000002"),
+        ("F0002", "F0002-S000002"),
+    ]
+    assert len(evidence["samples"]) == 5
 
 
 def test_evidence_samples_center_the_match_and_label_forms(tmp_path: Path) -> None:
@@ -2562,6 +3255,141 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
     assert current_decision_draft(project)["run_id"] == old["run_id"]
 
 
+def test_unrelated_draft_update_cannot_clear_scalar_conflicts(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    library = read_json(project, project / "terminology" / "terms.json")
+    alice = next(term for term in library["terms"] if term["normalized"] == "alice")
+    alice["category"] = None
+    alice["preferred_translation"] = None
+    alice["conflicts"]["categories"] = ["人物", "角色"]
+    alice["conflicts"]["preferred_translations"] = ["爱丽丝", "艾丽丝"]
+    write_json(project, project / "terminology" / "terms.json", library)
+    before_terms = deepcopy(library)
+    before_overrides = read_json(project, project / "terminology" / "overrides.json")
+    write_pending_decision_draft(
+        project,
+        run_id="RUN-SCALAR-GUARD",
+        after=[
+            {
+                "normalized": "alice",
+                "source": "Alice",
+                "category": None,
+                "description": None,
+                "preferred_translation": None,
+                "aliases": ["Ally"],
+                "group_primary": None,
+                "disabled": False,
+            }
+        ],
+    )
+
+    with pytest.raises(UsageError, match="未明确解决冲突字段"):
+        apply_decision_draft(project, confirm_all=True)
+    assert read_json(project, project / "terminology" / "terms.json") == before_terms
+    assert (
+        read_json(project, project / "terminology" / "overrides.json")
+        == before_overrides
+    )
+
+
+def test_unresolved_relationship_component_is_restored_and_cannot_be_applied(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    library = read_json(project, project / "terminology" / "terms.json")
+    library["terms"] = build_term_library_rows(
+        project,
+        [
+            {
+                "source": "Alice",
+                "category": "人物",
+                "description": "",
+                "preferred_translation": None,
+                "aliases": ["Bob"],
+                "group_primary": None,
+            },
+            {
+                "source": "Bob",
+                "category": "人物",
+                "description": "",
+                "preferred_translation": "鲍勃",
+                "aliases": [],
+                "group_primary": None,
+            },
+            {
+                "source": "Carol",
+                "category": "人物",
+                "description": "",
+                "preferred_translation": None,
+                "aliases": ["Bob"],
+                "group_primary": None,
+            },
+        ],
+        {},
+    )
+    write_json(project, project / "terminology" / "terms.json", library)
+    assert all(
+        term["conflicts"]["group_claims"]
+        for term in library["terms"]
+        if term["normalized"] in {"alice", "bob", "carol"}
+    )
+
+    original = {
+        str(term["normalized"]): {
+            "normalized": term["normalized"],
+            "source": term["source"],
+            "category": term["category"],
+            "description": term["description"] or None,
+            "preferred_translation": term["preferred_translation"],
+            "aliases": term["aliases"],
+            "group_primary": term["group_primary"],
+            "disabled": False,
+        }
+        for term in library["terms"]
+    }
+    final = deepcopy(original)
+    final["carol"]["preferred_translation"] = "卡萝尔"
+    decisions = {
+        normalized: {"action": "keep", "reason": "保持"} for normalized in original
+    }
+    decisions["carol"] = {
+        "action": "update",
+        "reason": "补全译名",
+        "after": deepcopy(final["carol"]),
+    }
+    source_conflicts = {
+        str(term["normalized"]): deepcopy(term["conflicts"])
+        for term in library["terms"]
+    }
+    conflicts = _effective_conflicts(project, final, source_conflicts)
+
+    _recover_invalid_relationship_components(
+        original=original,
+        final=final,
+        decisions=decisions,
+        language="zh-CN",
+        spec=term_normalization(load_project_config(project)),
+        conflicts=conflicts,
+    )
+
+    assert final == original
+    assert all(decision["action"] == "needs_review" for decision in decisions.values())
+
+    before_overrides = read_json(project, project / "terminology" / "overrides.json")
+    write_pending_decision_draft(
+        project,
+        run_id="RUN-RELATION-GUARD",
+        after=[{**original["alice"], "category": "关键人物"}],
+    )
+    with pytest.raises(UsageError, match="未解决 alias 或组争用"):
+        apply_decision_draft(project, confirm_all=True)
+    assert read_json(project, project / "terminology" / "terms.json") == library
+    assert (
+        read_json(project, project / "terminology" / "overrides.json")
+        == before_overrides
+    )
+
+
 @pytest.mark.asyncio
 async def test_alias_transfer_and_disable_form_one_relationship_proposal(
     tmp_path: Path,
@@ -2681,6 +3509,7 @@ def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
         run_id=run_id,
         status="pending",
         source_terms_revision=1,
+        decision_rules_version=DECISION_RULES_VERSION,
         decision_fingerprint="sha256:test",
         proposals=[
             {
@@ -2763,6 +3592,7 @@ def test_atomic_apply_failure_preserves_terms(
         run_id=run_id,
         status="pending",
         source_terms_revision=1,
+        decision_rules_version=DECISION_RULES_VERSION,
         proposals=[
             {
                 "proposal_id": "TDP-A",

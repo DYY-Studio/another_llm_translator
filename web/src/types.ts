@@ -285,6 +285,22 @@ export interface RunDecision {
   run_action: "resume" | "decline" | null;
 }
 
+export interface TermDecisionConflicts {
+  categories: string[];
+  preferred_translations: string[];
+  alias_primaries: Array<{
+    alias: string;
+    primary_source: string;
+    reason: "policy" | "cycle" | "multiple_owners" | "group_collision";
+  }>;
+  group_claims: Array<{
+    entry: string;
+    claimed_by: string;
+    alias: string;
+    reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
+  }>;
+}
+
 export interface Term {
   normalized: string;
   source: string;
@@ -294,21 +310,7 @@ export interface Term {
   aliases: string[];
   group_primary: string | null;
   disabled: boolean;
-  conflicts: {
-    categories: string[];
-    preferred_translations: string[];
-    alias_primaries: Array<{
-      alias: string;
-      primary_source: string;
-      reason: "policy" | "cycle" | "multiple_owners";
-    }>;
-    group_claims: Array<{
-      entry: string;
-      claimed_by: string;
-      alias: string;
-      reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
-    }>;
-  };
+  conflicts: TermDecisionConflicts;
   has_conflicts: boolean;
 }
 
@@ -345,6 +347,7 @@ export interface TermDecisionProposal {
   changes: string[];
   reason: string;
   evidence: Record<string, TermDecisionEvidence>;
+  conflicts?: Record<string, TermDecisionConflicts>;
 }
 
 export interface TermDecisionDraft {
@@ -356,6 +359,7 @@ export interface TermDecisionDraft {
     source: string;
     reason: string;
     evidence: TermDecisionEvidence;
+    conflicts?: TermDecisionConflicts;
   }>;
   rejected_proposal_ids: string[];
 }
@@ -366,6 +370,7 @@ export interface TermDecisionManualReviewItem {
   source: string;
   reason: string;
   evidence: TermDecisionEvidence;
+  conflicts?: TermDecisionConflicts;
   resolved: boolean;
 }
 

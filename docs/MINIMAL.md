@@ -1023,11 +1023,16 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 
 自动术语决策是独立、显式触发的 `terminology_decision` LLM 阶段，不属于
 `run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
-只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中次数和最多五个跨文件
-上下文样本，再进行分批裁决和跨术语一致性复核。两个阶段共用项目的可编辑决策规则，
-但使用各自的固定阶段指令；第一阶段的 anchors 是人工决定，第二阶段的 anchors 还
-包括第一阶段暂定状态，所有 anchors 始终只读且不得输出 decision。模型只能保留、更新、软移除或标为
-`needs_review`；不能修改 source/normalized、虚构 alias 或新增 description。
+只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中 Segment 数和最多五个
+上下文样本；`hit_count` 是至少命中一个 source/alias 形式的 Segment 数，不是字符出现
+次数。样本先保留最多五个不同 File 的首个命中，再以其余不同 Segment 按源文顺序补满，
+因此单文件项目同样最多可提供五条样本。随后系统进行分批裁决和跨术语一致性复核。
+
+两个阶段共用项目的可编辑决策规则，但使用各自的固定阶段指令。第一阶段 anchors 是
+人工决定；第二阶段 anchors 包含人工决定，以及第一阶段 disposition 已确定、当前启用
+且没有任何未解决冲突的自动状态。第一阶段或已完成第二阶段检查点的 `needs_review`、
+disabled 及仍有冲突的状态不得锚定其他术语。所有 anchors 始终只读且不得输出 decision。
+模型只能保留、更新、软移除或标为 `needs_review`；不能修改 source/normalized 或虚构 alias。
 
 固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action
 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、
@@ -1035,7 +1040,16 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 实际修改的 `category`、`description`、`preferred_translation`、`aliases`、
 `group_primary`；宿主将它应用于输入状态并生成完整 `after`。空 Patch 只允许第二阶段
 显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。
-`description` 只能保留当前值或清空，alias 只能选用输入中可见的既有源文形式。
+`description` 可以保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文
+样本或可见 anchor 支持，不得增加无证据事实。宿主校验类型、空值归一化和 no-op，语义
+正确性由用户在草案中查看完整旧文本和新文本后确认。alias 只能选用输入中可见的既有
+源文形式。
+
+LLM 的 `terms[]` 和 `anchors[]` 在对应术语存在证据时携带可选、只读 `conflicts`，结构沿用
+`categories`、`preferred_translations`、`alias_primaries`、`group_claims`。去重候选是证据，
+不是投票统计或允许值白名单；全文证据支持时模型可以提出候选之外的新值。第一阶段存在
+类别或推荐译名冲突时不得 `keep`；`update` 必须为每个冲突标量提供非空决议，也可以
+`disable` 或 `needs_review`。`conflicts` 禁止出现在 decision 输出中。
 格式修正请求携带结构化错误、上轮无效记录、已接受项和本轮唯一目标；完整校验通过的
 无关关系组件不会重复请求。连续出现相同错误时，各未决硬关系组件独立修正，但组件内部
 不可拆分。批级 JSONL、end 或未知记录错误仍使该次请求整体未决。
@@ -1043,7 +1057,8 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 alias 转移必须是完整的多术语关系操作：接收方必须是启用的根术语，原所有者必须释放
 该 alias、被禁用，或在 source 转移时直接成为接收方成员。单边新增其他术语仍持有的
 source/alias、规范化后重复 alias 和把自身 source 作为 alias 都会被宿主拒绝；跨批次才能
-确认的关系冲突会恢复整个依赖组件并列入 `needs_review`，不会产生隐式归组或部分建议。
+确认的关系冲突会按暂定状态重建。最终仍未解决的 alias/组争用会恢复整个依赖组件的
+运行前状态并列入 `needs_review`，不会产生隐式归组或部分建议。
 
 第二阶段的 `terms` 和 `anchors` 输入携带只读 `disabled`，`terms` 还携带只读的第一阶段
 action/reason；该字段不得出现在 decision 输出中。第二阶段 `keep` 保留第一阶段 disposition
@@ -1054,21 +1069,24 @@ action/reason；该字段不得出现在 decision 输出中。第二阶段 `keep
 暂定状态后才进入第二阶段。每个完整校验通过的批次原子写入 Run 检查点；用户取消或
 进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
 和 Prompt。续作剩余第二阶段前，宿主将已完成的第二阶段检查点叠加到第一阶段暂定状态，
-并用这一不可变快照生成 focus、anchors 和关系校验状态；当前并发兄弟批次不会动态互相影响。
-源术语 revision 或决策规则版本已变化时，在创建 continuation 前拒绝续作。旧规则 Run
+重新计算每个术语的有效 disposition 和冲突，再用这一不可变快照生成 focus、可信 anchors
+和关系校验状态；当前并发兄弟批次不会动态互相影响。当前决策规则版本为 6。源术语
+revision 或规则版本已变化时，在创建 continuation 前拒绝续作；规则版本 5 的 running Run
 必须由用户显式结束并强制新建，不提供双协议兼容路径。中断 manifest 只记录安全错误码、
 原因码、最后 request ID 和完成步数，不保存 Prompt、响应或术语正文。强制重做会结束旧 Run 并忽略检查点。
 检查点不是草案，不能审核或应用。
 
 完整结果保存为绑定源术语 revision、模型和 Prompt 指纹的待处理草案。单术语建议可
 整条拒绝，分组和 alias 转移等多术语建议作为不可拆的组合建议。应用前重新校验 revision、
-override 保护、alias 碰撞和组拓扑，并在一个 SQLite 事务中写入确认后的 overrides、
+规则版本、未裁决标量冲突、override 保护、重建后的 alias 碰撞和组拓扑；无关 description、
+alias 或组修改不得借完整 override 清除冲突。通过后在一个 SQLite 事务中写入确认后的 overrides、
 术语库新 revision 和 Run 状态；全部拒绝不增加 revision。草案保留应用前快照，只有
 应用后术语 revision 未再变化时才允许以新 revision 严格撤销。失败或替换失败不会留下
-部分草案，也不会丢弃原草案。
+部分草案，也不会丢弃原草案。旧规则草案仍可查看、保存拒绝项或丢弃，但应用时要求重新生成。
 
 审核界面使用术语页内的全宽工作区。建议默认接受，用户可以按类型、接受状态和文本筛选，
-并在固定工具栏中翻页、拒绝或应用。`needs_review` 不参与自动应用；应用或全部拒绝完成后，
+冲突候选和关系争用也参与搜索。Proposal 与 `needs_review` 保存对应的只读冲突证据；界面
+展示历史类别/推荐译名候选、alias 归属和组关系争用。`needs_review` 不参与自动应用；应用或全部拒绝完成后，
 它们进入持久人工待办队列。队列状态写入对应 Run manifest，旧 Run 缺少处理字段时按未处理
 读取；同一 normalized 以最新完成 Run 的人工项为准。存在待处理草案时，旧队列继续保留但
 在审核工作区中暂不开放，避免用户同时处理两个决策世代；启动新一轮决策前必须确认，只有
@@ -1077,8 +1095,8 @@ override 保护、alias 碰撞和组拓扑，并在一个 SQLite 事务中写入
 不受后续术语 revision 变化影响。
 
 每个证据样本包含文件、Segment、命中形式及 `source` 上下文片段；片段围绕实际命中位置
-截取，并标记为普通 source、Aozora base 或 Aozora reading 视图。样本仍最多保留五个且
-优先跨文件；Anchor 使用 `compact` 策略时只移除样本，不改变命中计数。
+截取，并标记为普通 source、Aozora base 或 Aozora reading 视图。Anchor 使用 `compact`
+策略时只移除样本，不改变按 Segment 计算的命中计数。
 
 ### 术语交换
 

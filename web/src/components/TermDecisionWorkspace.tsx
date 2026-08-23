@@ -16,6 +16,7 @@ import type {
   RunDecision,
   TaskOptions,
   TaskState,
+  TermDecisionConflicts,
   TermDecisionEvidence,
   TermDecisionManualReviewItem,
   TermDecisionProposal,
@@ -51,7 +52,6 @@ function groupValue(state: TermDecisionState, states: TermDecisionState[], langu
 function changeValue(field: string, raw: string, state: TermDecisionState, states: TermDecisionState[], language: Language) {
   if (field === "group_primary") return raw ? groupValue(state, states, language) : translate("terms.decisionStandalone", language);
   if (field === "disabled") return raw ? translate("terms.decisionDisabledState", language) : translate("terms.decisionEnabledState", language);
-  if (field === "description") return raw ? translate("terms.decisionHasDescription", language) : translate("terms.decisionClearedDescription", language);
   return valueOrDash(raw);
 }
 
@@ -82,6 +82,28 @@ function EvidenceDetails({ evidence, language }: { evidence: Record<string, Term
           {sample.matched_forms?.length ? <small>{sample.matched_forms.map((form) => `${form.kind}: ${form.value}`).join(" · ")}</small> : null}
           <p>{sample.source}</p>
         </div>)}</div>}
+      </div>)}
+    </div>
+  </details>;
+}
+
+function ConflictDetails({ conflicts, language }: { conflicts?: Record<string, TermDecisionConflicts>; language: Language }) {
+  const entries = Object.entries(conflicts ?? {}).filter(([, value]) => (
+    value.categories.length > 0
+    || value.preferred_translations.length > 0
+    || value.alias_primaries.length > 0
+    || value.group_claims.length > 0
+  ));
+  if (!entries.length) return null;
+  return <details className="decision-evidence decision-conflicts">
+    <summary>{translate("terms.decisionConflictEvidence", language)}</summary>
+    <div className="decision-conflict-list">
+      {entries.map(([normalized, value]) => <div className="decision-conflict-term" key={normalized}>
+        <strong>{normalized}</strong>
+        {value.categories.length > 0 && <p><span>{translate("terms.decisionConflictCategories", language)}</span>{value.categories.join(" · ")}</p>}
+        {value.preferred_translations.length > 0 && <p><span>{translate("terms.decisionConflictTranslations", language)}</span>{value.preferred_translations.join(" · ")}</p>}
+        {value.alias_primaries.map((item) => <p key={`${item.alias}:${item.primary_source}:${item.reason}`}><span>{translate("terms.decisionConflictAliasPrimaries", language)}</span>{item.alias} → {item.primary_source} · {item.reason}</p>)}
+        {value.group_claims.map((item) => <p key={`${item.entry}:${item.claimed_by}:${item.alias}:${item.reason}`}><span>{translate("terms.decisionConflictGroupClaims", language)}</span>{item.alias} · {item.claimed_by} → {item.entry} · {item.reason}</p>)}
       </div>)}
     </div>
   </details>;
@@ -137,6 +159,7 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle }:
       <div className="decision-state-pair"><StateDetails title={translate("terms.decisionBefore", language)} state={before} states={proposal.before} language={language} /><StateDetails title={translate("terms.decisionAfter", language)} state={after} states={proposal.after} language={language} /></div>
     </div>)}</div>
     <p className="decision-reason">{proposal.reason}</p>
+    <ConflictDetails conflicts={proposal.conflicts} language={language} />
     <EvidenceDetails evidence={proposal.evidence} language={language} />
   </article>;
 }
@@ -304,7 +327,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
         {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist"><button className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}
         <div className="term-decision-content" ref={contentRef}>
           {tab === "proposals" && review?.draft && <><div className="term-decision-summary"><span>{translate("terms.decisionAccepted", language)} {summary.accepted}</span><span>{translate("terms.decisionRejected", language)} {summary.rejected}</span><span>{translate("terms.decisionDisabled", language)} {summary.disabled}</span><span>{translate("terms.decisionTranslations", language)} {summary.translations}</span><span>{translate("terms.decisionStructural", language)} {summary.structural}</span></div>{review.draft.needs_review.length > 0 && <div className="term-decision-review-preview"><strong>{translate("terms.decisionNeedsReview", language)} {review.draft.needs_review.length}</strong><span>{translate("terms.decisionNeedsReviewHint", language)}</span><div>{review.draft.needs_review.slice(0, 3).map((item) => <span key={item.normalized}>{item.source}</span>)}</div></div>}<div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionSearch", language)} /><select value={kind} onChange={(event) => { setKind(event.target.value); setPage(0); }}><option value="">{translate("terms.decisionAllKinds", language)}</option><option value="term_update">{translate("terms.decisionTermUpdate", language)}</option><option value="relationship">{translate("terms.decisionRelationship", language)}</option></select><select value={status} onChange={(event) => { setStatus(event.target.value as DecisionProposalStatus); setPage(0); }}><option value="all">{translate("terms.decisionAllStatus", language)}</option><option value="accepted">{translate("terms.decisionAcceptedStatus", language)}</option><option value="rejected">{translate("terms.decisionRejectedStatus", language)}</option></select><Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></div><div className="term-decision-list">{visible.map((proposal) => <ProposalCard key={proposal.proposal_id} proposal={proposal} rejected={rejected.has(proposal.proposal_id)} busy={busy} running={running} language={language} onToggle={() => void setRejected(proposal.proposal_id, !rejected.has(proposal.proposal_id))} />)}</div>{!visible.length && <p className="diagnostics-empty">{translate("terms.decisionNoMatch", language)}</p>}<Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></>}
-          {tab === "manual" && showManualTab && <><div className="manual-review-summary"><strong>{translate("terms.decisionManualProgress", language, progressValues)}</strong><span>{translate("terms.decisionManualHint", language)}</span></div><div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionManualSearch", language)} /><select value={manualStatus} onChange={(event) => { setManualStatus(event.target.value as typeof manualStatus); setPage(0); }}><option value="open">{translate("terms.decisionManualOpen", language)}</option><option value="resolved">{translate("terms.decisionManualResolved", language)}</option><option value="all">{translate("terms.decisionAllStatus", language)}</option></select><Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></div><div className="manual-review-list">{manualVisible.map((item) => <article className={`manual-review-card ${item.resolved ? "resolved" : ""}`} key={`${item.run_id}:${item.normalized}`}><header><div><strong>{item.source}</strong><small>{item.normalized}</small></div><span>{item.resolved ? translate("terms.decisionManualResolvedBadge", language) : translate("terms.decisionManualOpenBadge", language)}</span></header><p>{item.reason}</p><small>{translate("terms.decisionHits", language)} {item.evidence.hit_count}</small><EvidenceDetails evidence={{ [item.normalized]: item.evidence }} language={language} /><div className="manual-review-actions"><button disabled={busy} onClick={() => onNavigateToEditor(item, "edit")}>{translate("terms.decisionEditTerm", language)}</button><button disabled={busy} onClick={() => onNavigateToEditor(item, "group")}>{translate("terms.decisionViewRelation", language)}</button><button disabled={busy} onClick={() => void setManualResolved(item, !item.resolved)}>{item.resolved ? translate("terms.decisionRestoreManual", language) : translate("terms.decisionMarkHandled", language)}</button></div></article>)}</div>{!manualVisible.length && <p className="diagnostics-empty">{translate("terms.decisionManualEmpty", language)}</p>}<Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></>}
+          {tab === "manual" && showManualTab && <><div className="manual-review-summary"><strong>{translate("terms.decisionManualProgress", language, progressValues)}</strong><span>{translate("terms.decisionManualHint", language)}</span></div><div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionManualSearch", language)} /><select value={manualStatus} onChange={(event) => { setManualStatus(event.target.value as typeof manualStatus); setPage(0); }}><option value="open">{translate("terms.decisionManualOpen", language)}</option><option value="resolved">{translate("terms.decisionManualResolved", language)}</option><option value="all">{translate("terms.decisionAllStatus", language)}</option></select><Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></div><div className="manual-review-list">{manualVisible.map((item) => <article className={`manual-review-card ${item.resolved ? "resolved" : ""}`} key={`${item.run_id}:${item.normalized}`}><header><div><strong>{item.source}</strong><small>{item.normalized}</small></div><span>{item.resolved ? translate("terms.decisionManualResolvedBadge", language) : translate("terms.decisionManualOpenBadge", language)}</span></header><p>{item.reason}</p><small>{translate("terms.decisionHits", language)} {item.evidence.hit_count}</small><ConflictDetails conflicts={item.conflicts ? { [item.normalized]: item.conflicts } : undefined} language={language} /><EvidenceDetails evidence={{ [item.normalized]: item.evidence }} language={language} /><div className="manual-review-actions"><button disabled={busy} onClick={() => onNavigateToEditor(item, "edit")}>{translate("terms.decisionEditTerm", language)}</button><button disabled={busy} onClick={() => onNavigateToEditor(item, "group")}>{translate("terms.decisionViewRelation", language)}</button><button disabled={busy} onClick={() => void setManualResolved(item, !item.resolved)}>{item.resolved ? translate("terms.decisionRestoreManual", language) : translate("terms.decisionMarkHandled", language)}</button></div></article>)}</div>{!manualVisible.length && <p className="diagnostics-empty">{translate("terms.decisionManualEmpty", language)}</p>}<Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></>}
           {!review?.draft && tab === "proposals" && !running && <p className="diagnostics-empty">{translate("terms.decisionNoDraft", language)}</p>}
         </div>
       </>}

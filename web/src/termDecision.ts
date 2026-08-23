@@ -1,10 +1,30 @@
 import type {
+  TermDecisionConflicts,
   TermDecisionManualReviewItem,
   TermDecisionProposal,
   TermDecisionState,
 } from "./types";
 
 export type DecisionProposalStatus = "all" | "accepted" | "rejected";
+
+function conflictSearchValues(conflicts: TermDecisionConflicts | undefined) {
+  if (!conflicts) return [];
+  return [
+    ...conflicts.categories,
+    ...conflicts.preferred_translations,
+    ...conflicts.alias_primaries.flatMap((item) => [
+      item.alias,
+      item.primary_source,
+      item.reason,
+    ]),
+    ...conflicts.group_claims.flatMap((item) => [
+      item.entry,
+      item.claimed_by,
+      item.alias,
+      item.reason,
+    ]),
+  ];
+}
 
 export function decisionProposalChanges(
   before: TermDecisionState,
@@ -93,6 +113,7 @@ export function filterDecisionProposals(
       proposal.reason,
       ...proposal.before.flatMap((term) => [term.source, term.preferred_translation ?? ""]),
       ...proposal.after.flatMap((term) => [term.source, term.preferred_translation ?? ""]),
+      ...Object.values(proposal.conflicts ?? {}).flatMap(conflictSearchValues),
     ].join("\n").toLocaleLowerCase().includes(needle);
   });
 }
@@ -107,7 +128,12 @@ export function filterManualReviewItems(
     if (status === "open" && item.resolved) return false;
     if (status === "resolved" && !item.resolved) return false;
     if (!needle) return true;
-    return [item.source, item.normalized, item.reason]
+    return [
+      item.source,
+      item.normalized,
+      item.reason,
+      ...conflictSearchValues(item.conflicts),
+    ]
       .join("\n")
       .toLocaleLowerCase()
       .includes(needle);

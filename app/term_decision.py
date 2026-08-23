@@ -73,6 +73,12 @@ _STATE_FIELDS = (
     "group_primary",
     "disabled",
 )
+_CONFLICT_FIELDS = (
+    "categories",
+    "preferred_translations",
+    "alias_primaries",
+    "group_claims",
+)
 
 _PHASES = ("adjudication", "consistency")
 
@@ -121,6 +127,33 @@ def _term_state(
     }
 
 
+def _term_conflicts(term: dict[str, Any]) -> dict[str, list[Any]]:
+    raw = term.get("conflicts") or {}
+    if not isinstance(raw, dict):
+        raise StorageError("术语 conflicts 必须是对象")
+    conflicts: dict[str, list[Any]] = {}
+    for field in _CONFLICT_FIELDS:
+        values = raw.get(field, [])
+        if not isinstance(values, list):
+            raise StorageError(f"术语 conflicts.{field} 必须是数组")
+        conflicts[field] = deepcopy(values)
+    return conflicts
+
+
+def _empty_conflicts() -> dict[str, list[Any]]:
+    return {field: [] for field in _CONFLICT_FIELDS}
+
+
+def _conflicts_by_term(
+    terms: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, list[Any]]]:
+    return {str(term["normalized"]): _term_conflicts(term) for term in terms}
+
+
+def _has_conflicts(conflicts: dict[str, list[Any]]) -> bool:
+    return any(conflicts[field] for field in _CONFLICT_FIELDS)
+
+
 def _normalized_forms(term: dict[str, Any], spec: Any) -> list[tuple[str, str, str]]:
     values = [("source", str(term["source"]))]
     values.extend(("alias", str(value)) for value in term.get("aliases", []))
@@ -164,6 +197,8 @@ def collect_term_evidence(
         for normalized, forms in forms_by_term.items()
     }
     sample_files: dict[str, set[str]] = {key: set() for key in evidence}
+    file_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
+    fallback_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
         raw_views = list(aozora_match_views(source))
@@ -194,31 +229,42 @@ def collect_term_evidence(
             for kind, original in matched:
                 if kind == "alias":
                     item["alias_hit_counts"][original] += 1
-            samples = item["samples"]
             file_id = str(segment["file_id"])
-            if (
-                len(samples) < EVIDENCE_SAMPLE_LIMIT
-                and file_id not in sample_files[normalized]
-            ):
+            is_first_file_sample = file_id not in sample_files[normalized]
+            should_sample = (
+                is_first_file_sample
+                and len(file_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+            ) or (
+                not is_first_file_sample
+                and len(fallback_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+            )
+            if should_sample:
                 view_name, excerpt = _evidence_excerpt(
                     views,
                     matched,
                     raw_views=raw_views,
                     spec=spec,
                 )
-                samples.append(
-                    {
-                        "file_id": file_id,
-                        "segment_id": str(segment["segment_id"]),
-                        "source": excerpt,
-                        "match_view": view_name,
-                        "matched_forms": [
-                            {"kind": kind, "value": original}
-                            for kind, original in matched
-                        ],
-                    }
-                )
-                sample_files[normalized].add(file_id)
+                sample = {
+                    "file_id": file_id,
+                    "segment_id": str(segment["segment_id"]),
+                    "source": excerpt,
+                    "match_view": view_name,
+                    "matched_forms": [
+                        {"kind": kind, "value": original} for kind, original in matched
+                    ],
+                }
+                if is_first_file_sample:
+                    file_samples[normalized].append(sample)
+                    sample_files[normalized].add(file_id)
+                else:
+                    fallback_samples[normalized].append(sample)
+    for normalized, item in evidence.items():
+        primary = file_samples[normalized]
+        item["samples"] = [
+            *primary,
+            *fallback_samples[normalized][: EVIDENCE_SAMPLE_LIMIT - len(primary)],
+        ]
     return evidence
 
 
@@ -338,6 +384,7 @@ def _payload_term(
     evidence: dict[str, dict[str, Any]],
     *,
     include_disabled: bool,
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     value = {
         key: deepcopy(state[key])
@@ -351,6 +398,9 @@ def _payload_term(
             "group_primary",
         )
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
+    term_conflicts = (conflicts or {}).get(str(state["normalized"]))
+    if term_conflicts is not None and _has_conflicts(term_conflicts):
+        value["conflicts"] = deepcopy(term_conflicts)
     if include_disabled:
         value["disabled"] = bool(state["disabled"])
     prior_decision = state.get("_prior_decision")
@@ -462,17 +512,28 @@ def _make_payload(
     focus: list[dict[str, Any]],
     anchors: list[dict[str, Any]],
     evidence: dict[str, dict[str, Any]],
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     include_disabled = phase == "consistency"
     return {
         "phase": phase,
         "target_language": target_language,
         "terms": [
-            _payload_term(item, evidence, include_disabled=include_disabled)
+            _payload_term(
+                item,
+                evidence,
+                include_disabled=include_disabled,
+                conflicts=conflicts,
+            )
             for item in focus
         ],
         "anchors": [
-            _payload_term(item, evidence, include_disabled=include_disabled)
+            _payload_term(
+                item,
+                evidence,
+                include_disabled=include_disabled,
+                conflicts=conflicts,
+            )
             for item in anchors
         ],
     }
@@ -488,6 +549,7 @@ def _pack_batches(
     prompt: str,
     config: dict[str, Any],
     spec: Any,
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> tuple[list[tuple[list[dict[str, Any]], list[dict[str, Any]]]], int]:
     soft_target, hard_limit, context_limit, itpm_limit = _request_limits(config)
     decision_config = config["terminology_decision"]
@@ -505,6 +567,7 @@ def _pack_batches(
             focus=focus,
             anchors=anchor_list,
             evidence=_compact_anchor_evidence(evidence, anchor_list),
+            conflicts=conflicts,
         )
         return estimate_messages(
             render_messages(prompt, payload),
@@ -838,6 +901,7 @@ def _analyze_decisions(
     review_states: dict[str, dict[str, Any]] | None,
     spec: Any | None,
     phase: str,
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[str],
@@ -852,6 +916,7 @@ def _analyze_decisions(
     ]
     batch_error = bool(document.errors)
     expected = {str(item["normalized"]): item for item in focus}
+    conflicts = conflicts or {}
     decisions: dict[str, dict[str, Any]] = {}
     ignored_read_only: list[str] = []
     seen_targets: set[str] = set()
@@ -942,6 +1007,18 @@ def _analyze_decisions(
                 continue
             if extra_keys:
                 normalized_redundant.append((normalized, action))
+            term_conflicts = conflicts.get(normalized, {})
+            scalar_conflicts = bool(
+                term_conflicts.get("categories")
+                or term_conflicts.get("preferred_translations")
+            )
+            if action == "keep" and scalar_conflicts and phase == "adjudication":
+                reject(
+                    "unresolved_conflict",
+                    f"术语决策 keep 不能保留未裁决类别或推荐译名冲突：{normalized}",
+                    value,
+                )
+                continue
             decisions[normalized] = {
                 "action": action,
                 "reason": reason.strip(),
@@ -1008,19 +1085,30 @@ def _analyze_decisions(
                     reject("invalid_patch_value", str(exc), value)
                     patch_invalid = True
                     break
-                if key == "description" and parsed not in {
-                    None,
-                    expected[normalized].get("description") or None,
-                }:
-                    reject(
-                        "invented_description",
-                        f"术语决策不得新写 description：{normalized}",
-                        value,
-                    )
-                    patch_invalid = True
-                    break
                 after[key] = parsed
         if patch_invalid:
+            continue
+        term_conflicts = conflicts.get(normalized, {})
+        required_conflict_fields = {
+            "category": term_conflicts.get("categories", []),
+            "preferred_translation": term_conflicts.get("preferred_translations", []),
+        }
+        missing_conflict_fields = (
+            [
+                field
+                for field, candidates in required_conflict_fields.items()
+                if candidates and (field not in changes or after.get(field) is None)
+            ]
+            if phase == "adjudication"
+            else []
+        )
+        if missing_conflict_fields:
+            reject(
+                "unresolved_conflict",
+                "术语决策 update 必须明确解决冲突字段："
+                f"{normalized}（{', '.join(missing_conflict_fields)}）",
+                value,
+            )
             continue
         if changes and all(
             after[key] == expected[normalized].get(key) for key in changes
@@ -1134,6 +1222,7 @@ async def _request_batch(
     prompt_language: str,
     review_states: dict[str, dict[str, Any]],
     spec: Any,
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     accepted: dict[str, dict[str, Any]] = {}
     unresolved = {str(item["normalized"]) for item in focus}
@@ -1184,6 +1273,7 @@ async def _request_batch(
                 focus=request_focus,
                 anchors=request_anchors,
                 evidence=_compact_anchor_evidence(evidence, request_anchors),
+                conflicts=conflicts,
             )
             if attempt:
                 payload["format_correction"] = format_correction(
@@ -1229,6 +1319,7 @@ async def _request_batch(
                 review_states=review_states,
                 spec=spec,
                 phase=phase,
+                conflicts=conflicts,
             )
             if ignored_read_only:
                 llm.logger.warning(
@@ -1303,7 +1394,9 @@ def decision_checkpoint_progress(project: Path, run_id: str) -> int:
     return completed
 
 
-def decision_resume_compatibility(project: Path, run_id: str) -> tuple[bool, str | None]:
+def decision_resume_compatibility(
+    project: Path, run_id: str
+) -> tuple[bool, str | None]:
     path = _checkpoint_path(project, run_id)
     if not path.is_file():
         return False, "旧 Run 缺少术语决策检查点规则版本"
@@ -1431,6 +1524,81 @@ def _consistency_states(
     return result
 
 
+def _automatic_phase_two_anchors(
+    eligible: list[dict[str, Any]],
+    states: dict[str, dict[str, Any]],
+    adjudication: dict[str, dict[str, Any]],
+    consistency: dict[str, dict[str, Any]],
+    conflicts: dict[str, dict[str, list[Any]]],
+    spec: Any,
+) -> list[dict[str, Any]]:
+    violation_nodes = {
+        node for violation in _group_violations(states) for node in violation[1]
+    }
+    blocked_relationship_nodes: set[str] = set()
+    for component in _dependency_components(
+        _decision_dependency_graph(states, states, spec), violation_nodes
+    ):
+        blocked_relationship_nodes.update(component)
+    anchors: list[dict[str, Any]] = []
+    for item in eligible:
+        normalized = str(item["normalized"])
+        first_action = str(adjudication[normalized]["action"])
+        second = consistency.get(normalized)
+        action = (
+            str(second["action"])
+            if second is not None and second["action"] != "keep"
+            else first_action
+        )
+        state = states[normalized]
+        if (
+            action in {"keep", "update"}
+            and not state.get("disabled")
+            and normalized not in blocked_relationship_nodes
+            and not _has_conflicts(conflicts.get(normalized, _empty_conflicts()))
+        ):
+            anchors.append(state)
+    return anchors
+
+
+def _effective_conflicts(
+    project: Path,
+    states: dict[str, dict[str, Any]],
+    source_conflicts: dict[str, dict[str, list[Any]]],
+) -> dict[str, dict[str, list[Any]]]:
+    rebuilt: dict[str, dict[str, list[Any]]] = {}
+    if not _group_violations(states):
+        active = [
+            deepcopy(state) for state in states.values() if not state.get("disabled")
+        ]
+        rebuilt = {
+            str(term["normalized"]): _term_conflicts(term)
+            for term in build_term_library_rows(project, active, {})
+        }
+    result: dict[str, dict[str, list[Any]]] = {}
+    for normalized, state in states.items():
+        if state.get("disabled"):
+            result[normalized] = _empty_conflicts()
+            continue
+        original = source_conflicts.get(normalized, _empty_conflicts())
+        structural = rebuilt.get(normalized, original)
+        result[normalized] = {
+            "categories": (
+                deepcopy(original["categories"])
+                if state.get("category") is None
+                else []
+            ),
+            "preferred_translations": (
+                deepcopy(original["preferred_translations"])
+                if state.get("preferred_translation") is None
+                else []
+            ),
+            "alias_primaries": deepcopy(structural["alias_primaries"]),
+            "group_claims": deepcopy(structural["group_claims"]),
+        }
+    return result
+
+
 def _merge_phase_decisions(
     *,
     original: dict[str, dict[str, Any]],
@@ -1486,24 +1654,16 @@ def _decision_dependency_graph(
             if primary is not None:
                 connect(key, str(primary))
 
-    original_owners: dict[str, set[str]] = {}
-    for key, state in original.items():
-        for value in [state["source"], *state.get("aliases", [])]:
-            form = normalize_term(str(value), spec)
-            if form:
-                original_owners.setdefault(form, set()).add(key)
-    for key, state in final.items():
-        if key not in original:
-            continue
-        added = {
-            normalize_term(str(value), spec) for value in state.get("aliases", [])
-        } - {
-            normalize_term(str(value), spec)
-            for value in original[key].get("aliases", [])
-        }
-        for alias in added:
-            for owner in original_owners.get(str(alias), set()):
-                connect(key, owner)
+    owners: dict[str, set[str]] = {}
+    for states in (original, final):
+        for key, state in states.items():
+            for value in [state["source"], *state.get("aliases", [])]:
+                form = normalize_term(str(value), spec)
+                if form:
+                    owners.setdefault(form, set()).add(key)
+    for values in owners.values():
+        for left, right in pairwise(sorted(values)):
+            connect(left, right)
     return graph
 
 
@@ -1548,9 +1708,7 @@ def _relationship_violation_nodes(
     return set(values)
 
 
-def _relationship_violation_message(
-    violation: _GroupViolation, language: str
-) -> str:
+def _relationship_violation_message(violation: _GroupViolation, language: str) -> str:
     kind = violation[0]
     if kind in {"self", "missing", "disabled", "member", "cycle"}:
         return _group_violation_message(violation, language)
@@ -1564,19 +1722,25 @@ def _recover_invalid_relationship_components(
     decisions: dict[str, dict[str, Any]],
     language: str,
     spec: Any,
+    conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> None:
     violations: list[_GroupViolation] = [
         *_group_violations(final),
         *_alias_violations(original, final, spec),
     ]
-    if not violations:
+    structural_conflicts = {
+        normalized: value
+        for normalized, value in (conflicts or {}).items()
+        if value.get("alias_primaries") or value.get("group_claims")
+    }
+    if not violations and not structural_conflicts:
         return
     graph = _decision_dependency_graph(original, final, spec)
     invalid_nodes = {
         node
         for violation in violations
         for node in _relationship_violation_nodes(violation)
-    }
+    } | set(structural_conflicts)
     for component in _dependency_components(graph, invalid_nodes):
         affected = sorted(component & decisions.keys())
         if not affected:
@@ -1586,6 +1750,14 @@ def _recover_invalid_relationship_components(
             for violation in violations
             if component.intersection(_relationship_violation_nodes(violation))
         ]
+        details.extend(
+            (
+                f"{normalized} still has unresolved alias or group conflicts"
+                if language == "en"
+                else f"{normalized} 仍有未解决 alias 或组争用"
+            )
+            for normalized in sorted(component & structural_conflicts.keys())
+        )
         if language == "en":
             reason = (
                 "Automatic terminology relationship validation failed; this dependency component was "
@@ -1612,6 +1784,20 @@ def _proposal_id(values: list[dict[str, Any]]) -> str:
     return "TDP-" + hashlib.sha256(encoded.encode()).hexdigest()[:16].upper()
 
 
+def _merge_conflict_evidence(
+    *snapshots: dict[str, dict[str, list[Any]]],
+) -> dict[str, dict[str, list[Any]]]:
+    merged: dict[str, dict[str, list[Any]]] = {}
+    for snapshot in snapshots:
+        for normalized, conflicts in snapshot.items():
+            current = merged.setdefault(normalized, _empty_conflicts())
+            for field in _CONFLICT_FIELDS:
+                for value in conflicts[field]:
+                    if value not in current[field]:
+                        current[field].append(deepcopy(value))
+    return merged
+
+
 def _build_draft(
     *,
     project_id: str,
@@ -1622,6 +1808,7 @@ def _build_draft(
     decisions: dict[str, dict[str, Any]],
     protected: set[str],
     evidence: dict[str, dict[str, Any]],
+    conflicts: dict[str, dict[str, list[Any]]],
     fingerprint: str,
     source_library: dict[str, Any],
     source_overrides: dict[str, Any],
@@ -1663,6 +1850,7 @@ def _build_draft(
                     dict.fromkeys(decisions[key]["reason"] for key in keys)
                 ),
                 "evidence": {key: deepcopy(evidence[key]) for key in keys},
+                "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
         )
     needs_review = [
@@ -1671,6 +1859,7 @@ def _build_draft(
             "source": original[key]["source"],
             "reason": decision["reason"],
             "evidence": deepcopy(evidence[key]),
+            "conflicts": deepcopy(conflicts[key]),
         }
         for key, decision in sorted(decisions.items())
         if decision["action"] == "needs_review"
@@ -1682,6 +1871,7 @@ def _build_draft(
         run_id=run_id,
         status="pending",
         source_terms_revision=revision,
+        decision_rules_version=DECISION_RULES_VERSION,
         decision_fingerprint=fingerprint,
         model_fingerprint=model_fingerprint,
         prompt_fingerprint=prompt_fingerprint,
@@ -1903,6 +2093,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
     states = {
         str(item["normalized"]): _term_state(item) for item in library.get("terms", [])
     }
+    source_conflicts = _conflicts_by_term(library.get("terms", []))
     eligible = [
         state
         for key, state in states.items()
@@ -1924,6 +2115,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         prompt=prompts["adjudication"],
         config=config,
         spec=spec,
+        conflicts=source_conflicts,
     )
     simulated_focus = [
         {
@@ -1941,6 +2133,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         prompt=prompts["consistency"],
         config=config,
         spec=spec,
+        conflicts=source_conflicts,
     )
     return {
         "library": library,
@@ -1948,6 +2141,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         "overrides_document": overrides_document,
         "protected": protected,
         "states": states,
+        "source_conflicts": source_conflicts,
         "eligible": eligible,
         "evidence": evidence,
         "language": language,
@@ -1981,6 +2175,7 @@ async def run_terminology_decision(
     overrides_document = plan["overrides_document"]
     protected = plan["protected"]
     states = plan["states"]
+    source_conflicts = plan["source_conflicts"]
     eligible = plan["eligible"]
     evidence = plan["evidence"]
     language = plan["language"]
@@ -2018,9 +2213,7 @@ async def run_terminology_decision(
             project, resume_run_id
         )
         if not compatible:
-            raise UsageError(
-                f"{incompatibility_reason}；请显式结束旧 Run 并强制新建"
-            )
+            raise UsageError(f"{incompatibility_reason}；请显式结束旧 Run 并强制新建")
         resumed_steps = decision_checkpoint_progress(project, resume_run_id)
     if dry_run:
         return {
@@ -2159,6 +2352,7 @@ async def run_terminology_decision(
                 prompt=prompts["adjudication"],
                 config=config,
                 spec=spec,
+                conflicts=source_conflicts,
             )
 
             async def adjudicate(
@@ -2179,6 +2373,7 @@ async def run_terminology_decision(
                     prompt_language=language,
                     review_states=states,
                     spec=spec,
+                    conflicts=source_conflicts,
                 )
                 decisions.update(result)
                 records = checkpoint["phases"]["adjudication"]
@@ -2202,6 +2397,16 @@ async def run_terminology_decision(
             tentative = deepcopy(states)
             _apply_tentative(tentative, decisions)
             phase_two_state = _consistency_states(states, tentative, final_decisions)
+            unresolved_phase_two_conflicts = _effective_conflicts(
+                project, phase_two_state, source_conflicts
+            )
+            phase_two_conflicts = deepcopy(unresolved_phase_two_conflicts)
+            for normalized, conflicts in phase_two_conflicts.items():
+                source = source_conflicts[normalized]
+                conflicts["categories"] = deepcopy(source["categories"])
+                conflicts["preferred_translations"] = deepcopy(
+                    source["preferred_translations"]
+                )
             phase_two_focus = [
                 {
                     **deepcopy(phase_two_state[item["normalized"]]),
@@ -2211,7 +2416,14 @@ async def run_terminology_decision(
             ]
             phase_two_anchors = [
                 *protected_states,
-                *[phase_two_state[item["normalized"]] for item in eligible],
+                *_automatic_phase_two_anchors(
+                    eligible,
+                    phase_two_state,
+                    decisions,
+                    final_decisions,
+                    unresolved_phase_two_conflicts,
+                    spec,
+                ),
             ]
             remaining_phase_two = [
                 item
@@ -2227,6 +2439,7 @@ async def run_terminology_decision(
                 prompt=prompts["consistency"],
                 config=config,
                 spec=spec,
+                conflicts=phase_two_conflicts,
             )
 
             async def review_consistency(
@@ -2247,6 +2460,7 @@ async def run_terminology_decision(
                     prompt_language=language,
                     review_states=states,
                     spec=spec,
+                    conflicts=phase_two_conflicts,
                 )
                 final_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
@@ -2284,7 +2498,21 @@ async def run_terminology_decision(
             language=language,
             spec=spec,
         )
+        final_conflicts = _effective_conflicts(project, final, source_conflicts)
+        _recover_invalid_relationship_components(
+            original=states,
+            final=final,
+            decisions=decisions,
+            language=language,
+            spec=spec,
+            conflicts=final_conflicts,
+        )
         _validate_final_states(project, final, original=states, spec=spec)
+        draft_conflicts = _merge_conflict_evidence(
+            source_conflicts,
+            phase_two_conflicts,
+            final_conflicts,
+        )
         draft = _build_draft(
             project_id=str(metadata["project_id"]),
             run_id=run_id,
@@ -2294,6 +2522,7 @@ async def run_terminology_decision(
             decisions=decisions,
             protected=protected,
             evidence=evidence,
+            conflicts=draft_conflicts,
             fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
             source_library=deepcopy(library),
             source_overrides=deepcopy(overrides_document),
@@ -2414,6 +2643,68 @@ def _proposal_after_states(
     return values, accepted
 
 
+def _validate_accepted_scalar_conflicts(
+    draft: dict[str, Any], after_states: dict[str, dict[str, Any]]
+) -> None:
+    source_library = draft.get("source_library")
+    if not isinstance(source_library, dict):
+        raise StorageError("术语决策草案缺少源术语库快照")
+    source_terms = {
+        str(term["normalized"]): term
+        for term in source_library.get("terms", [])
+        if isinstance(term, dict) and isinstance(term.get("normalized"), str)
+    }
+    for normalized, state in after_states.items():
+        source = source_terms.get(normalized)
+        if source is None:
+            raise StorageError(f"术语决策草案源快照缺少术语：{normalized}")
+        if state.get("disabled"):
+            continue
+        conflicts = _term_conflicts(source)
+        unresolved = []
+        if conflicts["categories"] and state.get("category") is None:
+            unresolved.append("category")
+        if (
+            conflicts["preferred_translations"]
+            and state.get("preferred_translation") is None
+        ):
+            unresolved.append("preferred_translation")
+        if unresolved:
+            raise UsageError(
+                "术语决策草案未明确解决冲突字段："
+                f"{normalized}（{', '.join(unresolved)}）；请重新生成"
+            )
+
+
+def _validate_accepted_relationship_conflicts(
+    *,
+    original_terms: list[dict[str, Any]],
+    final_terms: list[dict[str, Any]],
+    changed: set[str],
+    spec: Any,
+) -> None:
+    original = {str(term["normalized"]): _term_state(term) for term in original_terms}
+    final = {str(term["normalized"]): _term_state(term) for term in final_terms}
+    final_conflicts = _conflicts_by_term(final_terms)
+    conflict_nodes = {
+        normalized
+        for normalized, conflicts in final_conflicts.items()
+        if conflicts["alias_primaries"] or conflicts["group_claims"]
+    }
+    if not conflict_nodes:
+        return
+    graph = _decision_dependency_graph(original, final, spec)
+    affected: set[str] = set()
+    for component in _dependency_components(graph, conflict_nodes):
+        affected.update(component & changed)
+    if affected:
+        raise UsageError(
+            "术语决策草案仍有未解决 alias 或组争用："
+            + ", ".join(sorted(affected)[:10])
+            + "；请重新生成"
+        )
+
+
 def apply_decision_draft(
     project: Path,
     *,
@@ -2430,6 +2721,8 @@ def apply_decision_draft(
         draft["source_terms_revision"]
     ):
         raise UsageError("术语库已变化，当前决策草案已过期")
+    if draft.get("decision_rules_version") != DECISION_RULES_VERSION:
+        raise UsageError("术语决策草案规则版本不兼容；请丢弃并重新生成")
     manifest_rejected = set(map(str, draft.get("rejected_proposal_ids", [])))
     requested_rejected = set(map(str, rejected_proposal_ids or []))
     known = {str(item["proposal_id"]) for item in draft["proposals"]}
@@ -2438,6 +2731,7 @@ def apply_decision_draft(
         raise UsageError(f"未知术语决策建议：{', '.join(unknown[:10])}")
     rejected = manifest_rejected | requested_rejected
     after_states, accepted = _proposal_after_states(draft, rejected)
+    _validate_accepted_scalar_conflicts(draft, after_states)
     run_id = str(draft["run_id"])
     manifest_path = project / "runs" / run_id / "manifest.json"
     manifest = _pending_manifest(project, run_id)
@@ -2499,6 +2793,12 @@ def apply_decision_draft(
         project,
         [current[key] for key in sorted(current)],
         overrides,
+    )
+    _validate_accepted_relationship_conflicts(
+        original_terms=list(library.get("terms", [])),
+        final_terms=terms,
+        changed=set(after_states),
+        spec=term_normalization(load_project_config(project)),
     )
     revision = int(library["terms_revision"]) + 1
     term_record = record_header(

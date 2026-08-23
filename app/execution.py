@@ -542,13 +542,15 @@ _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
     "consistency": {
         "zh-CN": (
             "当前是第二阶段“跨术语一致性复核”。terms 是本批唯一可修改目标；anchors "
-            "是只读关系参照，可能包含受保护人工决定和第一阶段暂定状态。可以依据"
+            "是只读关系参照，只包含受保护人工决定，以及 disposition 已确定、当前启用且"
+            "无冲突的第一阶段自动状态。可以依据"
             "anchors 判断姓名、简称、昵称、译名和组关系，但不得为 anchors 输出任何决策。"
         ),
         "en": (
             "This is phase two, cross-term consistency review. terms are the only editable "
-            "targets in this batch; anchors are read-only relationship references that may "
-            "contain protected human decisions and provisional phase-one states. Use anchors "
+            "targets in this batch; anchors are read-only relationship references containing "
+            "protected human decisions and only phase-one automatic states whose disposition "
+            "is determined, enabled, and currently conflict-free. Use anchors "
             "to judge names, short forms, nicknames, translations, and groups, but never "
             "output a decision for anchors."
         ),
