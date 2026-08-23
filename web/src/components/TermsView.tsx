@@ -1521,7 +1521,7 @@ function TermExportDialog({
         const value = await response.json().catch(() => null);
         const code: unknown = value?.code;
         const localized = typeof code === "string"
-          ? translateError(code, value?.params ?? {})
+          ? translateError(code, value?.params ?? {}, language)
           : null;
         throw new Error(localized || value?.error || translate("export.requestFailedStatus", language, { status: response.status }));
       }

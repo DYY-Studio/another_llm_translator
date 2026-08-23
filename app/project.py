@@ -18,7 +18,13 @@ from .documents import (
     compact_emphasis_aozora,
     decode_plaintext,
 )
-from .errors import ConfigError, IncompleteError, ProjectError, UsageError
+from .errors import (
+    ConfigError,
+    ExportError,
+    IncompleteError,
+    ProjectError,
+    UsageError,
+)
 from .sqlite_storage import (
     database_path,
     new_record_id,
@@ -415,8 +421,12 @@ class TXTDocumentAdapter:
         try:
             payload = "\n".join(lines).encode(output_encoding, errors="strict")
         except UnicodeEncodeError as exc:
-            raise IncompleteError(
-                f"输出编码 {output_encoding} 无法表示 {relative}: {exc}"
+            raise ExportError(
+                f"输出编码 {output_encoding} 无法表示 {relative}: {exc}",
+                reason="unrepresentable_output_encoding",
+                encoding=output_encoding,
+                file=str(relative),
+                setting="project.output_encoding",
             ) from exc
         destination = staging_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,14 @@ class AppError(Exception):
         self.params: dict[str, object] = {}
 
 
+def app_error_payload(exc: AppError) -> dict[str, object]:
+    return {
+        "error": str(exc),
+        "code": exc.code,
+        "params": exc.params,
+    }
+
+
 class UsageError(AppError):
     exit_code = 2
     code = "usage_error"
@@ -31,6 +39,14 @@ class InvalidCredentialsError(UsageError):
 class ConfigError(AppError):
     exit_code = 2
     code = "config_error"
+
+
+class ConfigFieldError(ConfigError):
+    code = "config_field_error"
+
+    def __init__(self, message: str, *, field: str, reason: str) -> None:
+        super().__init__(message)
+        self.params = {"field": field, "reason": reason}
 
 
 class RequestSizeError(ConfigError):
@@ -79,3 +95,11 @@ class FatalExternalError(ExternalError):
 class IncompleteError(AppError):
     exit_code = 5
     code = "incomplete_error"
+
+
+class ExportError(IncompleteError):
+    code = "export_error"
+
+    def __init__(self, message: str, *, reason: str, **params: object) -> None:
+        super().__init__(message)
+        self.params = {"reason": reason, **params}

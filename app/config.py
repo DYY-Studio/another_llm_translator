@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .errors import ConfigError
+from .errors import ConfigError, ConfigFieldError
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
@@ -168,8 +168,10 @@ def validate_config(config: dict[str, Any]) -> None:
     if target_language_tag and not is_well_formed_language_tag(
         target_language_tag
     ):
-        raise ConfigError(
-            "project.target_language_tag 必须是格式正确的 BCP 47 语言标签"
+        raise ConfigFieldError(
+            "project.target_language_tag 必须是格式正确的 BCP 47 语言标签",
+            field="project.target_language_tag",
+            reason="invalid_bcp47",
         )
     preset_id = config["llm"]["preset"]
     if not isinstance(preset_id, str) or not preset_id.strip():

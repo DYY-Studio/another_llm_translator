@@ -50,6 +50,7 @@ from .errors import (
     InvalidCredentialsError,
     ProjectError,
     UsageError,
+    app_error_payload,
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
@@ -424,14 +425,19 @@ def create_app(
         if not loopback:
             if not config["lan"]["enabled"]:
                 return JSONResponse(
-                    {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                    {"error": "只允许本机访问", "code": "local_only", "params": {}},
+                    status_code=403,
                 )
             client_ip = request.client.host if request.client else ""
             if not _client_allowed_on_bind(
                 client_ip, config["lan"]["bind_address"]
             ):
                 return JSONResponse(
-                    {"error": "客户端不在允许的网段内", "code": "out_of_subnet"},
+                    {
+                        "error": "客户端不在允许的网段内",
+                        "code": "out_of_subnet",
+                        "params": {},
+                    },
                     status_code=403,
                 )
             path = request.url.path
@@ -451,13 +457,15 @@ def create_app(
                 and not valid_session(request.cookies.get(SESSION_COOKIE))
             ):
                 return JSONResponse(
-                    {"error": "需要登录", "code": "auth_required"}, status_code=401
+                    {"error": "需要登录", "code": "auth_required", "params": {}},
+                    status_code=401,
                 )
             return await call_next(request)
         host = request.headers.get("host", "").split(":", 1)[0]
         if host not in {"127.0.0.1", "localhost", "testserver", "testclient"}:
             return JSONResponse(
-                {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                {"error": "只允许本机访问", "code": "local_only", "params": {}},
+                status_code=403,
             )
         origin = request.headers.get("origin")
         if origin:
@@ -465,20 +473,18 @@ def create_app(
             origin_host = origin_host.split(":", 1)[0]
             if origin_host not in {"127.0.0.1", "localhost", "testserver"}:
                 return JSONResponse(
-                    {"error": "不允许的请求来源", "code": "invalid_origin"}, status_code=403
+                    {
+                        "error": "不允许的请求来源",
+                        "code": "invalid_origin",
+                        "params": {},
+                    },
+                    status_code=403,
                 )
         return await call_next(request)
 
     @app.exception_handler(AppError)
     async def app_error(_: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            {
-                "error": str(exc),
-                "code": exc.code,
-                "params": exc.params,
-            },
-            status_code=400,
-        )
+        return JSONResponse(app_error_payload(exc), status_code=400)
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -501,6 +507,19 @@ def create_app(
                 "params": {"fields": sorted(fields)},
             },
             status_code=400,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        get_logger("web").exception(
+            "unexpected request error method=%s path=%s",
+            request.method,
+            request.url.path,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return JSONResponse(
+            {"error": "内部错误", "code": "internal_error", "params": {}},
+            status_code=500,
         )
 
     def welcome_seen() -> bool:

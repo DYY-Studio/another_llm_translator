@@ -27,6 +27,7 @@ from .documents import (
 )
 from .errors import (
     ConfigError,
+    ExportError,
     IncompleteError,
     ProjectError,
     StorageError,
@@ -343,16 +344,27 @@ class EPUBDocumentAdapter:
     ) -> list[Path]:
         del output_encoding
         if not target_language_tag:
-            raise IncompleteError(
-                "EPUB 导出需要 project.target_language_tag"
+            raise ExportError(
+                "EPUB 导出需要 project.target_language_tag",
+                reason="missing_target_language_tag",
+                adapter_id="epub",
+                setting="project.target_language_tag",
             )
         target_language = target_language.strip()
         if not target_language:
-            raise IncompleteError(
-                "EPUB 导出需要非空 project.target_language"
+            raise ExportError(
+                "EPUB 导出需要非空 project.target_language",
+                reason="missing_target_language",
+                adapter_id="epub",
+                setting="project.target_language",
             )
         if opaque_state is None:
-            raise IncompleteError("EPUB 文件缺少 Document Adapter 状态")
+            raise ExportError(
+                "EPUB 文件缺少 Document Adapter 状态",
+                reason="adapter_state_invalid",
+                adapter_id="epub",
+                file_id=str(file.get("file_id", "")),
+            )
         state = deepcopy(opaque_state)
         locators = state.get("locators")
         if not isinstance(locators, list) or len(locators) != len(segments):
@@ -724,7 +736,11 @@ def _set_opf_publication_metadata(
         and _local_name(child.tag) == "title"
     ]
     if not title_nodes or not (title_nodes[0].text or "").strip():
-        raise IncompleteError("EPUB OPF 缺少有效主标题")
+        raise ExportError(
+            "EPUB OPF 缺少有效主标题",
+            reason="missing_primary_title",
+            adapter_id="epub",
+        )
     suffix = f"（{target_language}"
     if bilingual:
         suffix += "·双语"

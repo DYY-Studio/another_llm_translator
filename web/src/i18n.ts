@@ -1,3 +1,5 @@
+import type { ErrorPayload } from "./types";
+
 export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
@@ -1647,6 +1649,9 @@ const errorCodes: Record<Language, Record<string, string>> = {
     "invalid_origin": "不允许的请求来源",
     "auth_required": "需要登录",
     "invalid_credentials": "用户名或密码错误",
+    "out_of_subnet": "客户端不在允许的网段内",
+    "internal_error": "服务发生内部错误，请查看服务日志",
+    "http_error": "请求失败：{status}",
   },
   en: {
     "usage_error": "Invalid operation",
@@ -1660,6 +1665,9 @@ const errorCodes: Record<Language, Record<string, string>> = {
     "invalid_origin": "Request origin not allowed",
     "auth_required": "Sign-in required",
     "invalid_credentials": "Invalid username or password",
+    "out_of_subnet": "The client is outside the allowed network",
+    "internal_error": "The service encountered an internal error; check the service log",
+    "http_error": "Request failed: {status}",
   },
 };
 
@@ -1688,28 +1696,128 @@ const termGroupReasons: Record<Language, Record<string, string>> = {
   },
 };
 
-let uiLanguage: Language = "zh-CN";
+const exportErrorReasons: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    missing_target_language_tag: "无法导出 EPUB：项目未设置目标语言标签。请在项目设置中填写 BCP 47 标签，例如 zh-Hans。",
+    missing_target_language: "无法导出 EPUB：项目未设置目标语言。请先在项目设置中填写目标语言。",
+    unrepresentable_output_encoding: "无法导出 {file}：输出编码 {encoding} 不能表示译文中的部分字符。请更改项目输出编码。",
+    missing_stage_results: "无法导出：{stage}阶段仍有 {count} 个片段缺少结果。请先完成该阶段。",
+    adapter_capability_missing: "当前 {adapter_id} 文档适配器不支持 {capability}。",
+    adapter_version_incompatible: "文件 {file_id} 的 {adapter_id} 适配器版本与当前版本不兼容，请重新导入源文件。",
+    adapter_state_invalid: "文件 {file_id} 的 {adapter_id} 导入状态无效，请重新导入源文件。",
+    missing_primary_title: "EPUB 缺少有效主标题，无法生成导出文件。请补充源文件元数据后重新导入。",
+  },
+  en: {
+    missing_target_language_tag: "EPUB export is unavailable because the project has no target language tag. Enter a BCP 47 tag such as zh-Hans in Project Settings.",
+    missing_target_language: "EPUB export is unavailable because the project has no target language. Set it in Project Settings first.",
+    unrepresentable_output_encoding: "Cannot export {file}: the {encoding} output encoding cannot represent some translated characters. Change the project output encoding.",
+    missing_stage_results: "Cannot export: {count} segments still lack {stage} results. Complete that stage first.",
+    adapter_capability_missing: "The {adapter_id} document adapter does not support {capability}.",
+    adapter_version_incompatible: "File {file_id} uses an incompatible version of the {adapter_id} adapter. Re-import the source file.",
+    adapter_state_invalid: "The imported {adapter_id} state for file {file_id} is invalid. Re-import the source file.",
+    missing_primary_title: "The EPUB has no valid primary title. Add the source metadata and re-import it before exporting.",
+  },
+};
 
-export function setUiLanguage(language: Language): void {
-  uiLanguage = language;
+const configFieldReasons: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    invalid_bcp47: "目标语言标签必须是格式正确的 BCP 47 标签，例如 zh-Hans。",
+  },
+  en: {
+    invalid_bcp47: "The target language tag must be a well-formed BCP 47 tag, such as zh-Hans.",
+  },
+};
+
+const stageNames: Record<Language, Record<string, string>> = {
+  "zh-CN": { translated: "翻译", proofread: "校对", polished: "润色" },
+  en: { translated: "translation", proofread: "proofreading", polished: "polishing" },
+};
+
+const broadErrorCodes = new Set([
+  "usage_error",
+  "config_error",
+  "project_error",
+  "storage_error",
+  "external_error",
+  "incomplete_error",
+]);
+
+function interpolate(
+  template: string,
+  params: Record<string, unknown>,
+  language: Language,
+): string {
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
+    const value = name === "stage"
+      ? stageNames[language][String(params[name] ?? "")] ?? params[name]
+      : params[name];
+    return value === undefined ? match : String(value);
+  });
 }
 
 export function translateError(
   code: string,
   params: Record<string, unknown>,
+  language: Language,
 ): string | null {
   if (code === "term_group_error") {
-    return termGroupReasons[uiLanguage][String(params.reason ?? "")] ?? null;
+    return termGroupReasons[language][String(params.reason ?? "")] ?? null;
   }
-  const template = errorCodes[uiLanguage][code];
+  if (code === "export_error") {
+    const template = exportErrorReasons[language][String(params.reason ?? "")];
+    return template ? interpolate(template, params, language) : null;
+  }
+  if (code === "config_field_error") {
+    const template = configFieldReasons[language][String(params.reason ?? "")];
+    return template ? interpolate(template, params, language) : null;
+  }
+  const template = errorCodes[language][code];
   if (!template) return null;
-  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-    String(params[name] ?? match),
-  );
+  return interpolate(template, params, language);
+}
+
+function isErrorPayload(value: unknown): value is ErrorPayload {
+  return typeof value === "object" && value !== null
+    && typeof (value as ErrorPayload).code === "string"
+    && typeof (value as ErrorPayload).params === "object"
+    && (value as ErrorPayload).params !== null
+    && !Array.isArray((value as ErrorPayload).params)
+    && typeof (value as ErrorPayload).error === "string";
+}
+
+export function formatErrorPayload(
+  payload: ErrorPayload,
+  language: Language,
+): string {
+  const localized = translateError(payload.code, payload.params, language);
+  if (!localized) {
+    return payload.error || translate("common.requestFailed", language);
+  }
+  if (
+    broadErrorCodes.has(payload.code)
+    && payload.error
+    && payload.error !== localized
+  ) {
+    return language === "zh-CN"
+      ? `${localized}：${payload.error}`
+      : `${localized}: ${payload.error}`;
+  }
+  return localized;
 }
 
 export function errorMessage(reason: unknown, language: Language): string {
-  return reason instanceof Error ? reason.message : translate("common.requestFailed", language);
+  if (
+    typeof reason === "object"
+    && reason !== null
+    && "payload" in reason
+    && isErrorPayload(reason.payload)
+  ) {
+    return formatErrorPayload(reason.payload, language);
+  }
+  if (isErrorPayload(reason)) return formatErrorPayload(reason, language);
+  if (reason instanceof Error && reason.message) return reason.message;
+  if (typeof reason === "string" && reason) return reason;
+  return translate("common.requestFailed", language);
 }
 
 export function detectLanguage(): Language {

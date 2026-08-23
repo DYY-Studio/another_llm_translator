@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import {
   decisionAliasChanges,
   decisionProposalChanges,
@@ -219,8 +219,8 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   useEffect(() => {
     if (task?.project !== project || task.stage !== "terminology_decision") return;
     if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(String(error)));
-    if (task.status === "failed") setMessage(task.error ?? translate("common.requestFailed", language));
-  }, [task?.task_id, task?.status]);
+    if (task.status === "failed") setMessage(errorMessage(task.error, language));
+  }, [task?.task_id, task?.status, language]);
 
   const rejected = useMemo(() => new Set(review?.draft?.rejected_proposal_ids ?? []), [review]);
   const filtered = useMemo(() => filterDecisionProposals(review?.draft?.proposals ?? [], search, kind, status, rejected), [review, search, kind, status, rejected]);

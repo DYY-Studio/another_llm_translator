@@ -19,7 +19,7 @@ import type {
   TaskState,
   ThemeMode,
 } from "./types";
-import { detectLanguage, setUiLanguage, translate, type Language } from "./i18n";
+import { detectLanguage, translate, type Language } from "./i18n";
 import { migrateLegacyLocalStorage, STORAGE_KEYS } from "./storageMigration";
 import "./styles.css";
 
@@ -117,7 +117,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setUiLanguage(language);
     document.documentElement.lang = language;
     document.title = translate("brand", language);
     try {

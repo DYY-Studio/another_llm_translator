@@ -1,4 +1,4 @@
-import { translateError } from "./i18n";
+import type { ErrorPayload } from "./types";
 
 const authRequiredHandlers = new Set<() => void>();
 
@@ -11,6 +11,44 @@ function notifyAuthRequired() {
   for (const handler of authRequiredHandlers) handler();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: ErrorPayload;
+
+  constructor(status: number, payload: ErrorPayload) {
+    super(payload.error || `Request failed: ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+export function parseErrorPayload(
+  value: unknown,
+  status: number,
+): ErrorPayload {
+  const record = isRecord(value) ? value : {};
+  const code = typeof record.code === "string" && record.code
+    ? record.code
+    : "http_error";
+  const params = isRecord(record.params) ? { ...record.params } : {};
+  if (code === "http_error" && !("status" in params)) params.status = status;
+  return {
+    code,
+    params,
+    error: typeof record.error === "string" ? record.error : "",
+  };
+}
+
+export async function apiErrorFromResponse(response: Response): Promise<ApiError> {
+  const value: unknown = await response.json().catch(() => null);
+  return new ApiError(response.status, parseErrorPayload(value, response.status));
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
@@ -21,19 +59,13 @@ export async function api<T>(
       ? options.headers
       : { "Content-Type": "application/json", ...options.headers },
   });
-  const value = await response.json().catch(() => null);
   if (!response.ok) {
-    const code: unknown = value?.code;
-    const params: Record<string, unknown> = value?.params ?? {};
-    if (response.status === 401 && code === "auth_required") {
+    const error = await apiErrorFromResponse(response);
+    if (response.status === 401 && error.payload.code === "auth_required") {
       notifyAuthRequired();
     }
-    const localized = typeof code === "string"
-      ? translateError(code, params)
-      : null;
-    throw new Error(
-      localized || value?.error || `请求失败：${response.status}`,
-    );
+    throw error;
   }
+  const value = await response.json().catch(() => null);
   return value as T;
 }

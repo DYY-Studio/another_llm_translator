@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
-import { translate } from "../i18n";
+import { errorMessage, translate } from "../i18n";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -111,7 +111,15 @@ export function AppShell({
               : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
           {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
-          {task.error && <span className="error-text run-error">{task.error}</span>}
+          {task.error && (
+            <span
+              className="error-text run-error"
+              role="alert"
+              title={errorMessage(task.error, language)}
+            >
+              {errorMessage(task.error, language)}
+            </span>
+          )}
           {running && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
         </section>
       )}
