@@ -78,20 +78,23 @@ python -m app.web
 
 这些 Preset 只是示例，使用前必须核对端点、模型和限流设置。
 
-流式请求会持续接收 SSE 事件，以降低代理在等待完整响应时返回 HTTP 504 的概率。
-部分 Adapter（内置 OpenAI-compatible）还显式兼容“至少收到一个合法事件后自然
-EOF”的 clean EOF；其他 Adapter 仍要求其声明的终止事件。它不能解决上游迟迟不发送
-首事件或代理缓冲 SSE 的情况；连接中断时已收到的半成品会被丢弃并按既有重试次数
-重新请求，可能造成重复计费。只有完整响应通过格式解析和校验后才会写入 Segment。
-某些 Provider 会用外层 HTTP 200 传输错误事件；诊断中会
-分别显示实际 HTTP 状态和 Provider 报告的上游状态，例如“HTTP 200 · 上游 HTTP 504”。
-诊断页还会显示传输方式、事件数、接收字节数和首事件延迟，不会展示未校验的增量正文。
-
 ### 使用系统钥匙串
 
 在设置页的凭据管理中保存密钥，再让 Preset 通过 `keychain` 和凭据 ID 引用它。项目配置、Preset、Run 快照和日志只记录引用，不记录密钥正文。
 
 不要把 API Key 写入 TOML、Preset JSON、Prompt、项目源文件或日志。
+
+### 流式请求 (Stream)
+流式请求会持续接收 SSE 事件，以降低代理在等待完整响应时返回 HTTP 504 的概率；可配置允许接收 SSE 时忽视传输超时。
+
+部分 Adapter（内置 OpenAI-compatible）还显式兼容“至少收到一个合法事件后自然
+EOF”的 clean EOF；其他 Adapter 仍要求其声明的终止事件。它不能解决上游迟迟不发送
+首事件或代理缓冲 SSE 的情况；连接中断时已收到的半成品会被丢弃并按既有重试次数
+重新请求，可能造成重复计费。只有完整响应通过格式解析和校验后才会写入 Segment。
+
+某些 Provider 会用外层 HTTP 200 传输错误事件；诊断中会
+分别显示实际 HTTP 状态和 Provider 报告的上游状态，例如“HTTP 200 · 上游 HTTP 504”。
+诊断页还会显示传输方式、事件数、接收字节数和首事件延迟，不会展示未校验的增量正文。
 
 ## 3. 创建和管理项目
 
@@ -142,6 +145,7 @@ EPUB 青空 Ruby 中的 base 和 reading 会分别参与术语匹配；直接相
 会连续组合，普通正文会切断组合，base 与 reading 不会拼接。比如
 `｜漢《かん》｜字《じ》` 可以命中“漢字”和“かんじ”，同一术语重复命中只提供一次。
 
+#### 术语自动决策 (DEV)
 已发布术语库可以通过“自动决策（开发版）”显式生成两阶段审查草案。界面会先显示
 Preset、可处理/受保护术语数量及请求和 Token 估算；草案中可搜索、筛选并逐条拒绝建议，
 组合关系建议必须整体接受或拒绝。应用、丢弃、替换旧草案和撤销都需要再次确认。
@@ -215,14 +219,48 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 
 - 支持 OPF 2.0/3.0 和 spine XHTML。
 - 保留文档 part 边界及未翻译资源。
-- 新导入支持 `aozora`、`short_xml`、`compact` 和 `base_only`。
-- `short_xml`/`compact` 只改变模型看到的 Ruby；界面和可编辑结果仍使用
-  `｜base《reading》`。`base_only` 完全移除 reading。
-- 连续 Emphasis Ruby 在界面/模型中合并，导出 EPUB 时会按可见字素簇恢复为
-  逐字 Ruby 强调。
-- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入；旧
-  `parenthetical` File 可继续读取/导出，但新导入不再提供该模式。
+- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入.
 - 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
+
+#### Ruby 标签转换
+<small>Ruby的正文此处表记为`base`，注音表记为`reading`。`<ruby>base<rt>reading</rt></ruby>`</small>
+
+- 可将Ruby转换为 `aozora`、`short_xml`、`compact` 和 `base_only` 四种形式。
+-  `short_xml`/`compact` 只改变 LLM 看到的 Ruby；用户在界面上看到的仍是`aozora`。
+-  `base_only` 完全移除 reading，只留下 base。
+
+| ID | 格式 | 例 | 损坏重试 |
+| -- | -- | -- | :--: |
+| aozora | `｜base《reading》` | `｜漢字《かんじ》` | ❌ |
+| short_xml | `<r><b>base</b><y>reading</y></r>`| `<r><b>漢字</b><y>かんじ</y></r>` | ✅ |
+| compact | `⟦B:base\|Y:reading⟧` | `⟦B:漢字\|Y:かんじ⟧` | ✅ | 
+| base_only | `base` | `漢字` | - |
+
+需要根据使用的模型选择其最适应的格式，以下是少量模型的测试结果，经供参考。
+| 模型 | 综合成绩 | 首选 | 正确率 | 备选 | 正确率 |
+| -- | :--: | -- | :--: | -- | :--: |
+| Muse Spark 1.2 | ~92.1% | aozora | ~100% | short_xml | ~100% |
+| MiniMax M3 | ~79.1% | short_xml | ~99% | aozora/compact | ~96% |
+| GLM 5.2 | ~77.3% | short_xml | ~94% | aozora | ~92% |
+| Ox Alpha | ~75.5% | compact | ~98% | aozora | ~97% |
+| DeepSeek V4 Flash 0731 | ~70.7% | short_xml | ~95% | aozora | ~94% |
+
+- **正确率**：只反应该模型的 formatter 正确性，不表示其翻译和自动决策的可靠性。
+- **综合成绩**：在极端场景和极简提示词下进行的自动决策与翻译验证，由于机器校验不完全可靠，可能有部分误差。
+
+所有模型均使用 `reasoning_effort=high, temperature=0, top_p=0.95`。
+
+#### Ruby 连续强调符号压缩
+- 避免 LLM 在处理 Emphasis Ruby 时因连续Ruby出现文本理解不当、强调符号数不一致的情况
+- 连续 Emphasis Ruby 在用户可见内容和发送给LLM的内容中均合并，导出 EPUB 时会按可见字素簇恢复为
+  逐字 Ruby 强调。
+
+| 步骤 | 形式 |
+| -- | -- |
+| 原文 | `<ruby>漢<rt>·</rt></ruby><ruby>字<rt>·</rt></ruby>` |
+| 转换 (Aozora) | `｜漢《·》｜字《·》` |
+| 压缩 (用户/LLM) | `｜漢字《·》` |
+| 导出 | `<ruby>漢<rt>·</rt></ruby><ruby>字<rt>·</rt></ruby>` |
 
 ### SRT（独立插件）
 
