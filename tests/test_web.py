@@ -600,7 +600,7 @@ def test_web_applies_epub_import_options_without_project_level_settings(
         data={
             "name": "ruby-option",
             "adapter_options": json.dumps(
-                {"epub": {"ruby_mode": "parenthetical"}}
+                {"epub": {"ruby_mode": "short_xml"}}
             ),
         },
         files=[
@@ -611,14 +611,14 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert response.status_code == 200
     overview = client.get("/api/v1/projects/ruby-option").json()
     assert [item["source"] for item in overview["segments"]] == [
-        "彼は漢字（かんじ）を読む。",
-        "特別（スペシャル／とくべつ）だ。",
+        "彼は｜漢字《かんじ》を読む。",
+        "｜特別《スペシャル／とくべつ》だ。",
     ]
     project = projects_root / "ruby-option"
     assert "adapter_options" not in read_json(project, project / "project.json")
     file_record = read_files(project)[0]
     state = read_json(project, project / str(file_record["document_adapter_state"]))
-    assert state["state"]["ruby_mode"] == "parenthetical"
+    assert state["state"]["ruby_mode"] == "short_xml"
 
 
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(

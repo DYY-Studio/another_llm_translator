@@ -1196,6 +1196,39 @@ def test_epub_import_compacts_consecutive_emphasis_ruby(
     assert imported.files[0].model_sources == (expected_model,)
 
 
+def test_epub_emphasis_compaction_stops_at_controlled_format_boundary(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "emphasis-format-boundary.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<em><ruby>强<rt>・</rt></ruby></em>"
+            "<ruby>调<rt>・</rt></ruby></p></body></html>"
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)],
+        recursive=False,
+        config={},
+        options={
+            "ruby_mode": "short_xml",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+
+    assert imported.files[0].segments == (
+        "｜强《・》｜调《・》",
+    )
+    assert imported.files[0].model_sources == (
+        "<em1><r><b>强</b><y>・</y></r></em1>"
+        "<r><b>调</b><y>・</y></r>",
+    )
+
+
 def test_epub_emphasis_export_expands_unicode_grapheme_clusters(
     tmp_path: Path,
 ) -> None:

@@ -1177,6 +1177,22 @@ def _text_slots(
             return
         semantic_run.append((locator, text))
 
+    def display_run(formats: list[dict[str, Any]]) -> str:
+        groups: list[tuple[tuple[str, ...], str]] = []
+        for index, (_, text) in enumerate(semantic_run):
+            signature = tuple(
+                str(item["id"])
+                for item in formats
+                if int(item["start"]) <= index <= int(item["end"])
+            )
+            if groups and groups[-1][0] == signature:
+                groups[-1] = (signature, groups[-1][1] + text)
+            else:
+                groups.append((signature, text))
+        return "".join(
+            compact_emphasis_aozora(text) for _, text in groups
+        )
+
     def flush_run() -> None:
         if not semantic_run:
             return
@@ -1215,12 +1231,12 @@ def _text_slots(
                 "slots": [item[0] for item in semantic_run],
             }
         source = "".join(item[1] for item in semantic_run)
+        model_source, formats = model_run()
         if ruby_mode in {"aozora", "short_xml", "compact"}:
-            compacted_source = compact_emphasis_aozora(source)
+            compacted_source = display_run(formats)
             if compacted_source != source:
                 locator["adapter_source"] = source
             source = compacted_source
-        model_source, formats = model_run()
         if formats:
             locator["formats"] = formats
         values.append((locator, source, model_source or None))
