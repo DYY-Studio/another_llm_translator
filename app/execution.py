@@ -22,6 +22,7 @@ import httpx
 from .config import load_project_config, load_run_config
 from .credentials import resolve_api_key
 from .diagnostics import current_diagnostics
+from .documents import aozora_to_model_ruby
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -735,6 +736,13 @@ def segment_model_source(segment: dict[str, Any]) -> str:
     return str(value) if isinstance(value, str) else str(segment["source"])
 
 
+def segment_model_text(segment: dict[str, Any], value: str) -> str:
+    mode = segment.get("_ruby_mode")
+    if mode in {"short_xml", "compact"}:
+        return aozora_to_model_ruby(value, str(mode))
+    return value
+
+
 class PreviousContextIndex:
     """Indexed lookup for the preceding non-empty segments of a Segment."""
 
@@ -754,6 +762,7 @@ class PreviousContextIndex:
         count: int,
         *,
         target_resolver: Callable[[str], str | None] | None = None,
+        target_transform: Callable[[dict[str, Any], str], str] | None = None,
         source_key: str = "source",
     ) -> list[dict[str, str]]:
         if count <= 0:
@@ -780,7 +789,11 @@ class PreviousContextIndex:
             if target_resolver is not None:
                 target = target_resolver(str(item["segment_id"]))
                 if target is not None:
-                    context["translation"] = target
+                    context["translation"] = (
+                        target_transform(item, target)
+                        if target_transform is not None
+                        else target
+                    )
             result.append(context)
         return result
 

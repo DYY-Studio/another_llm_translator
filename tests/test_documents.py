@@ -775,14 +775,16 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
     assert tiered is not None
     assert "may be omitted as a whole" in tiered
     assert "Semantic markers are a, abbr" in tiered
-    assert adapter.model_prompt_requirements(
+    terminology = adapter.model_prompt_requirements(
         stage="terminology",
         language="en",
         opaque_state={
             "inline_format_mode": "markers",
             "inline_format_policy": "strict",
         },
-    ) is None
+    )
+    assert terminology is not None
+    assert "Keep every existing marker" in terminology
 
 
 def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
@@ -1042,8 +1044,15 @@ RUBY_XHTML = (
             "aozora",
             ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
         ),
+        (
+            "short_xml",
+            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+        ),
+        (
+            "compact",
+            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+        ),
         ("base_only", ["彼は漢字を読む。", "特別だ。"]),
-        ("parenthetical", ["彼は漢字（かんじ）を読む。", "特別（スペシャル／とくべつ）だ。"]),
     ],
 )
 def test_epub_ruby_modes_form_semantic_segments(
@@ -1059,6 +1068,77 @@ def test_epub_ruby_modes_form_semantic_segments(
     assert list(imported.files[0].segments) == expected
     assert imported.files[0].opaque_state is not None
     assert imported.files[0].opaque_state["ruby_mode"] == mode
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (
+            "short_xml",
+            [
+                "彼は<r><b>漢字</b><y>かんじ</y></r>を読む。",
+                "<r><b>特別</b><y>スペシャル／とくべつ</y></r>だ。",
+            ],
+        ),
+        (
+            "compact",
+            [
+                "彼は⟦R:漢字|Y:かんじ⟧を読む。",
+                "⟦R:特別|Y:スペシャル／とくべつ⟧だ。",
+            ],
+        ),
+    ],
+)
+def test_epub_model_only_ruby_modes_keep_aozora_source(
+    tmp_path: Path, mode: str, expected: list[str]
+) -> None:
+    source = tmp_path / f"ruby-model-{mode}.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+    )
+
+    assert list(imported.files[0].model_sources or ()) == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "model_text"),
+    [
+        ("short_xml", "<r><b>汉字 &amp; 词</b><y>hànzì</y></r>"),
+        ("compact", "⟦R:汉\\|字|Y:hànzì⟧"),
+    ],
+)
+def test_epub_model_ruby_output_normalizes_to_aozora(
+    mode: str, model_text: str
+) -> None:
+    adapter = get_document_adapter("epub")
+
+    assert adapter.normalize_model_output(
+        segment={"source": "source", "_ruby_mode": mode},
+        text=model_text,
+        stage="translation",
+    ) in {"｜汉字 & 词《hànzì》", "｜汉|字《hànzì》"}
+
+
+@pytest.mark.parametrize(
+    ("mode", "model_text"),
+    [
+        ("short_xml", "<r><y>reading</y><b>base</b></r>"),
+        ("short_xml", "<r><b>base</b></r>"),
+        ("compact", "⟦R:base|Y:⟧"),
+        ("compact", "⟦R:base\\q|Y:reading⟧"),
+    ],
+)
+def test_epub_model_ruby_output_rejects_broken_structure(
+    mode: str, model_text: str
+) -> None:
+    with pytest.raises(IncompleteError):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source", "_ruby_mode": mode},
+            text=model_text,
+            stage="translation",
+        )
 
 
 def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
@@ -1670,6 +1750,8 @@ def test_document_adapter_choice_options_apply_defaults_and_validate_values() ->
         validate_document_import_options(epub, {"unknown": "value"})
     with pytest.raises(UsageError, match="取值无效"):
         validate_document_import_options(epub, {"ruby_mode": "invalid"})
+    with pytest.raises(UsageError, match="取值无效"):
+        validate_document_import_options(epub, {"ruby_mode": "parenthetical"})
 
 
 def test_plugin_host_rejects_invalid_choice_option(

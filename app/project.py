@@ -1133,7 +1133,7 @@ def _load_segment_records(
     if not include_model_contract:
         return segments
     files = read_sqlite_files(project)
-    state_by_file: dict[str, list[dict[str, Any]]] = {}
+    state_by_file: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
     for file_record in files:
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
@@ -1147,13 +1147,20 @@ def _load_segment_records(
             state = state["state"]
         locators = state.get("locators")
         if isinstance(locators, list):
-            state_by_file[str(file_record.get("file_id"))] = locators
+            ruby_mode = state.get("ruby_mode")
+            state_by_file[str(file_record.get("file_id"))] = (
+                locators,
+                str(ruby_mode) if isinstance(ruby_mode, str) else None,
+            )
     by_file: dict[str, list[dict[str, Any]]] = {}
     for segment in segments:
         by_file.setdefault(str(segment.get("file_id")), []).append(segment)
     for file_id, items in by_file.items():
-        locators = state_by_file.get(file_id)
-        if locators is None or len(locators) != len(items):
+        state_entry = state_by_file.get(file_id)
+        if state_entry is None:
+            continue
+        locators, ruby_mode = state_entry
+        if len(locators) != len(items):
             continue
         for segment, locator in zip(
             sorted(items, key=lambda value: int(value["line_index"])),
@@ -1161,6 +1168,8 @@ def _load_segment_records(
             strict=True,
         ):
             if isinstance(locator, dict):
+                if ruby_mode is not None:
+                    segment["_ruby_mode"] = ruby_mode
                 slot = locator.get("slot")
                 formats = slot.get("formats") if isinstance(slot, dict) else None
                 if isinstance(formats, list):
