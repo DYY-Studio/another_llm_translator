@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 5
+DECISION_RULES_VERSION = 6
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -20,8 +20,11 @@ UPDATE_ACTION_KEYS = SIMPLE_ACTION_KEYS | {"changes"}
 _PROTOCOL = {
     "zh-CN": (
         "以下固定输出协议优先于可编辑中段。terms[] 是唯一决策目标；每项必须恰好输出一条 "
-        "decision 并逐字照录 normalized。anchors[]、evidence、source、disabled、第一阶段 "
-        "action/reason 均为只读数据，不得输出 anchor 决策。每条记录必须有非空字符串 "
+        "decision 并逐字照录 normalized。anchors[]、evidence、conflicts、source、disabled、第一阶段 "
+        "action/reason 均为只读数据，不得输出 anchor 决策。conflicts 是去重后的历史候选和关系"
+        "争用证据，不是投票结果或可选值白名单；可以依据全文证据提出新值。第一阶段存在 category "
+        "或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，无法"
+        "可靠决定时使用 needs_review。每条记录必须有非空字符串 "
         "reason。keep、disable、needs_review 必须且只能含 type、normalized、action、reason。"
         "update 必须且只能含 type、normalized、action、reason、changes；changes 是 Patch，"
         "只能包含 category、description、preferred_translation、aliases、group_primary 中实际"
@@ -44,8 +47,13 @@ _PROTOCOL = {
     "en": (
         "The following fixed output contract takes precedence over the editable middle. "
         "terms[] are the only decision targets; output exactly one decision per item and copy "
-        "normalized verbatim. anchors[], evidence, source, disabled, and prior-phase action/reason "
-        "are read-only; never output an anchor decision. Every record requires a non-empty string "
+        "normalized verbatim. anchors[], evidence, conflicts, source, disabled, and prior-phase "
+        "action/reason are read-only; never output an anchor decision. conflicts contains deduplicated "
+        "historical candidates and relationship disputes, not vote totals or an allowed-value whitelist; "
+        "you may propose a new value when the work-wide evidence supports it. In phase one, a term with "
+        "category or preferred_translation conflicts must not use keep; update must provide a non-empty "
+        "decision for every conflicted scalar field, or use needs_review when evidence is insufficient. "
+        "Every record requires a non-empty string "
         "reason. keep, disable, and needs_review contain exactly type, normalized, action, reason. "
         "update contains exactly type, normalized, action, reason, changes. changes is a Patch and "
         "may contain only fields actually changed from category, description, preferred_translation, "
