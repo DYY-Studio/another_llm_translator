@@ -24,6 +24,7 @@ from .documents import (
     DocumentExportJob,
     aozora_match_views,
     aozora_safe_split_positions,
+    compact_emphasis_aozora,
     publish_document_exports,
 )
 from .errors import (
@@ -4813,6 +4814,14 @@ def export_project(
                 str(segment["source"]),
                 output_text[segment_id],
             )
+            if segment.get("_ruby_mode") in {
+                "aozora",
+                "short_xml",
+                "compact",
+            }:
+                output_text[segment_id] = compact_emphasis_aozora(
+                    output_text[segment_id]
+                )
         if record is not None:
             lineage = result_lineage(record)
             if any(

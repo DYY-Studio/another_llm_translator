@@ -17,6 +17,7 @@ from app.documents import (
     DocumentChoiceOption,
     DocumentExportJob,
     ImportedFile,
+    compact_emphasis_aozora,
     decode_plaintext,
     publish_document_exports,
 )
@@ -31,7 +32,7 @@ from app.plugins import (
     normalize_model_text,
     validate_document_import_options,
 )
-from app.project import _normalize_imported_file, init_project
+from app.project import _normalize_imported_file, init_project, load_segments
 from app.stages import _project_context, export_project
 from app.sqlite_storage import (
     append_jsonl,
@@ -1139,6 +1140,123 @@ def test_epub_model_ruby_output_rejects_broken_structure(
             text=model_text,
             stage="translation",
         )
+
+
+@pytest.mark.parametrize(
+    "mark",
+    list("・•◦●○◉◎▲△﹅﹆"),
+)
+def test_emphasis_aozora_compacts_adjacent_and_repeated_ruby(mark: str) -> None:
+    assert compact_emphasis_aozora(
+        f"｜强《{mark}》｜调《{mark}{mark}》"
+    ) == f"｜强调《{mark}》"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "｜强《・》 ｜调《・》",
+        "｜强《・》文｜调《・》",
+        "｜强《・》｜调《•》",
+        "｜强《きょう》｜调《ちょう》",
+    ],
+)
+def test_emphasis_aozora_does_not_cross_non_emphasis_boundaries(
+    source: str,
+) -> None:
+    assert compact_emphasis_aozora(source) == source
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_model"),
+    [
+        ("aozora", None),
+        ("short_xml", "<r><b>强调</b><y>・</y></r>"),
+        ("compact", "⟦R:强调|Y:・⟧"),
+    ],
+)
+def test_epub_import_compacts_consecutive_emphasis_ruby(
+    tmp_path: Path, mode: str, expected_model: str | None
+) -> None:
+    source = tmp_path / f"emphasis-{mode}.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<ruby>强<rt>・</rt></ruby><ruby>调<rt>・</rt></ruby>"
+            "</p></body></html>"
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+    )
+
+    assert imported.files[0].segments == ("｜强调《・》",)
+    assert imported.files[0].model_sources == (expected_model,)
+
+
+def test_epub_emphasis_export_expands_unicode_grapheme_clusters(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "emphasis-export.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<p><ruby>原<rt>・</rt></ruby>"
+            "<ruby>文<rt>・</rt></ruby></p></body></html>"
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="emphasis-export",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    assert load_segments(project)[0]["source"] == "｜原文《・》"
+    assert load_segments(project)[0]["_adapter_source"] == (
+        "｜原《・》｜文《・》"
+    )
+    metadata = read_json(project, project / "project.json")
+    segment = read_segments(project)[0]
+    append_jsonl(
+        project,
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segment["segment_id"],
+            status="completed",
+            text="｜e\u0301👩‍❤️‍💋‍👨 A《・》",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-EMPHASIS",
+            request_id="REQ-EMPHASIS",
+        ),
+    )
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        rubies = [
+            item for item in root.iter() if item.tag.rsplit("}", 1)[-1] == "ruby"
+        ]
+        assert [item.text for item in rubies] == [
+            "e\u0301",
+            "👩‍❤️‍💋‍👨",
+            "A",
+        ]
+        assert [list(item)[0].text for item in rubies] == ["・", "・", "・"]
+        assert " " in "".join(root.itertext())
 
 
 def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(

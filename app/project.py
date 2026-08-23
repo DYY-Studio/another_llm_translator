@@ -15,6 +15,7 @@ from .documents import (
     DocumentAdapter,
     DocumentImport,
     ImportedFile,
+    compact_emphasis_aozora,
     decode_plaintext,
 )
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
@@ -1170,7 +1171,31 @@ def _load_segment_records(
             if isinstance(locator, dict):
                 if ruby_mode is not None:
                     segment["_ruby_mode"] = ruby_mode
+                    if ruby_mode in {"aozora", "short_xml", "compact"}:
+                        raw_source = str(segment["source"])
+                        display_source = compact_emphasis_aozora(raw_source)
+                        if display_source != raw_source:
+                            segment["_adapter_source"] = raw_source
+                            segment["source"] = display_source
+                        model_source = segment.get("model_source")
+                        if isinstance(model_source, str) and ruby_mode == "aozora":
+                            parts = re.split(
+                                r"(</?[a-z][a-z0-9]*\d+>)", model_source
+                            )
+                            segment["model_source"] = "".join(
+                                part
+                                if re.fullmatch(r"</?[a-z][a-z0-9]*\d+>", part)
+                                else compact_emphasis_aozora(part)
+                                for part in parts
+                            )
                 slot = locator.get("slot")
+                adapter_source = (
+                    slot.get("adapter_source")
+                    if isinstance(slot, dict)
+                    else None
+                )
+                if isinstance(adapter_source, str):
+                    segment["_adapter_source"] = adapter_source
                 formats = slot.get("formats") if isinstance(slot, dict) else None
                 if isinstance(formats, list):
                     segment["_format_markers"] = formats

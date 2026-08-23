@@ -13,9 +13,12 @@ from xml.parsers import expat
 from xml.etree import ElementTree
 from uuid import UUID, uuid5
 
+import regex
+
 from .documents import (
     DocumentChoiceOption,
     DocumentImport,
+    EMPHASIS_RUBY_CHARACTERS,
     ImportedFile,
     aozora_to_model_ruby,
     compact_emphasis_aozora,
@@ -451,7 +454,7 @@ class EPUBDocumentAdapter:
                     _set_regular_slot(
                         body,
                         locator.get("slot"),
-                        str(segment["source"]),
+                        str(segment.get("_adapter_source", segment["source"])),
                         target,
                         bilingual=bilingual,
                         ruby_mode=str(state.get("ruby_mode", "")),
@@ -475,7 +478,7 @@ class EPUBDocumentAdapter:
                         _set_composite_slot(
                             body,
                             slot,
-                            str(segment["source"]),
+                            str(segment.get("_adapter_source", segment["source"])),
                             target,
                             bilingual=bilingual,
                             ruby_mode=str(state.get("ruby_mode", "")),
@@ -1091,12 +1094,13 @@ def _text_slots(
         return len(path) >= len(ancestor) and path[: len(ancestor)] == ancestor
 
     def model_run() -> tuple[str, list[dict[str, Any]]]:
-        has_model_ruby = any(
-            isinstance(locator, dict)
-            and isinstance(locator.get("model_source"), str)
+        has_ruby = any(
+            isinstance(locator, dict) and locator.get("kind") == "ruby"
             for locator, _ in semantic_run
         )
-        if inline_format_mode != "markers" and not has_model_ruby:
+        if inline_format_mode != "markers" and not (
+            has_ruby and ruby_mode in {"short_xml", "compact"}
+        ):
             return "", []
         entries: list[dict[str, Any]] = []
         for path, name in format_elements:
@@ -1135,28 +1139,35 @@ def _text_slots(
             ends.setdefault(int(item["end"]), []).append(item)
         parts: list[str] = []
         for index, (locator, text) in enumerate(semantic_run):
+            del locator
             for item in sorted(starts.get(index, []), key=lambda value: len(value["path"])):
                 parts.append(f"<{item['id']}>")
-            model_text = locator.get("model_source")
-            if isinstance(model_text, str):
-                source = locator.get("source")
-                tail = locator.get("tail")
-                if not isinstance(source, str) or not isinstance(tail, str):
-                    raise ProjectError("EPUB Ruby 模型定位状态损坏")
-                included_tail = text[len(source) :]
-                parts.append(
-                    model_text
-                    + escape_model_ruby_literal(included_tail, ruby_mode)
-                )
-            elif has_model_ruby:
-                parts.append(escape_model_ruby_literal(text, ruby_mode))
-            else:
-                parts.append(text)
+            parts.append(text)
             for item in sorted(
                 ends.get(index, []), key=lambda value: len(value["path"]), reverse=True
             ):
                 parts.append(f"</{item['id']}>")
-        return "".join(parts), entries
+        rendered = "".join(parts)
+        if ruby_mode not in {"aozora", "short_xml", "compact"}:
+            return rendered, entries
+        converted: list[str] = []
+        cursor = 0
+        for match in _INLINE_MARKER_RE.finditer(rendered):
+            literal = compact_emphasis_aozora(rendered[cursor : match.start()])
+            converted.append(
+                aozora_to_model_ruby(literal, ruby_mode)
+                if "｜" in literal
+                else escape_model_ruby_literal(literal, ruby_mode)
+            )
+            converted.append(match.group())
+            cursor = match.end()
+        literal = compact_emphasis_aozora(rendered[cursor:])
+        converted.append(
+            aozora_to_model_ruby(literal, ruby_mode)
+            if "｜" in literal
+            else escape_model_ruby_literal(literal, ruby_mode)
+        )
+        return "".join(converted), entries
 
     def add_regular(locator: dict[str, Any], text: str | None) -> None:
         if not text:
@@ -1203,6 +1214,11 @@ def _text_slots(
                 "slots": [item[0] for item in semantic_run],
             }
         source = "".join(item[1] for item in semantic_run)
+        if ruby_mode in {"aozora", "short_xml", "compact"}:
+            compacted_source = compact_emphasis_aozora(source)
+            if compacted_source != source:
+                locator["adapter_source"] = source
+            source = compacted_source
         model_source, formats = model_run()
         if formats:
             locator["formats"] = formats
@@ -1613,10 +1629,24 @@ def _insert_fragments(
             continue
         if reading is None:
             raise IncompleteError("EPUB Aozora Ruby 片段损坏")
-        ruby = _new_aozora_ruby(parent, text, reading)
-        parent.insert(insert_at, ruby)
-        insert_at += 1
-        last_inserted = ruby
+        bases = (
+            regex.findall(r"\X", text)
+            if reading in EMPHASIS_RUBY_CHARACTERS
+            else [text]
+        )
+        for base in bases:
+            if base.isspace():
+                if last_inserted is not None:
+                    last_inserted.tail = (last_inserted.tail or "") + base
+                elif previous is not None:
+                    previous.tail = (previous.tail or "") + base
+                else:
+                    parent.text = (parent.text or "") + base
+                continue
+            ruby = _new_aozora_ruby(parent, base, reading)
+            parent.insert(insert_at, ruby)
+            insert_at += 1
+            last_inserted = ruby
     return last_inserted
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
+from .documents import compact_emphasis_aozora
 from .errors import TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
@@ -55,6 +56,17 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
+        self._ruby_modes: dict[str, str] = {}
+        for file_record in self.files:
+            state_path = file_record.get("document_adapter_state")
+            if not isinstance(state_path, str):
+                continue
+            state_record = read_json(project, project / state_path)
+            state = state_record.get("state")
+            if isinstance(state, dict) and isinstance(state.get("ruby_mode"), str):
+                self._ruby_modes[str(file_record["file_id"])] = str(
+                    state["ruby_mode"]
+                )
 
     @property
     def project_id(self) -> str:
@@ -63,13 +75,24 @@ class WebStore:
     def _history(
         self, stage: str, segment_ids_filter: list[str] | None = None
     ) -> dict[str, dict[str, Any]]:
-        return {
-            segment_id: record
-            for segment_id, record in latest_stage_results(
-                self.project, stage, segment_ids_filter
-            ).items()
-            if record.get("status") != "reset"
-        }
+        result: dict[str, dict[str, Any]] = {}
+        for segment_id, record in latest_stage_results(
+            self.project, stage, segment_ids_filter
+        ).items():
+            if record.get("status") == "reset":
+                continue
+            item = dict(record)
+            file_id = str(segment_id).split("-S", 1)[0]
+            if self._ruby_modes.get(file_id) in {
+                "aozora",
+                "short_xml",
+                "compact",
+            }:
+                for key in ("text", "suggested_text"):
+                    if isinstance(item.get(key), str):
+                        item[key] = compact_emphasis_aozora(str(item[key]))
+            result[segment_id] = item
+        return result
 
     def _terms_revision(self) -> int | None:
         library = load_terms(self.project)
@@ -115,6 +138,13 @@ class WebStore:
         segment = get_segment(self.project, segment_id)
         if segment is None or segment.get("is_empty"):
             raise UsageError(f"未知或空 Segment：{segment_id}")
+        mode = self._ruby_modes.get(str(segment["file_id"]))
+        if mode is not None:
+            segment["_ruby_mode"] = mode
+            if mode in {"aozora", "short_xml", "compact"}:
+                segment["source"] = compact_emphasis_aozora(
+                    str(segment["source"])
+                )
         return segment
 
     def _base_results(
@@ -319,7 +349,12 @@ class WebStore:
                     "file_id": item["file_id"],
                     "part_id": item["part_id"],
                     "line_index": item["line_index"],
-                    "source": item["source"],
+                    "source": (
+                        compact_emphasis_aozora(str(item["source"]))
+                        if self._ruby_modes.get(str(item["file_id"]))
+                        in {"aozora", "short_xml", "compact"}
+                        else item["source"]
+                    ),
                     "model_source": item.get("model_source"),
                     "format_count": len(item.get("_format_markers", [])),
                     "completed": {
@@ -433,7 +468,12 @@ class WebStore:
             "file_id": segment["file_id"],
             "part_id": segment["part_id"],
             "line_index": segment["line_index"],
-            "source": segment["source"],
+            "source": (
+                compact_emphasis_aozora(str(segment["source"]))
+                if self._ruby_modes.get(str(segment["file_id"]))
+                in {"aozora", "short_xml", "compact"}
+                else segment["source"]
+            ),
             "model_source": segment.get("model_source"),
             "format_count": len(segment.get("_format_markers", [])),
             "translation": self._result_view(
