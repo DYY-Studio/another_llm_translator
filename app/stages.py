@@ -23,6 +23,9 @@ from .config import load_project_config
 from .documents import (
     DocumentExportJob,
     aozora_match_views,
+    aozora_safe_split_positions,
+    compact_emphasis_aozora,
+    document_adapter_reads_version,
     publish_document_exports,
 )
 from .errors import (
@@ -62,6 +65,7 @@ from .execution import (
     save_debug_chunks,
     scope_from_run,
     segment_model_source,
+    segment_model_text,
     select_scope,
     stage_fingerprint,
     stage_result_path,
@@ -173,6 +177,19 @@ def _project_context(
 def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
     if not any(not segment["is_empty"] for segment in segments):
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
+
+
+def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
+    if isinstance(value, str):
+        return segment_model_text(segment, value)
+    if isinstance(value, list):
+        return [_segment_model_payload_value(segment, item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _segment_model_payload_value(segment, item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
@@ -752,9 +769,14 @@ async def _localized_request_loop(
                 {
                     "id": item["segment_id"],
                     "source": segment_model_source(item),
-                    "failed_candidate": repair_candidates[
-                        str(item["segment_id"])
-                    ]["candidate"],
+                    "failed_candidate": segment_model_text(
+                        item,
+                        str(
+                            repair_candidates[str(item["segment_id"])][
+                                "candidate"
+                            ]
+                        ),
+                    ),
                     "validation_matches": repair_candidates[
                         str(item["segment_id"])
                     ]["findings"],
@@ -2181,6 +2203,7 @@ async def run_terminology(
             context_index.previous(
                 items[0],
                 context_config["previous_segments"],
+                source_key="model_source",
             )
             if context_config["enabled"]
             else []
@@ -2188,7 +2211,7 @@ async def run_terminology(
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": [item["source"] for item in raw_context],
-            "source_segments": [item["source"] for item in items],
+            "source_segments": [segment_model_source(item) for item in items],
         }
 
     run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
@@ -2221,17 +2244,13 @@ async def run_terminology(
         payload_builder=payload_builder,
         prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
-        make_probe=lambda segment, part: {
-            **segment,
-            "segment_id": f"{segment['segment_id']}-PROBE",
-            "source": part,
-        },
+        make_probe=lambda segment, part: _split_segment_source(
+            segment, f"{segment['segment_id']}-PROBE", part
+        ),
         split_part=lambda part: list(_split_source_once(part)),
-        accept_part=lambda segment, part_id, part: {
-            **segment,
-            "segment_id": part_id,
-            "source": part,
-        },
+        accept_part=lambda segment, part_id, part: _split_segment_source(
+            segment, part_id, part
+        ),
     )
     request_segments = preflight.request_segments
     part_original = preflight.part_original
@@ -3091,15 +3110,28 @@ def _split_source_once(source: str) -> tuple[str, str]:
         raise ConfigError("固定 Prompt 与单字符输入仍超过模型硬限制")
     midpoint = len(source) // 2
     punctuation = "。！？!?；;，,"
+    safe_positions = set(aozora_safe_split_positions(source))
     candidates = [
         index + 1
         for index, character in enumerate(source)
-        if character in punctuation
+        if character in punctuation and index + 1 in safe_positions
     ]
-    split_at = min(candidates, key=lambda index: abs(index - midpoint)) if candidates else midpoint
-    if split_at <= 0 or split_at >= len(source):
-        split_at = midpoint
+    if candidates:
+        split_at = min(candidates, key=lambda index: abs(index - midpoint))
+    elif safe_positions:
+        split_at = min(safe_positions, key=lambda index: abs(index - midpoint))
+    else:
+        raise ConfigError("单个 Aozora Ruby 超过模型硬限制，无法安全拆分")
     return source[:split_at], source[split_at:]
+
+
+def _split_segment_source(
+    segment: dict[str, Any], segment_id: str, source: str
+) -> dict[str, Any]:
+    result = {**segment, "segment_id": segment_id, "source": source}
+    if segment.get("_ruby_mode") in {"short_xml", "compact"}:
+        result["model_source"] = segment_model_text(result, source)
+    return result
 
 
 def _replace_with_runtime_parts(
@@ -3119,8 +3151,8 @@ def _replace_with_runtime_parts(
         f"{segment_id}-R2-{suffix}",
     ]
     parts = [
-        {**segment, "segment_id": part_ids[0], "source": left_source},
-        {**segment, "segment_id": part_ids[1], "source": right_source},
+        _split_segment_source(segment, part_ids[0], left_source),
+        _split_segment_source(segment, part_ids[1], right_source),
     ]
     expected = original_parts.setdefault(original_id, [segment_id])
     index = expected.index(segment_id)
@@ -3293,6 +3325,7 @@ async def run_translation(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
+                target_transform=segment_model_text,
                 source_key="model_source",
             )
             if context_config["enabled"]
@@ -3303,7 +3336,9 @@ async def run_translation(
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
-            "terms": term_match_cache.for_items(items),
+            "terms": _segment_model_payload_value(
+                items[0], term_match_cache.for_items(items)
+            ),
             "segments": [
                 {
                     "id": item["segment_id"],
@@ -3340,16 +3375,14 @@ async def run_translation(
         prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
         make_probe=lambda segment, part: {
-            **segment,
-            "segment_id": f"{segment['segment_id']}-PROBE",
-            "source": part,
+            **_split_segment_source(
+                segment, f"{segment['segment_id']}-PROBE", part
+            ),
         },
         split_part=lambda part: list(_split_source_once(part)),
-        accept_part=lambda segment, part_id, part: {
-            **segment,
-            "segment_id": part_id,
-            "source": part,
-        },
+        accept_part=lambda segment, part_id, part: _split_segment_source(
+            segment, part_id, part
+        ),
     )
     request_segments = preflight.request_segments
     part_original = preflight.part_original
@@ -4137,6 +4170,7 @@ async def run_review(
                 items[0],
                 context_config["previous_segments"],
                 target_resolver=resolver,
+                target_transform=segment_model_text,
                 source_key="model_source",
             )
             if context_config["enabled"]
@@ -4147,12 +4181,16 @@ async def run_review(
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
-            "terms": term_match_cache.for_items(items),
+            "terms": _segment_model_payload_value(
+                items[0], term_match_cache.for_items(items)
+            ),
             "segments": [
                 {
                     "id": item["segment_id"],
                     "source": segment_model_source(item),
-                    "current_text": bases[str(item["segment_id"])]["text"],
+                    "current_text": segment_model_text(
+                        item, str(bases[str(item["segment_id"])]["text"])
+                    ),
                 }
                 for item in items
             ],
@@ -4183,7 +4221,7 @@ async def run_review(
             "record_id": bases[str(segment["segment_id"])]["record_id"],
             "text": part[1],
         }
-        return {**segment, "segment_id": probe_id, "source": part[0]}
+        return _split_segment_source(segment, probe_id, part[0])
 
     def initial_part(segment: dict[str, Any]) -> tuple[str, str]:
         return (
@@ -4206,7 +4244,7 @@ async def run_review(
             "record_id": bases[str(segment["segment_id"])]["record_id"],
             "text": part[1],
         }
-        return {**segment, "segment_id": part_id, "source": part[0]}
+        return _split_segment_source(segment, part_id, part[0])
 
     preflight = _split_oversized_preflight(
         selection.work,
@@ -4777,6 +4815,14 @@ def export_project(
                 str(segment["source"]),
                 output_text[segment_id],
             )
+            if segment.get("_ruby_mode") in {
+                "aozora",
+                "short_xml",
+                "compact",
+            }:
+                output_text[segment_id] = compact_emphasis_aozora(
+                    output_text[segment_id]
+                )
         if record is not None:
             lineage = result_lineage(record)
             if any(
@@ -4822,7 +4868,7 @@ def export_project(
             )
         else:
             project_version = str(file_record["document_adapter_version"])
-            if project_version != adapter.version:
+            if not document_adapter_reads_version(adapter, project_version):
                 raise IncompleteError(
                     f"Document Adapter 版本不兼容：文件 "
                     f"{file_record['file_id']} 使用 {project_version}，"

@@ -15,6 +15,7 @@ from .documents import (
     DocumentAdapter,
     DocumentImport,
     ImportedFile,
+    compact_emphasis_aozora,
     decode_plaintext,
 )
 from .errors import ConfigError, IncompleteError, ProjectError, UsageError
@@ -1133,7 +1134,7 @@ def _load_segment_records(
     if not include_model_contract:
         return segments
     files = read_sqlite_files(project)
-    state_by_file: dict[str, list[dict[str, Any]]] = {}
+    state_by_file: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
     for file_record in files:
         state_path = file_record.get("document_adapter_state")
         if not isinstance(state_path, str):
@@ -1147,13 +1148,20 @@ def _load_segment_records(
             state = state["state"]
         locators = state.get("locators")
         if isinstance(locators, list):
-            state_by_file[str(file_record.get("file_id"))] = locators
+            ruby_mode = state.get("ruby_mode")
+            state_by_file[str(file_record.get("file_id"))] = (
+                locators,
+                str(ruby_mode) if isinstance(ruby_mode, str) else None,
+            )
     by_file: dict[str, list[dict[str, Any]]] = {}
     for segment in segments:
         by_file.setdefault(str(segment.get("file_id")), []).append(segment)
     for file_id, items in by_file.items():
-        locators = state_by_file.get(file_id)
-        if locators is None or len(locators) != len(items):
+        state_entry = state_by_file.get(file_id)
+        if state_entry is None:
+            continue
+        locators, ruby_mode = state_entry
+        if len(locators) != len(items):
             continue
         for segment, locator in zip(
             sorted(items, key=lambda value: int(value["line_index"])),
@@ -1161,7 +1169,33 @@ def _load_segment_records(
             strict=True,
         ):
             if isinstance(locator, dict):
+                if ruby_mode is not None:
+                    segment["_ruby_mode"] = ruby_mode
+                    if ruby_mode in {"aozora", "short_xml", "compact"}:
+                        raw_source = str(segment["source"])
+                        display_source = compact_emphasis_aozora(raw_source)
+                        if display_source != raw_source:
+                            segment["_adapter_source"] = raw_source
+                            segment["source"] = display_source
+                        model_source = segment.get("model_source")
+                        if isinstance(model_source, str) and ruby_mode == "aozora":
+                            parts = re.split(
+                                r"(</?[a-z][a-z0-9]*\d+>)", model_source
+                            )
+                            segment["model_source"] = "".join(
+                                part
+                                if re.fullmatch(r"</?[a-z][a-z0-9]*\d+>", part)
+                                else compact_emphasis_aozora(part)
+                                for part in parts
+                            )
                 slot = locator.get("slot")
+                adapter_source = (
+                    slot.get("adapter_source")
+                    if isinstance(slot, dict)
+                    else None
+                )
+                if isinstance(adapter_source, str):
+                    segment["_adapter_source"] = adapter_source
                 formats = slot.get("formats") if isinstance(slot, dict) else None
                 if isinstance(formats, list):
                     segment["_format_markers"] = formats

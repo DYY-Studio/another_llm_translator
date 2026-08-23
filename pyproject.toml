@@ -15,6 +15,7 @@ dependencies = [
   "keyring>=25,<26",
   "psutil>=5.9,<7",
   "python-multipart>=0.0.20,<1",
+  "regex>=2024.11.6,<2027",
   "uvicorn>=0.30,<1",
 ]
 
