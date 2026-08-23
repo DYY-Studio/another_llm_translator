@@ -48,10 +48,11 @@ test("summarizes accepted whole proposals", () => {
 });
 
 test("renders semantic field and alias changes from states", () => {
-  const before = { ...state("Alice", null), aliases: ["Ally"] };
-  const after = { ...before, preferred_translation: "爱丽丝", group_primary: "root", aliases: ["Ally", "A"] };
+  const before = { ...state("Alice", null), description: "旧说明全文", aliases: ["Ally"] };
+  const after = { ...before, description: "基于源文证据整理后的完整说明", preferred_translation: "爱丽丝", group_primary: "root", aliases: ["Ally", "A"] };
   assert.deepEqual(decisionProposalChanges(before, after), [
     { field: "preferred_translation", before: "", after: "爱丽丝" },
+    { field: "description", before: "旧说明全文", after: "基于源文证据整理后的完整说明" },
     { field: "group_primary", before: "", after: "root" },
   ]);
   assert.deepEqual(decisionAliasChanges(before, after), { added: ["A"], removed: [] });
@@ -88,6 +89,7 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.match(source, /<RunDialog/);
   assert.match(source, /decisionRelationshipSummary/);
   assert.match(source, /decisionRelationshipRole/);
+  assert.doesNotMatch(source, /decisionHasDescription|decisionClearedDescription/);
   assert.match(source, /terms\.decisionRelationshipPrimary/);
   assert.match(source, /terms\.decisionRelationshipMembers/);
   assert.match(source, /term-decision-workspace/);

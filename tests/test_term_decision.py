@@ -873,6 +873,70 @@ def test_phase_two_keep_preserves_prior_review_with_scalar_conflicts() -> None:
     assert decisions["target"]["action"] == "keep"
 
 
+def test_description_patch_allows_rewrite_and_clear_but_rejects_type_and_noop() -> None:
+    rewrite = {**_batch_state("rewrite", "Rewrite"), "description": "旧说明；重复说明"}
+    clear = {**_batch_state("clear", "Clear"), "description": "无助于区分的说明"}
+    states = {"rewrite": rewrite, "clear": clear}
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "rewrite",
+                    "action": "update",
+                    "reason": "依据当前说明与源文样本整理",
+                    "changes": {"description": "作品中的核心角色"},
+                },
+                {
+                    "type": "decision",
+                    "normalized": "clear",
+                    "action": "update",
+                    "reason": "现有说明没有区分作用",
+                    "changes": {"description": None},
+                },
+            ]
+        ),
+        [rewrite, clear],
+        visible_states=[rewrite, clear],
+        known_states=states,
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="adjudication",
+    )
+    assert errors == []
+    assert decisions["rewrite"]["after"]["description"] == "作品中的核心角色"
+    assert decisions["clear"]["after"]["description"] is None
+
+    for value, code in (
+        (" 旧说明；重复说明 ", "no_op_patch"),
+        (1, "invalid_patch_value"),
+    ):
+        _, _, _, errors, _, _ = _analyze_decisions(
+            llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": "rewrite",
+                        "action": "update",
+                        "reason": "测试宿主校验",
+                        "changes": {"description": value},
+                    }
+                ]
+            ),
+            [rewrite],
+            visible_states=[rewrite],
+            known_states={"rewrite": rewrite},
+            read_only_terms=set(),
+            prompt_language="zh-CN",
+            review_states=None,
+            spec=None,
+            phase="adjudication",
+        )
+        assert [error["code"] for error in errors] == [code]
+
+
 @pytest.mark.parametrize(
     ("record", "message"),
     [
@@ -1694,6 +1758,68 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     alice = next(item for item in restored["terms"] if item["normalized"] == "alice")
     assert alice["preferred_translation"] is None
     assert alice["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_grounded_description_rewrite_has_full_draft_diff_apply_and_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    rewritten = "女性主角，源文中亦称 Ally"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for term in payload["terms"]:
+            if payload["phase"] == "adjudication" and term["normalized"] == "alice":
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": "alice",
+                        "action": "update",
+                        "reason": "当前说明与 Alice Ally 样本支持精简改写",
+                        "changes": {"description": rewritten},
+                    }
+                )
+            else:
+                records.append(
+                    {
+                        "type": "decision",
+                        "normalized": term["normalized"],
+                        "action": "keep",
+                        "reason": "保持当前有效裁决",
+                    }
+                )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology_decision(project, http_client=client)
+
+    draft = current_decision_draft(project)
+    assert draft is not None
+    proposal = draft["proposals"][0]
+    assert proposal["changes"] == ["description"]
+    assert proposal["before"][0]["description"] == "unhelpful"
+    assert proposal["after"][0]["description"] == rewritten
+
+    apply_decision_draft(project, confirm_all=True)
+    applied = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "alice"
+    )
+    assert applied["description"] == rewritten
+
+    rollback_decision(project, confirm=True)
+    restored = next(
+        term
+        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
+        if term["normalized"] == "alice"
+    )
+    assert restored["description"] == "unhelpful"
 
 
 @pytest.mark.asyncio

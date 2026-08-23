@@ -1072,17 +1072,6 @@ def _analyze_decisions(
                     reject("invalid_patch_value", str(exc), value)
                     patch_invalid = True
                     break
-                if key == "description" and parsed not in {
-                    None,
-                    expected[normalized].get("description") or None,
-                }:
-                    reject(
-                        "invented_description",
-                        f"术语决策不得新写 description：{normalized}",
-                        value,
-                    )
-                    patch_invalid = True
-                    break
                 after[key] = parsed
         if patch_invalid:
             continue

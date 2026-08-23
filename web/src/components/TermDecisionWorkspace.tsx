@@ -51,7 +51,6 @@ function groupValue(state: TermDecisionState, states: TermDecisionState[], langu
 function changeValue(field: string, raw: string, state: TermDecisionState, states: TermDecisionState[], language: Language) {
   if (field === "group_primary") return raw ? groupValue(state, states, language) : translate("terms.decisionStandalone", language);
   if (field === "disabled") return raw ? translate("terms.decisionDisabledState", language) : translate("terms.decisionEnabledState", language);
-  if (field === "description") return raw ? translate("terms.decisionHasDescription", language) : translate("terms.decisionClearedDescription", language);
   return valueOrDash(raw);
 }
 
