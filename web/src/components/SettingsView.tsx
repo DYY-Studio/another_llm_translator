@@ -1,7 +1,7 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api } from "../api";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, TranslationValidatorSummary } from "../types";
+import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -16,7 +16,7 @@ interface AdapterRow {
   streaming_supported?: boolean;
 }
 
-export function SettingsView({ project, language }: { project: string; language: Language }) {
+export function SettingsView({ project, language, focusField, onFocusConsumed }: { project: string; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
   const [scope, setScope] = useState<ConfigScope>(project ? "project" : "global");
   const [section, setSection] = useState<SettingsSection>("config");
   useEffect(() => {
@@ -25,6 +25,12 @@ export function SettingsView({ project, language }: { project: string; language:
       setSection("config");
     }
   }, [project]);
+  useEffect(() => {
+    if (project && focusField) {
+      setScope("project");
+      setSection("config");
+    }
+  }, [focusField, project]);
   const activeScope: ConfigScope = project ? scope : "global";
   const globalSections: SettingsSection[] = ["presets", "adapters"];
   useEffect(() => {
@@ -49,7 +55,7 @@ export function SettingsView({ project, language }: { project: string; language:
         </div>
       </nav>
       <div className="settings-content">
-        {section === "config" && <ConfigSettings project={project} scope={activeScope} language={language} />}
+        {section === "config" && <ConfigSettings project={project} scope={activeScope} language={language} focusField={activeScope === "project" ? focusField : null} onFocusConsumed={onFocusConsumed} />}
         {section === "prompts" && <PromptSettings project={project} scope={activeScope} language={language} />}
         {section === "presets" && <PresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings language={language} />}
@@ -60,14 +66,17 @@ export function SettingsView({ project, language }: { project: string; language:
   );
 }
 
-function ConfigSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
+function ConfigSettings({ project, scope, language, focusField, onFocusConsumed }: { project: string; scope: ConfigScope; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [validators, setValidators] = useState<TranslationValidatorSummary[]>([]);
   const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const loadRevision = useRef(0);
+  const targetLanguageRef = useRef<HTMLInputElement>(null);
+  const targetLanguageTagRef = useRef<HTMLInputElement>(null);
+  const outputEncodingRef = useRef<HTMLInputElement>(null);
   const configPath = scope === "global" ? "/api/v1/global/config" : `/api/v1/projects/${project}/config`;
 
   async function load() {
@@ -87,16 +96,16 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
     let active = true;
     setConfig(null);
     setMessage("");
-    setError("");
+    setError(null);
     void load().catch((reason: unknown) => {
-      if (active) setError(errorMessage(reason, language));
+      if (active) setError(reason);
     });
     return () => { active = false; loadRevision.current += 1; };
   }, [configPath, project, scope]);
 
   function update(change: (draft: ProjectConfig) => void) {
     setMessage("");
-    setError("");
+    setError(null);
     setConfig((current) => {
       if (!current) return current;
       const next = structuredClone(current);
@@ -105,17 +114,48 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
     });
   }
 
+  function focusSettingsField(field: SettingsField): boolean {
+    const refs: Record<SettingsField, RefObject<HTMLInputElement | null>> = {
+      target_language: targetLanguageRef,
+      target_language_tag: targetLanguageTagRef,
+      output_encoding: outputEncodingRef,
+    };
+    const input = refs[field].current;
+    if (!input) return false;
+    input.scrollIntoView({ block: "center" });
+    input.focus({ preventScroll: true });
+    return true;
+  }
+
+  useEffect(() => {
+    if (
+      config
+      && scope === "project"
+      && focusField
+      && focusSettingsField(focusField)
+    ) {
+      onFocusConsumed();
+    }
+  }, [config, focusField, onFocusConsumed, scope]);
+
   async function save() {
     if (!config) return;
     setSaving(true);
     setMessage("");
-    setError("");
+    setError(null);
     try {
       await api(configPath, { method: "PUT", body: JSON.stringify({ config }) });
       await load();
       setMessage(scope === "global" ? translate("settings.globalSaved", language) : translate("settings.projectSaved", language));
     } catch (reason) {
-      setError(errorMessage(reason, language));
+      setError(reason);
+      const payload = errorPayloadFrom(reason);
+      if (
+        payload?.code === "config_field_error"
+        && payload.params.reason === "invalid_bcp47"
+      ) {
+        focusSettingsField("target_language_tag");
+      }
     } finally {
       setSaving(false);
     }
@@ -131,11 +171,11 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
       await load();
       setMessage(result.warnings.join("；"));
     } catch (reason) {
-      setError(errorMessage(reason, language));
+      setError(reason);
     }
   }
 
-  if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error || translate("settings.loadingConfig", language)}</p></section>;
+  if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error ? errorMessage(error, language) : translate("settings.loadingConfig", language)}</p></section>;
 
   const presetOptions = presets.filter((item) => item.valid);
   const configuredValidatorIds = new Set(config.validation.translation.validators);
@@ -175,13 +215,13 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
           <button className="primary-button" disabled={saving} onClick={save}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button>
         </div>
       </div>
-      {error && <div className="error-banner" role="alert">{error}</div>}
+      {error != null ? <div className="error-banner" role="alert">{errorMessage(error, language)}</div> : null}
       {message && <p className="success-text">{message}</p>}
       <div className="config-form">
         <ConfigSection title={translate("settings.projectInput", language)} description={translate("settings.projectInputHint", language)}>
-          <Field label={translate("settings.targetLanguage", language)}><input value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
+          <Field label={translate("settings.targetLanguage", language)}><input ref={targetLanguageRef} value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
           <Field label={translate("settings.targetLanguageTag", language)} help={translate("settings.targetLanguageTagHint", language)}>
-            <input list="target-language-tag-options" value={config.project.target_language_tag} placeholder="zh-Hans" onChange={(event) => update((draft) => { draft.project.target_language_tag = event.target.value; })} />
+            <input ref={targetLanguageTagRef} list="target-language-tag-options" value={config.project.target_language_tag} placeholder="zh-Hans" onChange={(event) => update((draft) => { draft.project.target_language_tag = event.target.value; })} />
             <datalist id="target-language-tag-options">
               {[
                 "zh-Hans", "zh-Hant", "ja", "ko", "en", "fr", "de", "es", "it",
@@ -189,7 +229,7 @@ function ConfigSettings({ project, scope, language }: { project: string; scope: 
               ].map((value) => <option key={value} value={value} />)}
             </datalist>
           </Field>
-          <Field label={translate("settings.txtOutputEncoding", language)} help={translate("settings.outputEncodingHint", language)}><input value={config.project.output_encoding} onChange={(event) => update((draft) => { draft.project.output_encoding = event.target.value; })} /></Field>
+          <Field label={translate("settings.txtOutputEncoding", language)} help={translate("settings.outputEncodingHint", language)}><input ref={outputEncodingRef} value={config.project.output_encoding} onChange={(event) => update((draft) => { draft.project.output_encoding = event.target.value; })} /></Field>
           <NumberField label={translate("settings.encodingThreshold", language)} value={config.input.encoding_confidence_threshold} min={0} max={1} step={0.05} help={translate("settings.encodingThresholdHint", language)} onChange={(value) => update((draft) => { draft.input.encoding_confidence_threshold = value; })} />
           <Field label={translate("settings.fallbackEncoding", language)} help={translate("settings.fallbackEncodingHint", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
         </ConfigSection>

@@ -8,6 +8,11 @@ export type Stage =
   | "export"
   | "settings";
 
+export type SettingsField =
+  | "target_language"
+  | "target_language_tag"
+  | "output_encoding";
+
 export type LLMStage =
   | "terminology"
   | "terminology_decision"

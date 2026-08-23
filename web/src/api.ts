@@ -49,6 +49,17 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
   return new ApiError(response.status, parseErrorPayload(value, response.status));
 }
 
+export function errorPayloadFrom(reason: unknown): ErrorPayload | null {
+  if (reason instanceof ApiError) return reason.payload;
+  if (!isRecord(reason) || typeof reason.code !== "string") return null;
+  if (!isRecord(reason.params) || typeof reason.error !== "string") return null;
+  return {
+    code: reason.code,
+    params: reason.params,
+    error: reason.error,
+  };
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},

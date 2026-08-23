@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
-import { api } from "../api";
+import { api, errorPayloadFrom } from "../api";
 import {
   nativeBridgeAvailable,
   pickNativeFile,
@@ -21,8 +21,19 @@ import {
   type FileMoveCommand,
 } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview, ProjectSummary } from "../types";
-import { translate, type Language } from "../i18n";
+import type {
+  ErrorPayload,
+  ProjectOverview,
+  ProjectSummary,
+  SettingsField,
+  Stage,
+} from "../types";
+import {
+  errorMessage,
+  formatErrorPayload,
+  translate,
+  type Language,
+} from "../i18n";
 
 type InputKind = "file" | "folder";
 
@@ -31,6 +42,18 @@ interface ExportFile {
   size: number;
   mtime: number;
 }
+
+const EXPORT_SETTINGS_FIELDS: Partial<Record<string, SettingsField>> = {
+  missing_target_language_tag: "target_language_tag",
+  missing_target_language: "target_language",
+  unrepresentable_output_encoding: "output_encoding",
+};
+
+const EXPORT_RESULT_STAGES: Partial<Record<string, Stage>> = {
+  translated: "translation",
+  proofread: "proofreading",
+  polished: "polishing",
+};
 
 interface AdapterSummary {
   adapter_id: string;
@@ -1047,15 +1070,20 @@ export function ExportView({
   project,
   overview,
   language,
+  onNavigateStage,
+  onOpenSettings,
 }: {
   project: string;
   overview: ProjectOverview;
   language: Language;
+  onNavigateStage: (stage: Stage) => void;
+  onOpenSettings: (field: SettingsField) => void;
 }) {
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [exportError, setExportError] = useState<ErrorPayload | null>(null);
   const [message, setMessage] = useState("");
   const [files, setFiles] = useState<ExportFile[]>([]);
   const [highlighted, setHighlighted] = useState<string[]>([]);
@@ -1081,16 +1109,16 @@ export function ExportView({
   }
 
   useEffect(() => {
-    void refresh().catch((reason) => setError(String(reason)));
+    void refresh().catch((reason) => setError(reason));
   }, [project]);
 
   function openBrowse() {
     setTab("browse");
-    void refresh().catch((reason) => setError(String(reason)));
+    void refresh().catch((reason) => setError(reason));
   }
 
   async function run() {
-    setError(""); setMessage(""); setHighlighted([]);
+    setError(null); setExportError(null); setMessage(""); setHighlighted([]);
     try {
       const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
         method: "POST",
@@ -1113,7 +1141,9 @@ export function ExportView({
         setMessage(translate("export.generated", language, { count: written.length }));
       }
     } catch (reason) {
-      setError(String(reason));
+      const payload = errorPayloadFrom(reason);
+      if (payload?.code === "export_error") setExportError(payload);
+      else setError(reason);
     }
   }
 
@@ -1126,7 +1156,7 @@ export function ExportView({
     filename: string,
     body?: Record<string, unknown>,
   ) {
-    setError("");
+    setError(null);
     try {
       const saved = await saveExport(
         url,
@@ -1135,7 +1165,7 @@ export function ExportView({
       );
       if (saved) setMessage(translate("export.savedTo", language, { path: saved }));
     } catch (reason) {
-      setError(String(reason));
+      setError(reason);
     }
   }
 
@@ -1159,7 +1189,7 @@ export function ExportView({
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-    }).catch((reason) => setError(String(reason)));
+    }).catch((reason) => setError(reason));
   }
 
   function downloadAll() {
@@ -1180,7 +1210,7 @@ export function ExportView({
     if (!window.confirm(translate("export.deleteConfirm", language, { path }))) {
       return;
     }
-    setError(""); setMessage("");
+    setError(null); setMessage("");
     try {
       await api(`/api/v1/projects/${project}/exports/remove`, {
         method: "POST",
@@ -1188,9 +1218,19 @@ export function ExportView({
       });
       await refresh();
     } catch (reason) {
-      setError(String(reason));
+      setError(reason);
     }
   }
+
+  const action = (() => {
+    if (!exportError) return null;
+    const reason = String(exportError.params.reason ?? "");
+    const settingsField = EXPORT_SETTINGS_FIELDS[reason];
+    if (settingsField) return { kind: "settings" as const, field: settingsField };
+    if (reason !== "missing_stage_results") return null;
+    const target = EXPORT_RESULT_STAGES[String(exportError.params.stage ?? "")];
+    return target ? { kind: "stage" as const, stage: target } : null;
+  })();
 
   return (
     <div className="page export-page">
@@ -1199,7 +1239,7 @@ export function ExportView({
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
         <button className={tab === "browse" ? "active" : ""} onClick={openBrowse}>{translate("export.tabBrowse", language)}</button>
       </div>
-      {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+      {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
       {tab === "export" ? <>
         <div className="export-workspace">
           <div className="export-form-col">
@@ -1207,6 +1247,34 @@ export function ExportView({
             <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
             <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
             <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+            {exportError && (
+              <div className="export-error-card" role="alert">
+                <div className="export-error-heading">
+                  <strong>{translate("export.errorTitle", language)}</strong>
+                  <button
+                    className="export-error-dismiss"
+                    aria-label={translate("common.dismiss", language)}
+                    title={translate("common.dismiss", language)}
+                    onClick={() => setExportError(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <p>{formatErrorPayload(exportError, language)}</p>
+                {action ? <div className="export-error-actions">
+                  {action?.kind === "settings" && (
+                    <button className="quiet-button" onClick={() => onOpenSettings(action.field)}>
+                      {translate("export.openProjectSettings", language)}
+                    </button>
+                  )}
+                  {action?.kind === "stage" && (
+                    <button className="quiet-button" onClick={() => onNavigateStage(action.stage)}>
+                      {translate("export.openStage", language, { stage: translate(`stage.${action.stage}`, language) })}
+                    </button>
+                  )}
+                </div> : null}
+              </div>
+            )}
             {message && (
               <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
             )}

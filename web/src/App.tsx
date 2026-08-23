@@ -14,6 +14,7 @@ import type {
   ProjectSummary,
   RunDecision,
   ServerStatus,
+  SettingsField,
   Stage,
   TaskOptions,
   TaskState,
@@ -72,6 +73,7 @@ export default function App() {
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
+  const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState("");
   const [warningDismissed, setWarningDismissed] = useState(false);
@@ -91,6 +93,7 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
+  const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
 
   useEffect(() => {
     let active = true;
@@ -247,11 +250,19 @@ export default function App() {
     setOverview(null);
     setTask(null);
     setFailureFocus(null);
+    setSettingsField(null);
     await loadProjects();
   }
 
   function navigateStage(value: Stage) {
+    if (value !== "settings") setSettingsField(null);
     setStage(value);
+    setFailureFocus(null);
+  }
+
+  function openSettingsField(field: SettingsField) {
+    setSettingsField(field);
+    setStage("settings");
     setFailureFocus(null);
   }
 
@@ -272,7 +283,7 @@ export default function App() {
 
   let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
-    else if (stage === "settings") content = <SettingsView project={project} language={language} />;
+    else if (stage === "settings") content = <SettingsView project={project} language={language} focusField={settingsField} onFocusConsumed={consumeSettingsFocus} />;
   else if (stage === "overview") content = (
     <Overview
       projects={projects}
@@ -289,7 +300,7 @@ export default function App() {
     if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={setTask} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
-    } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
+    } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
   if (serverStatus?.auth.required && !serverStatus.authed) {
