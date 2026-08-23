@@ -7,7 +7,7 @@ import type {
   DiagnosticsRequestSummary,
   DiagnosticsResponse,
 } from "../types";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import { STORAGE_KEYS } from "../storageMigration";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
@@ -233,7 +233,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
       setValue(nextValue);
       setError("");
     } catch (reason) {
-      if (loadId === summaryLoadRef.current) setError(String(reason));
+      if (loadId === summaryLoadRef.current) setError(errorMessage(reason, language));
     }
   }, [level, project, stage, query]);
 
@@ -267,7 +267,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
           timer = window.setTimeout(() => void pollDetail(), 1000);
         }
       } catch (reason) {
-        if (!stopped) setDetailError(String(reason));
+        if (!stopped) setDetailError(errorMessage(reason, language));
       }
     };
     void pollDetail();

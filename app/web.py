@@ -51,6 +51,7 @@ from .errors import (
     ProjectError,
     UsageError,
     app_error_payload,
+    internal_error_payload,
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
@@ -517,10 +518,7 @@ def create_app(
             request.url.path,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
-        return JSONResponse(
-            {"error": "内部错误", "code": "internal_error", "params": {}},
-            status_code=500,
-        )
+        return JSONResponse(internal_error_payload(), status_code=500)
 
     def welcome_seen() -> bool:
         return (user_root() / ".welcome-seen").is_file()

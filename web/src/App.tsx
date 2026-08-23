@@ -20,7 +20,7 @@ import type {
   TaskState,
   ThemeMode,
 } from "./types";
-import { detectLanguage, translate, type Language } from "./i18n";
+import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { migrateLegacyLocalStorage, STORAGE_KEYS } from "./storageMigration";
 import "./styles.css";
 
@@ -75,7 +75,7 @@ export default function App() {
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
@@ -179,9 +179,9 @@ export default function App() {
       const failures = results.length - validPaths.length;
       if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
       await loadProjects();
-    }).catch((value) => setError(String(value)));
+    }).catch((value) => setError(value));
   }, []);
-  useEffect(() => { void refresh().catch((value) => setError(String(value))); }, [refresh]);
+  useEffect(() => { void refresh().catch((value) => setError(value)); }, [refresh]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
@@ -210,7 +210,7 @@ export default function App() {
         `/api/v1/projects/${project}/task-options/${taskStage}`,
       ));
     } catch (value) {
-      setError(String(value));
+      setError(value);
     } finally {
       setRunOptionsLoading(false);
     }
@@ -226,7 +226,7 @@ export default function App() {
         body: JSON.stringify({ stage: runOptions.stage, language, ...decision }),
       }));
     } catch (value) {
-      setError(String(value));
+      setError(value);
       try {
         setRunOptions(await api<TaskOptions>(
           `/api/v1/projects/${project}/task-options/${runOptions.stage}`,
@@ -308,10 +308,10 @@ export default function App() {
       <LoginView
         language={language}
         onLoggedIn={() => {
-          setError("");
+          setError(null);
           setWarningDismissed(false);
           setServerStatus((current) => current ? { ...current, authed: true } : current);
-          void loadProjects().catch((value) => setError(String(value)));
+          void loadProjects().catch((value) => setError(value));
         }}
       />
     );
@@ -346,7 +346,7 @@ export default function App() {
         {serverStatus?.lan.enabled && !serverStatus.auth.required && !warningDismissed && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setWarningDismissed(true)}>{translate("server.warningEnabled", language)}</button>
         )}
-        {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+        {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}

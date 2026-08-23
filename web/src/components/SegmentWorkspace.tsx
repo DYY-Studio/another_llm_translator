@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import type { ProjectOverview, Segment, SegmentDetail } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
@@ -274,7 +274,7 @@ export function SegmentWorkspace({
     } catch (value) {
       if (requestId !== indexRequestRef.current) return [];
       resetPageCache();
-      setListError(String(value));
+      setListError(errorMessage(value, language));
       setOrderedIds([]);
       setTotal(0);
       setFocusedDetail(null);
@@ -364,7 +364,7 @@ export function SegmentWorkspace({
           if (
             requestGeneration === pageGenerationRef.current
             && requestQuery === activePageQueryRef.current
-          ) setListError(String(value));
+          ) setListError(errorMessage(value, language));
         })
         .finally(() => {
           pageRequestsRef.current.delete(requestToken);
@@ -400,7 +400,7 @@ export function SegmentWorkspace({
         setRecords((current) => ({ ...current, [item.segment_id]: item }));
         setFocusedDetail(item);
       })
-      .catch((value) => { if (active) setListError(String(value)); });
+      .catch((value) => { if (active) setListError(errorMessage(value, language)); });
     return () => { active = false; };
   }, [project, focusedId, showContext]);
 
@@ -458,7 +458,7 @@ export function SegmentWorkspace({
         setRecords((current) => ({ ...current, [fresh.segment_id]: fresh }));
         setFocusedDetail(fresh);
       } catch (value) {
-        setListError(String(value));
+        setListError(errorMessage(value, language));
       }
     }
   }
@@ -692,7 +692,7 @@ function BatchActionDialog({
     try {
       await onConfirm(allowOutdated);
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setWorking(false);
     }

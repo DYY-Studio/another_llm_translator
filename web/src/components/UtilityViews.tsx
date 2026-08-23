@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
-import { api, errorPayloadFrom } from "../api";
+import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import {
   nativeBridgeAvailable,
   pickNativeFile,
@@ -214,7 +214,7 @@ function InputQueue({
     folderRef.current?.setAttribute("webkitdirectory", "");
     void api<{ adapters: AdapterSummary[] }>("/api/v1/document-adapters")
       .then((result) => setAdapters(result.adapters))
-      .catch((reason) => setMessage(String(reason)));
+      .catch((reason) => setMessage(errorMessage(reason, language)));
   }, []);
 
   const extensionOwners = new Map<string, string>();
@@ -711,7 +711,7 @@ export function Overview({
       selection.reset();
       await onFilesChanged();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setBusy(false);
     }
@@ -729,7 +729,7 @@ export function Overview({
       setRemoving(false);
       await onFilesChanged();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setBusy(false);
     }
@@ -749,7 +749,7 @@ export function Overview({
       await onFilesChanged();
     } catch (reason) {
       if (!saved) setOptimisticOrder(null);
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setBusy(false);
     }
@@ -870,7 +870,7 @@ export function Overview({
       setButtonReorder(null);
       await onDeleted(projectPath);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setBusy(false);
     }
@@ -892,7 +892,7 @@ export function Overview({
         }),
       );
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setCompacting(false);
     }
@@ -1180,7 +1180,7 @@ export function ExportView({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file: path }),
     }).then(async (response) => {
-      if (!response.ok) throw new Error(`请求失败：${response.status}`);
+      if (!response.ok) throw await apiErrorFromResponse(response);
       const url = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1349,7 +1349,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
         setParentDir(value.default_projects_path);
         setProjectPath(value.default_projects_path);
       })
-      .catch((reason) => setError(String(reason)));
+      .catch((reason) => setError(errorMessage(reason, language)));
   }, []);
   async function submit() {
     const body = new FormData();
@@ -1373,7 +1373,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
       const result = await api<{ project_selector: string; project_path: string; external: boolean }>("/api/v1/projects", { method: "POST", body });
       onCreated(result.project_selector, result.external ? result.project_path : undefined);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     }
   }
   async function open() {
@@ -1384,7 +1384,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
       });
       onCreated(result.selector, result.external ? result.path : undefined);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     }
   }
   return (
@@ -1459,7 +1459,7 @@ function DirectoryPicker({
       setListing(result);
     } catch (reason) {
       if (revision === requestRevision.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason, language));
       }
     } finally {
       if (revision === requestRevision.current) setLoading(false);

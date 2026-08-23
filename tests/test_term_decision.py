@@ -2912,7 +2912,11 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
     task_id = started.json()["task_id"]
     state = client.get(f"/api/v1/tasks/{task_id}").json()
     assert state["status"] == "failed"
-    assert state["error"] == "模型协议错误"
+    assert state["error"] == {
+        "error": "模型协议错误",
+        "code": "usage_error",
+        "params": {},
+    }
 
     options = client.get(
         "/api/v1/projects/decision-demo/task-options/terminology_decision"

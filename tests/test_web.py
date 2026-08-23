@@ -2501,6 +2501,54 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
 
 
 @pytest.mark.asyncio
+async def test_web_task_manager_preserves_expected_errors_and_hides_unexpected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager()
+
+    async def expected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise UsageError("模型协议错误")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", expected_failure)
+    expected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[expected["task_id"]].asyncio_task
+    assert manager.get(expected["task_id"])["error"] == {
+        "error": "模型协议错误",
+        "code": "usage_error",
+        "params": {},
+    }
+
+    async def unexpected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise RuntimeError("secret diagnostic detail")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", unexpected_failure)
+    unexpected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[unexpected["task_id"]].asyncio_task
+    state = manager.get(unexpected["task_id"])
+    assert state["status"] == "failed"
+    assert state["error"] == {
+        "error": "内部错误",
+        "code": "internal_error",
+        "params": {},
+    }
+    assert "secret" not in str(state["error"])
+
+
+@pytest.mark.asyncio
 async def test_web_task_exposes_live_progress_and_separate_token_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

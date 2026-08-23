@@ -542,8 +542,10 @@ def test_epub_export_rejects_missing_primary_title_without_output(
     )
     assert project is not None
     add_translations(project)
-    with pytest.raises(IncompleteError, match="主标题"):
+    with pytest.raises(IncompleteError, match="主标题") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.code == "export_error"
+    assert raised.value.params["reason"] == "missing_primary_title"
     assert not list((project / "output").rglob("*.epub"))
 
 
@@ -560,8 +562,9 @@ def test_epub_export_rejects_empty_target_language_without_output(
         lambda *_args, **_kwargs: config,
     )
 
-    with pytest.raises(IncompleteError, match="target_language"):
+    with pytest.raises(IncompleteError, match="target_language") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.params["reason"] == "missing_target_language"
     assert not list((project / "output").rglob("*.epub"))
 
 
@@ -575,9 +578,57 @@ def test_epub_export_requires_language_tag_without_partial_output(
     config_path.write_text(dump_config(config), encoding="utf-8")
     add_translations(project)
 
-    with pytest.raises(IncompleteError, match="target_language_tag"):
+    with pytest.raises(IncompleteError, match="target_language_tag") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.params == {
+        "reason": "missing_target_language_tag",
+        "adapter_id": "epub",
+        "setting": "project.target_language_tag",
+    }
     assert not list((project / "output").rglob("*.epub"))
+
+
+def test_export_errors_describe_missing_results_and_output_encoding(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="encoding",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    with pytest.raises(IncompleteError, match="缺少 translated 结果") as missing:
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert missing.value.params == {
+        "reason": "missing_stage_results",
+        "stage": "translated",
+        "count": 1,
+        "segment_ids": ["F0001-S000001"],
+    }
+
+    add_translations(project)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["output_encoding"] = "ascii"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    with pytest.raises(IncompleteError, match="输出编码 ascii") as encoding:
+        export_project(
+            project,
+            "translated",
+            bilingual=False,
+            allow_missing=False,
+            output_format="txt",
+        )
+    assert encoding.value.params == {
+        "reason": "unrepresentable_output_encoding",
+        "encoding": "ascii",
+        "file": "input.txt",
+        "setting": "project.output_encoding",
+    }
 
 
 def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
@@ -1578,10 +1629,15 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     write_json(project, state_path, {"schema_version": 1, "state": []})
-    with pytest.raises(IncompleteError, match="状态损坏"):
+    with pytest.raises(IncompleteError, match="状态损坏") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
+    assert raised.value.params == {
+        "reason": "adapter_state_invalid",
+        "file_id": "F0001",
+        "adapter_id": "epub",
+    }
     with pytest.raises(UsageError, match="未安装 Document Adapter"):
         get_document_adapter("missing")
 
@@ -1597,10 +1653,17 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
             "UPDATE files SET payload_json = ? WHERE file_id = ?",
             (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
         )
-    with pytest.raises(IncompleteError, match="版本不兼容"):
+    with pytest.raises(IncompleteError, match="版本不兼容") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
+    assert raised.value.params == {
+        "reason": "adapter_version_incompatible",
+        "file_id": "F0001",
+        "adapter_id": "epub",
+        "project_version": "future",
+        "current_version": "0.4",
+    }
 
 
 def test_epub_04_reads_03_state_without_migrating_project(

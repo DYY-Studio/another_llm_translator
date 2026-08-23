@@ -17,6 +17,10 @@ def app_error_payload(exc: AppError) -> dict[str, object]:
     }
 
 
+def internal_error_payload() -> dict[str, object]:
+    return {"error": "内部错误", "code": "internal_error", "params": {}}
+
+
 class UsageError(AppError):
     exit_code = 2
     code = "usage_error"

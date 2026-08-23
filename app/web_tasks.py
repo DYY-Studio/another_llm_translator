@@ -9,7 +9,12 @@ from typing import Any
 
 from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
-from .errors import UsageError
+from .errors import (
+    AppError,
+    UsageError,
+    app_error_payload,
+    internal_error_payload,
+)
 from .execution import (
     Scope,
     choose_running_run,
@@ -20,6 +25,7 @@ from .execution import (
 )
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
+from .logging_utils import get_logger
 from .project import load_segments
 from .sqlite_storage import (
     latest_stage_summary,
@@ -283,7 +289,7 @@ class WebTask:
     started_at: str | None = None
     completed_at: str | None = None
     summary: dict[str, Any] | None = None
-    error: str | None = None
+    error: dict[str, object] | None = None
     completed_segments: int = 0
     failed_segments: int = 0
     total_segments: int = 0
@@ -569,9 +575,18 @@ class WebTaskManager:
             )
         except asyncio.CancelledError:
             state.status = "cancelled"
+        except AppError as exc:
+            state.status = "failed"
+            state.error = app_error_payload(exc)
         except Exception as exc:
             state.status = "failed"
-            state.error = str(exc)
+            state.error = internal_error_payload()
+            get_logger(state.stage).exception(
+                "unexpected background task error task_id=%s project=%s",
+                state.task_id,
+                state.project,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
         finally:
             state.completed_at = utc_now()
             async with self.guard:
