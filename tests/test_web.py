@@ -34,7 +34,7 @@ from app.sqlite_storage import (
 from app.web import create_app
 from app.web_store import WebStore
 from app.web_tasks import WebTaskManager
-from tests.test_documents import RUBY_XHTML, make_epub
+from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
 
@@ -122,6 +122,59 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert payload["code"] == "request_validation_error"
     assert payload["params"]["fields"] == ["name"]
     assert "input" not in payload["params"]
+
+
+def test_web_epub_export_error_preserves_language_tag_guidance(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = ""
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/book/export",
+        json={"stage": "translated", "format": "original"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "EPUB 导出需要 project.target_language_tag",
+        "code": "export_error",
+        "params": {
+            "reason": "missing_target_language_tag",
+            "adapter_id": "epub",
+            "setting": "project.target_language_tag",
+        },
+    }
+    assert not list((project / "output").rglob("*.epub"))
+
+
+def test_web_unexpected_error_returns_safe_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+
+    def unexpected(*_: object, **__: object) -> None:
+        raise RuntimeError("secret diagnostic detail")
+
+    monkeypatch.setattr(web_module, "resolve_project", unexpected)
+    client = TestClient(
+        create_app(projects_root=projects_root),
+        raise_server_exceptions=False,
+    )
+    response = client.get("/api/v1/projects/sample")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": "内部错误",
+        "code": "internal_error",
+        "params": {},
+    }
+    assert "secret" not in response.text
 
 
 def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
@@ -2445,6 +2498,54 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     )
     await manager.tasks[reused["task_id"]].asyncio_task
     assert calls == [(True, False), (False, True)]
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_preserves_expected_errors_and_hides_unexpected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager()
+
+    async def expected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise UsageError("模型协议错误")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", expected_failure)
+    expected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[expected["task_id"]].asyncio_task
+    assert manager.get(expected["task_id"])["error"] == {
+        "error": "模型协议错误",
+        "code": "usage_error",
+        "params": {},
+    }
+
+    async def unexpected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise RuntimeError("secret diagnostic detail")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", unexpected_failure)
+    unexpected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[unexpected["task_id"]].asyncio_task
+    state = manager.get(unexpected["task_id"])
+    assert state["status"] == "failed"
+    assert state["error"] == {
+        "error": "内部错误",
+        "code": "internal_error",
+        "params": {},
+    }
+    assert "secret" not in str(state["error"])
 
 
 @pytest.mark.asyncio

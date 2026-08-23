@@ -8,6 +8,11 @@ export type Stage =
   | "export"
   | "settings";
 
+export type SettingsField =
+  | "target_language"
+  | "target_language_tag"
+  | "output_encoding";
+
 export type LLMStage =
   | "terminology"
   | "terminology_decision"
@@ -91,6 +96,12 @@ export interface ProjectSummary {
   segment_count: number;
 }
 
+export interface ErrorPayload {
+  code: string;
+  params: Record<string, unknown>;
+  error: string;
+}
+
 export interface PromptLibraryEntry {
   id: string;
   digest: string;
@@ -109,7 +120,7 @@ export interface TaskState {
   project: string;
   stage: string;
   status: string;
-  error?: string | null;
+  error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
   completed_segments: number;
   failed_segments: number;

@@ -31,6 +31,7 @@ from .documents import (
 from .errors import (
     ConfigError,
     ContextLengthError,
+    ExportError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
@@ -4835,8 +4836,12 @@ def export_project(
                 if item.get("stage_fingerprint")
             )
     if missing:
-        raise IncompleteError(
-            f"导出缺少 {export_stage} 结果：{', '.join(missing[:10])}"
+        raise ExportError(
+            f"导出缺少 {export_stage} 结果：{', '.join(missing[:10])}",
+            reason="missing_stage_results",
+            stage=export_stage,
+            count=len(missing),
+            segment_ids=missing[:10],
         )
 
     directory = (
@@ -4856,9 +4861,12 @@ def export_project(
         adapter_id = "txt" if output_format == "txt" else source_adapter_id
         adapter = get_document_adapter(adapter_id)
         if required_capability not in adapter.capabilities:
-            raise IncompleteError(
+            raise ExportError(
                 f"Document Adapter 不支持此导出模式：{adapter_id} "
-                f"{required_capability}"
+                f"{required_capability}",
+                reason="adapter_capability_missing",
+                adapter_id=adapter_id,
+                capability=required_capability,
             )
         opaque_state = None
         export_file = dict(file_record)
@@ -4869,10 +4877,15 @@ def export_project(
         else:
             project_version = str(file_record["document_adapter_version"])
             if not document_adapter_reads_version(adapter, project_version):
-                raise IncompleteError(
+                raise ExportError(
                     f"Document Adapter 版本不兼容：文件 "
                     f"{file_record['file_id']} 使用 {project_version}，"
-                    f"当前 {adapter.version}"
+                    f"当前 {adapter.version}",
+                    reason="adapter_version_incompatible",
+                    file_id=str(file_record["file_id"]),
+                    adapter_id=adapter_id,
+                    project_version=project_version,
+                    current_version=adapter.version,
                 )
             state_path = file_record.get("document_adapter_state")
             if state_path is not None:
@@ -4885,9 +4898,12 @@ def export_project(
                     not in {None, file_record["file_id"]}
                     or not isinstance(state_record.get("state"), dict)
                 ):
-                    raise IncompleteError(
+                    raise ExportError(
                         f"Document Adapter 状态损坏或版本不匹配："
-                        f"{file_record['file_id']}"
+                        f"{file_record['file_id']}",
+                        reason="adapter_state_invalid",
+                        file_id=str(file_record["file_id"]),
+                        adapter_id=adapter_id,
                     )
                 opaque_state = state_record["state"]
         jobs.append(

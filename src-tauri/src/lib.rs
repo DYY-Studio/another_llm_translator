@@ -97,10 +97,44 @@ fn http_request(
         .ok_or_else(|| "服务响应无效".to_string())?;
     let headers = String::from_utf8_lossy(&response[..separator]);
     if !headers.starts_with("HTTP/1.1 200") {
+        let body = &response[separator + 4..];
+        if !body.is_empty() {
+            return Err(String::from_utf8_lossy(body).into_owned());
+        }
         let status = headers.lines().next().unwrap_or("").to_string();
         return Err(format!("下载失败：{status}"));
     }
     Ok(response[separator + 4..].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::http_request;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn http_request_preserves_error_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let payload = r#"{"error":"missing tag","code":"export_error","params":{"reason":"missing_target_language_tag"}}"#;
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload,
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let error = http_request(&port, "/download", "GET", None).unwrap_err();
+
+        server.join().unwrap();
+        assert_eq!(error, payload);
+    }
 }
 
 #[tauri::command]

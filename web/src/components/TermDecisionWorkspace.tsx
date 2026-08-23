@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import {
   decisionAliasChanges,
   decisionProposalChanges,
@@ -207,20 +207,20 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       const nextOptions = await optionsRequest;
       setOptions(nextOptions);
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     }
     return nextReview;
   }
 
   useEffect(() => {
     setReviewLoading(true);
-    void load().catch((error) => { setReviewLoading(false); setMessage(String(error)); });
+    void load().catch((error) => { setReviewLoading(false); setMessage(errorMessage(error, language)); });
   }, [project]);
   useEffect(() => {
     if (task?.project !== project || task.stage !== "terminology_decision") return;
-    if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(String(error)));
-    if (task.status === "failed") setMessage(task.error ?? translate("common.requestFailed", language));
-  }, [task?.task_id, task?.status]);
+    if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(errorMessage(error, language)));
+    if (task.status === "failed") setMessage(errorMessage(task.error, language));
+  }, [task?.task_id, task?.status, language]);
 
   const rejected = useMemo(() => new Set(review?.draft?.rejected_proposal_ids ?? []), [review]);
   const filtered = useMemo(() => filterDecisionProposals(review?.draft?.proposals ?? [], search, kind, status, rejected), [review, search, kind, status, rejected]);
@@ -268,7 +268,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     try {
       const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, { method: "POST", body: JSON.stringify({ stage: "terminology_decision", language, replace_draft: replaceDraft, force, reuse_mixed_fingerprints: false, acknowledge_manual_review: !resuming, run_action: decision.run_action }) });
       onTask(next);
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }
   async function setRejected(proposalId: string, value: boolean) {
     const next = new Set(rejected);
@@ -277,7 +277,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     try {
       const result = await api<{ draft: NonNullable<TermDecisionReviewState["draft"]> }>(`/api/v1/projects/${project}/terms/decision/rejections`, { method: "PUT", body: JSON.stringify({ rejected_proposal_ids: [...next] }) });
       setReview((current) => current ? { ...current, draft: result.draft } : current);
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }
   async function setManualResolved(item: TermDecisionManualReviewItem, value: boolean) {
     if (!review?.manual_review.items.some((entry) => entry.run_id === item.run_id && entry.normalized === item.normalized)) return;
@@ -287,7 +287,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       const nextReview = review ? { ...review, manual_review: result.manual_review } : { draft: null, rollback: null, manual_review: result.manual_review };
       setReview(nextReview);
       onReviewState(nextReview);
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }
   async function mutate(path: "apply" | "discard" | "rollback", confirmation: string) {
     if (!window.confirm(confirmation)) return;
@@ -305,7 +305,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
         }
         else onClose();
       }
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }
 
   return (

@@ -293,6 +293,13 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .export-select-col { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
 .export-select-col .export-file-list { flex: 1 1 0; min-height: 0; }
 .notice-box { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.export-error-card { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--danger-border); border-left-width: 3px; border-radius: 7px; background: var(--danger-bg); color: var(--danger); }
+.export-error-card strong { font-size: 13px; }
+.export-error-card p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.export-error-heading { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.export-error-actions { display: grid; gap: 7px; }
+.export-error-actions .quiet-button { width: 100%; white-space: normal; }
+.export-error-dismiss { width: 22px; height: 22px; flex: none; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 19px; line-height: 1; }
 .export-file-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
 .export-file-heading > div:first-child { display: grid; gap: 4px; }
 .export-file-heading small { color: var(--muted); }
