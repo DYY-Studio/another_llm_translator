@@ -197,6 +197,8 @@ def collect_term_evidence(
         for normalized, forms in forms_by_term.items()
     }
     sample_files: dict[str, set[str]] = {key: set() for key in evidence}
+    file_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
+    fallback_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
         raw_views = list(aozora_match_views(source))
@@ -227,31 +229,42 @@ def collect_term_evidence(
             for kind, original in matched:
                 if kind == "alias":
                     item["alias_hit_counts"][original] += 1
-            samples = item["samples"]
             file_id = str(segment["file_id"])
-            if (
-                len(samples) < EVIDENCE_SAMPLE_LIMIT
-                and file_id not in sample_files[normalized]
-            ):
+            is_first_file_sample = file_id not in sample_files[normalized]
+            should_sample = (
+                is_first_file_sample
+                and len(file_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+            ) or (
+                not is_first_file_sample
+                and len(fallback_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+            )
+            if should_sample:
                 view_name, excerpt = _evidence_excerpt(
                     views,
                     matched,
                     raw_views=raw_views,
                     spec=spec,
                 )
-                samples.append(
-                    {
-                        "file_id": file_id,
-                        "segment_id": str(segment["segment_id"]),
-                        "source": excerpt,
-                        "match_view": view_name,
-                        "matched_forms": [
-                            {"kind": kind, "value": original}
-                            for kind, original in matched
-                        ],
-                    }
-                )
-                sample_files[normalized].add(file_id)
+                sample = {
+                    "file_id": file_id,
+                    "segment_id": str(segment["segment_id"]),
+                    "source": excerpt,
+                    "match_view": view_name,
+                    "matched_forms": [
+                        {"kind": kind, "value": original} for kind, original in matched
+                    ],
+                }
+                if is_first_file_sample:
+                    file_samples[normalized].append(sample)
+                    sample_files[normalized].add(file_id)
+                else:
+                    fallback_samples[normalized].append(sample)
+    for normalized, item in evidence.items():
+        primary = file_samples[normalized]
+        item["samples"] = [
+            *primary,
+            *fallback_samples[normalized][: EVIDENCE_SAMPLE_LIMIT - len(primary)],
+        ]
     return evidence
 
 
@@ -1511,12 +1524,47 @@ def _consistency_states(
     return result
 
 
+def _automatic_phase_two_anchors(
+    eligible: list[dict[str, Any]],
+    states: dict[str, dict[str, Any]],
+    adjudication: dict[str, dict[str, Any]],
+    consistency: dict[str, dict[str, Any]],
+    conflicts: dict[str, dict[str, list[Any]]],
+    spec: Any,
+) -> list[dict[str, Any]]:
+    violation_nodes = {
+        node for violation in _group_violations(states) for node in violation[1]
+    }
+    blocked_relationship_nodes: set[str] = set()
+    for component in _dependency_components(
+        _decision_dependency_graph(states, states, spec), violation_nodes
+    ):
+        blocked_relationship_nodes.update(component)
+    anchors: list[dict[str, Any]] = []
+    for item in eligible:
+        normalized = str(item["normalized"])
+        first_action = str(adjudication[normalized]["action"])
+        second = consistency.get(normalized)
+        action = (
+            str(second["action"])
+            if second is not None and second["action"] != "keep"
+            else first_action
+        )
+        state = states[normalized]
+        if (
+            action in {"keep", "update"}
+            and not state.get("disabled")
+            and normalized not in blocked_relationship_nodes
+            and not _has_conflicts(conflicts.get(normalized, _empty_conflicts()))
+        ):
+            anchors.append(state)
+    return anchors
+
+
 def _effective_conflicts(
     project: Path,
     states: dict[str, dict[str, Any]],
     source_conflicts: dict[str, dict[str, list[Any]]],
-    *,
-    include_resolved_scalar_evidence: bool = False,
 ) -> dict[str, dict[str, list[Any]]]:
     rebuilt: dict[str, dict[str, list[Any]]] = {}
     if not _group_violations(states):
@@ -1537,13 +1585,12 @@ def _effective_conflicts(
         result[normalized] = {
             "categories": (
                 deepcopy(original["categories"])
-                if include_resolved_scalar_evidence or state.get("category") is None
+                if state.get("category") is None
                 else []
             ),
             "preferred_translations": (
                 deepcopy(original["preferred_translations"])
-                if include_resolved_scalar_evidence
-                or state.get("preferred_translation") is None
+                if state.get("preferred_translation") is None
                 else []
             ),
             "alias_primaries": deepcopy(structural["alias_primaries"]),
@@ -2333,12 +2380,16 @@ async def run_terminology_decision(
             tentative = deepcopy(states)
             _apply_tentative(tentative, decisions)
             phase_two_state = _consistency_states(states, tentative, final_decisions)
-            phase_two_conflicts = _effective_conflicts(
-                project,
-                phase_two_state,
-                source_conflicts,
-                include_resolved_scalar_evidence=True,
+            unresolved_phase_two_conflicts = _effective_conflicts(
+                project, phase_two_state, source_conflicts
             )
+            phase_two_conflicts = deepcopy(unresolved_phase_two_conflicts)
+            for normalized, conflicts in phase_two_conflicts.items():
+                source = source_conflicts[normalized]
+                conflicts["categories"] = deepcopy(source["categories"])
+                conflicts["preferred_translations"] = deepcopy(
+                    source["preferred_translations"]
+                )
             phase_two_focus = [
                 {
                     **deepcopy(phase_two_state[item["normalized"]]),
@@ -2348,7 +2399,14 @@ async def run_terminology_decision(
             ]
             phase_two_anchors = [
                 *protected_states,
-                *[phase_two_state[item["normalized"]] for item in eligible],
+                *_automatic_phase_two_anchors(
+                    eligible,
+                    phase_two_state,
+                    decisions,
+                    final_decisions,
+                    unresolved_phase_two_conflicts,
+                    spec,
+                ),
             ]
             remaining_phase_two = [
                 item

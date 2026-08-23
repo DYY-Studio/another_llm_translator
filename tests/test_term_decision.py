@@ -30,6 +30,7 @@ from app.term_decision import (
     _alias_violations,
     _analyze_decisions,
     _apply_tentative,
+    _automatic_phase_two_anchors,
     _consistency_states,
     _effective_conflicts,
     _group_violations,
@@ -207,6 +208,22 @@ def decision_response(payload: dict) -> list[dict]:
 
 def single_term_batches(states: list[dict], **_: object) -> tuple[list, int]:
     return [([state], []) for state in states], len(states)
+
+
+def single_term_batches_with_anchors(
+    states: list[dict], *, anchors: list[dict], **_: object
+) -> tuple[list, int]:
+    return [
+        (
+            [state],
+            [
+                anchor
+                for anchor in anchors
+                if anchor["normalized"] != state["normalized"]
+            ],
+        )
+        for state in states
+    ], len(states)
 
 
 def create_complete_legacy_group_run(
@@ -402,6 +419,77 @@ def test_consistency_states_overlay_completed_checkpoint_actions() -> None:
     assert result["disable"]["disabled"] is True
     assert result["review"] == original["review"]
     assert tentative["disable"]["disabled"] is False
+
+
+def test_automatic_phase_two_anchors_require_effective_resolution() -> None:
+    keys = (
+        "certain",
+        "phase-one-review",
+        "conflicted",
+        "disabled",
+        "resolved-on-resume",
+        "reopened-on-resume",
+        "cycle-a",
+        "cycle-b",
+    )
+    eligible = [_batch_state(key, key.title()) for key in keys]
+    states = {str(state["normalized"]): state for state in eligible}
+    states["disabled"] = {**states["disabled"], "disabled": True}
+    states["cycle-a"] = {**states["cycle-a"], "group_primary": "cycle-b"}
+    states["cycle-b"] = {**states["cycle-b"], "group_primary": "cycle-a"}
+    adjudication = {
+        "certain": {"action": "update", "reason": "已决定"},
+        "phase-one-review": {"action": "needs_review", "reason": "不确定"},
+        "conflicted": {"action": "keep", "reason": "暂时保持"},
+        "disabled": {"action": "disable", "reason": "禁用"},
+        "resolved-on-resume": {"action": "needs_review", "reason": "第一阶段不确定"},
+        "reopened-on-resume": {"action": "update", "reason": "第一阶段已决定"},
+        "cycle-a": {"action": "update", "reason": "形成跨批次关系"},
+        "cycle-b": {"action": "update", "reason": "形成跨批次关系"},
+    }
+    consistency = {
+        "phase-one-review": {"action": "keep", "reason": "保留人工复核"},
+        "resolved-on-resume": {"action": "update", "reason": "续作前已解决"},
+        "reopened-on-resume": {"action": "needs_review", "reason": "续作前重开"},
+    }
+    conflicts = {
+        key: {
+            "categories": [],
+            "preferred_translations": [],
+            "alias_primaries": [],
+            "group_claims": [],
+        }
+        for key in keys
+    }
+    conflicts["conflicted"]["group_claims"] = [
+        {
+            "entry": "conflicted",
+            "claimed_by": "certain",
+            "alias": "Conflict",
+            "reason": "policy",
+        }
+    ]
+
+    anchors = _automatic_phase_two_anchors(
+        eligible,
+        states,
+        adjudication,
+        consistency,
+        conflicts,
+        term_normalization(
+            {
+                "terminology": {
+                    "unicode_normalization": "NFKC",
+                    "case_insensitive": False,
+                }
+            }
+        ),
+    )
+
+    assert [state["normalized"] for state in anchors] == [
+        "certain",
+        "resolved-on-resume",
+    ]
 
 
 def test_decision_payload_exposes_read_only_disabled_state() -> None:
@@ -2019,6 +2107,37 @@ async def test_decision_runs_batches_concurrently_with_phase_barrier(
 
 
 @pytest.mark.asyncio
+async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    observed: dict[str, list[str]] = {}
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        if phase == "adjudication":
+            action = "needs_review" if normalized == "alice" else "keep"
+            return {normalized: {"action": action, "reason": "第一阶段判断"}}
+        observed[normalized] = [
+            str(anchor["normalized"]) for anchor in kwargs["anchors"]
+        ]
+        return {normalized: {"action": "keep", "reason": "保持有效裁决"}}
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    monkeypatch.setattr(
+        "app.term_decision._pack_batches", single_term_batches_with_anchors
+    )
+    monkeypatch.setattr("app.term_decision._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        await run_terminology_decision(project, http_client=client)
+
+    assert observed["alice"] == ["bob"]
+    assert "alice" not in observed["bob"]
+    assert current_decision_draft(project)["needs_review"][0]["normalized"] == ("alice")
+
+
+@pytest.mark.asyncio
 async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2161,11 +2280,21 @@ async def test_decision_error_keeps_completed_batches_resumable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("completed_action", "expected_anchor"),
+    [("update", True), ("needs_review", False)],
+)
 async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_action: str,
+    expected_anchor: bool,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+
+    monkeypatch.setattr(
+        "app.term_decision._pack_batches", single_term_batches_with_anchors
+    )
     alice_reviewed = asyncio.Event()
 
     async def failing_review(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -2173,6 +2302,13 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
         normalized = str(kwargs["focus"][0]["normalized"])
         if phase == "consistency" and normalized == "alice":
             alice_reviewed.set()
+            if completed_action == "needs_review":
+                return {
+                    "alice": {
+                        "action": "needs_review",
+                        "reason": "第二阶段仍不确定",
+                    }
+                }
             return {
                 "alice": {
                     "action": "update",
@@ -2208,7 +2344,12 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
             phase = str(kwargs["phase"])
             normalized = str(kwargs["focus"][0]["normalized"])
             resumed_calls.append((phase, normalized))
-            assert kwargs["known_states"]["alice"]["preferred_translation"] == "爱丽丝"
+            expected_translation = "爱丽丝" if completed_action == "update" else None
+            assert kwargs["known_states"]["alice"]["preferred_translation"] == (
+                expected_translation
+            )
+            anchor_ids = {str(anchor["normalized"]) for anchor in kwargs["anchors"]}
+            assert ("alice" in anchor_ids) is expected_anchor
             return {normalized: {"action": "keep", "reason": "保持"}}
 
         monkeypatch.setattr("app.term_decision._request_batch", resumed_review)
@@ -2876,6 +3017,61 @@ def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
     assert evidence["alice"]["source_hit_count"] == 1
     assert evidence["alice"]["alias_hit_counts"] == {"Ally": 1}
     assert evidence["bob"]["hit_count"] == 1
+
+
+def test_single_file_evidence_fills_five_distinct_segments_in_source_order(
+    tmp_path: Path,
+) -> None:
+    lines = ["Alice Alice first", *[f"Alice sample {index}" for index in range(2, 7)]]
+    project = create_decision_project(tmp_path, "\n".join(lines))
+    library = read_json(project, project / "terminology" / "terms.json")
+
+    evidence = collect_term_evidence(project, library["terms"])["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert evidence["source_hit_count"] == 6
+    assert [sample["segment_id"] for sample in evidence["samples"]] == [
+        f"F0001-S{index:06d}" for index in range(1, 6)
+    ]
+    assert len({sample["segment_id"] for sample in evidence["samples"]}) == 5
+
+
+def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"source-{index}.txt"
+        path.write_text(
+            f"Alice file {index} first\nAlice file {index} second",
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="multi-file-evidence",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert [
+        (sample["file_id"], sample["segment_id"]) for sample in evidence["samples"]
+    ] == [
+        ("F0001", "F0001-S000001"),
+        ("F0002", "F0002-S000001"),
+        ("F0003", "F0003-S000001"),
+        ("F0001", "F0001-S000002"),
+        ("F0002", "F0002-S000002"),
+    ]
+    assert len(evidence["samples"]) == 5
 
 
 def test_evidence_samples_center_the_match_and_label_forms(tmp_path: Path) -> None:
