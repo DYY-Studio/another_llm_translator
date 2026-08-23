@@ -1970,6 +1970,7 @@ async def test_conflict_candidates_reach_both_phases_and_new_resolution_applies(
     draft = current_decision_draft(project)
     assert draft is not None
     assert draft["decision_rules_version"] == DECISION_RULES_VERSION
+    assert draft["proposals"][0]["conflicts"]["alice"] == expected
     assert draft["proposals"][0]["after"][0]["category"] == "核心角色"
     assert draft["proposals"][0]["after"][0]["preferred_translation"] == ("艾莉丝")
 
@@ -2111,6 +2112,11 @@ async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
+    library = read_json(project, project / "terminology" / "terms.json")
+    alice = next(term for term in library["terms"] if term["normalized"] == "alice")
+    alice["category"] = None
+    alice["conflicts"]["categories"] = ["人物", "核心角色"]
+    write_json(project, project / "terminology" / "terms.json", library)
     observed: dict[str, list[str]] = {}
 
     async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -2134,7 +2140,28 @@ async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
 
     assert observed["alice"] == ["bob"]
     assert "alice" not in observed["bob"]
-    assert current_decision_draft(project)["needs_review"][0]["normalized"] == ("alice")
+    draft = current_decision_draft(project)
+    assert draft["needs_review"][0]["normalized"] == "alice"
+    assert draft["needs_review"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
+    client = TestClient(create_app(projects_root=project.parent))
+    review = client.get("/api/v1/projects/decision-demo/terms/decision")
+    assert review.status_code == 200
+    assert review.json()["draft"]["needs_review"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
+
+    apply_decision_draft(project, confirm_all=True)
+    queue = client.get("/api/v1/projects/decision-demo/terms/decision").json()[
+        "manual_review"
+    ]
+    assert queue["items"][0]["conflicts"]["categories"] == [
+        "人物",
+        "核心角色",
+    ]
 
 
 @pytest.mark.asyncio

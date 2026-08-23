@@ -22,6 +22,14 @@ const proposals = [
     before: [state("Alice", null)],
     after: [state("Alice", "爱丽丝")],
     reason: "fill translation",
+    conflicts: {
+      Alice: {
+        categories: ["人物", "女性主角候选"],
+        preferred_translations: ["爱丽丝", "艾丽丝"],
+        alias_primaries: [{ alias: "Ally", primary_source: "Alicia", reason: "policy" }],
+        group_claims: [{ entry: "Alice", claimed_by: "Alicia", alias: "Ally", reason: "multiple_owners" }],
+      },
+    },
   },
   {
     proposal_id: "two",
@@ -34,6 +42,8 @@ const proposals = [
 
 test("filters terminology proposals by kind and text", () => {
   assert.deepEqual(filterDecisionProposals(proposals, "爱丽丝", "").map((item) => item.proposal_id), ["one"]);
+  assert.deepEqual(filterDecisionProposals(proposals, "女性主角候选", "").map((item) => item.proposal_id), ["one"]);
+  assert.deepEqual(filterDecisionProposals(proposals, "Alicia", "").map((item) => item.proposal_id), ["one"]);
   assert.deepEqual(filterDecisionProposals(proposals, "", "relationship").map((item) => item.proposal_id), ["two"]);
 });
 
@@ -70,10 +80,11 @@ test("summarizes relationship components with primary and member roles", () => {
 
 test("filters and summarizes the persistent manual queue", () => {
   const items = [
-    { run_id: "run", normalized: "alice", source: "Alice", reason: "group", evidence: { hit_count: 1 }, resolved: false },
+    { run_id: "run", normalized: "alice", source: "Alice", reason: "group", evidence: { hit_count: 1 }, conflicts: { categories: ["人物", "核心角色候选"], preferred_translations: [], alias_primaries: [], group_claims: [] }, resolved: false },
     { run_id: "run", normalized: "bob", source: "Bob", reason: "checked", evidence: { hit_count: 0 }, resolved: true },
   ];
   assert.deepEqual(filterManualReviewItems(items, "alice", "open").map((item) => item.normalized), ["alice"]);
+  assert.deepEqual(filterManualReviewItems(items, "核心角色候选", "open").map((item) => item.normalized), ["alice"]);
   assert.deepEqual(filterManualReviewItems(items, "", "resolved").map((item) => item.normalized), ["bob"]);
 });
 
@@ -89,6 +100,10 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.match(source, /<RunDialog/);
   assert.match(source, /decisionRelationshipSummary/);
   assert.match(source, /decisionRelationshipRole/);
+  assert.match(source, /ConflictDetails/);
+  assert.match(source, /decisionConflictCategories/);
+  assert.match(source, /decisionConflictAliasPrimaries/);
+  assert.match(source, /decisionConflictGroupClaims/);
   assert.doesNotMatch(source, /decisionHasDescription|decisionClearedDescription/);
   assert.match(source, /terms\.decisionRelationshipPrimary/);
   assert.match(source, /terms\.decisionRelationshipMembers/);

@@ -1784,6 +1784,20 @@ def _proposal_id(values: list[dict[str, Any]]) -> str:
     return "TDP-" + hashlib.sha256(encoded.encode()).hexdigest()[:16].upper()
 
 
+def _merge_conflict_evidence(
+    *snapshots: dict[str, dict[str, list[Any]]],
+) -> dict[str, dict[str, list[Any]]]:
+    merged: dict[str, dict[str, list[Any]]] = {}
+    for snapshot in snapshots:
+        for normalized, conflicts in snapshot.items():
+            current = merged.setdefault(normalized, _empty_conflicts())
+            for field in _CONFLICT_FIELDS:
+                for value in conflicts[field]:
+                    if value not in current[field]:
+                        current[field].append(deepcopy(value))
+    return merged
+
+
 def _build_draft(
     *,
     project_id: str,
@@ -1794,6 +1808,7 @@ def _build_draft(
     decisions: dict[str, dict[str, Any]],
     protected: set[str],
     evidence: dict[str, dict[str, Any]],
+    conflicts: dict[str, dict[str, list[Any]]],
     fingerprint: str,
     source_library: dict[str, Any],
     source_overrides: dict[str, Any],
@@ -1835,6 +1850,7 @@ def _build_draft(
                     dict.fromkeys(decisions[key]["reason"] for key in keys)
                 ),
                 "evidence": {key: deepcopy(evidence[key]) for key in keys},
+                "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
         )
     needs_review = [
@@ -1843,6 +1859,7 @@ def _build_draft(
             "source": original[key]["source"],
             "reason": decision["reason"],
             "evidence": deepcopy(evidence[key]),
+            "conflicts": deepcopy(conflicts[key]),
         }
         for key, decision in sorted(decisions.items())
         if decision["action"] == "needs_review"
@@ -2491,6 +2508,11 @@ async def run_terminology_decision(
             conflicts=final_conflicts,
         )
         _validate_final_states(project, final, original=states, spec=spec)
+        draft_conflicts = _merge_conflict_evidence(
+            source_conflicts,
+            phase_two_conflicts,
+            final_conflicts,
+        )
         draft = _build_draft(
             project_id=str(metadata["project_id"]),
             run_id=run_id,
@@ -2500,6 +2522,7 @@ async def run_terminology_decision(
             decisions=decisions,
             protected=protected,
             evidence=evidence,
+            conflicts=draft_conflicts,
             fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
             source_library=deepcopy(library),
             source_overrides=deepcopy(overrides_document),

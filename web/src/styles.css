@@ -652,6 +652,10 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .decision-evidence { padding-top: 4px; border-top: 1px solid var(--row-border); color: var(--muted); font-size: 12px; }
 .decision-evidence-list { display: grid; gap: 8px; margin-top: 8px; }
 .decision-evidence-term { display: grid; gap: 4px; }
+.decision-conflict-list { display: grid; gap: 8px; margin-top: 8px; }
+.decision-conflict-term { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--warning-border); border-radius: 5px; background: var(--warning-bg); }
+.decision-conflict-term p { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr); gap: 8px; margin: 0; overflow-wrap: anywhere; color: var(--text); }
+.decision-conflict-term p span { color: var(--muted); font-weight: 650; }
 .decision-samples { display: grid; gap: 6px; margin-top: 3px; }
 .decision-sample { padding: 7px 8px; border: 1px solid var(--row-border); border-radius: 5px; background: var(--surface); }
 .decision-sample p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
