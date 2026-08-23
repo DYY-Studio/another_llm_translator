@@ -103,7 +103,8 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
     assert "当前是第一阶段“术语裁决”" in adjudication
     assert "当前是第二阶段“跨术语一致性复核”" in consistency
     assert "只包含受保护人工决定" in adjudication
-    assert "可能包含受保护人工决定和第一阶段暂定状态" in consistency
+    assert "只包含受保护人工决定" in consistency
+    assert "disposition 已确定、当前启用且无冲突的第一阶段自动状态" in consistency
     assert "不得为 anchors 输出任何决策" in consistency
     assert "changes 是 Patch" in adjudication
     assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in consistency
@@ -135,6 +136,8 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
                 "conflicts 是去重后的历史候选和关系争用证据",
                 "不是投票结果或可选值白名单",
                 "第一阶段存在 category",
+                "evidence.hit_count 是命中 Segment 数",
+                "先覆盖不同文件",
                 "description 可保持、清为 null，或改写为简洁的目标语说明",
                 "不得增加无证据事实",
                 "本次 terms[]/anchors[] 中可见",
@@ -154,6 +157,8 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
                 "deduplicated historical candidates and relationship disputes",
                 "not vote totals or an allowed-value whitelist",
                 "In phase one, a term with category",
+                "evidence.hit_count is the number of matching Segments",
+                "prioritizing first hits from different files",
                 "description may be retained, cleared to null, or rewritten",
                 "must not add unsupported facts",
                 "visible in this request",
@@ -179,6 +184,36 @@ def test_terminology_decision_prompt_defines_unambiguous_output_contract(
         assert '"action":"disable"' in prompt
         assert '"action":"needs_review"' in prompt
         assert prompt.count('{"type":"end"}') == 2
+
+
+def test_terminology_decision_middle_defines_evidence_semantics() -> None:
+    markers = {
+        "zh-CN": (
+            "hit_count 表示命中该术语的 Segment 数",
+            "先覆盖不同文件的首个命中",
+            "不是票数或可选值白名单",
+            "候选之外的新值",
+            "第一阶段已确定且当前无冲突的自动 anchors",
+            "不得增加证据中没有的事实",
+        ),
+        "en": (
+            "hit_count is the number of Segments matching the term",
+            "first hits from different files",
+            "not votes or an allowed-value whitelist",
+            "new value outside those candidates",
+            "phase-one disposition is determined and currently conflict-free",
+            "Never add facts absent from that evidence",
+        ),
+    }
+
+    for language, expected in markers.items():
+        middle = (
+            ROOT / "prompts" / f"terminology_decision.{language}.middle.txt"
+        ).read_text(encoding="utf-8")
+        for marker in expected:
+            assert marker in middle
+        assert "JSONL" not in middle
+        assert '{"type"' not in middle
 
 
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
