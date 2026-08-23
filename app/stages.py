@@ -25,6 +25,7 @@ from .documents import (
     aozora_match_views,
     aozora_safe_split_positions,
     compact_emphasis_aozora,
+    document_adapter_reads_version,
     publish_document_exports,
 )
 from .errors import (
@@ -4867,7 +4868,7 @@ def export_project(
             )
         else:
             project_version = str(file_record["document_adapter_version"])
-            if project_version != adapter.version:
+            if not document_adapter_reads_version(adapter, project_version):
                 raise IncompleteError(
                     f"Document Adapter 版本不兼容：文件 "
                     f"{file_record['file_id']} 使用 {project_version}，"

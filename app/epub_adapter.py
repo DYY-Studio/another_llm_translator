@@ -91,7 +91,8 @@ _REQUIRED_INLINE_TEXT_ELEMENTS = {
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.3"
+    version = "0.4"
+    readable_versions = frozenset({"0.3", "0.4"})
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
     import_options = (

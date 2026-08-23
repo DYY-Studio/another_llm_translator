@@ -86,6 +86,19 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                 raise ConfigError(
                     f"Document Adapter 描述不完整：{adapter.adapter_id}"
                 )
+            readable_versions = getattr(adapter, "readable_versions", None)
+            if readable_versions is not None and (
+                not isinstance(readable_versions, frozenset)
+                or adapter.version not in readable_versions
+                or not all(
+                    isinstance(value, str) and value
+                    for value in readable_versions
+                )
+            ):
+                raise ConfigError(
+                    f"Document Adapter 可读版本声明无效："
+                    f"{adapter.adapter_id}"
+                )
             extensions = getattr(adapter, "extensions", None)
             if not isinstance(extensions, frozenset) or not all(
                 isinstance(value, str)

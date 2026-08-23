@@ -281,6 +281,7 @@ class DocumentChoiceOption:
 class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
+    readable_versions: frozenset[str]
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
@@ -317,6 +318,15 @@ class DocumentAdapter(Protocol):
         target_language_tag: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]: ...
+
+
+def document_adapter_reads_version(
+    adapter: DocumentAdapter, version: str
+) -> bool:
+    readable = getattr(adapter, "readable_versions", None)
+    if readable is None:
+        return version == adapter.version
+    return version in readable
 
 
 def normalize_document_output(

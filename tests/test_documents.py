@@ -618,7 +618,7 @@ def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
         "OEBPS/text/ch2.xhtml",
         "OEBPS/text/ch2.xhtml",
     ]
-    assert files[0]["document_adapter_version"] == "0.3"
+    assert files[0]["document_adapter_version"] == "0.4"
 
 
 @pytest.mark.parametrize("parts", [(), ("only-one",), ("", "two")])
@@ -1568,6 +1568,35 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
+
+
+def test_epub_04_reads_03_state_without_migrating_project(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    file_record["document_adapter_version"] = "0.3"
+    state_record["adapter_version"] = "0.3"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (
+                json.dumps(file_record, ensure_ascii=False),
+                file_record["file_id"],
+            ),
+        )
+    write_json(project, state_path, state_record)
+    add_translations(project)
+
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+
+    assert result["files"] == 1
+    assert read_files(project)[0]["document_adapter_version"] == "0.3"
+    assert read_json(project, state_path)["adapter_version"] == "0.3"
 
 
 def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
