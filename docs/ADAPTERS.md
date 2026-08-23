@@ -356,11 +356,11 @@ CLI 的 `init` 与 `files-add` 用可重复的
 
 ### 版本与升级策略
 
-Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配立即失败。Adapter
-升级或选项变更的方式是移除文件并重新导入：宿主不解释、不迁移 `opaque_state`，
-也不会改写既有 Segment 和阶段结果；指纹变化使旧结果不再复用。兼容范围
-（如 semver 前缀）语义不在当前协议中，等待至少一个真实第二实现出现后由用户
-决策引入；协议版本不匹配的插件直接快速失败。
+Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明
+`readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现
+能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
+File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。
+外部 Adapter 未声明时仍保持严格相等语义。
 
 ### 导出
 
@@ -388,7 +388,7 @@ HTML/ASS 样式标记作为普通正文交给模型，不由首版插件解析�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.3
+### EPUB 0.4
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
 保存各 File 的原始容器，并记录 OPF、spine
@@ -423,9 +423,14 @@ PUBLIC 标识都会快速失败。
 首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出
 保留源槽并在末槽后写入译文。Ruby 是同一文本流中的内联成员；包含 Ruby 的
 复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻
-文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。导入可选择
-`aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
-（`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
+文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择
+`aozora`（默认）、`short_xml`、`compact` 或 `base_only`。除 `base_only`
+完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空
+`｜base《reading》`；`short_xml` 只向模型使用
+`<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用
+`⟦R:base|Y:reading⟧`。新导入不再提供 `parenthetical`；EPUB 0.4 可直接
+读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。
+无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
 位置快速失败。纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余
 普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个
 Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略译文、校对或润色
@@ -434,7 +439,15 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉
 标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
 含 HTML 或跨行的形式按普通文本保留。
-`base_only` 和 `parenthetical` 不执行 Ruby 还原。
+`base_only` 不执行 Ruby 还原。short XML 使用标准 XML 实体；compact
+在 base/reading 中用反斜杠转义 `\\`、`|`、`⟦`、`⟧`。两种模型格式的
+非法结构进入既有格式修复预算，不会泄露到用户文本。
+
+Reading 完全由同一个 `・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
+直接相邻的同符号 Ruby 及单 Ruby 内的重复符号在用户/模型表示中合并为
+单个 reading；普通文本、空白和内联格式边界会切断合并。最终 EPUB 导出按
+Unicode 扩展字素簇展开，为每个非空白字素簇写入一个带相同 `rt`
+的 Ruby；普通 reading 仍保持分组 Ruby。
 确定性术语注入使用同一严格青空语法：匹配视图分别保留 base 正文和 reading，
 不把二者拼接。base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
 连续组合，普通正文会切断 reading 组合。因此 `｜漢《かん》｜字《じ》` 可命中

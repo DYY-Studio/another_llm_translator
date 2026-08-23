@@ -215,8 +215,14 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 
 - 支持 OPF 2.0/3.0 和 spine XHTML。
 - 保留文档 part 边界及未翻译资源。
-- 支持 `aozora`、`base_only` 和 `parenthetical` Ruby 导入模式。
-- 导入选项在文件加入项目时确定；修改选项需要移除并重新导入。
+- 新导入支持 `aozora`、`short_xml`、`compact` 和 `base_only`。
+- `short_xml`/`compact` 只改变模型看到的 Ruby；界面和可编辑结果仍使用
+  `｜base《reading》`。`base_only` 完全移除 reading。
+- 连续 Emphasis Ruby 在界面/模型中合并，导出 EPUB 时会按可见字素簇恢复为
+  逐字 Ruby 强调。
+- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入；旧
+  `parenthetical` File 可继续读取/导出，但新导入不再提供该模式。
+- 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
 
 ### SRT（独立插件）
 
