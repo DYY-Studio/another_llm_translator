@@ -90,7 +90,7 @@
 body { margin: 0; min-width: 360px; min-height: 100vh; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
-.app { height: 100vh; min-height: 0; overflow: hidden; display: grid; grid-template: 58px auto minmax(0, 1fr) / 238px minmax(0, 1fr); background: var(--surface); }
+.app { --mobile-run-status-height: 0px; height: 100vh; min-height: 0; overflow: hidden; display: grid; grid-template: 58px auto minmax(0, 1fr) / 238px minmax(0, 1fr); background: var(--surface); }
 .topbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .brand { margin-right: 18px; white-space: nowrap; font-size: 23px; font-weight: 760; letter-spacing: -.04em; color: var(--brand); }
 .topbar button { height: 36px; }
@@ -264,6 +264,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .project-picker-value { min-width: 0; display: grid; gap: 3px; }
 .project-picker-value strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .project-picker-value small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.project-picker-status { flex: none; max-width: 150px; overflow: hidden; padding: 3px 6px; border: 1px solid var(--info-border); border-radius: 999px; background: var(--info-bg); color: var(--info-text); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .project-picker-chevron { flex: none; color: var(--muted); font-size: 16px; line-height: 1; }
 .project-picker-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 12; width: 100%; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); box-shadow: 0 16px 40px var(--modal-shadow); }
 .project-search { padding: 10px; border-bottom: 1px solid var(--row-border); }
@@ -277,6 +278,8 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .project-option strong, .project-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-option strong { font-size: 13px; }
 .project-option small { color: var(--muted); font-size: 11px; }
+.project-option-meta { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.project-running-badge { padding: 3px 6px; border: 1px solid var(--info-border); border-radius: 999px; background: var(--info-bg); color: var(--info-text); font-size: 10px; }
 .project-option-check { flex: none; color: var(--accent-text); font-size: 16px; font-weight: 700; }
 .project-picker-state { padding: 24px 16px; color: var(--muted); font-size: 12px; text-align: center; }
 .mobile-reorder-toggle { display: none; }
@@ -823,6 +826,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .topbar { gap: 7px; padding-inline: 10px; }
   .main-overview { display: block; }
   .global-run-status { position: sticky; top: 58px; z-index: 3; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 8px 12px; }
+  .warning-banner-sticky { top: calc(58px + var(--mobile-run-status-height)); z-index: 2; }
   .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }
   .run-tokens { min-width: 0; gap: 12px; white-space: normal; }
@@ -862,7 +866,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .term-decision-action-heading .button-group button { min-width: 0; }
   .term-decision-action-heading .button-group button:last-child { grid-column: 1 / -1; white-space: normal; }
   .term-decision-content { overflow: visible; padding-bottom: 24px; }
-  .term-decision-sticky { top: 58px; }
+  .term-decision-sticky { top: calc(58px + var(--mobile-run-status-height)); }
   .term-decision-filters { grid-template-columns: 1fr 1fr; }
   .term-decision-filters input { grid-column: 1 / -1; }
   .term-decision-filters .term-decision-pages { grid-column: 1 / -1; }
@@ -902,7 +906,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .comparison, .context-groups { grid-template-columns: 1fr; }
   .settings-layout { display: block; }
   .settings-page { height: auto; display: block; overflow: visible; }
-  .settings-navigation { position: sticky; top: 58px; grid-template-rows: 36px 42px; padding-inline: 14px; }
+  .settings-navigation { position: sticky; top: calc(58px + var(--mobile-run-status-height)); grid-template-rows: 36px 42px; padding-inline: 14px; }
   .settings-scope-tabs, .settings-section-tabs { overflow-x: auto; }
   .settings-content { overflow: visible; }
   .settings-main { overflow: visible; padding: 0 14px 60px; border: 0; }

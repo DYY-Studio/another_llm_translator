@@ -20,3 +20,15 @@ test("marks other running projects without creating a multi-task status bar", as
   assert.match(source, /project-running-badge/);
   assert.doesNotMatch(source, /tasks\.map\(/);
 });
+
+test("reserves the measured mobile run status height for sticky content", async () => {
+  const shell = await readFile(new URL("../src/components/AppShell.tsx", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  assert.match(shell, /ResizeObserver/);
+  assert.match(shell, /--mobile-run-status-height/);
+  assert.match(shell, /\[\"queued\", \"running\"\]\.includes\(task\.status\)/);
+  assert.match(styles, /\.settings-navigation \{ position: sticky; top: calc\(58px \+ var\(--mobile-run-status-height\)\)/);
+  assert.match(styles, /\.term-decision-sticky \{ top: calc\(58px \+ var\(--mobile-run-status-height\)\)/);
+  assert.match(styles, /\.warning-banner-sticky \{ top: calc\(58px \+ var\(--mobile-run-status-height\)\)/);
+});

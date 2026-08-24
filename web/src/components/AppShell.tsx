@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
@@ -47,6 +47,8 @@ export function AppShell({
   onLanguage: () => void;
   children: ReactNode;
 }) {
+  const runStatusRef = useRef<HTMLElement>(null);
+  const [runStatusHeight, setRunStatusHeight] = useState(0);
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
@@ -78,8 +80,24 @@ export function AppShell({
     current: themeLabels[themeMode],
     next: themeLabels[nextTheme[themeMode]],
   });
+  useLayoutEffect(() => {
+    const element = runStatusRef.current;
+    if (!element) {
+      setRunStatusHeight(0);
+      return;
+    }
+    const update = () => setRunStatusHeight(element.getBoundingClientRect().height);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [Boolean(task)]);
+  const appStyle = {
+    "--mobile-run-status-height": `${runStatusHeight}px`,
+  } as CSSProperties;
   return (
-    <div className={`app${task ? " has-run-status" : ""}`}>
+    <div className={`app${task ? " has-run-status" : ""}`} style={appStyle}>
       <header className="topbar">
         <div className="brand">{translate("brand", language)}</div>
         <div className="topbar-spacer" />
@@ -92,7 +110,7 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" aria-label={translate("shell.globalTaskStatus", language)}>
+        <section className="global-run-status" ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
@@ -120,7 +138,7 @@ export function AppShell({
               {errorMessage(task.error, language)}
             </span>
           )}
-          {running && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
+          {["queued", "running"].includes(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
         </section>
       )}
       <aside className="sidebar">
