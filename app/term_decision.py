@@ -199,9 +199,7 @@ def collect_term_evidence(
     sample_boundaries: dict[str, set[tuple[str, str]]] = {
         key: set() for key in evidence
     }
-    boundary_samples: dict[str, list[dict[str, Any]]] = {
-        key: [] for key in evidence
-    }
+    boundary_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     fallback_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
@@ -419,6 +417,34 @@ def _payload_term(
     return value
 
 
+def _request_evidence(
+    focus: list[dict[str, Any]],
+    anchors: list[dict[str, Any]],
+    evidence: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project durable locations to request-local content-boundary references."""
+    boundary_refs: dict[tuple[str, str], int] = {}
+    projected: dict[str, dict[str, Any]] = {}
+    for state in [*focus, *anchors]:
+        normalized = str(state["normalized"])
+        value = deepcopy(evidence[normalized])
+        samples = []
+        for sample in value["samples"]:
+            boundary = (str(sample["file_id"]), str(sample["part_id"]))
+            boundary_ref = boundary_refs.setdefault(boundary, len(boundary_refs) + 1)
+            samples.append(
+                {
+                    "boundary_ref": boundary_ref,
+                    "source": sample["source"],
+                    "match_view": sample["match_view"],
+                    "matched_forms": deepcopy(sample["matched_forms"]),
+                }
+            )
+        value["samples"] = samples
+        projected[normalized] = value
+    return projected
+
+
 def _compact_anchor_evidence(
     evidence: dict[str, dict[str, Any]],
     anchors: list[dict[str, Any]],
@@ -522,13 +548,14 @@ def _make_payload(
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     include_disabled = phase == "consistency"
+    request_evidence = _request_evidence(focus, anchors, evidence)
     return {
         "phase": phase,
         "target_language": target_language,
         "terms": [
             _payload_term(
                 item,
-                evidence,
+                request_evidence,
                 include_disabled=include_disabled,
                 conflicts=conflicts,
             )
@@ -537,7 +564,7 @@ def _make_payload(
         "anchors": [
             _payload_term(
                 item,
-                evidence,
+                request_evidence,
                 include_disabled=include_disabled,
                 conflicts=conflicts,
             )
