@@ -1227,7 +1227,13 @@ class WebStore:
             "total": len(hits),
             "offset": offset,
             "limit": limit,
-            "hits": hits[offset : offset + limit],
+            "hits": [
+                {
+                    key: segment[key]
+                    for key in ("segment_id", "file_id", "line_index", "source")
+                }
+                for segment in hits[offset : offset + limit]
+            ],
         }
 
     @staticmethod

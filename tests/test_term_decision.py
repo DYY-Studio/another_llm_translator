@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
+from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
 
@@ -2972,13 +2974,13 @@ async def test_format_exhaustion_records_only_safe_request_diagnostics(
     assert "模型" not in serialized
 
 
-def test_rule_five_decision_checkpoint_is_visible_but_cannot_resume(
+def test_rule_six_decision_checkpoint_is_visible_but_cannot_resume(
     tmp_path: Path,
 ) -> None:
     project = create_decision_project(tmp_path)
     run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
-    checkpoint["decision_rules_version"] = 5
+    checkpoint["decision_rules_version"] = 6
     atomic_write_json(run_dir / CHECKPOINT_FILE, checkpoint)
 
     client = TestClient(create_app(projects_root=project.parent))
@@ -2999,7 +3001,7 @@ def test_rule_five_decision_checkpoint_is_visible_but_cannot_resume(
     assert "强制新建" in resumed.json()["error"]
 
 
-def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
+def test_rule_six_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
     tmp_path: Path,
 ) -> None:
     project = create_decision_project(tmp_path)
@@ -3010,8 +3012,8 @@ def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
     )
     path = write_pending_decision_draft(
         project,
-        run_id="RUN-RULE-5",
-        rules_version=5,
+        run_id="RUN-RULE-6",
+        rules_version=6,
         after=[
             {
                 "normalized": "bob",
@@ -3026,14 +3028,14 @@ def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
         ],
     )
 
-    assert current_decision_draft(project)["decision_rules_version"] == 5
+    assert current_decision_draft(project)["decision_rules_version"] == 6
     assert save_decision_rejections(project, [])["rejected_proposal_ids"] == []
     with pytest.raises(UsageError, match="规则版本不兼容"):
         apply_decision_draft(project, confirm_all=True)
     assert path.is_file()
     assert discard_decision_draft(project, confirm=True) == {
         "discarded": True,
-        "run_id": "RUN-RULE-5",
+        "run_id": "RUN-RULE-6",
     }
     assert current_decision_draft(project) is None
 
@@ -3061,13 +3063,14 @@ def test_single_file_evidence_fills_five_distinct_segments_in_source_order(
 
     assert evidence["hit_count"] == 6
     assert evidence["source_hit_count"] == 6
+    assert {sample["part_id"] for sample in evidence["samples"]} == {"document"}
     assert [sample["segment_id"] for sample in evidence["samples"]] == [
         f"F0001-S{index:06d}" for index in range(1, 6)
     ]
     assert len({sample["segment_id"] for sample in evidence["samples"]}) == 5
 
 
-def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
+def test_multi_file_evidence_prefers_first_hit_per_boundary_then_source_order(
     tmp_path: Path,
 ) -> None:
     app_root = make_app_root(tmp_path)
@@ -3094,15 +3097,104 @@ def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
 
     assert evidence["hit_count"] == 6
     assert [
-        (sample["file_id"], sample["segment_id"]) for sample in evidence["samples"]
+        (sample["file_id"], sample["part_id"], sample["segment_id"])
+        for sample in evidence["samples"]
     ] == [
-        ("F0001", "F0001-S000001"),
-        ("F0002", "F0002-S000001"),
-        ("F0003", "F0003-S000001"),
-        ("F0001", "F0001-S000002"),
-        ("F0002", "F0002-S000002"),
+        ("F0001", "document", "F0001-S000001"),
+        ("F0002", "document", "F0002-S000001"),
+        ("F0003", "document", "F0003-S000001"),
+        ("F0001", "document", "F0001-S000002"),
+        ("F0002", "document", "F0002-S000002"),
     ]
     assert len(evidence["samples"]) == 5
+
+
+def test_epub_evidence_prefers_first_hit_from_each_spine_part(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.epub"
+    chapters = tuple(
+        (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            f"<p>Alice chapter {index} first</p>"
+            f"<p>Alice chapter {index} second</p>"
+            "</body></html>"
+        ).encode()
+        for index in range(1, 4)
+    )
+    make_epub(source, xhtmls=chapters)
+    project, _ = init_project(
+        [str(source)],
+        name="epub-evidence",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert [
+        (sample["part_id"], sample["segment_id"])
+        for sample in evidence["samples"]
+    ] == [
+        ("OEBPS/text/ch1.xhtml", "F0001-S000001"),
+        ("OEBPS/text/ch2.xhtml", "F0001-S000003"),
+        ("OEBPS/text/ch3.xhtml", "F0001-S000005"),
+        ("OEBPS/text/ch1.xhtml", "F0001-S000002"),
+        ("OEBPS/text/ch2.xhtml", "F0001-S000004"),
+    ]
+
+
+def test_evidence_distinguishes_file_and_part_boundaries(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"mixed-{index}.txt"
+        path.write_text(
+            f"Alice file {index} first\nAlice file {index} second",
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="mixed-boundary-evidence",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("part-a", "F0001-S000001"),
+                ("part-b", "F0001-S000002"),
+                ("part-a", "F0002-S000001"),
+                ("part-a", "F0002-S000002"),
+                ("part-a", "F0003-S000001"),
+                ("part-b", "F0003-S000002"),
+            ],
+        )
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert [
+        (sample["file_id"], sample["part_id"], sample["segment_id"])
+        for sample in evidence["samples"]
+    ] == [
+        ("F0001", "part-a", "F0001-S000001"),
+        ("F0001", "part-b", "F0001-S000002"),
+        ("F0002", "part-a", "F0002-S000001"),
+        ("F0003", "part-a", "F0003-S000001"),
+        ("F0003", "part-b", "F0003-S000002"),
+    ]
 
 
 def test_evidence_samples_center_the_match_and_label_forms(tmp_path: Path) -> None:

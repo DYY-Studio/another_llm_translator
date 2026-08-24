@@ -196,8 +196,12 @@ def collect_term_evidence(
         }
         for normalized, forms in forms_by_term.items()
     }
-    sample_files: dict[str, set[str]] = {key: set() for key in evidence}
-    file_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
+    sample_boundaries: dict[str, set[tuple[str, str]]] = {
+        key: set() for key in evidence
+    }
+    boundary_samples: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in evidence
+    }
     fallback_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
@@ -230,12 +234,14 @@ def collect_term_evidence(
                 if kind == "alias":
                     item["alias_hit_counts"][original] += 1
             file_id = str(segment["file_id"])
-            is_first_file_sample = file_id not in sample_files[normalized]
+            part_id = str(segment["part_id"])
+            boundary = (file_id, part_id)
+            is_first_boundary_sample = boundary not in sample_boundaries[normalized]
             should_sample = (
-                is_first_file_sample
-                and len(file_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+                is_first_boundary_sample
+                and len(boundary_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
             ) or (
-                not is_first_file_sample
+                not is_first_boundary_sample
                 and len(fallback_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
             )
             if should_sample:
@@ -247,6 +253,7 @@ def collect_term_evidence(
                 )
                 sample = {
                     "file_id": file_id,
+                    "part_id": part_id,
                     "segment_id": str(segment["segment_id"]),
                     "source": excerpt,
                     "match_view": view_name,
@@ -254,13 +261,13 @@ def collect_term_evidence(
                         {"kind": kind, "value": original} for kind, original in matched
                     ],
                 }
-                if is_first_file_sample:
-                    file_samples[normalized].append(sample)
-                    sample_files[normalized].add(file_id)
+                if is_first_boundary_sample:
+                    boundary_samples[normalized].append(sample)
+                    sample_boundaries[normalized].add(boundary)
                 else:
                     fallback_samples[normalized].append(sample)
     for normalized, item in evidence.items():
-        primary = file_samples[normalized]
+        primary = boundary_samples[normalized]
         item["samples"] = [
             *primary,
             *fallback_samples[normalized][: EVIDENCE_SAMPLE_LIMIT - len(primary)],
