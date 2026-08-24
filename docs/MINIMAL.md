@@ -1025,8 +1025,9 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 `run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
 只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中 Segment 数和最多五个
 上下文样本；`hit_count` 是至少命中一个 source/alias 形式的 Segment 数，不是字符出现
-次数。样本先保留最多五个不同 File 的首个命中，再以其余不同 Segment 按源文顺序补满，
-因此单文件项目同样最多可提供五条样本。随后系统进行分批裁决和跨术语一致性复核。
+次数。样本先保留最多五个不同 `(file_id, part_id)` 内容边界的首个命中，再以其余不同
+Segment 按源文顺序补满，因此单边界项目同样最多可提供五条样本。随后系统进行分批裁决
+和跨术语一致性复核。
 
 两个阶段共用项目的可编辑决策规则，但使用各自的固定阶段指令。第一阶段 anchors 是
 人工决定；第二阶段 anchors 包含人工决定，以及第一阶段 disposition 已确定、当前启用
@@ -1070,8 +1071,8 @@ action/reason；该字段不得出现在 decision 输出中。第二阶段 `keep
 进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
 和 Prompt。续作剩余第二阶段前，宿主将已完成的第二阶段检查点叠加到第一阶段暂定状态，
 重新计算每个术语的有效 disposition 和冲突，再用这一不可变快照生成 focus、可信 anchors
-和关系校验状态；当前并发兄弟批次不会动态互相影响。当前决策规则版本为 6。源术语
-revision 或规则版本已变化时，在创建 continuation 前拒绝续作；规则版本 5 的 running Run
+和关系校验状态；当前并发兄弟批次不会动态互相影响。当前决策规则版本为 7。源术语
+revision 或规则版本已变化时，在创建 continuation 前拒绝续作；规则版本 6 的 running Run
 必须由用户显式结束并强制新建，不提供双协议兼容路径。中断 manifest 只记录安全错误码、
 原因码、最后 request ID 和完成步数，不保存 Prompt、响应或术语正文。强制重做会结束旧 Run 并忽略检查点。
 检查点不是草案，不能审核或应用。
@@ -1094,9 +1095,14 @@ alias 或组修改不得借完整 override 清除冲突。通过后在一个 SQL
 均保留旧队列。用户可从队列定位术语编辑或关系编辑，并显式标记或恢复“已处理”，该状态
 不受后续术语 revision 变化影响。
 
-每个证据样本包含文件、Segment、命中形式及 `source` 上下文片段；片段围绕实际命中位置
-截取，并标记为普通 source、Aozora base 或 Aozora reading 视图。Anchor 使用 `compact`
-策略时只移除样本，不改变按 Segment 计算的命中计数。
+持久证据中的每个样本包含 `file_id`、`part_id`、`segment_id`、命中形式及 `source`
+上下文片段；片段围绕实际命中位置截取，并标记为普通 source、Aozora base 或 Aozora
+reading 视图。构造一次 LLM 请求时，focus 与 anchors 的可见样本共用连续的请求内
+`boundary_ref`：相同 `(file_id, part_id)` 使用相同编号。模型样本只包含 `boundary_ref`、
+`source`、`match_view` 和 `matched_forms`，不包含三个持久定位 ID；编号不表示全局 ID、
+顺序或权重。Token 预估和实际请求使用同一投影。草案、人工待办和审核接口仍保存完整定位；
+旧草案缺少 `part_id` 时仍可查看。Anchor 使用 `compact` 策略时只移除样本，不改变按
+Segment 计算的命中计数。
 
 ### 术语交换
 

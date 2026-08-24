@@ -192,7 +192,8 @@ def test_terminology_decision_middle_defines_evidence_semantics() -> None:
     markers = {
         "zh-CN": (
             "hit_count 表示命中该术语的 Segment 数",
-            "先覆盖不同文件的首个命中",
+            "先覆盖不同 (file_id, part_id) 内容边界的首个命中",
+            "boundary_ref 只是本次请求内",
             "不是票数或可选值白名单",
             "候选之外的新值",
             "第一阶段已确定且当前无冲突的自动 anchors",
@@ -200,7 +201,8 @@ def test_terminology_decision_middle_defines_evidence_semantics() -> None:
         ),
         "en": (
             "hit_count is the number of Segments matching the term",
-            "first hits from different files",
+            "first hits from different (file_id, part_id) content boundaries",
+            "boundary_ref is a read-only reference used only within this request",
             "not votes or an allowed-value whitelist",
             "new value outside those candidates",
             "phase-one disposition is determined and currently conflict-free",
