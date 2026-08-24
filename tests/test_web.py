@@ -1869,6 +1869,12 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     assert payload["source"] == "Alice"
     assert payload["total"] == 2
     assert [item["segment_id"] for item in payload["hits"]] == ["F0001-S000001"]
+    assert set(payload["hits"][0]) == {
+        "segment_id",
+        "file_id",
+        "line_index",
+        "source",
+    }
     assert payload["hits"][0]["source"] == "Alice walks alone"
 
     second = client.post(

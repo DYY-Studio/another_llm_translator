@@ -196,8 +196,10 @@ def collect_term_evidence(
         }
         for normalized, forms in forms_by_term.items()
     }
-    sample_files: dict[str, set[str]] = {key: set() for key in evidence}
-    file_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
+    sample_boundaries: dict[str, set[tuple[str, str]]] = {
+        key: set() for key in evidence
+    }
+    boundary_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     fallback_samples: dict[str, list[dict[str, Any]]] = {key: [] for key in evidence}
     for segment in read_segment_sources(project):
         source = str(segment["source"])
@@ -230,12 +232,14 @@ def collect_term_evidence(
                 if kind == "alias":
                     item["alias_hit_counts"][original] += 1
             file_id = str(segment["file_id"])
-            is_first_file_sample = file_id not in sample_files[normalized]
+            part_id = str(segment["part_id"])
+            boundary = (file_id, part_id)
+            is_first_boundary_sample = boundary not in sample_boundaries[normalized]
             should_sample = (
-                is_first_file_sample
-                and len(file_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
+                is_first_boundary_sample
+                and len(boundary_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
             ) or (
-                not is_first_file_sample
+                not is_first_boundary_sample
                 and len(fallback_samples[normalized]) < EVIDENCE_SAMPLE_LIMIT
             )
             if should_sample:
@@ -247,6 +251,7 @@ def collect_term_evidence(
                 )
                 sample = {
                     "file_id": file_id,
+                    "part_id": part_id,
                     "segment_id": str(segment["segment_id"]),
                     "source": excerpt,
                     "match_view": view_name,
@@ -254,13 +259,13 @@ def collect_term_evidence(
                         {"kind": kind, "value": original} for kind, original in matched
                     ],
                 }
-                if is_first_file_sample:
-                    file_samples[normalized].append(sample)
-                    sample_files[normalized].add(file_id)
+                if is_first_boundary_sample:
+                    boundary_samples[normalized].append(sample)
+                    sample_boundaries[normalized].add(boundary)
                 else:
                     fallback_samples[normalized].append(sample)
     for normalized, item in evidence.items():
-        primary = file_samples[normalized]
+        primary = boundary_samples[normalized]
         item["samples"] = [
             *primary,
             *fallback_samples[normalized][: EVIDENCE_SAMPLE_LIMIT - len(primary)],
@@ -412,6 +417,34 @@ def _payload_term(
     return value
 
 
+def _request_evidence(
+    focus: list[dict[str, Any]],
+    anchors: list[dict[str, Any]],
+    evidence: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project durable locations to request-local content-boundary references."""
+    boundary_refs: dict[tuple[str, str], int] = {}
+    projected: dict[str, dict[str, Any]] = {}
+    for state in [*focus, *anchors]:
+        normalized = str(state["normalized"])
+        value = deepcopy(evidence[normalized])
+        samples = []
+        for sample in value["samples"]:
+            boundary = (str(sample["file_id"]), str(sample["part_id"]))
+            boundary_ref = boundary_refs.setdefault(boundary, len(boundary_refs) + 1)
+            samples.append(
+                {
+                    "boundary_ref": boundary_ref,
+                    "source": sample["source"],
+                    "match_view": sample["match_view"],
+                    "matched_forms": deepcopy(sample["matched_forms"]),
+                }
+            )
+        value["samples"] = samples
+        projected[normalized] = value
+    return projected
+
+
 def _compact_anchor_evidence(
     evidence: dict[str, dict[str, Any]],
     anchors: list[dict[str, Any]],
@@ -515,13 +548,14 @@ def _make_payload(
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     include_disabled = phase == "consistency"
+    request_evidence = _request_evidence(focus, anchors, evidence)
     return {
         "phase": phase,
         "target_language": target_language,
         "terms": [
             _payload_term(
                 item,
-                evidence,
+                request_evidence,
                 include_disabled=include_disabled,
                 conflicts=conflicts,
             )
@@ -530,7 +564,7 @@ def _make_payload(
         "anchors": [
             _payload_term(
                 item,
-                evidence,
+                request_evidence,
                 include_disabled=include_disabled,
                 conflicts=conflicts,
             )

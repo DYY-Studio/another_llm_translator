@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.config import load_config, load_project_config, validate_config
 from app.errors import ConfigError, RequestSizeError, StorageError, UsageError
-from app.execution import create_run
+from app.execution import create_run, estimate_messages, render_messages
 from app.main import build_parser
 from app.project import init_project
 from app.sqlite_storage import (
@@ -31,6 +32,7 @@ from app.term_decision import (
     _analyze_decisions,
     _apply_tentative,
     _automatic_phase_two_anchors,
+    _compact_anchor_evidence,
     _consistency_states,
     _effective_conflicts,
     _group_violations,
@@ -54,6 +56,7 @@ from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
+from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
 
@@ -384,7 +387,17 @@ def _batch_evidence(*states: dict[str, object]) -> dict[str, dict[str, object]]:
             "hit_count": 1,
             "source_hit_count": 1,
             "alias_hit_counts": {},
-            "samples": [{"file_id": "F", "segment_id": "S", "source": "sample"}] * 5,
+            "samples": [
+                {
+                    "file_id": "F",
+                    "part_id": "document",
+                    "segment_id": f"S-{index}",
+                    "source": "sample",
+                    "match_view": "source",
+                    "matched_forms": [{"kind": "source", "value": state["source"]}],
+                }
+                for index in range(5)
+            ],
         }
         for state in states
     }
@@ -554,6 +567,101 @@ def test_decision_payload_exposes_only_nonempty_read_only_conflicts() -> None:
 
     assert payload["terms"][0]["conflicts"] == conflicts["focus"]
     assert "conflicts" not in payload["anchors"][0]
+
+
+def test_decision_payload_reuses_request_local_boundary_refs_across_terms() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = _batch_state("anchor", "Anchor")
+    evidence = _batch_evidence(focus, anchor)
+    evidence["focus"]["samples"] = [
+        {
+            "file_id": "F1",
+            "part_id": "chapter-1",
+            "segment_id": "S1",
+            "source": "focus one",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+        {
+            "file_id": "F1",
+            "part_id": "chapter-2",
+            "segment_id": "S2",
+            "source": "focus two",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+    ]
+    evidence["anchor"]["samples"] = [
+        {
+            "file_id": "F1",
+            "part_id": "chapter-1",
+            "segment_id": "S3",
+            "source": "anchor one",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Anchor"}],
+        },
+        {
+            "file_id": "F2",
+            "part_id": "chapter-1",
+            "segment_id": "S4",
+            "source": "anchor two",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Anchor"}],
+        },
+    ]
+
+    payload = _make_payload(
+        phase="consistency",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=evidence,
+    )
+
+    focus_samples = payload["terms"][0]["evidence"]["samples"]
+    anchor_samples = payload["anchors"][0]["evidence"]["samples"]
+    assert [sample["boundary_ref"] for sample in focus_samples] == [1, 2]
+    assert [sample["boundary_ref"] for sample in anchor_samples] == [1, 3]
+    assert all(
+        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        for sample in [*focus_samples, *anchor_samples]
+    )
+
+
+def test_compact_anchor_payload_removes_samples_before_location_projection() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = {**_batch_state("anchor", "Anchor"), "_compact_evidence": True}
+    evidence = _compact_anchor_evidence(_batch_evidence(focus, anchor), [anchor])
+
+    payload = _make_payload(
+        phase="consistency",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=evidence,
+    )
+
+    assert payload["anchors"][0]["evidence"]["samples"] == []
+    assert payload["terms"][0]["evidence"]["samples"][0]["boundary_ref"] == 1
+
+
+def test_compact_sample_locations_reduce_estimated_request_tokens() -> None:
+    focus = _batch_state("alice", "Alice")
+    durable_evidence = _batch_evidence(focus)
+    compact_payload = _make_payload(
+        phase="adjudication",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[],
+        evidence=durable_evidence,
+    )
+    durable_payload = deepcopy(compact_payload)
+    durable_payload["terms"][0]["evidence"] = durable_evidence["alice"]
+
+    compact_tokens = estimate_messages(render_messages("prompt", compact_payload), 1)
+    durable_tokens = estimate_messages(render_messages("prompt", durable_payload), 1)
+
+    assert compact_tokens < durable_tokens
 
 
 def test_phase_two_keep_preserves_every_phase_one_disposition() -> None:
@@ -1789,11 +1897,17 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
 ) -> None:
     project = create_decision_project(tmp_path)
     phases: list[str] = []
+    request_samples: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         phases.append(payload["phase"])
+        request_samples.extend(
+            sample
+            for term in [*payload["terms"], *payload["anchors"]]
+            for sample in term["evidence"]["samples"]
+        )
         return httpx.Response(
             200,
             json={
@@ -1814,6 +1928,11 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     del os.environ["LLM_API_KEY"]
 
     assert phases == ["adjudication", "consistency"]
+    assert request_samples
+    assert all(
+        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        for sample in request_samples
+    )
     assert summary["proposals"] == 1
     run_dir = project / "runs" / summary["run_id"]
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
@@ -1828,6 +1947,25 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert draft is not None
     assert draft["source_terms_revision"] == 1
     assert draft["proposals"][0]["after"][0]["preferred_translation"] == "爱丽丝"
+    durable_sample = draft["proposals"][0]["evidence"]["alice"]["samples"][0]
+    assert set(durable_sample) == {
+        "file_id",
+        "part_id",
+        "segment_id",
+        "source",
+        "match_view",
+        "matched_forms",
+    }
+    review = TestClient(create_app(projects_root=project.parent)).get(
+        "/api/v1/projects/decision-demo/terms/decision"
+    )
+    assert review.status_code == 200
+    api_sample = review.json()["draft"]["proposals"][0]["evidence"]["alice"][
+        "samples"
+    ][0]
+    assert api_sample["file_id"] == durable_sample["file_id"]
+    assert api_sample["part_id"] == durable_sample["part_id"]
+    assert api_sample["segment_id"] == durable_sample["segment_id"]
 
     applied = apply_decision_draft(project, confirm_all=True)
     assert applied["terms_revision"] == 2
@@ -2972,13 +3110,13 @@ async def test_format_exhaustion_records_only_safe_request_diagnostics(
     assert "模型" not in serialized
 
 
-def test_rule_five_decision_checkpoint_is_visible_but_cannot_resume(
+def test_rule_six_decision_checkpoint_is_visible_but_cannot_resume(
     tmp_path: Path,
 ) -> None:
     project = create_decision_project(tmp_path)
     run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
-    checkpoint["decision_rules_version"] = 5
+    checkpoint["decision_rules_version"] = 6
     atomic_write_json(run_dir / CHECKPOINT_FILE, checkpoint)
 
     client = TestClient(create_app(projects_root=project.parent))
@@ -2999,7 +3137,7 @@ def test_rule_five_decision_checkpoint_is_visible_but_cannot_resume(
     assert "强制新建" in resumed.json()["error"]
 
 
-def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
+def test_rule_six_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
     tmp_path: Path,
 ) -> None:
     project = create_decision_project(tmp_path)
@@ -3010,8 +3148,8 @@ def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
     )
     path = write_pending_decision_draft(
         project,
-        run_id="RUN-RULE-5",
-        rules_version=5,
+        run_id="RUN-RULE-6",
+        rules_version=6,
         after=[
             {
                 "normalized": "bob",
@@ -3026,14 +3164,14 @@ def test_rule_five_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
         ],
     )
 
-    assert current_decision_draft(project)["decision_rules_version"] == 5
+    assert current_decision_draft(project)["decision_rules_version"] == 6
     assert save_decision_rejections(project, [])["rejected_proposal_ids"] == []
     with pytest.raises(UsageError, match="规则版本不兼容"):
         apply_decision_draft(project, confirm_all=True)
     assert path.is_file()
     assert discard_decision_draft(project, confirm=True) == {
         "discarded": True,
-        "run_id": "RUN-RULE-5",
+        "run_id": "RUN-RULE-6",
     }
     assert current_decision_draft(project) is None
 
@@ -3061,13 +3199,14 @@ def test_single_file_evidence_fills_five_distinct_segments_in_source_order(
 
     assert evidence["hit_count"] == 6
     assert evidence["source_hit_count"] == 6
+    assert {sample["part_id"] for sample in evidence["samples"]} == {"document"}
     assert [sample["segment_id"] for sample in evidence["samples"]] == [
         f"F0001-S{index:06d}" for index in range(1, 6)
     ]
     assert len({sample["segment_id"] for sample in evidence["samples"]}) == 5
 
 
-def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
+def test_multi_file_evidence_prefers_first_hit_per_boundary_then_source_order(
     tmp_path: Path,
 ) -> None:
     app_root = make_app_root(tmp_path)
@@ -3094,15 +3233,103 @@ def test_multi_file_evidence_prefers_first_hit_per_file_then_source_order(
 
     assert evidence["hit_count"] == 6
     assert [
-        (sample["file_id"], sample["segment_id"]) for sample in evidence["samples"]
+        (sample["file_id"], sample["part_id"], sample["segment_id"])
+        for sample in evidence["samples"]
     ] == [
-        ("F0001", "F0001-S000001"),
-        ("F0002", "F0002-S000001"),
-        ("F0003", "F0003-S000001"),
-        ("F0001", "F0001-S000002"),
-        ("F0002", "F0002-S000002"),
+        ("F0001", "document", "F0001-S000001"),
+        ("F0002", "document", "F0002-S000001"),
+        ("F0003", "document", "F0003-S000001"),
+        ("F0001", "document", "F0001-S000002"),
+        ("F0002", "document", "F0002-S000002"),
     ]
     assert len(evidence["samples"]) == 5
+
+
+def test_epub_evidence_prefers_first_hit_from_each_spine_part(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.epub"
+    chapters = tuple(
+        (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            f"<p>Alice chapter {index} first</p>"
+            f"<p>Alice chapter {index} second</p>"
+            "</body></html>"
+        ).encode()
+        for index in range(1, 4)
+    )
+    make_epub(source, xhtmls=chapters)
+    project, _ = init_project(
+        [str(source)],
+        name="epub-evidence",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert evidence["hit_count"] == 6
+    assert [
+        (sample["part_id"], sample["segment_id"]) for sample in evidence["samples"]
+    ] == [
+        ("OEBPS/text/ch1.xhtml", "F0001-S000001"),
+        ("OEBPS/text/ch2.xhtml", "F0001-S000003"),
+        ("OEBPS/text/ch3.xhtml", "F0001-S000005"),
+        ("OEBPS/text/ch1.xhtml", "F0001-S000002"),
+        ("OEBPS/text/ch2.xhtml", "F0001-S000004"),
+    ]
+
+
+def test_evidence_distinguishes_file_and_part_boundaries(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"mixed-{index}.txt"
+        path.write_text(
+            f"Alice file {index} first\nAlice file {index} second",
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="mixed-boundary-evidence",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("part-a", "F0001-S000001"),
+                ("part-b", "F0001-S000002"),
+                ("part-a", "F0002-S000001"),
+                ("part-a", "F0002-S000002"),
+                ("part-a", "F0003-S000001"),
+                ("part-b", "F0003-S000002"),
+            ],
+        )
+
+    evidence = collect_term_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert [
+        (sample["file_id"], sample["part_id"], sample["segment_id"])
+        for sample in evidence["samples"]
+    ] == [
+        ("F0001", "part-a", "F0001-S000001"),
+        ("F0001", "part-b", "F0001-S000002"),
+        ("F0002", "part-a", "F0002-S000001"),
+        ("F0003", "part-a", "F0003-S000001"),
+        ("F0003", "part-b", "F0003-S000002"),
+    ]
 
 
 def test_evidence_samples_center_the_match_and_label_forms(tmp_path: Path) -> None:

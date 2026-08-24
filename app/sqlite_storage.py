@@ -1124,7 +1124,7 @@ def read_segment_sources(project: Path) -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT segments.segment_id, segments.file_id, segments.line_index,
-                   segments.source
+                   segments.part_id, segments.source
             FROM files CROSS JOIN segments ON segments.file_id = files.file_id
             WHERE segments.is_empty = 0
             ORDER BY files.file_order, segments.line_index
@@ -1135,7 +1135,8 @@ def read_segment_sources(project: Path) -> list[dict[str, Any]]:
                 "segment_id": str(row[0]),
                 "file_id": str(row[1]),
                 "line_index": int(row[2]),
-                "source": str(row[3]),
+                "part_id": str(row[3]),
+                "source": str(row[4]),
             }
             for row in rows
         ]

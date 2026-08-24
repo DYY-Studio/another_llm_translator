@@ -618,6 +618,7 @@ def test_read_segment_sources_excludes_empty_and_preserves_order(
     ]
     assert sources[0]["line_index"] == 0
     assert sources[1]["file_id"] == "F0001"
+    assert sources[1]["part_id"] == "document"
 
 
 def test_read_jsonl_filters_terminology_records_by_task(tmp_path: Path) -> None:

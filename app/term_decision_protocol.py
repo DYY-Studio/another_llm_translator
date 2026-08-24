@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 6
+DECISION_RULES_VERSION = 7
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -25,7 +25,9 @@ _PROTOCOL = {
         "争用证据，不是投票结果或可选值白名单；可以依据全文证据提出新值。第一阶段存在 category "
         "或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，无法"
         "可靠决定时使用 needs_review。evidence.hit_count 是命中 Segment 数，不是字符出现次数；"
-        "samples 最多五条，先覆盖不同文件，再按源文顺序补充不同 Segment。每条记录必须有非空字符串 "
+        "samples 最多五条，先覆盖不同 (file_id, part_id) 内容边界，再按源文顺序补充不同 Segment。"
+        "boundary_ref 是只读的请求内内容边界引用；相同编号表示样本来自同一内容边界，不是全局 ID、"
+        "顺序或权重。每条记录必须有非空字符串 "
         "reason。keep、disable、needs_review 必须且只能含 type、normalized、action、reason。"
         "update 必须且只能含 type、normalized、action、reason、changes；changes 是 Patch，"
         "只能包含 category、description、preferred_translation、aliases、group_primary 中实际"
@@ -57,7 +59,9 @@ _PROTOCOL = {
         "category or preferred_translation conflicts must not use keep; update must provide a non-empty "
         "decision for every conflicted scalar field, or use needs_review when evidence is insufficient. "
         "evidence.hit_count is the number of matching Segments, not substring occurrences. evidence.samples contains "
-        "at most five distinct Segments, prioritizing first hits from different files before source-order fill. "
+        "at most five distinct Segments, prioritizing first hits from different (file_id, part_id) content "
+        "boundaries before source-order fill. boundary_ref is a read-only, request-local content-boundary "
+        "reference: equal values mean the samples share a boundary, not a global ID, ordering, or weight. "
         "Every record requires a non-empty string "
         "reason. keep, disable, and needs_review contain exactly type, normalized, action, reason. "
         "update contains exactly type, normalized, action, reason, changes. changes is a Patch and "
