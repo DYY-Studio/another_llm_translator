@@ -283,6 +283,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
 class WebTask:
     task_id: str
     project: Path
+    project_id: str
     stage: str
     status: str = "queued"
     created_at: str = field(default_factory=utc_now)
@@ -309,6 +310,7 @@ class WebTask:
         return {
             "task_id": self.task_id,
             "project": self.project.name,
+            "project_id": self.project_id,
             "stage": self.stage,
             "status": self.status,
             "created_at": self.created_at,
@@ -436,6 +438,9 @@ class WebTaskManager:
             state = WebTask(
                 task_id=task_id,
                 project=project,
+                project_id=str(
+                    read_json(project, project / "project.json")["project_id"]
+                ),
                 stage=stage,
                 total_segments=selected_count,
             )
@@ -598,6 +603,22 @@ class WebTaskManager:
             return self.tasks[task_id].view()
         except KeyError as exc:
             raise UsageError(f"未知后台任务：{task_id}") from exc
+
+    def active_tasks(self) -> list[dict[str, Any]]:
+        active = {
+            "queued",
+            "running",
+            "cancelling",
+        }
+        states = [
+            state.view()
+            for state in self.tasks.values()
+            if state.status in active
+        ]
+        return sorted(
+            states,
+            key=lambda value: (str(value["created_at"]), str(value["task_id"])),
+        )
 
     def is_running(self, project: Path, stage: str) -> bool:
         return any(

@@ -1840,6 +1840,10 @@ def create_app(
     async def get_task_options(name: str, stage: str) -> dict[str, Any]:
         return task_options(project(name), stage)
 
+    @app.get("/api/v1/tasks/active")
+    async def active_tasks() -> dict[str, Any]:
+        return {"tasks": app.state.tasks.active_tasks()}
+
     @app.get("/api/v1/tasks/{task_id}")
     async def task(task_id: str) -> dict[str, Any]:
         return app.state.tasks.get(task_id)

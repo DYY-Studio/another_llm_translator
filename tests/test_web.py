@@ -2617,6 +2617,42 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
     assert diagnostics.snapshot()["metrics"]["output_tokens"] == 5
 
 
+@pytest.mark.asyncio
+async def test_web_task_manager_active_tasks_excludes_terminal_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    entered = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+
+    active = manager.active_tasks()
+    assert len(active) == 1
+    assert active[0]["task_id"] == started["task_id"]
+    assert active[0]["project_id"] == read_json(
+        project, project / "project.json"
+    )["project_id"]
+
+    await manager.cancel(started["task_id"])
+    await manager.tasks[started["task_id"]].asyncio_task
+    assert manager.active_tasks() == []
+
+
 def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:
@@ -2671,7 +2707,7 @@ def test_web_task_manager_allows_one_task_and_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    projects_root, _ = make_project(tmp_path)
+    projects_root, project = make_project(tmp_path)
     entered = asyncio.Event()
 
     async def fake_translation(*_: object, **__: object) -> dict[str, object]:
@@ -2687,6 +2723,12 @@ def test_web_task_manager_allows_one_task_and_cancellation(
         )
         assert first.status_code == 200
         task_id = first.json()["task_id"]
+        active = client.get("/api/v1/tasks/active")
+        assert active.status_code == 200
+        assert [item["task_id"] for item in active.json()["tasks"]] == [task_id]
+        assert active.json()["tasks"][0]["project_id"] == read_json(
+            project, project / "project.json"
+        )["project_id"]
         second = client.post(
             "/api/v1/projects/sample/tasks",
             json={"stage": "translation"},
@@ -2699,6 +2741,7 @@ def test_web_task_manager_allows_one_task_and_cancellation(
             if state["status"] == "cancelled":
                 break
         assert state["status"] == "cancelled"
+        assert client.get("/api/v1/tasks/active").json()["tasks"] == []
 
 
 class FakeModelsResponse:
