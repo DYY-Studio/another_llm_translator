@@ -342,6 +342,7 @@ export interface TermDecisionEvidence {
   alias_hit_counts: Record<string, number>;
   samples: Array<{
     file_id: string;
+    part_id?: string;
     segment_id: string;
     source: string;
     match_view?: string;

@@ -77,8 +77,8 @@ function EvidenceDetails({ evidence, language }: { evidence: Record<string, Term
         <strong>{normalized}</strong>
         <span>{translate("terms.decisionHits", language)} {value.hit_count} · {translate("terms.decisionSourceHits", language)} {value.source_hit_count}</span>
         {Object.entries(value.alias_hit_counts).map(([alias, count]) => <span key={alias}>{translate("terms.decisionAliasHits", language)} {alias}: {count}</span>)}
-        {value.samples.length > 0 && <div className="decision-samples">{value.samples.map((sample, index) => <div className="decision-sample" key={`${sample.file_id}:${sample.segment_id}:${index}`}>
-          <small>{sample.file_id} · {sample.segment_id}{sample.match_view ? ` · ${sample.match_view}` : ""}</small>
+        {value.samples.length > 0 && <div className="decision-samples">{value.samples.map((sample, index) => <div className="decision-sample" key={`${sample.file_id}:${sample.part_id ?? ""}:${sample.segment_id}:${index}`}>
+          <small>{sample.file_id}{sample.part_id ? ` · ${sample.part_id}` : ""} · {sample.segment_id}{sample.match_view ? ` · ${sample.match_view}` : ""}</small>
           {sample.matched_forms?.length ? <small>{sample.matched_forms.map((form) => `${form.kind}: ${form.value}`).join(" · ")}</small> : null}
           <p>{sample.source}</p>
         </div>)}</div>}

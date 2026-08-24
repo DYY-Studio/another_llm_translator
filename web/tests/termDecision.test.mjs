@@ -101,6 +101,7 @@ test("automatic decision workspace keeps navigation separate from task cancellat
   assert.match(source, /decisionRelationshipSummary/);
   assert.match(source, /decisionRelationshipRole/);
   assert.match(source, /ConflictDetails/);
+  assert.match(source, /sample\.part_id \? ` · \$\{sample\.part_id\}` : ""/);
   assert.match(source, /decisionConflictCategories/);
   assert.match(source, /decisionConflictAliasPrimaries/);
   assert.match(source, /decisionConflictGroupClaims/);
@@ -121,6 +122,11 @@ test("automatic decision workspace keeps navigation separate from task cancellat
     new URL("../src/components/RunDialog.tsx", import.meta.url),
     "utf8",
   );
+  const typeSource = await readFile(
+    new URL("../src/types.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(typeSource, /part_id\?: string/);
   assert.match(dialogSource, /runDialog\.decisionTitle/);
   assert.match(dialogSource, /decisionMode/);
   assert.match(dialogSource, /resultPolicy === "force"/);

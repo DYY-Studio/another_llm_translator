@@ -1956,6 +1956,16 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         "match_view",
         "matched_forms",
     }
+    review = TestClient(create_app(projects_root=project.parent)).get(
+        "/api/v1/projects/decision-demo/terms/decision"
+    )
+    assert review.status_code == 200
+    api_sample = review.json()["draft"]["proposals"][0]["evidence"]["alice"][
+        "samples"
+    ][0]
+    assert api_sample["file_id"] == durable_sample["file_id"]
+    assert api_sample["part_id"] == durable_sample["part_id"]
+    assert api_sample["segment_id"] == durable_sample["segment_id"]
 
     applied = apply_decision_draft(project, confirm_all=True)
     assert applied["terms_revision"] == 2
