@@ -881,7 +881,7 @@ export function TermsView({
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
-              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && task.project === project && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
+              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
               {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
               {selectedActive.length > 0 && <button
                 className="danger-button"
