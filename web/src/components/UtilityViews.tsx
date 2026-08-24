@@ -371,19 +371,21 @@ function InputQueue({
 function ProjectBar({
   projects,
   project,
+  runningProjectIds,
   onProject,
   onCreate,
   language,
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   onProject: (value: string) => void;
   onCreate: () => void;
   language: Language;
 }) {
   return (
     <div className="overview-project-bar">
-      <ProjectPicker projects={projects} project={project} onProject={onProject} language={language} />
+      <ProjectPicker projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={onProject} language={language} />
       <button className="quiet-button" onClick={onCreate}>{translate("project.create", language)}</button>
     </div>
   );
@@ -392,11 +394,13 @@ function ProjectBar({
 function ProjectPicker({
   projects,
   project,
+  runningProjectIds,
   onProject,
   language,
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   onProject: (value: string) => void;
   language: Language;
 }) {
@@ -407,6 +411,8 @@ function ProjectPicker({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const selected = projects.find((item) => item.selector === project) ?? null;
+  const selectedRunning = Boolean(selected && runningProjectIds.has(selected.project_id));
+  const otherRunning = projects.filter((item) => item.selector !== project && runningProjectIds.has(item.project_id)).length;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredProjects = normalizedQuery
     ? projects.filter((item) => (
@@ -492,6 +498,9 @@ function ProjectPicker({
           <strong>{selected?.name ?? translate("project.select", language)}</strong>
           {selected && <small>{selected.path}</small>}
         </span>
+        {(selectedRunning || otherRunning > 0) && <span className="project-picker-status" aria-label={selectedRunning ? translate("project.running", language) : translate("project.otherRunning", language, { count: otherRunning })}>
+          {selectedRunning ? translate("project.running", language) : translate("project.otherRunning", language, { count: otherRunning })}
+        </span>}
         <span className="project-picker-chevron" aria-hidden="true">⌄</span>
       </button>
       {open && (
@@ -525,7 +534,10 @@ function ProjectPicker({
                   <strong>{item.name}</strong>
                   <small title={item.path}>{item.path}</small>
                 </span>
-                {item.selector === project && <span className="project-option-check" aria-hidden="true">✓</span>}
+                <span className="project-option-meta">
+                  {runningProjectIds.has(item.project_id) && <small className="project-running-badge">{translate("project.running", language)}</small>}
+                  {item.selector === project && <span className="project-option-check" aria-hidden="true">✓</span>}
+                </span>
               </button>
             ))}
           </div>
@@ -595,6 +607,7 @@ function AddFilesDialog({
 export function Overview({
   projects,
   project,
+  runningProjectIds,
   value,
   onProject,
   onCreate,
@@ -604,6 +617,7 @@ export function Overview({
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   value: ProjectOverview | null;
   onProject: (value: string) => void;
   onCreate: () => void;
@@ -659,7 +673,7 @@ export function Overview({
   if (!value) {
     return (
       <div className="page">
-        <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
+        <ProjectBar projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={changeProject} onCreate={onCreate} language={language} />
         <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
       </div>
     );
@@ -900,7 +914,7 @@ export function Overview({
 
   return (
     <div className="page overview-page">
-      <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
+      <ProjectBar projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={changeProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
         <div className="overview-identity"><h1>{value.name}</h1><p>{value.path}</p></div>
         <div className="summary-strip">

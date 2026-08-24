@@ -118,6 +118,7 @@ export interface TranslationValidatorSummary {
 export interface TaskState {
   task_id: string;
   project: string;
+  project_id: string;
   stage: string;
   status: string;
   error?: ErrorPayload | null;

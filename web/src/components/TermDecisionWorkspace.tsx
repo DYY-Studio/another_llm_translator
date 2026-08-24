@@ -194,7 +194,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [replaceDraft, setReplaceDraft] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
-  const running = Boolean(task && task.project === project && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
+  const running = Boolean(task && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
 
   async function load() {
     const reviewRequest = api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`);
@@ -217,7 +217,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     void load().catch((error) => { setReviewLoading(false); setMessage(errorMessage(error, language)); });
   }, [project]);
   useEffect(() => {
-    if (task?.project !== project || task.stage !== "terminology_decision") return;
+    if (task?.stage !== "terminology_decision") return;
     if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(errorMessage(error, language)));
     if (task.status === "failed") setMessage(errorMessage(task.error, language));
   }, [task?.task_id, task?.status, language]);
