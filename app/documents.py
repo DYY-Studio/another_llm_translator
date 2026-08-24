@@ -13,7 +13,7 @@ import chardet
 from .errors import ProjectError
 
 _AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
-EMPHASIS_RUBY_CHARACTERS = frozenset("・•◦●○◉◎▲△﹅﹆")
+EMPHASIS_RUBY_CHARACTERS = frozenset("·・•◦●○◉◎▲△﹅﹆")
 _COMPACT_ESCAPES = frozenset("\\|⟦⟧")
 
 

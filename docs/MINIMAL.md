@@ -319,7 +319,7 @@ Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追�
 状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.4 可读取
 0.3/0.4 状态，不改写旧 File、Segment、locator 或阶段结果。
 
-Reading 完全由同一个 `・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
+Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
 相邻同符号 Ruby 和单 Ruby 的重复符号合并为一个 reading；普通文本、空白、
 块边界和受控内联格式边界会切断合并。用户 source/result 使用合并后的青空；
 最终 EPUB 译文区按 Unicode 扩展字素簇展开为逐字 Ruby，空白保持普通文本。
