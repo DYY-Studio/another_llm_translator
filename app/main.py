@@ -36,6 +36,13 @@ from .stages import (
     run_terminology,
     run_translation,
 )
+from .term_decision import (
+    apply_decision_draft,
+    current_decision_draft,
+    manual_review_state,
+    rollback_decision,
+    run_terminology_decision,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -187,6 +194,37 @@ def build_parser() -> argparse.ArgumentParser:
         "terms-publish-partial", help="发布当前活动扫描中已有的候选术语"
     )
     terms_partial.add_argument("project")
+    terms_decide = subparsers.add_parser(
+        "terms-decide", help="生成整库自动术语决策草案"
+    )
+    terms_decide.add_argument("project")
+    terms_decide.add_argument("--dry-run", action="store_true")
+    terms_decide.add_argument("--replace-draft", action="store_true")
+    terms_decide.add_argument("--force", action="store_true")
+    terms_decide.add_argument(
+        "--acknowledge-manual-review",
+        action="store_true",
+        help="确认新一轮决策成功应用后会取代现有人工待办",
+    )
+    terms_decide_run = terms_decide.add_mutually_exclusive_group()
+    terms_decide_run.add_argument("--resume-run", action="store_true")
+    terms_decide_run.add_argument("--decline-run", action="store_true")
+    subparsers.add_parser(
+        "terms-decide-show", help="查看当前自动术语决策草案"
+    ).add_argument("project")
+    terms_decide_apply = subparsers.add_parser(
+        "terms-decide-apply", help="应用自动术语决策草案"
+    )
+    terms_decide_apply.add_argument("project")
+    terms_decide_apply.add_argument("--all", action="store_true")
+    terms_decide_apply.add_argument(
+        "--reject", dest="rejected_proposal_ids", action="append", default=[]
+    )
+    terms_decide_rollback = subparsers.add_parser(
+        "terms-decide-rollback", help="撤销最近一次自动术语决策"
+    )
+    terms_decide_rollback.add_argument("project")
+    terms_decide_rollback.add_argument("--confirm", action="store_true")
     return parser
 
 
@@ -319,6 +357,69 @@ def run(argv: list[str] | None = None) -> int:
             "command complete command=optimize reclaimed_bytes=%d",
             summary["reclaimed_bytes"],
         )
+        return 0
+    if args.command == "terms-decide":
+        project = _resolve_project(args)
+        warnings = sync_global_templates(project, dry_run=args.dry_run)
+        if args.force and args.resume_run:
+            raise UsageError("续用自动决策 Run 时不能同时指定 --force")
+        run_action = (
+            "resume"
+            if args.resume_run
+            else "decline"
+            if args.decline_run or args.force
+            else None
+        )
+        resume_run_id, run_warnings = choose_running_run(
+            project,
+            "terminology_decision",
+            action=run_action,
+            dry_run=args.dry_run,
+        )
+        warnings.extend(run_warnings)
+        if (
+            not args.dry_run
+            and not args.resume_run
+            and manual_review_state(project)["remaining"] > 0
+            and not args.acknowledge_manual_review
+        ):
+            raise UsageError(
+                "存在未处理人工待办；请使用 --acknowledge-manual-review 确认新一轮决策"
+            )
+        lock = nullcontext() if args.dry_run else project_write_lock(project)
+        with lock:
+            summary = asyncio.run(
+                run_terminology_decision(
+                    project,
+                    dry_run=args.dry_run,
+                    replace_draft=args.replace_draft,
+                    resume_run_id=resume_run_id,
+                )
+            )
+        summary["warnings"] = warnings
+        emit_summary(summary)
+        return 0
+    if args.command == "terms-decide-show":
+        draft = current_decision_draft(_resolve_project(args))
+        if draft is None:
+            raise UsageError("没有待处理术语决策草案")
+        emit_summary(draft)
+        return 0
+    if args.command == "terms-decide-apply":
+        project = _resolve_project(args)
+        with project_write_lock(project):
+            summary = apply_decision_draft(
+                project,
+                confirm_all=args.all,
+                rejected_proposal_ids=args.rejected_proposal_ids,
+            )
+        emit_summary(summary)
+        return 0
+    if args.command == "terms-decide-rollback":
+        project = _resolve_project(args)
+        with project_write_lock(project):
+            summary = rollback_decision(project, confirm=args.confirm)
+        emit_summary(summary)
         return 0
     if args.command in {
         "terminology",

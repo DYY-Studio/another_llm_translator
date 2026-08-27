@@ -11,6 +11,7 @@ import pytest
 from app.execution import Scope, parse_jsonl_document
 from app.logging_utils import attach_project_log, configure_cli_logging
 from app.main import run
+from app.sqlite_storage import read_json, read_jsonl
 from app.stages import (
     _parse_review_items,
     _parse_translation_items,
@@ -18,7 +19,6 @@ from app.stages import (
     run_terminology,
     run_translation,
 )
-from app.sqlite_storage import read_json, read_jsonl
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 
@@ -36,7 +36,7 @@ def test_jsonl_extraction_accepts_bom_crlf_blanks_and_supported_fence() -> None:
 
 @pytest.mark.parametrize("label", ["jsonl", "ndjson", "json", ""])
 def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
-    content = f"说明\n```{label}\n{{\"type\":\"end\"}}\n```\n说明"
+    content = f'说明\n```{label}\n{{"type":"end"}}\n```\n说明'
     document = parse_jsonl_document(content, record_type="segment")
     assert document.complete is True
     assert document.records == ()
@@ -44,9 +44,7 @@ def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
 
 def test_jsonl_extraction_accepts_leading_thought_blocks() -> None:
     template = "\ufeff \r\n<think>推理过程</think>\r\n{answer}"
-    answer = llm_jsonl(
-        [{"type": "segment", "id": "S1", "translation": "译文"}]
-    )
+    answer = llm_jsonl([{"type": "segment", "id": "S1", "translation": "译文"}])
     document = parse_jsonl_document(
         template.replace("{answer}", answer),
         record_type="segment",
@@ -57,7 +55,7 @@ def test_jsonl_extraction_accepts_leading_thought_blocks() -> None:
 
 def test_jsonl_extraction_uses_answer_fence_after_thought_block() -> None:
     content = (
-        "<think>```jsonl\n{\"type\":\"end\"}\n```</think>\n"
+        '<think>```jsonl\n{"type":"end"}\n```</think>\n'
         "```jsonl\n"
         '{"type":"segment","id":"S1","translation":"最终译文"}\n'
         '{"type":"end"}\n'
@@ -71,12 +69,12 @@ def test_jsonl_extraction_uses_answer_fence_after_thought_block() -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        "<think>未闭合\n```jsonl\n{\"type\":\"end\"}\n```",
-        "<think>first</think><thought>second</thought>\n{\"type\":\"end\"}",
-        "<think>outer <thought>inner</thought></think>\n{\"type\":\"end\"}",
-        "<think>mismatched </thought></think>\n{\"type\":\"end\"}",
-        "说明<think>推理</think>\n{\"type\":\"end\"}",
-        "```jsonl\n{\"type\":\"end\"}\n```\n<think>后置推理</think>",
+        '<think>未闭合\n```jsonl\n{"type":"end"}\n```',
+        '<think>first</think><thought>second</thought>\n{"type":"end"}',
+        '<think>outer <thought>inner</thought></think>\n{"type":"end"}',
+        '<think>mismatched </thought></think>\n{"type":"end"}',
+        '说明<think>推理</think>\n{"type":"end"}',
+        '```jsonl\n{"type":"end"}\n```\n<think>后置推理</think>',
     ],
 )
 def test_jsonl_extraction_rejects_malformed_or_nonleading_thought_blocks(
@@ -93,9 +91,7 @@ def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
         "<thought>文本</thought> 和 <analysis>文本</analysis>"
     )
     valid, unresolved, errors, complete = _parse_translation_items(
-        llm_jsonl(
-            [{"type": "segment", "id": "S1", "translation": translation}]
-        ),
+        llm_jsonl([{"type": "segment", "id": "S1", "translation": translation}]),
         ["S1"],
     )
     assert valid == {"S1": translation}
@@ -108,8 +104,9 @@ def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
     "content",
     [
         '{"segments":[]}',
-        "[]\n{\"type\":\"end\"}",
+        '[]\n{"type":"end"}',
         '{"type":"unknown"}\n{"type":"end"}',
+        '{"type":"end","extra":true}',
         '{"type":"end"}\n{"type":"end"}',
         '{"type":"end"}\n{"type":"segment","id":"S1","translation":"x"}',
         '{"type":"segment","id":"S1","translation":"x"}',
@@ -236,7 +233,12 @@ def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
                     "aliases": [],
                 },
                 {"type": "term", "source": "", "category": "人物", "description": "x"},
-                {"type": "term", "source": "Bob", "category": "男性人名", "description": 1},
+                {
+                    "type": "term",
+                    "source": "Bob",
+                    "category": "男性人名",
+                    "description": 1,
+                },
             ]
         )
     )
@@ -247,7 +249,9 @@ def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
     assert complete is False
 
 
-def test_terminology_rejects_malformed_end_without_discarding_valid_candidates() -> None:
+def test_terminology_rejects_malformed_end_without_discarding_valid_candidates() -> (
+    None
+):
     content = (
         '{"type":"term","source":"Alice","category":"人物",'
         '"description":"人物","aliases":[]}\n'
@@ -295,11 +299,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
             200,
             json={
                 "choices": [
-                    {
-                        "message": {
-                            "content": template.replace("{answer}", answer)
-                        }
-                    }
+                    {"message": {"content": template.replace("{answer}", answer)}}
                 ]
             },
         )
@@ -333,9 +333,7 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
         else:
             saved = read_jsonl(project, project / "stages" / "translation.jsonl")
             assert any(item.get("segment_id") == "F0001-S000001" for item in saved)
-            assert [item["id"] for item in payload["segments"]] == [
-                "1"
-            ]
+            assert [item["id"] for item in payload["segments"]] == ["1"]
             content = llm_jsonl(
                 [
                     {
@@ -518,7 +516,9 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert scans[-1]["status"] == "failed"
     assert scans[-1]["error_class"] == "format_error"
     assert not (project / "terminology" / "terms.json").exists()
-    manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
+    manifest = read_json(
+        project, project / "runs" / summary["run_id"] / "manifest.json"
+    )
     assert manifest["failure_counts"] == {"format_error": 1}
 
 

@@ -91,7 +91,8 @@ JSON Pointer 负索引扩展、`messages_format` 消息形状转换与 `${system
 `${model}` 占位符。HTTP、限速、重试、取消、Run 收尾和调试记录始终由宿主
 管理；API Key 不进入 URL、请求正文、Run 快照或阶段指纹。
 
-Preset schema 3 的 `stream`/`stream_endpoint` 与四个内置 Adapter 的 SSE 规则
+Preset schema 4 的 `stream`/`stream_endpoint`、SSE 读取超时开关与四个内置
+Adapter 的 SSE 规则
 已落地；普通 Preset 迁移后仍为非流式。宿主聚合完整正文，流中断丢弃半成品并
 沿既有尝试次数重试，不隐式 fallback；诊断只展示事件、字节和首事件延迟。Stage
 22 公开 Beta 后，已发布 Preset/Adapter schema 变更必须提供明确迁移或主版本边界。

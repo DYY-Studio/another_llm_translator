@@ -1,8 +1,8 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
-import { translate } from "../i18n";
+import { errorMessage, translate } from "../i18n";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -47,6 +47,8 @@ export function AppShell({
   onLanguage: () => void;
   children: ReactNode;
 }) {
+  const runStatusRef = useRef<HTMLElement>(null);
+  const [runStatusHeight, setRunStatusHeight] = useState(0);
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
@@ -78,8 +80,24 @@ export function AppShell({
     current: themeLabels[themeMode],
     next: themeLabels[nextTheme[themeMode]],
   });
+  useLayoutEffect(() => {
+    const element = runStatusRef.current;
+    if (!element) {
+      setRunStatusHeight(0);
+      return;
+    }
+    const update = () => setRunStatusHeight(element.getBoundingClientRect().height);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [Boolean(task)]);
+  const appStyle = {
+    "--mobile-run-status-height": `${runStatusHeight}px`,
+  } as CSSProperties;
   return (
-    <div className={`app${task ? " has-run-status" : ""}`}>
+    <div className={`app${task ? " has-run-status" : ""}`} style={appStyle}>
       <header className="topbar">
         <div className="brand">{translate("brand", language)}</div>
         <div className="topbar-spacer" />
@@ -92,7 +110,7 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" aria-label={translate("shell.globalTaskStatus", language)}>
+        <section className="global-run-status" ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
@@ -107,11 +125,20 @@ export function AppShell({
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>
-            ) : <span>{translate("run.tokensUnavailable", language)}</span>}
+            ) : task.usage.partial ? <span>{translate("run.tokensPartial", language, { input: task.usage.input_tokens, output: task.usage.output_tokens })}</span>
+              : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
           {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
-          {task.error && <span className="error-text run-error">{task.error}</span>}
-          {running && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
+          {task.error && (
+            <span
+              className="error-text run-error"
+              role="alert"
+              title={errorMessage(task.error, language)}
+            >
+              {errorMessage(task.error, language)}
+            </span>
+          )}
+          {["queued", "running"].includes(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
         </section>
       )}
       <aside className="sidebar">

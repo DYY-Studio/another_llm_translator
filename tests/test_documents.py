@@ -17,7 +17,10 @@ from app.documents import (
     DocumentChoiceOption,
     DocumentExportJob,
     ImportedFile,
+    aozora_to_model_ruby,
+    compact_emphasis_aozora,
     decode_plaintext,
+    escape_model_ruby_literal,
     publish_document_exports,
 )
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
@@ -31,7 +34,7 @@ from app.plugins import (
     normalize_model_text,
     validate_document_import_options,
 )
-from app.project import _normalize_imported_file, init_project
+from app.project import _normalize_imported_file, init_project, load_segments
 from app.stages import _project_context, export_project
 from app.sqlite_storage import (
     append_jsonl,
@@ -541,8 +544,10 @@ def test_epub_export_rejects_missing_primary_title_without_output(
     )
     assert project is not None
     add_translations(project)
-    with pytest.raises(IncompleteError, match="主标题"):
+    with pytest.raises(IncompleteError, match="主标题") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.code == "export_error"
+    assert raised.value.params["reason"] == "missing_primary_title"
     assert not list((project / "output").rglob("*.epub"))
 
 
@@ -559,8 +564,9 @@ def test_epub_export_rejects_empty_target_language_without_output(
         lambda *_args, **_kwargs: config,
     )
 
-    with pytest.raises(IncompleteError, match="target_language"):
+    with pytest.raises(IncompleteError, match="target_language") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.params["reason"] == "missing_target_language"
     assert not list((project / "output").rglob("*.epub"))
 
 
@@ -574,9 +580,57 @@ def test_epub_export_requires_language_tag_without_partial_output(
     config_path.write_text(dump_config(config), encoding="utf-8")
     add_translations(project)
 
-    with pytest.raises(IncompleteError, match="target_language_tag"):
+    with pytest.raises(IncompleteError, match="target_language_tag") as raised:
         export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert raised.value.params == {
+        "reason": "missing_target_language_tag",
+        "adapter_id": "epub",
+        "setting": "project.target_language_tag",
+    }
     assert not list((project / "output").rglob("*.epub"))
+
+
+def test_export_errors_describe_missing_results_and_output_encoding(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="encoding",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    with pytest.raises(IncompleteError, match="缺少 translated 结果") as missing:
+        export_project(project, "translated", bilingual=False, allow_missing=False)
+    assert missing.value.params == {
+        "reason": "missing_stage_results",
+        "stage": "translated",
+        "count": 1,
+        "segment_ids": ["F0001-S000001"],
+    }
+
+    add_translations(project)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["output_encoding"] = "ascii"
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    with pytest.raises(IncompleteError, match="输出编码 ascii") as encoding:
+        export_project(
+            project,
+            "translated",
+            bilingual=False,
+            allow_missing=False,
+            output_format="txt",
+        )
+    assert encoding.value.params == {
+        "reason": "unrepresentable_output_encoding",
+        "encoding": "ascii",
+        "file": "input.txt",
+        "setting": "project.output_encoding",
+    }
 
 
 def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
@@ -617,7 +671,7 @@ def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
         "OEBPS/text/ch2.xhtml",
         "OEBPS/text/ch2.xhtml",
     ]
-    assert files[0]["document_adapter_version"] == "0.3"
+    assert files[0]["document_adapter_version"] == "0.4"
 
 
 @pytest.mark.parametrize("parts", [(), ("only-one",), ("", "two")])
@@ -775,14 +829,16 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
     assert tiered is not None
     assert "may be omitted as a whole" in tiered
     assert "Semantic markers are a, abbr" in tiered
-    assert adapter.model_prompt_requirements(
+    terminology = adapter.model_prompt_requirements(
         stage="terminology",
         language="en",
         opaque_state={
             "inline_format_mode": "markers",
             "inline_format_policy": "strict",
         },
-    ) is None
+    )
+    assert terminology is not None
+    assert "Keep every existing marker" in terminology
 
 
 def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
@@ -1042,8 +1098,15 @@ RUBY_XHTML = (
             "aozora",
             ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
         ),
+        (
+            "short_xml",
+            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+        ),
+        (
+            "compact",
+            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
+        ),
         ("base_only", ["彼は漢字を読む。", "特別だ。"]),
-        ("parenthetical", ["彼は漢字（かんじ）を読む。", "特別（スペシャル／とくべつ）だ。"]),
     ],
 )
 def test_epub_ruby_modes_form_semantic_segments(
@@ -1059,6 +1122,261 @@ def test_epub_ruby_modes_form_semantic_segments(
     assert list(imported.files[0].segments) == expected
     assert imported.files[0].opaque_state is not None
     assert imported.files[0].opaque_state["ruby_mode"] == mode
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (
+            "short_xml",
+            [
+                "彼は<r><b>漢字</b><y>かんじ</y></r>を読む。",
+                "<r><b>特別</b><y>スペシャル／とくべつ</y></r>だ。",
+            ],
+        ),
+        (
+            "compact",
+            [
+                "彼は⟦R:漢字|Y:かんじ⟧を読む。",
+                "⟦R:特別|Y:スペシャル／とくべつ⟧だ。",
+            ],
+        ),
+    ],
+)
+def test_epub_model_only_ruby_modes_keep_aozora_source(
+    tmp_path: Path, mode: str, expected: list[str]
+) -> None:
+    source = tmp_path / f"ruby-model-{mode}.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+    )
+
+    assert list(imported.files[0].model_sources or ()) == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "model_text"),
+    [
+        ("short_xml", "<r><b>汉字 &amp; 词</b><y>hànzì</y></r>"),
+        ("compact", "⟦R:汉\\|字|Y:hànzì⟧"),
+    ],
+)
+def test_epub_model_ruby_output_normalizes_to_aozora(
+    mode: str, model_text: str
+) -> None:
+    adapter = get_document_adapter("epub")
+
+    assert adapter.normalize_model_output(
+        segment={"source": "source", "_ruby_mode": mode},
+        text=model_text,
+        stage="translation",
+    ) in {"｜汉字 & 词《hànzì》", "｜汉|字《hànzì》"}
+
+
+def test_epub_compact_ruby_round_trips_escaped_literal_text() -> None:
+    source = "前｜汉《hàn》后\\|字⟦R:字|Y:读⟧⟧\\"
+    model_text = aozora_to_model_ruby(source, "compact")
+
+    assert get_document_adapter("epub").normalize_model_output(
+        segment={"source": source, "_ruby_mode": "compact"},
+        text=model_text,
+        stage="translation",
+    ) == source
+
+
+def test_epub_compact_ruby_unescapes_plain_literal_text() -> None:
+    source = "普通\\文本|⟦R:base|Y:reading⟧⟧"
+    model_text = escape_model_ruby_literal(source, "compact")
+
+    assert get_document_adapter("epub").normalize_model_output(
+        segment={"source": source, "_ruby_mode": "compact"},
+        text=model_text,
+        stage="translation",
+    ) == source
+
+
+@pytest.mark.parametrize("model_text", ["普通\\q", "普通\\"])
+def test_epub_compact_ruby_rejects_invalid_literal_escapes(
+    model_text: str,
+) -> None:
+    with pytest.raises(IncompleteError):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source", "_ruby_mode": "compact"},
+            text=model_text,
+            stage="translation",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "model_text"),
+    [
+        ("short_xml", "<r><y>reading</y><b>base</b></r>"),
+        ("short_xml", "<r><b>base</b></r>"),
+        ("compact", "⟦R:base|Y:⟧"),
+        ("compact", "⟦R:base\\q|Y:reading⟧"),
+    ],
+)
+def test_epub_model_ruby_output_rejects_broken_structure(
+    mode: str, model_text: str
+) -> None:
+    with pytest.raises(IncompleteError):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source", "_ruby_mode": mode},
+            text=model_text,
+            stage="translation",
+        )
+
+
+@pytest.mark.parametrize(
+    "mark",
+    list("・•◦●○◉◎▲△﹅﹆"),
+)
+def test_emphasis_aozora_compacts_adjacent_and_repeated_ruby(mark: str) -> None:
+    assert compact_emphasis_aozora(
+        f"｜强《{mark}》｜调《{mark}{mark}》"
+    ) == f"｜强调《{mark}》"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "｜强《・》 ｜调《・》",
+        "｜强《・》文｜调《・》",
+        "｜强《・》｜调《•》",
+        "｜强《きょう》｜调《ちょう》",
+    ],
+)
+def test_emphasis_aozora_does_not_cross_non_emphasis_boundaries(
+    source: str,
+) -> None:
+    assert compact_emphasis_aozora(source) == source
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_model"),
+    [
+        ("aozora", None),
+        ("short_xml", "<r><b>强调</b><y>・</y></r>"),
+        ("compact", "⟦R:强调|Y:・⟧"),
+    ],
+)
+def test_epub_import_compacts_consecutive_emphasis_ruby(
+    tmp_path: Path, mode: str, expected_model: str | None
+) -> None:
+    source = tmp_path / f"emphasis-{mode}.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<ruby>强<rt>・</rt></ruby><ruby>调<rt>・</rt></ruby>"
+            "</p></body></html>"
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+    )
+
+    assert imported.files[0].segments == ("｜强调《・》",)
+    assert imported.files[0].model_sources == (expected_model,)
+
+
+def test_epub_emphasis_compaction_stops_at_controlled_format_boundary(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "emphasis-format-boundary.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<em><ruby>强<rt>・</rt></ruby></em>"
+            "<ruby>调<rt>・</rt></ruby></p></body></html>"
+        ).encode(),
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)],
+        recursive=False,
+        config={},
+        options={
+            "ruby_mode": "short_xml",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+
+    assert imported.files[0].segments == (
+        "｜强《・》｜调《・》",
+    )
+    assert imported.files[0].model_sources == (
+        "<em1><r><b>强</b><y>・</y></r></em1>"
+        "<r><b>调</b><y>・</y></r>",
+    )
+
+
+def test_epub_emphasis_export_expands_unicode_grapheme_clusters(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "emphasis-export.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<p><ruby>原<rt>・</rt></ruby>"
+            "<ruby>文<rt>・</rt></ruby></p></body></html>"
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="emphasis-export",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    assert load_segments(project)[0]["source"] == "｜原文《・》"
+    assert load_segments(project)[0]["_adapter_source"] == (
+        "｜原《・》｜文《・》"
+    )
+    metadata = read_json(project, project / "project.json")
+    segment = read_segments(project)[0]
+    append_jsonl(
+        project,
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segment["segment_id"],
+            status="completed",
+            text="｜e\u0301👩‍❤️‍💋‍👨 A《・》",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-EMPHASIS",
+            request_id="REQ-EMPHASIS",
+        ),
+    )
+
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        root = ElementTree.fromstring(archive.read("OEBPS/text/ch1.xhtml"))
+        rubies = [
+            item for item in root.iter() if item.tag.rsplit("}", 1)[-1] == "ruby"
+        ]
+        assert [item.text for item in rubies] == [
+            "e\u0301",
+            "👩‍❤️‍💋‍👨",
+            "A",
+        ]
+        assert [list(item)[0].text for item in rubies] == ["・", "・", "・"]
+        assert " " in "".join(root.itertext())
 
 
 def test_epub_ruby_export_removes_stale_readings_but_bilingual_keeps_source(
@@ -1347,10 +1665,15 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     write_json(project, state_path, {"schema_version": 1, "state": []})
-    with pytest.raises(IncompleteError, match="状态损坏"):
+    with pytest.raises(IncompleteError, match="状态损坏") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
+    assert raised.value.params == {
+        "reason": "adapter_state_invalid",
+        "file_id": "F0001",
+        "adapter_id": "epub",
+    }
     with pytest.raises(UsageError, match="未安装 Document Adapter"):
         get_document_adapter("missing")
 
@@ -1366,10 +1689,46 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
             "UPDATE files SET payload_json = ? WHERE file_id = ?",
             (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
         )
-    with pytest.raises(IncompleteError, match="版本不兼容"):
+    with pytest.raises(IncompleteError, match="版本不兼容") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
+    assert raised.value.params == {
+        "reason": "adapter_version_incompatible",
+        "file_id": "F0001",
+        "adapter_id": "epub",
+        "project_version": "future",
+        "current_version": "0.4",
+    }
+
+
+def test_epub_04_reads_03_state_without_migrating_project(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    file_record["document_adapter_version"] = "0.3"
+    state_record["adapter_version"] = "0.3"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (
+                json.dumps(file_record, ensure_ascii=False),
+                file_record["file_id"],
+            ),
+        )
+    write_json(project, state_path, state_record)
+    add_translations(project)
+
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+
+    assert result["files"] == 1
+    assert read_files(project)[0]["document_adapter_version"] == "0.3"
+    assert read_json(project, state_path)["adapter_version"] == "0.3"
 
 
 def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
@@ -1670,6 +2029,8 @@ def test_document_adapter_choice_options_apply_defaults_and_validate_values() ->
         validate_document_import_options(epub, {"unknown": "value"})
     with pytest.raises(UsageError, match="取值无效"):
         validate_document_import_options(epub, {"ruby_mode": "invalid"})
+    with pytest.raises(UsageError, match="取值无效"):
+        validate_document_import_options(epub, {"ruby_mode": "parenthetical"})
 
 
 def test_plugin_host_rejects_invalid_choice_option(

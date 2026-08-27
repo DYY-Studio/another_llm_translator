@@ -34,7 +34,7 @@ from app.sqlite_storage import (
 from app.web import create_app
 from app.web_store import WebStore
 from app.web_tasks import WebTaskManager
-from tests.test_documents import RUBY_XHTML, make_epub
+from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
 
@@ -122,6 +122,59 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert payload["code"] == "request_validation_error"
     assert payload["params"]["fields"] == ["name"]
     assert "input" not in payload["params"]
+
+
+def test_web_epub_export_error_preserves_language_tag_guidance(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    config_path = project / "config.toml"
+    config = load_config(config_path)
+    config["project"]["target_language_tag"] = ""
+    config_path.write_text(dump_config(config), encoding="utf-8")
+    add_translations(project)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/book/export",
+        json={"stage": "translated", "format": "original"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "EPUB 导出需要 project.target_language_tag",
+        "code": "export_error",
+        "params": {
+            "reason": "missing_target_language_tag",
+            "adapter_id": "epub",
+            "setting": "project.target_language_tag",
+        },
+    }
+    assert not list((project / "output").rglob("*.epub"))
+
+
+def test_web_unexpected_error_returns_safe_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+
+    def unexpected(*_: object, **__: object) -> None:
+        raise RuntimeError("secret diagnostic detail")
+
+    monkeypatch.setattr(web_module, "resolve_project", unexpected)
+    client = TestClient(
+        create_app(projects_root=projects_root),
+        raise_server_exceptions=False,
+    )
+    response = client.get("/api/v1/projects/sample")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": "内部错误",
+        "code": "internal_error",
+        "params": {},
+    }
+    assert "secret" not in response.text
 
 
 def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
@@ -600,7 +653,7 @@ def test_web_applies_epub_import_options_without_project_level_settings(
         data={
             "name": "ruby-option",
             "adapter_options": json.dumps(
-                {"epub": {"ruby_mode": "parenthetical"}}
+                {"epub": {"ruby_mode": "short_xml"}}
             ),
         },
         files=[
@@ -611,14 +664,14 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert response.status_code == 200
     overview = client.get("/api/v1/projects/ruby-option").json()
     assert [item["source"] for item in overview["segments"]] == [
-        "彼は漢字（かんじ）を読む。",
-        "特別（スペシャル／とくべつ）だ。",
+        "彼は｜漢字《かんじ》を読む。",
+        "｜特別《スペシャル／とくべつ》だ。",
     ]
     project = projects_root / "ruby-option"
     assert "adapter_options" not in read_json(project, project / "project.json")
     file_record = read_files(project)[0]
     state = read_json(project, project / str(file_record["document_adapter_state"]))
-    assert state["state"]["ruby_mode"] == "parenthetical"
+    assert state["state"]["ruby_mode"] == "short_xml"
 
 
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
@@ -1116,6 +1169,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "endpoint": "/v1/models/${model}:generate",
         "stream": True,
         "stream_endpoint": "/v1/models/${model}:stream",
+        "stream_read_timeout_enabled": False,
         "model": "provider/model",
         "extra_body": {
             "provider": {
@@ -1126,6 +1180,9 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     }
     saved = client.put("/api/v1/global/presets/openrouter", json=custom)
     assert saved.status_code == 200
+    assert client.get(
+        "/api/v1/global/presets/openrouter"
+    ).json()["stream_read_timeout_enabled"] is False
     preview = client.get(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
@@ -1812,6 +1869,12 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     assert payload["source"] == "Alice"
     assert payload["total"] == 2
     assert [item["segment_id"] for item in payload["hits"]] == ["F0001-S000001"]
+    assert set(payload["hits"][0]) == {
+        "segment_id",
+        "file_id",
+        "line_index",
+        "source",
+    }
     assert payload["hits"][0]["source"] == "Alice walks alone"
 
     second = client.post(
@@ -2444,6 +2507,54 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
 
 
 @pytest.mark.asyncio
+async def test_web_task_manager_preserves_expected_errors_and_hides_unexpected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager()
+
+    async def expected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise UsageError("模型协议错误")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", expected_failure)
+    expected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[expected["task_id"]].asyncio_task
+    assert manager.get(expected["task_id"])["error"] == {
+        "error": "模型协议错误",
+        "code": "usage_error",
+        "params": {},
+    }
+
+    async def unexpected_failure(*_: object, **__: object) -> dict[str, object]:
+        raise RuntimeError("secret diagnostic detail")
+
+    monkeypatch.setattr("app.web_tasks.run_translation", unexpected_failure)
+    unexpected = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[unexpected["task_id"]].asyncio_task
+    state = manager.get(unexpected["task_id"])
+    assert state["status"] == "failed"
+    assert state["error"] == {
+        "error": "内部错误",
+        "code": "internal_error",
+        "params": {},
+    }
+    assert "secret" not in str(state["error"])
+
+
+@pytest.mark.asyncio
 async def test_web_task_exposes_live_progress_and_separate_token_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2466,6 +2577,7 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
                 "output_tokens": 5,
                 "total_tokens": 17,
                 "available": True,
+                "partial": False,
             }
         )
         progress(2, 0, 2)
@@ -2479,6 +2591,7 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
                 "output_tokens": 5,
                 "total_tokens": 17,
                 "available": True,
+                "partial": False,
             },
         }
 
@@ -2502,6 +2615,42 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
     assert state["usage"]["output_tokens"] == 5
     assert diagnostics.snapshot()["metrics"]["input_tokens"] == 12
     assert diagnostics.snapshot()["metrics"]["output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_active_tasks_excludes_terminal_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    entered = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+
+    active = manager.active_tasks()
+    assert len(active) == 1
+    assert active[0]["task_id"] == started["task_id"]
+    assert active[0]["project_id"] == read_json(
+        project, project / "project.json"
+    )["project_id"]
+
+    await manager.cancel(started["task_id"])
+    await manager.tasks[started["task_id"]].asyncio_task
+    assert manager.active_tasks() == []
 
 
 def test_web_task_options_include_completed_terminology_scans(
@@ -2558,7 +2707,7 @@ def test_web_task_manager_allows_one_task_and_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    projects_root, _ = make_project(tmp_path)
+    projects_root, project = make_project(tmp_path)
     entered = asyncio.Event()
 
     async def fake_translation(*_: object, **__: object) -> dict[str, object]:
@@ -2574,6 +2723,12 @@ def test_web_task_manager_allows_one_task_and_cancellation(
         )
         assert first.status_code == 200
         task_id = first.json()["task_id"]
+        active = client.get("/api/v1/tasks/active")
+        assert active.status_code == 200
+        assert [item["task_id"] for item in active.json()["tasks"]] == [task_id]
+        assert active.json()["tasks"][0]["project_id"] == read_json(
+            project, project / "project.json"
+        )["project_id"]
         second = client.post(
             "/api/v1/projects/sample/tasks",
             json={"stage": "translation"},
@@ -2586,6 +2741,7 @@ def test_web_task_manager_allows_one_task_and_cancellation(
             if state["status"] == "cancelled":
                 break
         assert state["status"] == "cancelled"
+        assert client.get("/api/v1/tasks/active").json()["tasks"] == []
 
 
 class FakeModelsResponse:

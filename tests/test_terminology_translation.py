@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.errors import RequestSizeError
+from app.errors import FatalExternalError, RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
 from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
@@ -41,6 +42,32 @@ async def create_project(
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
     return project
+
+
+def terminology_response(source: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": llm_jsonl(
+                            [
+                                {
+                                    "type": "term",
+                                    "source": source,
+                                    "category": "人物",
+                                    "description": "人物",
+                                    "preferred_translation": f"译-{source}",
+                                    "aliases": [],
+                                }
+                            ]
+                        )
+                    }
+                }
+            ]
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -160,6 +187,7 @@ async def test_terminology_publishes_and_translation_uses_terms(
         "output_tokens": 5,
         "total_tokens": 15,
         "available": True,
+        "partial": False,
     }
     assert term_summary["usage"] == expected_usage
     assert translation_summary["usage"] == expected_usage
@@ -459,6 +487,108 @@ async def test_incremental_terminology_failure_keeps_task_active_for_retry(
     assert retried["failed"] == 0
     assert retried["published"] is True
     assert load_terms(project)["terms_revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_terminology_cancel_records_completed_scans_and_retry_reuses_them(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    second = tmp_path / "second.txt"
+    second.write_text("Bob", encoding="utf-8")
+    add_project_files(project, [str(second)])
+    second_started = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def interrupted_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["source_segments"][0]
+        if source == "Bob":
+            second_started.set()
+            await release_second.wait()
+        return terminology_response(source)
+
+    interrupted_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(interrupted_handler)
+    )
+    task = asyncio.create_task(
+        run_terminology(project, Scope(), http_client=interrupted_client)
+    )
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await interrupted_client.aclose()
+
+    manifest = max(
+        (
+            read_json(project, path)
+            for path in (project / "runs").glob("*/manifest.json")
+        ),
+        key=lambda item: str(item["started_at"]),
+    )
+    assert manifest["status"] == "interrupted"
+    assert manifest["completed_segment_count"] == 1
+    assert manifest["failed_segment_count"] == 0
+
+    retried_sources: list[str] = []
+
+    def retry_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["source_segments"][0]
+        retried_sources.append(source)
+        return terminology_response(source)
+
+    retry_client = httpx.AsyncClient(transport=httpx.MockTransport(retry_handler))
+    try:
+        retried = await run_terminology(project, Scope(), http_client=retry_client)
+    finally:
+        await retry_client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert retried_sources == ["Bob"]
+    assert retried["published"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminology_fatal_error_records_completed_and_remaining_counts(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice")
+    second = tmp_path / "second.txt"
+    second.write_text("Bob", encoding="utf-8")
+    add_project_files(project, [str(second)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["source_segments"][0]
+        if source == "Bob":
+            return httpx.Response(401, text="unauthorized")
+        return terminology_response(source)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(FatalExternalError, match="鉴权失败"):
+            await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    manifest = max(
+        (
+            read_json(project, path)
+            for path in (project / "runs").glob("*/manifest.json")
+        ),
+        key=lambda item: str(item["started_at"]),
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["completed_segment_count"] == 1
+    assert manifest["failed_segment_count"] == 1
 
 
 @pytest.mark.asyncio

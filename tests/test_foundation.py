@@ -273,8 +273,13 @@ def test_config_rejects_malformed_target_language_tag(
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigError, match="BCP 47"):
+    with pytest.raises(ConfigError, match="BCP 47") as raised:
         load_config(path)
+    assert raised.value.code == "config_field_error"
+    assert raised.value.params == {
+        "field": "project.target_language_tag",
+        "reason": "invalid_bcp47",
+    }
 
 
 @pytest.mark.parametrize("value", ["zh-Hans", "pt-BR", "sr-Latn-RS", "x-private"])

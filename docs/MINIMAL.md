@@ -135,7 +135,7 @@ MVP 不实现：
 - Python LLM Adapter、自动 Provider 判断或通用工作流引擎。
 - 远程插件、自动安装、插件市场或插件沙箱。
 - Repository、Service、依赖注入或迁移框架。
-- 通用术语编辑器或复杂自动冲突裁决。
+- 无人工确认即覆盖术语库的自动冲突裁决。
 - 自动翻译质量评分。
 - 源 Segment 的增量编辑。
 - TXT 字节级往返、原编码复刻或换行符保真。
@@ -210,6 +210,8 @@ config 整文件覆盖，Prompt/Adapter/Preset 按文件或 ID 覆盖：
 config/config.toml
 prompts/terminology.zh-CN.middle.txt
 prompts/terminology.en.middle.txt
+prompts/terminology_decision.zh-CN.middle.txt
+prompts/terminology_decision.en.middle.txt
 prompts/translation.zh-CN.middle.txt
 prompts/translation.en.middle.txt
 prompts/proofreading.zh-CN.middle.txt
@@ -299,9 +301,12 @@ EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC
 不匹配版本的 DOCTYPE、SYSTEM-only 声明和不支持的 PUBLIC 标识均拒绝。
 
 完整 `<ruby>` 子树和紧随的尾文本作为文本流中的一个成员；它与同一文本流中的
-普通 `text`/`tail` 槽、其他 Ruby 按源文顺序组成一个 Segment。导入前可选择
-`aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
-（`原文（Ruby）`）；选项固化于 File 的 Adapter 状态，不是项目运行设置。
+普通 `text`/`tail` 槽、其他 Ruby 按源文顺序组成一个 Segment。新导入可选择
+`aozora`（默认）、`short_xml`、`compact` 或 `base_only`；选项固化于 File
+的 Adapter 状态，不是项目运行设置。`base_only` 完全删除 Ruby/reading；
+其余模式的用户文本均使用 `｜base《reading》`。`short_xml` 和 `compact`
+只把 Ruby 分别作为 `<r><b>base</b><y>reading</y></r>` 和
+`⟦R:base|Y:reading⟧` 提交模型，输出在存储前还原青空。
 更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。纯译文
 EPUB 将整条译文写入该语义 Segment 的首个可用位置，清空其余普通槽并移除全部
 Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追加译文。使用
@@ -310,7 +315,14 @@ Ruby；双语 EPUB 保留完整源句和 Ruby，只在整个 Segment 末尾追�
 `｜已翻译base《目标语言适用reading》`，系统会在译文区域恢复 EPUB Ruby；reading
 必须翻译或转写，无法适配目标语言时应去掉标记和 reading，仅返回已翻译 base。
 没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML 或跨行的形式保持普通
-文本。`base_only` 和 `parenthetical` 不还原 Ruby。
+文本。`base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容
+状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.4 可读取
+0.3/0.4 状态，不改写旧 File、Segment、locator 或阶段结果。
+
+Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
+相邻同符号 Ruby 和单 Ruby 的重复符号合并为一个 reading；普通文本、空白、
+块边界和受控内联格式边界会切断合并。用户 source/result 使用合并后的青空；
+最终 EPUB 译文区按 Unicode 扩展字素簇展开为逐字 Ruby，空白保持普通文本。
 嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。
 
 EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露普通内联
@@ -408,11 +420,13 @@ fallback_encoding = "utf-8"
 [llm]
 preset = "default"
 preset_terminology = ""
+preset_terminology_decision = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 temperature_terminology = 0.1
+temperature_terminology_decision = 0.1
 temperature_translation = 0.2
 temperature_proofreading = 0.1
 temperature_polishing = 0.3
@@ -1005,6 +1019,91 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 该副条目的独立译名、类别和说明。相关推荐中的“快速移除”复用可恢复的 disabled
 移除语义；有成员的组主仍不可移除。
 
+### 自动术语决策（开发版）
+
+自动术语决策是独立、显式触发的 `terminology_decision` LLM 阶段，不属于
+`run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
+只读一致性锚点。宿主一次扫描 Segment 收集 source/alias 命中 Segment 数和最多五个
+上下文样本；`hit_count` 是至少命中一个 source/alias 形式的 Segment 数，不是字符出现
+次数。样本先保留最多五个不同 `(file_id, part_id)` 内容边界的首个命中，再以其余不同
+Segment 按源文顺序补满，因此单边界项目同样最多可提供五条样本。随后系统进行分批裁决
+和跨术语一致性复核。
+
+两个阶段共用项目的可编辑决策规则，但使用各自的固定阶段指令。第一阶段 anchors 是
+人工决定；第二阶段 anchors 包含人工决定，以及第一阶段 disposition 已确定、当前启用
+且没有任何未解决冲突的自动状态。第一阶段或已完成第二阶段检查点的 `needs_review`、
+disabled 及仍有冲突的状态不得锚定其他术语。所有 anchors 始终只读且不得输出 decision。
+模型只能保留、更新、软移除或标为 `needs_review`；不能修改 source/normalized 或虚构 alias。
+
+固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action
+都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、
+`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。Patch 只能包含
+实际修改的 `category`、`description`、`preferred_translation`、`aliases`、
+`group_primary`；宿主将它应用于输入状态并生成完整 `after`。空 Patch 只允许第二阶段
+显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。
+`description` 可以保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文
+样本或可见 anchor 支持，不得增加无证据事实。宿主校验类型、空值归一化和 no-op，语义
+正确性由用户在草案中查看完整旧文本和新文本后确认。alias 只能选用输入中可见的既有
+源文形式。
+
+LLM 的 `terms[]` 和 `anchors[]` 在对应术语存在证据时携带可选、只读 `conflicts`，结构沿用
+`categories`、`preferred_translations`、`alias_primaries`、`group_claims`。去重候选是证据，
+不是投票统计或允许值白名单；全文证据支持时模型可以提出候选之外的新值。第一阶段存在
+类别或推荐译名冲突时不得 `keep`；`update` 必须为每个冲突标量提供非空决议，也可以
+`disable` 或 `needs_review`。`conflicts` 禁止出现在 decision 输出中。
+格式修正请求携带结构化错误、上轮无效记录、已接受项和本轮唯一目标；完整校验通过的
+无关关系组件不会重复请求。连续出现相同错误时，各未决硬关系组件独立修正，但组件内部
+不可拆分。批级 JSONL、end 或未知记录错误仍使该次请求整体未决。
+
+alias 转移必须是完整的多术语关系操作：接收方必须是启用的根术语，原所有者必须释放
+该 alias、被禁用，或在 source 转移时直接成为接收方成员。单边新增其他术语仍持有的
+source/alias、规范化后重复 alias 和把自身 source 作为 alias 都会被宿主拒绝；跨批次才能
+确认的关系冲突会按暂定状态重建。最终仍未解决的 alias/组争用会恢复整个依赖组件的
+运行前状态并列入 `needs_review`，不会产生隐式归组或部分建议。
+
+第二阶段的 `terms` 和 `anchors` 输入携带只读 `disabled`，`terms` 还携带只读的第一阶段
+action/reason；该字段不得出现在 decision 输出中。第二阶段 `keep` 保留第一阶段 disposition
+及理由，只有显式 `update`、`disable`、`needs_review` 才覆盖；第二阶段 `needs_review`
+恢复运行前状态。`disable` 软禁用，`update` 应用 Patch 并启用术语。
+
+两个阶段分别按当前 Preset 的 `max_parallel` 有界并发，第一阶段全部完成并形成统一
+暂定状态后才进入第二阶段。每个完整校验通过的批次原子写入 Run 检查点；用户取消或
+进程中断后可续用同一 running Run，已经完成的批次不再请求，未完成批次使用当前配置
+和 Prompt。续作剩余第二阶段前，宿主将已完成的第二阶段检查点叠加到第一阶段暂定状态，
+重新计算每个术语的有效 disposition 和冲突，再用这一不可变快照生成 focus、可信 anchors
+和关系校验状态；当前并发兄弟批次不会动态互相影响。当前决策规则版本为 7。源术语
+revision 或规则版本已变化时，在创建 continuation 前拒绝续作；规则版本 6 的 running Run
+必须由用户显式结束并强制新建，不提供双协议兼容路径。中断 manifest 只记录安全错误码、
+原因码、最后 request ID 和完成步数，不保存 Prompt、响应或术语正文。强制重做会结束旧 Run 并忽略检查点。
+检查点不是草案，不能审核或应用。
+
+完整结果保存为绑定源术语 revision、模型和 Prompt 指纹的待处理草案。单术语建议可
+整条拒绝，分组和 alias 转移等多术语建议作为不可拆的组合建议。应用前重新校验 revision、
+规则版本、未裁决标量冲突、override 保护、重建后的 alias 碰撞和组拓扑；无关 description、
+alias 或组修改不得借完整 override 清除冲突。通过后在一个 SQLite 事务中写入确认后的 overrides、
+术语库新 revision 和 Run 状态；全部拒绝不增加 revision。草案保留应用前快照，只有
+应用后术语 revision 未再变化时才允许以新 revision 严格撤销。失败或替换失败不会留下
+部分草案，也不会丢弃原草案。旧规则草案仍可查看、保存拒绝项或丢弃，但应用时要求重新生成。
+
+审核界面使用术语页内的全宽工作区。建议默认接受，用户可以按类型、接受状态和文本筛选，
+冲突候选和关系争用也参与搜索。Proposal 与 `needs_review` 保存对应的只读冲突证据；界面
+展示历史类别/推荐译名候选、alias 归属和组关系争用。`needs_review` 不参与自动应用；应用或全部拒绝完成后，
+它们进入持久人工待办队列。队列状态写入对应 Run manifest，旧 Run 缺少处理字段时按未处理
+读取；同一 normalized 以最新完成 Run 的人工项为准。存在待处理草案时，旧队列继续保留但
+在审核工作区中暂不开放，避免用户同时处理两个决策世代；启动新一轮决策前必须确认，只有
+新草案成功应用（或全部建议被拒绝完成）后才会替换旧队列，生成失败、取消、丢弃或替换失败
+均保留旧队列。用户可从队列定位术语编辑或关系编辑，并显式标记或恢复“已处理”，该状态
+不受后续术语 revision 变化影响。
+
+持久证据中的每个样本包含 `file_id`、`part_id`、`segment_id`、命中形式及 `source`
+上下文片段；片段围绕实际命中位置截取，并标记为普通 source、Aozora base 或 Aozora
+reading 视图。构造一次 LLM 请求时，focus 与 anchors 的可见样本共用连续的请求内
+`boundary_ref`：相同 `(file_id, part_id)` 使用相同编号。模型样本只包含 `boundary_ref`、
+`source`、`match_view` 和 `matched_forms`，不包含三个持久定位 ID；编号不表示全局 ID、
+顺序或权重。Token 预估和实际请求使用同一投影。草案、人工待办和审核接口仍保存完整定位；
+旧草案缺少 `part_id` 时仍可查看。Anchor 使用 `compact` 策略时只移除样本，不改变按
+Segment 计算的命中计数。
+
 ### 术语交换
 
 `terms-import` 和 `terms-export` 只接受 `.json`、`.csv`。JSON 顶层固定为
@@ -1339,8 +1438,9 @@ Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset �
 整个命令共享一个 `httpx.AsyncClient`：
 
 - 非流式请求的 connect、read、write 和 pool timeout 都使用
-  `request_timeout_seconds`；流式请求把它作为连接及连续读取的空闲超时，不限制
-  整个生成总时长。
+  `request_timeout_seconds`；流式请求默认把它作为连接及连续读取的空闲超时，
+  `stream_read_timeout_enabled = false` 时仅取消连续读取超时，建连、写入和连接池
+  等待仍受该值限制。流式请求不限制整个生成总时长。
 - 连接池上限从 `max_parallel` 派生。
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
@@ -1359,12 +1459,16 @@ HTTP 重试：
 - 退避使用有上限的指数退避和 jitter。
 
 启用流式时，宿主要求响应为 UTF-8 SSE，并严格处理 CRLF/LF、注释、多行 `data:`
-和任意 HTTP chunk 边界。OpenAI-compatible 使用 `[DONE]`，OpenAI Responses
-使用 `response.completed`，Anthropic 使用 `message_stop`，Gemini 使用最终
-`finishReason`；每条流必须命中对应终止事件。宿主在后台聚合正文、reasoning 和
-声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件前超时、
-读取超时、EOF、流内服务错误或 HTTP 可重试错误会清空本次聚合并沿
-`http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生重复计费。
+和任意 HTTP chunk 边界。Adapter 的 `terminal` 声明显式终止方式：OpenAI-compatible
+使用 `[DONE]`，OpenAI Responses 使用 `response.completed`，Anthropic 使用
+`message_stop`，Gemini 使用最终 `finishReason`。Adapter 可额外显式设置
+`streaming.allow_clean_eof=true`，此时 HTTP 2xx、至少收到一个合法事件且自然到达
+body EOF 也算传输终止；缺省为 false，其他内置 Adapter 仍要求显式终止事件。EOF 前
+的所有事件都会被读取，尾部 usage 不会因缺少 `[DONE]` 而丢失。宿主在后台聚合正文、
+reasoning 和声明的 usage，只有终止后完整结果通过现有格式解析与校验才持久化。首事件
+前超时、读取超时、未启用 clean EOF 的 EOF、流内服务错误或 HTTP 可重试错误会清空
+本次聚合并沿 `http_max_attempts` 重试，不隐式改发非流式请求；部分流中断可能产生
+重复计费。
 Provider 可能在外层 HTTP 200 的 SSE 中报告最终错误（例如
 `finish_reason=error`、上游状态 504）；这类事件按流内错误处理，不会进入格式
 修复或保存半成品。诊断和 Debug 同时保留实际 `http_status` 与可选的
@@ -1553,8 +1657,8 @@ python -m app.main run-all PROJECT
   扫描中已经解析的候选。
 - `terms-publish-partial` 在当前术语扫描未运行且存在候选时显式发布部分结果；Web
   端要求同样的确认，不提供自动发布或自动修复路径。
-- `--resume-run`：仅用于四个独立 LLM 阶段，续用最近同阶段 running Run。
-- `--decline-run`：仅用于四个独立 LLM 阶段，明确结束该候选并创建新 Run。
+- `--resume-run`：用于四个主要 LLM 阶段和 `terms-decide`，续用最近同阶段 running Run。
+- `--decline-run`：用于四个主要 LLM 阶段和 `terms-decide`，明确结束该候选并创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
   仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
 - `--document-adapter`：用于带输入的 init 或 files-add，显式选择输入 Adapter；
@@ -1739,15 +1843,26 @@ Ctrl/Cmd/Shift 经典多选限定文件范围，未选择时导出全部。项�
 审校、apply 和 export。
 
 Web 与 CLI 使用同一 SQLite 项目数据库、应用内核和持久化记录。同一项目的写任务
-通过非阻塞文件锁互斥，冲突时明确失败。后台任务状态只存在于当前 Web 进程，重启
-后仍由项目 Run 与 Segment 记录恢复业务进度。
+通过非阻塞文件锁互斥，冲突时明确失败。WebTask 的临时状态只存在于当前 Web 进程；
+浏览器刷新或关闭后，前端通过 `GET /api/v1/tasks/active` 重新发现仍为
+`queued`、`running` 或 `cancelling` 的任务。Web 进程重启不会恢复旧的取消句柄，
+但项目 Run 与 Segment 记录仍按既有机制保留业务进度。
 
-Web 顶部的全局任务状态条在项目概览、导出、设置和窄屏布局中持续显示最近
-任务，直到下一任务开始。状态条提供运行项目、阶段、状态、已完成/失败/待处理
-与总 Segment、三段式进度、当前 Run 累计输入与输出 Tokens，以及运行中的取消
-入口；复用 Segment 计入已完成，不显示 Combined Tokens。失败数量可点击跳转到
-当前阶段的错误筛选；错误行只显示稳定的安全错误分类和摘要。完成、失败和取消
-状态只保留在当前页面会话，刷新后不从已结束 Run 重建。
+Web 在版本化 localStorage 中保存最近选中的 `project_id`。页面重新打开时先恢复该
+项目（外部项目仍按已保存的精确路径重新打开），再将活动任务按稳定项目 ID 关联；
+项目失效时清理选择并回退到首个可用项目。顶部全局任务状态条在项目概览、导出、
+设置和窄屏布局中只显示当前项目的活动任务，刷新后可恢复阶段、状态、已完成/失败/
+待处理与总 Segment、三段式进度、当前 Run 累计输入与输出 Tokens，以及运行中的取消
+入口。`cancelling` 状态不重复显示取消按钮；完成、失败和取消状态只保留在当前页面
+会话，重新打开时不从已结束 Run 重建。其他项目若有活动任务，仅在项目选择器显示
+“运行中”徽标和数量提示，切换到该项目后才展示其详细状态并开始轮询。复用 Segment
+计入已完成，不显示 Combined Tokens；失败数量可点击跳转到当前阶段的错误筛选，
+错误行只显示稳定的安全错误分类和摘要。
+
+这不是完整的多 Projects 并行任务管理：不提供多任务顶部列表、任务中心、并排进度、
+批量取消或跨项目统一操作，也不保证一个页面同时查看多个项目的详细进度、Token、
+错误或终态。后端仍允许不同项目同时运行；本次前端一次只完整管理当前项目，跨标签页
+并发启动、跨客户端实时发现和多项目终态历史不在范围内。
 
 Web 仪表盘不依赖当前项目，可查看全局日志和当前运行的请求并发数、平均请求延迟、
 P95 请求延迟、HTTP 错误、重试、当前限流等待请求数、累计输入/输出 Tokens 与总吞吐量。当前
@@ -1787,11 +1902,12 @@ Web 只在术语、翻译、校对和润色页面提供阶段启动入口。每�
 
 ### 凭据与 Preset 引用
 
-LLM Preset schema v3 使用显式单凭据引用 `credential: {kind, name}`，并以
+LLM Preset schema v4 使用显式单凭据引用 `credential: {kind, name}`，并以
 `stream` 与 `stream_endpoint` 控制可选 SSE：
 `environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，
-不隐式 fallback。schema 2 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
-迁移并默认关闭流式；Run 内历史 v2 快照只按非流式读取，不改写审计文件。v1 的
+不隐式 fallback。schema 2/3 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子
+迁移，分别默认关闭流式、启用 SSE 读取超时；Run 内历史 v2/v3 快照只在内存中
+补齐默认值，不改写审计文件。v1 的
 `api_key_env` 字段已移除，加载时明确拒绝并提示改用
 `credential`。密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、
 Run 快照或阶段指纹。

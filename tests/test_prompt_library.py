@@ -132,6 +132,22 @@ def test_prompt_api_reports_sync_and_keeps_library_separate(
     assert detail.status_code == 200
     assert detail.json()["content"] == "LIBRARY ONLY"
     assert "用户消息为 JSON" in detail.json()["assembled"]
+
+    assert (
+        client.put(
+            "/api/v1/prompt-library/terminology_decision/zh-CN/decision-policy",
+            json={"content": "共同术语政策"},
+        ).status_code
+        == 200
+    )
+    decision_detail = client.get(
+        "/api/v1/prompt-library/terminology_decision/zh-CN/decision-policy"
+    )
+    assert decision_detail.status_code == 200
+    assert set(decision_detail.json()["assembled_phases"]) == {
+        "adjudication",
+        "consistency",
+    }
     assert project_prompt_path.read_text(encoding="utf-8") == changed_global
     assert (
         client.get("/api/v1/global/prompts/translation").json()["content"]

@@ -28,6 +28,14 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     (root / "llm_presets" / "custom.json").write_text(
         json.dumps(preset), encoding="utf-8"
     )
+    preset_v3 = json.loads(
+        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
+    )
+    preset_v3["schema_version"] = 3
+    preset_v3.pop("stream_read_timeout_enabled")
+    (root / "llm_presets" / "custom-v3.json").write_text(
+        json.dumps(preset_v3), encoding="utf-8"
+    )
     adapter = json.loads(
         (ROOT / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
     )
@@ -37,7 +45,7 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
         json.dumps(adapter), encoding="utf-8"
     )
 
-    assert migrate_llm_resources(base=tmp_path) == 2
+    assert migrate_llm_resources(base=tmp_path) == 3
     assert migrate_llm_resources(base=tmp_path) == 0
     upgraded_preset = json.loads(
         (root / "llm_presets" / "custom.json").read_text("utf-8")
@@ -45,9 +53,15 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     upgraded_adapter = json.loads(
         (root / "llm_adapters" / "custom.json").read_text("utf-8")
     )
-    assert upgraded_preset["schema_version"] == 3
+    assert upgraded_preset["schema_version"] == 4
     assert upgraded_preset["stream"] is False
     assert upgraded_preset["stream_endpoint"] == ""
+    assert upgraded_preset["stream_read_timeout_enabled"] is True
+    upgraded_v3 = json.loads(
+        (root / "llm_presets" / "custom-v3.json").read_text("utf-8")
+    )
+    assert upgraded_v3["schema_version"] == 4
+    assert upgraded_v3["stream_read_timeout_enabled"] is True
     assert upgraded_preset == load_llm_preset(
         root / "llm_presets" / "custom.json"
     ).definition
@@ -73,7 +87,7 @@ def test_llm_resource_migration_uses_user_root_override_without_base(
     assert migrate_llm_resources() == 1
     assert (
         json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
-        == 3
+        == 4
     )
 
 

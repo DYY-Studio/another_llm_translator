@@ -8,8 +8,14 @@ export type Stage =
   | "export"
   | "settings";
 
+export type SettingsField =
+  | "target_language"
+  | "target_language_tag"
+  | "output_encoding";
+
 export type LLMStage =
   | "terminology"
+  | "terminology_decision"
   | "translation"
   | "proofreading"
   | "polishing";
@@ -90,6 +96,12 @@ export interface ProjectSummary {
   segment_count: number;
 }
 
+export interface ErrorPayload {
+  code: string;
+  params: Record<string, unknown>;
+  error: string;
+}
+
 export interface PromptLibraryEntry {
   id: string;
   digest: string;
@@ -106,9 +118,10 @@ export interface TranslationValidatorSummary {
 export interface TaskState {
   task_id: string;
   project: string;
+  project_id: string;
   stage: string;
   status: string;
-  error?: string | null;
+  error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
   completed_segments: number;
   failed_segments: number;
@@ -123,6 +136,7 @@ export interface TaskUsage {
   output_tokens: number;
   total_tokens: number;
   available: boolean;
+  partial: boolean;
 }
 
 export type DiagnosticsRequestStatus =
@@ -168,6 +182,7 @@ export interface DiagnosticsResponse {
     input_tokens: number;
     output_tokens: number;
     usage_available: boolean;
+    usage_partial: boolean;
     throughput_input_tokens_per_second: number | null;
     throughput_output_tokens_per_second: number | null;
     throughput_tokens_per_second: number | null;
@@ -247,12 +262,32 @@ export interface TaskOptions {
   failed: number;
   current_fingerprint_completed: number;
   mismatched_fingerprint_completed: number;
+  protected?: number;
+  has_pending_draft?: boolean;
+  estimated_requests?: number;
+  estimated_input_tokens?: number;
+  overflow_policy?: {
+    allow_soft_target_overflow: boolean;
+    anchor_overflow_mode: "error" | "trim" | "compact";
+  };
   running_run: {
     run_id: string;
     started_at: string | null;
     scope: Record<string, unknown> | null;
     previous: { model: string; endpoint: string };
     current: { model: string; endpoint: string };
+    completed_steps?: number;
+    total_steps?: number;
+    resume_compatible?: boolean;
+    resume_incompatibility_reason?: string | null;
+    last_interruption?: {
+      at: string;
+      error_code: string;
+      reason: string;
+      request_id?: string;
+      completed_steps: number;
+      total_steps: number;
+    };
   } | null;
 }
 
@@ -260,6 +295,22 @@ export interface RunDecision {
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
+}
+
+export interface TermDecisionConflicts {
+  categories: string[];
+  preferred_translations: string[];
+  alias_primaries: Array<{
+    alias: string;
+    primary_source: string;
+    reason: "policy" | "cycle" | "multiple_owners" | "group_collision";
+  }>;
+  group_claims: Array<{
+    entry: string;
+    claimed_by: string;
+    alias: string;
+    reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
+  }>;
 }
 
 export interface Term {
@@ -271,22 +322,80 @@ export interface Term {
   aliases: string[];
   group_primary: string | null;
   disabled: boolean;
-  conflicts: {
-    categories: string[];
-    preferred_translations: string[];
-    alias_primaries: Array<{
-      alias: string;
-      primary_source: string;
-      reason: "policy" | "cycle" | "multiple_owners";
-    }>;
-    group_claims: Array<{
-      entry: string;
-      claimed_by: string;
-      alias: string;
-      reason: "policy" | "multiple_owners" | "cycle" | "group_collision";
-    }>;
-  };
+  conflicts: TermDecisionConflicts;
   has_conflicts: boolean;
+}
+
+export interface TermDecisionState {
+  normalized: string;
+  source: string;
+  category: string | null;
+  description: string | null;
+  preferred_translation: string | null;
+  aliases: string[];
+  group_primary: string | null;
+  disabled: boolean;
+}
+
+export interface TermDecisionEvidence {
+  hit_count: number;
+  source_hit_count: number;
+  alias_hit_counts: Record<string, number>;
+  samples: Array<{
+    file_id: string;
+    part_id?: string;
+    segment_id: string;
+    source: string;
+    match_view?: string;
+    matched_forms?: Array<{ kind: "source" | "alias"; value: string }>;
+  }>;
+}
+
+export interface TermDecisionProposal {
+  proposal_id: string;
+  kind: "term_update" | "relationship";
+  normalized: string[];
+  before: TermDecisionState[];
+  after: TermDecisionState[];
+  changes: string[];
+  reason: string;
+  evidence: Record<string, TermDecisionEvidence>;
+  conflicts?: Record<string, TermDecisionConflicts>;
+}
+
+export interface TermDecisionDraft {
+  run_id: string;
+  source_terms_revision: number;
+  proposals: TermDecisionProposal[];
+  needs_review: Array<{
+    normalized: string;
+    source: string;
+    reason: string;
+    evidence: TermDecisionEvidence;
+    conflicts?: TermDecisionConflicts;
+  }>;
+  rejected_proposal_ids: string[];
+}
+
+export interface TermDecisionManualReviewItem {
+  run_id: string;
+  normalized: string;
+  source: string;
+  reason: string;
+  evidence: TermDecisionEvidence;
+  conflicts?: TermDecisionConflicts;
+  resolved: boolean;
+}
+
+export interface TermDecisionReviewState {
+  draft: TermDecisionDraft | null;
+  rollback: { run_id: string; applied_terms_revision: number } | null;
+  manual_review: {
+    items: TermDecisionManualReviewItem[];
+    total: number;
+    resolved: number;
+    remaining: number;
+  };
 }
 
 export interface TermsResponse {
@@ -372,10 +481,12 @@ export interface ProjectConfig {
   llm: {
     preset: string;
     preset_terminology: string;
+    preset_terminology_decision: string;
     preset_translation: string;
     preset_proofreading: string;
     preset_polishing: string;
     temperature_terminology: number;
+    temperature_terminology_decision: number;
     temperature_translation: number;
     temperature_proofreading: number;
     temperature_polishing: number;
@@ -386,7 +497,7 @@ export interface ProjectConfig {
   chunking: {
     target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
-    cross_boundary_batching: LLMStage[];
+    cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
@@ -397,6 +508,10 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
+  };
+  terminology_decision: {
+    allow_soft_target_overflow: boolean;
+    anchor_overflow_mode: "error" | "trim" | "compact";
   };
   validation: {
     translation: {
@@ -434,7 +549,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 3;
+  schema_version: 4;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -452,6 +567,7 @@ export interface LLMPreset {
   request_timeout_seconds: number;
   stream: boolean;
   stream_endpoint: string;
+  stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
 }
 

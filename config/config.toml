@@ -23,14 +23,17 @@ fallback_encoding = "utf-8"
 [llm]
 # 全局实时引用的命名 LLM Preset。连接、模型、Token 能力和限速由 Preset 提供。
 preset = "default"
-# 四阶段可分别覆盖全局 Preset；空字符串表示使用上面的全局 Preset。
+# 各 LLM 阶段可分别覆盖全局 Preset；空字符串表示使用上面的全局 Preset。
 preset_terminology = ""
+preset_terminology_decision = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 # 术语提取阶段的采样温度。
 temperature_terminology = 0.1
+# 自动术语决策阶段的采样温度。
+temperature_terminology_decision = 0.1
 # 翻译阶段的采样温度。
 temperature_translation = 0.2
 # 校对建议阶段的采样温度。
@@ -89,6 +92,13 @@ case_insensitive = true
 max_terms_per_segment = 100
 # alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性组化。
 alias_primary_collision = "merge"
+
+[terminology_decision]
+# 自动术语决策中，单术语超过软目标但未超过模型硬限制时是否继续执行。
+allow_soft_target_overflow = true
+# Anchors 使请求超过硬限制时的处理：error 直接停止，trim 从末尾移除，
+# compact 保留 Anchors 与命中计数但移除上下文样本。
+anchor_overflow_mode = "error"
 
 [validation.translation]
 # 启用的翻译校验器 ID；可由可信 Python 插件扩展。原文残留默认关闭。

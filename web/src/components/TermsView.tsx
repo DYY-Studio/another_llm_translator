@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { api } from "../api";
-import { translate, translateError, type Language } from "../i18n";
-import type { RelatedTerm, RelatedTermsResponse, Term, TermHitsResponse, TermsResponse } from "../types";
+import { api, apiErrorFromResponse } from "../api";
+import { errorMessage, translate, type Language } from "../i18n";
+import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
 
 interface TermForm {
   source: string;
@@ -30,6 +31,13 @@ interface TermsCacheEntry {
   focusedKey: string;
   scrollTop: number;
 }
+
+const emptyManualReview: TermDecisionReviewState["manual_review"] = {
+  items: [],
+  total: 0,
+  resolved: 0,
+  remaining: 0,
+};
 
 // Survives tab switches so returning renders the term list instantly. Keyed
 // by project; cleared when the project changes so cached data never leaks
@@ -88,11 +96,15 @@ export function TermsView({
   focusFailures = false,
   language,
   onFindSegment,
+  task,
+  onTask,
 }: {
   project: string;
   focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
+  task: TaskState | null;
+  onTask: (task: TaskState) => void;
 }) {
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
@@ -106,6 +118,12 @@ export function TermsView({
   const [clearOpen, setClearOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [decisionOpen, setDecisionOpen] = useState(false);
+  const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
+  const [manualReview, setManualReview] = useState(emptyManualReview);
+  const [decisionDraftPending, setDecisionDraftPending] = useState(false);
+  const [manualFocusId, setManualFocusId] = useState<string | null>(null);
+  const [termActionsOpen, setTermActionsOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
   const [partialOpen, setPartialOpen] = useState(false);
   const [showScanFailures, setShowScanFailures] = useState(false);
@@ -166,6 +184,7 @@ export function TermsView({
     }
     setData(null);
     selection.reset();
+    setManualFocusId(null);
     termsRestoredRef.current = false;
   }
   if (!termsRestoredRef.current) {
@@ -189,7 +208,19 @@ export function TermsView({
     setMessage("");
     void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
       .then(setData)
-      .catch((error) => setMessage(String(error)));
+      .catch((error) => setMessage(errorMessage(error, language)));
+  }, [project]);
+
+  useEffect(() => {
+    void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
+      .then((value) => {
+        setManualReview(value.manual_review);
+        setDecisionDraftPending(Boolean(value.draft));
+      })
+      .catch(() => {
+        setManualReview(emptyManualReview);
+        setDecisionDraftPending(false);
+      });
   }, [project]);
 
   useEffect(() => {
@@ -248,7 +279,7 @@ export function TermsView({
         if (requestId === hitsRequestRef.current) setHits(value);
       })
       .catch((error) => {
-        if (requestId === hitsRequestRef.current) setHitsError(String(error));
+        if (requestId === hitsRequestRef.current) setHitsError(errorMessage(error, language));
       })
       .finally(() => {
         if (requestId === hitsRequestRef.current) setHitsLoading(false);
@@ -289,7 +320,7 @@ export function TermsView({
         setRelated(value);
       })
       .catch((error) => {
-        if (requestId === relatedRequestRef.current) setRelatedError(String(error));
+        if (requestId === relatedRequestRef.current) setRelatedError(errorMessage(error, language));
       })
       .finally(() => {
         if (requestId === relatedRequestRef.current) setRelatedLoading(false);
@@ -307,7 +338,7 @@ export function TermsView({
           ? { ...value, hits: [...current.hits, ...value.hits] }
           : current
       )))
-      .catch((error) => setHitsError(String(error)))
+      .catch((error) => setHitsError(errorMessage(error, language)))
       .finally(() => setHitsLoading(false));
   }
 
@@ -391,6 +422,63 @@ export function TermsView({
     setMessage("");
   }
 
+  function manualItemId(item: TermDecisionManualReviewItem) {
+    return `${item.run_id}:${item.normalized}`;
+  }
+
+  const focusedManual = manualFocusId
+    ? manualReview.items.find((item) => manualItemId(item) === manualFocusId) ?? null
+    : null;
+  const openManualItems = manualReview.items.filter((item) => !item.resolved);
+
+  function openDecision(tab: "proposals" | "manual" = "proposals") {
+    if (tab === "manual" && decisionDraftPending) return;
+    setDecisionInitialTab(tab);
+    setDecisionOpen(true);
+  }
+
+  function updateDecisionReview(value: TermDecisionReviewState) {
+    setManualReview(value.manual_review);
+    setDecisionDraftPending(Boolean(value.draft));
+  }
+
+  function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
+    const term = data?.terms.find((value) => value.normalized === item.normalized) ?? null;
+    setDecisionOpen(false);
+    setManualFocusId(manualItemId(item));
+    setSearch("");
+    setOnlyConflicts(false);
+    setShowDisabled(Boolean(term?.disabled));
+    setEditorTab(tab);
+    if (term) {
+      selection.reset(term.normalized);
+      focusTerm(term);
+    } else {
+      selection.reset();
+      setForm(emptyForm);
+      setMessage(translate("terms.decisionManualTermMissing", language));
+    }
+  }
+
+  async function setManualResolved(item: TermDecisionManualReviewItem, resolved: boolean) {
+    try {
+      const result = await api<{ manual_review: TermDecisionReviewState["manual_review"] }>(
+        `/api/v1/projects/${project}/terms/decision/manual-review`,
+        { method: "PUT", body: JSON.stringify({ run_id: item.run_id, normalized: item.normalized, resolved }) },
+      );
+      setManualReview(result.manual_review);
+    } catch (error) {
+      setMessage(errorMessage(error, language));
+    }
+  }
+
+  function navigateManual(offset: number) {
+    if (!focusedManual) return;
+    const index = openManualItems.findIndex((item) => manualItemId(item) === manualItemId(focusedManual));
+    const next = openManualItems[index + offset] ?? openManualItems[0];
+    if (next) openManualEditor(next, editorTab === "group" ? "group" : "edit");
+  }
+
   async function save(disabled: boolean) {
     if (!form.source.trim()) {
       setMessage(translate("terms.sourceRequired", language));
@@ -424,7 +512,7 @@ export function TermsView({
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -448,7 +536,7 @@ export function TermsView({
       setMessage(translate("terms.removedCount", language, { count: value.removed }));
       setRemoveOpen(false);
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -472,7 +560,7 @@ export function TermsView({
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -510,7 +598,7 @@ export function TermsView({
       setClearOpen(false);
       setMessage(translate("terms.stageCleared", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -538,7 +626,7 @@ export function TermsView({
       } : emptyForm);
       setMessage(translate(restored ? "terms.materializedRestored" : "terms.materializedUnsaved", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -559,7 +647,7 @@ export function TermsView({
       setPendingPrimary(null);
       setMessage(translate("terms.primaryChanged", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -570,7 +658,7 @@ export function TermsView({
       await navigator.clipboard.writeText(candidate.source);
       setMessage(translate("terms.relatedCopied", language));
     } catch (error) {
-      setMessage(`${translate("terms.relatedCopyFailed", language)}: ${String(error)}`);
+      setMessage(`${translate("terms.relatedCopyFailed", language)}: ${errorMessage(error, language)}`);
     }
   }
 
@@ -624,7 +712,7 @@ export function TermsView({
       setPendingRelatedGroup(null);
       setMessage(translate("terms.relatedGrouped", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -655,7 +743,7 @@ export function TermsView({
       setPendingRelatedAlias(null);
       setMessage(translate("terms.relatedConverted", language, { count: value.aliases_added.length }));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -685,7 +773,7 @@ export function TermsView({
       setPendingGroupMemberAlias(null);
       setMessage(translate("terms.groupMemberConverted", language, { count: value.aliases_added.length }));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -712,7 +800,7 @@ export function TermsView({
       setPendingGroupMemberLeave(null);
       setMessage(translate("terms.groupMemberLeft", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -734,10 +822,24 @@ export function TermsView({
       setPendingRelatedRemoval(null);
       setMessage(translate("terms.relatedRemoved", language));
     } catch (error) {
-      setMessage(String(error));
+      setMessage(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
+  }
+
+  if (decisionOpen) {
+    return <TermDecisionWorkspace
+      project={project}
+      language={language}
+      task={task}
+      onTask={onTask}
+      onTerms={setData}
+      onClose={() => setDecisionOpen(false)}
+      initialTab={decisionInitialTab}
+      onReviewState={updateDecisionReview}
+      onNavigateToEditor={openManualEditor}
+    />;
   }
 
   return (
@@ -774,26 +876,36 @@ export function TermsView({
               <span>{translate("terms.conflicts", language)} {data?.conflict_count ?? 0}</span>
             </div>
           </div>
-          <div className="batch-toolbar segment-batch-toolbar">
+          <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
-              <button
+              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
+              {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
+              {selectedActive.length > 0 && <button
                 className="danger-button"
-                disabled={!selectedActive.length}
-                onClick={() => setRemoveOpen(true)}
-              >{translate("terms.removeSelected", language)}</button>
-              <button
-                className="danger-button"
-                disabled={!selectedTerms.length}
-                onClick={() => setDeleteOpen(true)}
-              >{translate("terms.deletePermanently", language)}</button>
-              <button
-                className="danger-button"
-                disabled={saving || !canClearStage}
-                onClick={() => setClearOpen(true)}
-              >{translate("terms.clearStage", language)}</button>
+                onClick={() => { setTermActionsOpen(false); setRemoveOpen(true); }}
+              >{translate("terms.removeSelected", language)}</button>}
+              <details
+                className="term-actions-menu"
+                open={termActionsOpen}
+                onToggle={(event) => setTermActionsOpen(event.currentTarget.open)}
+              >
+                <summary className="quiet-button">{translate("terms.moreActions", language)}</summary>
+                <div className="term-actions-popover">
+                  <button
+                    className="danger-button"
+                    disabled={!selectedTerms.length}
+                    onClick={() => { setTermActionsOpen(false); setDeleteOpen(true); }}
+                  >{translate("terms.deletePermanently", language)}</button>
+                  <button
+                    className="danger-button"
+                    disabled={saving || !canClearStage}
+                    onClick={() => { setTermActionsOpen(false); setClearOpen(true); }}
+                  >{translate("terms.clearStage", language)}</button>
+                </div>
+              </details>
             </div>
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
@@ -881,6 +993,16 @@ export function TermsView({
         </div>
       </section>
       <section className="term-editor">
+        {focusedManual && <div className="manual-review-editor-bar">
+          <div><strong>{translate("terms.decisionManualEditorTitle", language)}</strong><span>{translate("terms.decisionManualProgress", language, { remaining: manualReview.remaining, total: manualReview.total, resolved: manualReview.resolved })}</span></div>
+          <div className="manual-review-editor-actions">
+            <button className="quiet-button" onClick={() => openDecision("manual")}>{translate("terms.decisionBackToQueue", language)}</button>
+            <button className="quiet-button" disabled={openManualItems.length < 2} onClick={() => navigateManual(-1)}>‹</button>
+            <button className="quiet-button" disabled={openManualItems.length < 2} onClick={() => navigateManual(1)}>›</button>
+            <button className="primary-button" onClick={() => void setManualResolved(focusedManual, !focusedManual.resolved)}>{focusedManual.resolved ? translate("terms.decisionRestoreManual", language) : translate("terms.decisionMarkHandled", language)}</button>
+          </div>
+          {!data?.terms.some((term) => term.normalized === focusedManual.normalized) && <small className="error-text">{translate("terms.decisionManualTermMissing", language)}</small>}
+        </div>}
         <div className="page-heading">
           <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
@@ -1352,7 +1474,7 @@ function TermImportDialog({
       });
       onImported(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setSaving(false);
     }
@@ -1396,12 +1518,7 @@ function TermExportDialog({
         `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}&source=${source}`,
       );
       if (!response.ok) {
-        const value = await response.json().catch(() => null);
-        const code: unknown = value?.code;
-        const localized = typeof code === "string"
-          ? translateError(code, value?.params ?? {})
-          : null;
-        throw new Error(localized || value?.error || translate("export.requestFailedStatus", language, { status: response.status }));
+        throw await apiErrorFromResponse(response);
       }
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
@@ -1411,7 +1528,7 @@ function TermExportDialog({
       URL.revokeObjectURL(url);
       onClose();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     }
   }
 
@@ -1453,7 +1570,7 @@ function PartialPublishDialog({
       await api(`/api/v1/projects/${project}/terms/publish-partial`, { method: "POST", body: JSON.stringify({ confirm: true }) });
       await onPublished();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setWorking(false);
     }

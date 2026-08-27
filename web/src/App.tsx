@@ -14,17 +14,19 @@ import type {
   ProjectSummary,
   RunDecision,
   ServerStatus,
+  SettingsField,
   Stage,
   TaskOptions,
   TaskState,
   ThemeMode,
 } from "./types";
-import { detectLanguage, setUiLanguage, translate, type Language } from "./i18n";
+import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { migrateLegacyLocalStorage, STORAGE_KEYS } from "./storageMigration";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
 const RECENT_PROJECTS_STORAGE_KEY = STORAGE_KEYS.recentProjects;
+const SELECTED_PROJECT_STORAGE_KEY = "another-llm-translator.selected-project.v1";
 migrateLegacyLocalStorage(window.localStorage);
 const runnable: Partial<Record<Stage, LLMStage>> = {
   terminology: "terminology",
@@ -61,6 +63,14 @@ function rememberProjectPath(path: string) {
   ]);
 }
 
+function readSelectedProjectId(): string {
+  try {
+    return window.localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState("");
@@ -70,10 +80,11 @@ export default function App() {
     segmentId: string;
   } | null>(null);
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
-  const [task, setTask] = useState<TaskState | null>(null);
+  const [tasks, setTasks] = useState<Record<string, TaskState>>({});
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
+  const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
@@ -91,6 +102,35 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
+  const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
+  const selectedProject = projects.find((item) => item.selector === project) ?? null;
+  const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
+  const runningProjectIds = new Set(
+    Object.values(tasks)
+      .filter((item) => ["queued", "running", "cancelling"].includes(item.status))
+      .map((item) => item.project_id),
+  );
+
+  const updateTask = useCallback((next: TaskState | null) => {
+    setTasks((current) => {
+      if (next === null) {
+        if (!selectedProject) return current;
+        const updated = { ...current };
+        delete updated[selectedProject.project_id];
+        return updated;
+      }
+      return { ...current, [next.project_id]: next };
+    });
+  }, [selectedProject]);
+
+  const loadActiveTasks = useCallback(async () => {
+    const value = await api<{ tasks: TaskState[] }>("/api/v1/tasks/active");
+    setTasks((current) => {
+      const updated = { ...current };
+      for (const next of value.tasks) updated[next.project_id] = next;
+      return updated;
+    });
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -117,7 +157,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setUiLanguage(language);
     document.documentElement.lang = language;
     document.title = translate("brand", language);
     try {
@@ -126,6 +165,15 @@ export default function App() {
       // The selected language still applies for this page when storage is unavailable.
     }
   }, [language]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    try {
+      window.localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProject.project_id);
+    } catch {
+      // The selected project still applies for this page when storage is unavailable.
+    }
+  }, [selectedProject]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -147,10 +195,24 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
-    const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
+    const [value, active] = await Promise.all([
+      api<{ projects: ProjectSummary[] }>("/api/v1/projects"),
+      api<{ tasks: TaskState[] }>("/api/v1/tasks/active"),
+    ]);
     setProjects(value.projects);
-    if (!project && value.projects[0]) setProject(value.projects[0].selector);
-  }, [project]);
+    setTasks((current) => {
+      const updated = { ...current };
+      for (const next of active.tasks) updated[next.project_id] = next;
+      return updated;
+    });
+    const storedProjectId = readSelectedProjectId();
+    setProject((current) => {
+      if (current && value.projects.some((item) => item.selector === current)) return current;
+      return value.projects.find((item) => item.project_id === storedProjectId)?.selector
+        ?? value.projects[0]?.selector
+        ?? "";
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!project) { setOverview(null); return; }
@@ -177,9 +239,9 @@ export default function App() {
       const failures = results.length - validPaths.length;
       if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
       await loadProjects();
-    }).catch((value) => setError(String(value)));
+    }).catch((value) => setError(value));
   }, []);
-  useEffect(() => { void refresh().catch((value) => setError(String(value))); }, [refresh]);
+  useEffect(() => { void refresh().catch((value) => setError(value)); }, [refresh]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
@@ -189,15 +251,19 @@ export default function App() {
     prefetchWorkspace(project);
   }, [project]);
   useEffect(() => {
+    if (!project) return;
+    void loadActiveTasks().catch((value) => setError(value));
+  }, [project, loadActiveTasks]);
+  useEffect(() => {
     if (!task || !["queued", "running", "cancelling"].includes(task.status)) return;
     const timer = window.setInterval(() => {
       void api<TaskState>(`/api/v1/tasks/${task.task_id}`).then((value) => {
-        setTask(value);
+        updateTask(value);
         if (!["queued", "running", "cancelling"].includes(value.status)) void refresh();
       });
     }, 800);
     return () => window.clearInterval(timer);
-  }, [task, refresh]);
+  }, [task, refresh, updateTask]);
 
   async function openRunDialog() {
     const taskStage = runnable[stage];
@@ -208,7 +274,7 @@ export default function App() {
         `/api/v1/projects/${project}/task-options/${taskStage}`,
       ));
     } catch (value) {
-      setError(String(value));
+      setError(value);
     } finally {
       setRunOptionsLoading(false);
     }
@@ -219,12 +285,12 @@ export default function App() {
     setRunOptions(null);
     setStarting(true);
     try {
-      setTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
+      updateTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
         body: JSON.stringify({ stage: runOptions.stage, language, ...decision }),
       }));
     } catch (value) {
-      setError(String(value));
+      setError(value);
       try {
         setRunOptions(await api<TaskOptions>(
           `/api/v1/projects/${project}/task-options/${runOptions.stage}`,
@@ -239,20 +305,34 @@ export default function App() {
 
   async function cancelRun() {
     if (!task) return;
-    setTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
+    updateTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
   }
 
   async function handleProjectDeleted(path: string) {
     writeRecentProjectPaths(readRecentProjectPaths().filter((value) => value !== path));
     setProject("");
     setOverview(null);
-    setTask(null);
+    if (selectedProject) {
+      setTasks((current) => {
+        const updated = { ...current };
+        delete updated[selectedProject.project_id];
+        return updated;
+      });
+    }
     setFailureFocus(null);
+    setSettingsField(null);
     await loadProjects();
   }
 
   function navigateStage(value: Stage) {
+    if (value !== "settings") setSettingsField(null);
     setStage(value);
+    setFailureFocus(null);
+  }
+
+  function openSettingsField(field: SettingsField) {
+    setSettingsField(field);
+    setStage("settings");
     setFailureFocus(null);
   }
 
@@ -262,7 +342,7 @@ export default function App() {
     );
     if (!target) return;
     setFailureFocus(target);
-    setStage(target);
+    setStage(target as Stage);
   }
 
   function jumpToSegment(source: string, segmentId: string) {
@@ -273,13 +353,14 @@ export default function App() {
 
   let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
   if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
-    else if (stage === "settings") content = <SettingsView project={project} language={language} />;
+    else if (stage === "settings") content = <SettingsView project={project} language={language} focusField={settingsField} onFocusConsumed={consumeSettingsFocus} />;
   else if (stage === "overview") content = (
     <Overview
       projects={projects}
       project={project}
       value={overview}
       onProject={setProject}
+      runningProjectIds={runningProjectIds}
       onCreate={() => setCreateOpen(true)}
       onFilesChanged={refreshProject}
       onDeleted={handleProjectDeleted}
@@ -287,10 +368,10 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} />;
+    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
-    } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} />;
+    } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
   if (serverStatus?.auth.required && !serverStatus.authed) {
@@ -298,10 +379,10 @@ export default function App() {
       <LoginView
         language={language}
         onLoggedIn={() => {
-          setError("");
+          setError(null);
           setWarningDismissed(false);
           setServerStatus((current) => current ? { ...current, authed: true } : current);
-          void loadProjects().catch((value) => setError(String(value)));
+          void loadProjects().catch((value) => setError(value));
         }}
       />
     );
@@ -336,7 +417,7 @@ export default function App() {
         {serverStatus?.lan.enabled && !serverStatus.auth.required && !warningDismissed && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setWarningDismissed(true)}>{translate("server.warningEnabled", language)}</button>
         )}
-        {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+        {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}

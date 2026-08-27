@@ -78,18 +78,23 @@ python -m app.web
 
 这些 Preset 只是示例，使用前必须核对端点、模型和限流设置。
 
-流式请求会持续接收 SSE 事件，以降低代理在等待完整响应时返回 HTTP 504 的概率。
-它不能解决上游迟迟不发送首事件或代理缓冲 SSE 的情况；连接中断时已收到的半成品
-会被丢弃并按既有重试次数重新请求，可能造成重复计费。只有完整响应通过格式解析和
-校验后才会写入 Segment。某些 Provider 会用外层 HTTP 200 传输错误事件；诊断中会
-分别显示实际 HTTP 状态和 Provider 报告的上游状态，例如“HTTP 200 · 上游 HTTP 504”。
-诊断页还会显示传输方式、事件数、接收字节数和首事件延迟，不会展示未校验的增量正文。
-
 ### 使用系统钥匙串
 
 在设置页的凭据管理中保存密钥，再让 Preset 通过 `keychain` 和凭据 ID 引用它。项目配置、Preset、Run 快照和日志只记录引用，不记录密钥正文。
 
 不要把 API Key 写入 TOML、Preset JSON、Prompt、项目源文件或日志。
+
+### 流式请求 (Stream)
+流式请求会持续接收 SSE 事件，以降低代理在等待完整响应时返回 HTTP 504 的概率；可配置允许接收 SSE 时忽视传输超时。
+
+部分 Adapter（内置 OpenAI-compatible）还显式兼容“至少收到一个合法事件后自然
+EOF”的 clean EOF；其他 Adapter 仍要求其声明的终止事件。它不能解决上游迟迟不发送
+首事件或代理缓冲 SSE 的情况；连接中断时已收到的半成品会被丢弃并按既有重试次数
+重新请求，可能造成重复计费。只有完整响应通过格式解析和校验后才会写入 Segment。
+
+某些 Provider 会用外层 HTTP 200 传输错误事件；诊断中会
+分别显示实际 HTTP 状态和 Provider 报告的上游状态，例如“HTTP 200 · 上游 HTTP 504”。
+诊断页还会显示传输方式、事件数、接收字节数和首事件延迟，不会展示未校验的增量正文。
 
 ## 3. 创建和管理项目
 
@@ -140,6 +145,29 @@ EPUB 青空 Ruby 中的 base 和 reading 会分别参与术语匹配；直接相
 会连续组合，普通正文会切断组合，base 与 reading 不会拼接。比如
 `｜漢《かん》｜字《じ》` 可以命中“漢字”和“かんじ”，同一术语重复命中只提供一次。
 
+#### 术语自动决策 (DEV)
+已发布术语库可以通过“自动决策（开发版）”显式生成两阶段审查草案。界面会先显示
+Preset、可处理/受保护术语数量及请求和 Token 估算；草案中可搜索、筛选并逐条拒绝建议，
+组合关系建议必须整体接受或拒绝。应用、丢弃、替换旧草案和撤销都需要再次确认。
+模型不会直接写入术语库；已有人工作为 override 的术语只作为一致性参考。应用后的移除
+仍是可恢复的 disabled，后续任何术语编辑或扫描发布都会让旧撤销点失效。
+
+自动决策的 `hit_count` 表示命中术语的 Segment 数，不是一个 Segment 内的字符出现次数。
+每个术语最多提供五条不同 Segment 的上下文：先覆盖不同 `(file_id, part_id)` 内容边界的
+首个命中，再按源文顺序补充其余 Segment，因此单文件项目也可以得到五条样本。模型只看到
+请求内连续编号的 `boundary_ref`；相同编号表示样本来自同一内容边界，不表示全局 ID、顺序
+或权重。草案和审核页仍保留完整 File、part 和 Segment 定位。
+
+历史类别、推荐译名和关系争用会作为去重证据交给模型，它们不是按票数选胜者的统计，也
+不是封闭的可选值列表；源文和全书上下文支持时，草案可以提出候选之外的新值。第一阶段
+不能保留未裁决的类别或推荐译名冲突；证据不足时会进入人工待办。Description 可以保留、
+清空，或基于当前说明、源文样本和可见参考整理成简洁的目标语说明，不能添加无证据事实。
+
+第二阶段只把人工决定和“第一阶段已确定、当前无冲突”的自动状态用作 anchors；
+`needs_review`、disabled 或仍有冲突的状态不会影响其他术语。审核页会展示并搜索历史候选、
+alias 归属和组关系争用，也会完整显示 Description 的旧文本与新文本。未解决关系组件会
+整体恢复到运行前状态后进入人工待办，应用草案前还会再次检查术语 revision 和冲突状态。
+
 ### 4.2 翻译
 
 进入“翻译”，选择运行范围并启动任务。已完成 Segment 默认复用；失败和未完成内容可以继续处理。
@@ -179,7 +207,9 @@ Preset 覆盖值，请在确认运行前核对这里的内容。
 
 阶段进度以 Segment 为单位持久化，而不是以一次临时 LLM 请求为单位。任务取消、网络失败或应用重启后，已成功的结果仍然保留，未成功内容可以继续执行。
 
-同一项目的写任务互斥；已经运行任务时，第二个写任务会明确失败。Web 后台任务状态仅存在于当前进程，但项目结果和 Run 记录会持久化。
+同一项目的写任务互斥；已经运行任务时，第二个写任务会明确失败。WebTask 的临时状态仅存在于当前 Web 进程，但页面刷新或关闭后重新打开时，前端会通过活动任务接口重新发现仍在排队、运行或取消中的任务，并恢复当前项目的进度、Token、错误和取消入口。完成、失败或已取消的任务不会在重新打开时重建；项目结果和 Run 记录仍会持久化，Web 进程重启也不会恢复旧的取消句柄。
+
+Web 会记住上次选中的项目 ID；外部项目先按已保存路径重新打开，再关联活动任务。顶部状态条一次只展示当前项目。其他同时运行的项目只在项目选择器显示“运行中”提示，切换到该项目后才查看详情和取消。本版本不提供完整的多 Projects 并行任务中心、并排进度、批量取消或跨项目统一操作。
 
 ## 5. 导出
 
@@ -207,8 +237,34 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 
 - 支持 OPF 2.0/3.0 和 spine XHTML。
 - 保留文档 part 边界及未翻译资源。
-- 支持 `aozora`、`base_only` 和 `parenthetical` Ruby 导入模式。
-- 导入选项在文件加入项目时确定；修改选项需要移除并重新导入。
+- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入.
+- 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
+
+#### Ruby 标签转换
+<small>Ruby的正文此处表记为`base`，注音表记为`reading`。`<ruby>base<rt>reading</rt></ruby>`</small>
+
+- 可将Ruby转换为 `aozora`、`short_xml`、`compact` 和 `base_only` 四种形式。
+-  `short_xml`/`compact` 只改变 LLM 看到的 Ruby；用户在界面上看到的仍是`aozora`。
+-  `base_only` 完全移除 reading，只留下 base。
+
+| ID | 格式 | 例 | 损坏重试 |
+| -- | -- | -- | :--: |
+| aozora | `｜base《reading》` | `｜漢字《かんじ》` | ❌ |
+| short_xml | `<r><b>base</b><y>reading</y></r>`| `<r><b>漢字</b><y>かんじ</y></r>` | ✅ |
+| compact | `⟦R:base\|Y:reading⟧` | `⟦R:漢字\|Y:かんじ⟧` | ✅ |
+| base_only | `base` | `漢字` | - |
+
+#### Ruby 连续强调符号压缩
+- 避免 LLM 在处理 Emphasis Ruby 时因连续Ruby出现文本理解不当、强调符号数不一致的情况
+- 连续 Emphasis Ruby 在用户可见内容和发送给LLM的内容中均合并，导出 EPUB 时会按可见字素簇恢复为
+  逐字 Ruby 强调。
+
+| 步骤 | 形式 |
+| -- | -- |
+| 原文 | `<ruby>漢<rt>·</rt></ruby><ruby>字<rt>·</rt></ruby>` |
+| 转换 (Aozora) | `｜漢《·》｜字《·》` |
+| 压缩 (用户/LLM) | `｜漢字《·》` |
+| 导出 | `<ruby>漢<rt>·</rt></ruby><ruby>字<rt>·</rt></ruby>` |
 
 ### SRT（独立插件）
 
@@ -348,9 +404,24 @@ python -m app.main terms-export novel glossary.csv
 python -m app.main terms-import novel glossary.json
 python -m app.main terms-export novel scanned.json --source scanned
 python -m app.main terms-publish-partial novel
+python -m app.main terms-decide novel --dry-run
+python -m app.main terms-decide novel
+python -m app.main terms-decide novel --resume-run
+python -m app.main terms-decide novel --force
+python -m app.main terms-decide-show novel
+python -m app.main terms-decide-apply novel --all --reject TDP-EXAMPLE
+python -m app.main terms-decide-rollback novel --confirm
 ```
 
 术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。
+`terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用
+`--replace-draft` 才能生成替代草案；替代生成失败时旧草案保持不变。`terms-decide-apply`
+必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次可撤销应用，且
+要求术语 revision 从应用后未发生变化。自动决策在每个阶段内按当前 Preset 的
+`max_parallel` 并发，两个阶段之间仍严格串行。取消任务后可用 `--resume-run` 复用已经
+完成的批次；剩余批次使用当前配置和 Prompt，并按检查点重新计算第二阶段的可信 anchors。
+规则版本 6 的 running Run 不可续作。`--force` 会结束未完成 Run 并从头重做，但不会隐式
+替换待审核草案。旧规则草案可以继续查看、拒绝或丢弃，应用时会要求重新生成。
 
 ### 导出
 

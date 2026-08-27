@@ -4,6 +4,7 @@ import codecs
 import os
 import tempfile
 from dataclasses import dataclass
+from html import escape as escape_html
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,6 +13,8 @@ import chardet
 from .errors import ProjectError
 
 _AOZORA_DELIMITERS = frozenset("｜《》\r\n<>")
+EMPHASIS_RUBY_CHARACTERS = frozenset("·・•◦●○◉◎▲△﹅﹆")
+_COMPACT_ESCAPES = frozenset("\\|⟦⟧")
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,113 @@ def aozora_match_views(value: str) -> tuple[str, ...]:
     return ("".join(base_parts), *reading_views)
 
 
+def _strict_aozora_fragments(
+    value: str,
+) -> list[tuple[str, str, str | None]] | None:
+    fragments, found_ruby = parse_aozora_text(value)
+    if not found_ruby:
+        return None
+    if value.count("｜") != sum(
+        kind == "ruby" for kind, _, _ in fragments
+    ):
+        return None
+    return fragments
+
+
+def compact_emphasis_aozora(value: str) -> str:
+    """Merge adjacent Aozora emphasis Ruby without touching ordinary Ruby."""
+    fragments = _strict_aozora_fragments(value)
+    if fragments is None:
+        return value
+    compacted: list[tuple[str, str, str | None]] = []
+    for kind, text, reading in fragments:
+        if kind != "ruby" or reading is None:
+            compacted.append((kind, text, reading))
+            continue
+        mark = reading[0]
+        emphasis = (
+            mark in EMPHASIS_RUBY_CHARACTERS
+            and all(character == mark for character in reading)
+        )
+        if not emphasis:
+            compacted.append((kind, text, reading))
+            continue
+        if (
+            compacted
+            and compacted[-1][0] == "ruby"
+            and compacted[-1][2] == mark
+        ):
+            previous_kind, previous_text, _ = compacted[-1]
+            compacted[-1] = (previous_kind, previous_text + text, mark)
+        else:
+            compacted.append((kind, text, mark))
+    return "".join(
+        f"｜{text}《{reading}》" if kind == "ruby" else text
+        for kind, text, reading in compacted
+    )
+
+
+def _escape_compact(value: str) -> str:
+    return "".join(
+        f"\\{character}" if character in _COMPACT_ESCAPES else character
+        for character in value
+    )
+
+
+def escape_model_ruby_literal(value: str, mode: str) -> str:
+    if mode == "short_xml":
+        return escape_html(value, quote=False)
+    if mode == "compact":
+        return _escape_compact(value)
+    return value
+
+
+def aozora_to_model_ruby(value: str, mode: str) -> str:
+    """Render strict Aozora Ruby in a model-only EPUB representation."""
+    fragments = _strict_aozora_fragments(compact_emphasis_aozora(value))
+    if fragments is None or mode == "aozora":
+        return value
+    parts: list[str] = []
+    for kind, text, reading in fragments:
+        if kind != "ruby":
+            parts.append(
+                escape_html(text, quote=False)
+                if mode == "short_xml"
+                else _escape_compact(text)
+            )
+            continue
+        assert reading is not None
+        if mode == "short_xml":
+            parts.append(
+                f"<r><b>{escape_html(text, quote=False)}</b>"
+                f"<y>{escape_html(reading, quote=False)}</y></r>"
+            )
+        elif mode == "compact":
+            parts.append(
+                f"⟦R:{_escape_compact(text)}|Y:{_escape_compact(reading)}⟧"
+            )
+        else:
+            raise ValueError(f"unsupported model Ruby mode: {mode}")
+    return "".join(parts)
+
+
+def aozora_safe_split_positions(value: str) -> tuple[int, ...]:
+    """Return character boundaries that do not split strict Aozora Ruby."""
+    fragments = _strict_aozora_fragments(value)
+    if fragments is None:
+        return tuple(range(1, len(value)))
+    positions: set[int] = set()
+    offset = 0
+    for kind, text, reading in fragments:
+        rendered = f"｜{text}《{reading}》" if kind == "ruby" else text
+        if kind == "text":
+            positions.update(range(offset + 1, offset + len(rendered)))
+        offset += len(rendered)
+        if 0 < offset < len(value):
+            positions.add(offset)
+    return tuple(sorted(positions))
+
+
 @dataclass(frozen=True)
 class ImportedFile:
     source_path: Path
@@ -171,6 +281,7 @@ class DocumentChoiceOption:
 class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
+    readable_versions: frozenset[str]
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
@@ -207,6 +318,15 @@ class DocumentAdapter(Protocol):
         target_language_tag: str,
         opaque_state: dict[str, Any] | None,
     ) -> list[Path]: ...
+
+
+def document_adapter_reads_version(
+    adapter: DocumentAdapter, version: str
+) -> bool:
+    readable = getattr(adapter, "readable_versions", None)
+    if readable is None:
+        return version == adapter.version
+    return version in readable
 
 
 def normalize_document_output(

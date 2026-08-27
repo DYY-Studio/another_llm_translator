@@ -1,3 +1,5 @@
+import type { ErrorPayload } from "./types";
+
 export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
@@ -15,6 +17,8 @@ const messages: Record<Language, Record<string, string>> = {
     "project.search": "搜索项目",
     "project.searchPlaceholder": "按项目名称或路径筛选",
     "project.noMatch": "没有匹配的项目",
+    "project.running": "运行中",
+    "project.otherRunning": "另有 {count} 个项目运行中",
     "nav.overview": "项目概览",
     "nav.diagnostics": "仪表盘",
     "nav.terminology": "术语",
@@ -31,6 +35,7 @@ const messages: Record<Language, Record<string, string>> = {
     "run.cancelled": "已取消",
     "run.completedCount": "已完成 {completed} · 失败 {failed} · 待处理 {pending} / {total}",
     "run.tokensUnavailable": "精确 Tokens 不可用",
+    "run.tokensPartial": "输入 {input} · 输出 {output} Tokens（不完整）",
     "run.cancel": "取消任务",
     "language.switch": "English",
     "theme.system": "跟随系统",
@@ -38,6 +43,7 @@ const messages: Record<Language, Record<string, string>> = {
     "theme.dark": "深色",
     "theme.current": "当前外观：{current}；切换为{next}",
     "stage.terminology": "术语",
+    "stage.terminologyDecision": "术语自动决策",
     "stage.translation": "翻译",
     "stage.proofreading": "校对",
     "stage.polishing": "润色",
@@ -50,6 +56,7 @@ const messages: Record<Language, Record<string, string>> = {
     "common.new": "新建",
     "common.delete": "删除",
     "common.remove": "移除",
+    "common.dismiss": "关闭提示",
     "shell.globalTaskStatus": "全局任务状态",
     "shell.taskProgress": "任务进度",
     "run.tokensInput": "输入",
@@ -119,6 +126,103 @@ const messages: Record<Language, Record<string, string>> = {
     "status.applied": "已应用",
     "status.error": "请求失败",
     "terms.search": "搜索术语",
+    "terms.autoDecision": "自动决策（开发版）",
+    "terms.moreActions": "更多操作",
+    "terms.manualReviewQueue": "人工待办 {count}",
+    "terms.manualReviewQueueProgress": "人工待办 {remaining}/{total}",
+    "terms.decisionTitle": "自动术语决策（开发版）",
+    "terms.decisionHint": "模型只生成草案；人工拒绝后再一次确认应用。已人工修改的术语仅作为一致性锚点。",
+    "terms.decisionScope": "可处理 {selected} · 受保护 {protected}",
+    "terms.decisionEstimate": "预计 {requests} 次请求 · 约 {tokens} 输入 Tokens",
+    "terms.decisionOverflowPolicy": "当前超限策略：软目标超限 {soft} · Anchor 超限 {mode}",
+    "terms.decisionOverflowError": "直接停止",
+    "terms.decisionOverflowTrim": "逐个移除 Anchor",
+    "terms.decisionOverflowCompact": "压缩证据",
+    "terms.decisionSoftAllowed": "允许",
+    "terms.decisionSoftBlocked": "停止",
+    "terms.decisionGenerate": "生成决策草案",
+    "terms.decisionRegenerate": "替换并重新生成",
+    "terms.decisionReplaceConfirm": "替换当前待处理草案？只有新草案完整生成后才会替换旧草案。",
+    "terms.decisionRunning": "正在执行两阶段术语审查…",
+    "terms.decisionCloseHint": "切换到其他页面不会中断任务；如需停止，请使用顶部任务栏的“取消任务”。",
+    "terms.decisionLoading": "正在加载草案和审核状态…",
+    "terms.decisionRevisionWarning": "当前草案已绑定现有术语库 revision",
+    "terms.decisionRevisionWarningHint": "对术语表的任何新增、编辑、移除或分组修改都会使草案失效；应用后本轮人工关注项会取代旧人工待办。",
+    "terms.decisionManualReplaceConfirm": "当前仍有 {remaining}/{total} 项人工待办。新一轮决策成功应用后会取代旧待办；如果新草案失败或被丢弃，旧待办仍会保留。确认开始？",
+    "terms.decisionResume": "继续未完成批次",
+    "terms.decisionResumeHint": "已保存 {completed} / {total} 个阶段项；继续时不会重复请求这些内容，剩余批次使用当前配置和 Prompt。",
+    "terms.decisionResumeIncompatible": "此 Run 使用旧版术语决策协议，不能续作。请结束旧 Run 并强制新建。",
+    "terms.decisionForce": "强制重做全部",
+    "terms.decisionForceHint": "结束旧 Run，不复用其检查点，并从第一阶段重新开始。",
+    "terms.decisionForceConfirm": "结束未完成 Run 并强制重做全部自动术语决策？",
+    "terms.decisionNoDraft": "当前没有待处理草案。",
+    "terms.decisionSearch": "搜索建议",
+    "terms.decisionAllKinds": "全部建议类型",
+    "terms.decisionTermUpdate": "单术语修改",
+    "terms.decisionRelationship": "组合关系修改",
+    "terms.decisionRelationshipPrimary": "组主条目：{source}",
+    "terms.decisionRelationshipMembers": "副条目：{sources}",
+    "terms.decisionAccepted": "接受",
+    "terms.decisionRejected": "拒绝",
+    "terms.decisionDisabled": "软移除",
+    "terms.decisionTranslations": "译名修改",
+    "terms.decisionStructural": "结构修改",
+    "terms.decisionBefore": "修改前",
+    "terms.decisionAfter": "修改后",
+    "terms.decisionBackToLibrary": "返回术语库",
+    "terms.decisionProposalTab": "建议审核",
+    "terms.decisionManualTab": "人工待办",
+    "terms.decisionAllStatus": "全部状态",
+    "terms.decisionAcceptedStatus": "将接受",
+    "terms.decisionRejectedStatus": "已拒绝",
+    "terms.decisionWillAccept": "将接受",
+    "terms.decisionFieldTranslation": "译名",
+    "terms.decisionFieldCategory": "类别",
+    "terms.decisionFieldDescription": "说明",
+    "terms.decisionFieldGroup": "关系",
+    "terms.decisionFieldAliases": "别名",
+    "terms.decisionFieldStatus": "状态",
+    "terms.decisionConflictEvidence": "查看冲突证据",
+    "terms.decisionConflictCategories": "历史类别候选",
+    "terms.decisionConflictTranslations": "历史推荐译名",
+    "terms.decisionConflictAliasPrimaries": "Alias 归属争用",
+    "terms.decisionConflictGroupClaims": "组关系争用",
+    "terms.decisionStandalone": "独立术语",
+    "terms.decisionMemberOf": "{source} 的成员",
+    "terms.decisionEnabledState": "启用",
+    "terms.decisionDisabledState": "软移除",
+    "terms.decisionNoVisibleChanges": "没有可折叠的字段变化",
+    "terms.decisionEvidence": "查看命中证据",
+    "terms.decisionSourceHits": "原文命中",
+    "terms.decisionPagination": "建议分页",
+    "terms.decisionNoMatch": "没有符合当前筛选的建议",
+    "terms.decisionNeedsReviewHint": "这些项目不参与自动应用，应用草案后会进入人工待办。",
+    "terms.decisionManualProgress": "人工待办：剩余 {remaining} / 共 {total}（已处理 {resolved}）",
+    "terms.decisionManualHint": "请在术语编辑器中确认字段或关系；完成后显式标记已处理。",
+    "terms.decisionManualSearch": "搜索人工待办",
+    "terms.decisionManualOpen": "未处理",
+    "terms.decisionManualResolved": "已处理",
+    "terms.decisionManualOpenBadge": "待处理",
+    "terms.decisionManualResolvedBadge": "已处理",
+    "terms.decisionManualEmpty": "没有符合当前筛选的人工待办。",
+    "terms.decisionManualTermMissing": "该术语已不在当前术语库中，但人工待办仍保留。",
+    "terms.decisionManualEditorTitle": "正在处理人工待办",
+    "terms.decisionBackToQueue": "返回人工待办",
+    "terms.decisionEditTerm": "编辑字段",
+    "terms.decisionViewRelation": "查看关系",
+    "terms.decisionMarkHandled": "标记已处理",
+    "terms.decisionRestoreManual": "恢复待处理",
+    "terms.decisionHits": "总命中",
+    "terms.decisionAliasHits": "Alias 命中",
+    "terms.decisionReject": "拒绝整条建议",
+    "terms.decisionRestore": "恢复接受",
+    "terms.decisionNeedsReview": "需要人工关注",
+    "terms.decisionApply": "应用接受项",
+    "terms.decisionApplyConfirm": "确认应用 {accepted} 条建议？将拒绝 {rejected} 条、软移除 {disabled} 条，并生成一个新术语 revision。",
+    "terms.decisionDiscard": "丢弃草案",
+    "terms.decisionDiscardConfirm": "确认丢弃当前术语决策草案？",
+    "terms.decisionRollback": "撤销上次应用",
+    "terms.decisionRollbackConfirm": "确认以一个新 revision 恢复应用前的术语库和人工修改？",
     "terms.new": "新增",
     "terms.conflictsOnly": "只看冲突",
     "terms.showRemoved": "显示已移除",
@@ -199,6 +303,7 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.groupPrimaryBadge": "组主：{source}",
     "terms.groupCountBadge": "组 · {count} 成员",
     "terms.groupPrimary": "组主条目",
+    "terms.groupMember": "副条目",
     "terms.groupEmpty": "未加入术语组",
     "terms.setPrimary": "设为主条目",
     "terms.setPrimaryTitle": "更换术语组主",
@@ -262,9 +367,11 @@ const messages: Record<Language, Record<string, string>> = {
     "diagnostics.concurrency": "并发数",
     "diagnostics.logicalRequests": "逻辑请求累计",
     "diagnostics.runTotal": "当前 Run 精确累计",
+    "diagnostics.runPartial": "当前 Run 统计不完整",
     "diagnostics.tokensPerSecond": "Tokens / 秒",
     "diagnostics.currentRun": "当前运行：{project} · {stage}",
     "diagnostics.usageComplete": "完整",
+    "diagnostics.usagePartial": "不完整",
     "diagnostics.averageLatency": "平均延迟",
     "diagnostics.p95Latency": "P95 延迟",
     "diagnostics.httpErrors": "HTTP 错误",
@@ -323,6 +430,7 @@ const messages: Record<Language, Record<string, string>> = {
     "reqStatus.failed": "失败",
     "reqStatus.interrupted": "已中断",
     "runDialog.title": "运行{stage}阶段",
+    "runDialog.decisionTitle": "运行自动术语决策",
     "runDialog.subtitle": "确认如何处理已有结果和未完成 Run。",
     "runDialog.currentPreset": "当前 Preset",
     "runDialog.total": "全部",
@@ -392,6 +500,7 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.useGlobalPreset": "使用全局 Preset",
     "settings.presetEmptyHint": "不选择时使用全局 Preset。",
     "settings.tempTerms": "术语温度",
+    "settings.tempTermDecision": "术语决策温度",
     "settings.tempTranslation": "翻译温度",
     "settings.tempProofreading": "校对温度",
     "settings.tempPolishing": "润色温度",
@@ -415,6 +524,15 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.contextDisabledRisk": "关闭或设为 0 后，格式修复等单段重试不会携带邻段上文，单独重译的段落可能与前后文用词不一致。",
     "settings.terminology": "术语",
     "settings.terminologyHint": "术语匹配与注入规则。",
+    "settings.terminologyDecision": "自动术语决策（开发版）",
+    "settings.terminologyDecisionHint": "控制自动术语决策的请求预算。软目标用于切片；硬限制由模型上下文和启用的 ITPM 共同决定。",
+    "settings.allowSoftTargetOverflow": "允许单术语超过软目标",
+    "settings.allowSoftTargetOverflowHint": "超过软目标但低于硬限制时仍执行；关闭后会明确停止并保留检查点。",
+    "settings.anchorOverflowMode": "Anchor 超限策略",
+    "settings.anchorOverflowModeHint": "error 直接停止；trim 从末尾移除 Anchor；compact 保留命中计数但删除 Anchor 上下文样本。",
+    "settings.anchorOverflowError": "直接停止",
+    "settings.anchorOverflowTrim": "逐个移除 Anchor",
+    "settings.anchorOverflowCompact": "紧凑证据",
     "settings.unicodeNormalization": "Unicode 归一化",
     "settings.unicodeHint": "用于术语去重与匹配；留空表示不做归一化。",
     "settings.unicodeNone": "不归一化",
@@ -488,6 +606,9 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.promptLibraryDeleted": "提示词仓库条目已删除",
     "settings.promptLanguage": "提示词语言",
     "settings.promptAssembled": "装配后完整提示词",
+    "settings.promptPhaseHint": "术语决策共用同一份用户规则；以下预览展示两个阶段实际发送的固定指令和完整 Prompt。",
+    "settings.promptPhaseAdjudication": "第一阶段：术语裁决",
+    "settings.promptPhaseConsistency": "第二阶段：一致性复核",
     "settings.promptAssembledEmpty": "保存中…",
     "preset.title": "LLM Preset",
     "preset.subtitle": "全局实时连接设置",
@@ -527,6 +648,8 @@ const messages: Record<Language, Record<string, string>> = {
     "preset.timeoutSecondsHint": "非流式请求覆盖连接、读取、写入和连接池等待；流式请求是连接及连续读取的空闲超时，不限制生成总时长。",
     "preset.streaming": "启用流式请求",
     "preset.streamingHint": "通过 SSE 持续接收响应，降低长时间等待导致的网关 504；断流会丢弃半成品并重试。",
+    "preset.streamReadTimeout": "SSE 读取超时",
+    "preset.streamReadTimeoutHint": "关闭后，SSE 长时间没有新事件也会继续等待；建连、写入和连接池等待仍受请求超时限制。",
     "preset.streamEndpoint": "流式 Endpoint",
     "preset.streamEndpointHint": "留空复用普通 Endpoint；Gemini 等 Provider 可填写专用流式路径。",
     "preset.extraBody": "附加 JSON Body",
@@ -669,6 +792,9 @@ const messages: Record<Language, Record<string, string>> = {
     "export.viewOutputs": "前往浏览输出目录",
     "export.searchPlaceholder": "按文件名过滤…",
     "export.noMatch": "没有匹配的文件",
+    "export.errorTitle": "导出尚未就绪",
+    "export.openProjectSettings": "前往项目设置",
+    "export.openStage": "前往{stage}阶段",
     "dialog.projectActions": "项目操作",
     "dialog.new": "新建项目",
     "dialog.open": "打开现有项目",
@@ -708,6 +834,8 @@ const messages: Record<Language, Record<string, string>> = {
     "project.search": "Search projects",
     "project.searchPlaceholder": "Filter by project name or path",
     "project.noMatch": "No matching projects",
+    "project.running": "Running",
+    "project.otherRunning": "{count} other project(s) running",
     "nav.overview": "Overview",
     "nav.diagnostics": "Dashboard",
     "nav.terminology": "Terms",
@@ -724,6 +852,7 @@ const messages: Record<Language, Record<string, string>> = {
     "run.cancelled": "Cancelled",
     "run.completedCount": "Done {completed} · Failed {failed} · Pending {pending} / {total}",
     "run.tokensUnavailable": "Exact token usage unavailable",
+    "run.tokensPartial": "Input {input} · output {output} tokens (incomplete)",
     "run.cancel": "Cancel task",
     "language.switch": "中文",
     "theme.system": "System",
@@ -731,6 +860,7 @@ const messages: Record<Language, Record<string, string>> = {
     "theme.dark": "Dark",
     "theme.current": "Appearance: {current}; switch to {next}",
     "stage.terminology": "Terms",
+    "stage.terminologyDecision": "Terminology decisions",
     "stage.translation": "Translation",
     "stage.proofreading": "Proofreading",
     "stage.polishing": "Polishing",
@@ -743,6 +873,7 @@ const messages: Record<Language, Record<string, string>> = {
     "common.new": "New",
     "common.delete": "Delete",
     "common.remove": "Remove",
+    "common.dismiss": "Dismiss",
     "shell.globalTaskStatus": "Global task status",
     "shell.taskProgress": "Task progress",
     "run.tokensInput": "Input",
@@ -812,6 +943,103 @@ const messages: Record<Language, Record<string, string>> = {
     "status.applied": "Applied",
     "status.error": "Request failed",
     "terms.search": "Search terms",
+    "terms.autoDecision": "Auto decisions (dev)",
+    "terms.moreActions": "More actions",
+    "terms.manualReviewQueue": "Manual queue {count}",
+    "terms.manualReviewQueueProgress": "Manual queue {remaining}/{total}",
+    "terms.decisionTitle": "Automatic terminology decisions (dev)",
+    "terms.decisionHint": "The model creates a draft only. Reject proposals individually, then explicitly apply the remainder. Manual overrides are read-only consistency anchors.",
+    "terms.decisionScope": "Eligible {selected} · protected {protected}",
+    "terms.decisionEstimate": "Estimated {requests} requests · about {tokens} input tokens",
+    "terms.decisionOverflowPolicy": "Overflow policy: soft target {soft} · Anchor overflow {mode}",
+    "terms.decisionOverflowError": "stop immediately",
+    "terms.decisionOverflowTrim": "trim Anchors",
+    "terms.decisionOverflowCompact": "compact evidence",
+    "terms.decisionSoftAllowed": "allowed",
+    "terms.decisionSoftBlocked": "stops",
+    "terms.decisionGenerate": "Generate decision draft",
+    "terms.decisionRegenerate": "Replace and regenerate",
+    "terms.decisionReplaceConfirm": "Replace the pending draft? The old draft remains until the replacement is generated completely.",
+    "terms.decisionRunning": "Running the two-pass terminology review…",
+    "terms.decisionCloseHint": "Leaving this page will not stop the task. Use the global task bar to cancel it.",
+    "terms.decisionLoading": "Loading the draft and review status…",
+    "terms.decisionRevisionWarning": "This draft is bound to the current terminology revision",
+    "terms.decisionRevisionWarningHint": "Any term add, edit, removal, or grouping change invalidates the draft. After application, this run's manual items replace the previous queue.",
+    "terms.decisionManualReplaceConfirm": "There are still {remaining}/{total} manual items. A successful new decision application will replace the previous queue; if generation fails or is discarded, the old queue remains. Start anyway?",
+    "terms.decisionResume": "Continue unfinished batches",
+    "terms.decisionResumeHint": "Saved {completed} / {total} phase items. Continuing will not request them again; remaining batches use the current configuration and Prompt.",
+    "terms.decisionResumeIncompatible": "This Run uses an incompatible terminology-decision protocol. End it and force a new Run.",
+    "terms.decisionForce": "Force redo all",
+    "terms.decisionForceHint": "End the old Run, ignore its checkpoint, and restart from phase one.",
+    "terms.decisionForceConfirm": "End the unfinished Run and redo all automatic terminology decisions?",
+    "terms.decisionNoDraft": "There is no pending draft.",
+    "terms.decisionSearch": "Search proposals",
+    "terms.decisionAllKinds": "All proposal types",
+    "terms.decisionTermUpdate": "Single-term update",
+    "terms.decisionRelationship": "Relationship update",
+    "terms.decisionRelationshipPrimary": "Primary term: {source}",
+    "terms.decisionRelationshipMembers": "Member: {sources}",
+    "terms.decisionAccepted": "Accepted",
+    "terms.decisionRejected": "Rejected",
+    "terms.decisionDisabled": "Disabled",
+    "terms.decisionTranslations": "Translation changes",
+    "terms.decisionStructural": "Structural changes",
+    "terms.decisionBefore": "Before",
+    "terms.decisionAfter": "After",
+    "terms.decisionBackToLibrary": "Back to terminology library",
+    "terms.decisionProposalTab": "Review proposals",
+    "terms.decisionManualTab": "Manual queue",
+    "terms.decisionAllStatus": "All statuses",
+    "terms.decisionAcceptedStatus": "Will accept",
+    "terms.decisionRejectedStatus": "Rejected",
+    "terms.decisionWillAccept": "Will accept",
+    "terms.decisionFieldTranslation": "Translation",
+    "terms.decisionFieldCategory": "Category",
+    "terms.decisionFieldDescription": "Description",
+    "terms.decisionFieldGroup": "Relationship",
+    "terms.decisionFieldAliases": "Aliases",
+    "terms.decisionFieldStatus": "Status",
+    "terms.decisionConflictEvidence": "View conflict evidence",
+    "terms.decisionConflictCategories": "Historical category candidates",
+    "terms.decisionConflictTranslations": "Historical translation candidates",
+    "terms.decisionConflictAliasPrimaries": "Alias ownership dispute",
+    "terms.decisionConflictGroupClaims": "Group relationship dispute",
+    "terms.decisionStandalone": "Standalone term",
+    "terms.decisionMemberOf": "Member of {source}",
+    "terms.decisionEnabledState": "Enabled",
+    "terms.decisionDisabledState": "Soft-removed",
+    "terms.decisionNoVisibleChanges": "No visible field changes",
+    "terms.decisionEvidence": "View hit evidence",
+    "terms.decisionSourceHits": "Source hits",
+    "terms.decisionPagination": "Proposal pagination",
+    "terms.decisionNoMatch": "No proposals match the current filters",
+    "terms.decisionNeedsReviewHint": "These items are not applied automatically; they enter the manual queue after the draft is applied.",
+    "terms.decisionManualProgress": "Manual queue: {remaining} remaining / {total} total ({resolved} handled)",
+    "terms.decisionManualHint": "Confirm the fields or relationship in the terminology editor, then explicitly mark the item handled.",
+    "terms.decisionManualSearch": "Search manual queue",
+    "terms.decisionManualOpen": "Open",
+    "terms.decisionManualResolved": "Handled",
+    "terms.decisionManualOpenBadge": "Needs handling",
+    "terms.decisionManualResolvedBadge": "Handled",
+    "terms.decisionManualEmpty": "No manual items match the current filters.",
+    "terms.decisionManualTermMissing": "This term is no longer in the current terminology library, but the manual item is retained.",
+    "terms.decisionManualEditorTitle": "Handling a manual item",
+    "terms.decisionBackToQueue": "Back to manual queue",
+    "terms.decisionEditTerm": "Edit fields",
+    "terms.decisionViewRelation": "View relationship",
+    "terms.decisionMarkHandled": "Mark handled",
+    "terms.decisionRestoreManual": "Reopen item",
+    "terms.decisionHits": "Total hits",
+    "terms.decisionAliasHits": "Alias hits",
+    "terms.decisionReject": "Reject proposal",
+    "terms.decisionRestore": "Accept again",
+    "terms.decisionNeedsReview": "Needs manual review",
+    "terms.decisionApply": "Apply accepted proposals",
+    "terms.decisionApplyConfirm": "Apply {accepted} proposals? {rejected} will be rejected and {disabled} terms disabled in one new terminology revision.",
+    "terms.decisionDiscard": "Discard draft",
+    "terms.decisionDiscardConfirm": "Discard the current terminology decision draft?",
+    "terms.decisionRollback": "Roll back last application",
+    "terms.decisionRollbackConfirm": "Restore the terminology library and overrides from before the application as a new revision?",
     "terms.new": "New",
     "terms.conflictsOnly": "Conflicts only",
     "terms.showRemoved": "Show removed",
@@ -892,6 +1120,7 @@ const messages: Record<Language, Record<string, string>> = {
     "terms.groupPrimaryBadge": "Primary: {source}",
     "terms.groupCountBadge": "Group · {count} members",
     "terms.groupPrimary": "Primary term",
+    "terms.groupMember": "Member",
     "terms.groupEmpty": "Not part of a term group",
     "terms.setPrimary": "Set as primary",
     "terms.setPrimaryTitle": "Change group primary",
@@ -955,9 +1184,11 @@ const messages: Record<Language, Record<string, string>> = {
     "diagnostics.concurrency": "Concurrency",
     "diagnostics.logicalRequests": "Logical requests in current run",
     "diagnostics.runTotal": "Exact total for current run",
+    "diagnostics.runPartial": "Current run: usage incomplete",
     "diagnostics.tokensPerSecond": "Tokens / second",
     "diagnostics.currentRun": "Current run: {project} · {stage}",
     "diagnostics.usageComplete": "Complete",
+    "diagnostics.usagePartial": "Incomplete",
     "diagnostics.averageLatency": "Average latency",
     "diagnostics.p95Latency": "P95 latency",
     "diagnostics.httpErrors": "HTTP errors",
@@ -1016,6 +1247,7 @@ const messages: Record<Language, Record<string, string>> = {
     "reqStatus.failed": "Failed",
     "reqStatus.interrupted": "Interrupted",
     "runDialog.title": "Run {stage} stage",
+    "runDialog.decisionTitle": "Run automatic terminology decisions",
     "runDialog.subtitle": "Choose how to handle existing results and unfinished Runs.",
     "runDialog.currentPreset": "Current Preset",
     "runDialog.total": "Total",
@@ -1085,6 +1317,7 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.useGlobalPreset": "Use global Preset",
     "settings.presetEmptyHint": "Uses the global Preset when empty.",
     "settings.tempTerms": "Terms temperature",
+    "settings.tempTermDecision": "Terminology decision temperature",
     "settings.tempTranslation": "Translation temperature",
     "settings.tempProofreading": "Proofreading temperature",
     "settings.tempPolishing": "Polishing temperature",
@@ -1108,6 +1341,15 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.contextDisabledRisk": "When off or 0, single-segment retries (e.g. format repair) carry no neighboring context; re-translated segments may diverge from surrounding wording.",
     "settings.terminology": "Terminology",
     "settings.terminologyHint": "Term matching and injection rules.",
+    "settings.terminologyDecision": "Automatic terminology decisions (dev)",
+    "settings.terminologyDecisionHint": "Control request budgets for automatic terminology decisions. The soft target controls batching; hard limits come from model context and enabled ITPM.",
+    "settings.allowSoftTargetOverflow": "Allow a single term over the soft target",
+    "settings.allowSoftTargetOverflowHint": "Run when above the soft target but below the hard limit; when off, stop explicitly and preserve the checkpoint.",
+    "settings.anchorOverflowMode": "Anchor overflow policy",
+    "settings.anchorOverflowModeHint": "error stops; trim removes Anchors from the tail; compact keeps hit counts but removes Anchor context samples.",
+    "settings.anchorOverflowError": "Stop with an error",
+    "settings.anchorOverflowTrim": "Trim Anchors one by one",
+    "settings.anchorOverflowCompact": "Compact evidence",
     "settings.unicodeNormalization": "Unicode normalization",
     "settings.unicodeHint": "Used for term deduplication and matching; empty disables normalization.",
     "settings.unicodeNone": "None",
@@ -1181,6 +1423,9 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.promptLibraryDeleted": "Prompt library entry deleted",
     "settings.promptLanguage": "Prompt language",
     "settings.promptAssembled": "Assembled full prompt",
+    "settings.promptPhaseHint": "Terminology decision shares one user policy; these previews show the distinct fixed instructions and full Prompt sent for each phase.",
+    "settings.promptPhaseAdjudication": "Phase 1: Adjudication",
+    "settings.promptPhaseConsistency": "Phase 2: Consistency review",
     "settings.promptAssembledEmpty": "Saving…",
     "preset.title": "LLM Preset",
     "preset.subtitle": "Global live connection settings",
@@ -1220,6 +1465,8 @@ const messages: Record<Language, Record<string, string>> = {
     "preset.timeoutSecondsHint": "For non-streaming requests this covers connect, read, write, and pool waits; for streaming it is the connect and continuous-read idle timeout, not a total generation limit.",
     "preset.streaming": "Enable streaming requests",
     "preset.streamingHint": "Receive SSE events continuously to reduce gateway 504s; interrupted partial output is discarded and retried.",
+    "preset.streamReadTimeout": "SSE read timeout",
+    "preset.streamReadTimeoutHint": "When disabled, the request keeps waiting even if no SSE events arrive; connect, write, and pool waits still use the request timeout.",
     "preset.streamEndpoint": "Streaming endpoint",
     "preset.streamEndpointHint": "Leave empty to reuse the regular endpoint; some providers such as Gemini require a dedicated path.",
     "preset.extraBody": "Extra JSON body",
@@ -1362,6 +1609,9 @@ const messages: Record<Language, Record<string, string>> = {
     "export.viewOutputs": "Open output directory",
     "export.searchPlaceholder": "Filter by filename…",
     "export.noMatch": "No matching files",
+    "export.errorTitle": "Export isn’t ready",
+    "export.openProjectSettings": "Open Project Settings",
+    "export.openStage": "Open {stage}",
     "dialog.projectActions": "Project actions",
     "dialog.new": "New project",
     "dialog.open": "Open existing project",
@@ -1411,6 +1661,9 @@ const errorCodes: Record<Language, Record<string, string>> = {
     "invalid_origin": "不允许的请求来源",
     "auth_required": "需要登录",
     "invalid_credentials": "用户名或密码错误",
+    "out_of_subnet": "客户端不在允许的网段内",
+    "internal_error": "服务发生内部错误，请查看服务日志",
+    "http_error": "请求失败：{status}",
   },
   en: {
     "usage_error": "Invalid operation",
@@ -1424,6 +1677,9 @@ const errorCodes: Record<Language, Record<string, string>> = {
     "invalid_origin": "Request origin not allowed",
     "auth_required": "Sign-in required",
     "invalid_credentials": "Invalid username or password",
+    "out_of_subnet": "The client is outside the allowed network",
+    "internal_error": "The service encountered an internal error; check the service log",
+    "http_error": "Request failed: {status}",
   },
 };
 
@@ -1452,28 +1708,128 @@ const termGroupReasons: Record<Language, Record<string, string>> = {
   },
 };
 
-let uiLanguage: Language = "zh-CN";
+const exportErrorReasons: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    missing_target_language_tag: "无法导出 EPUB：项目未设置目标语言标签。请在项目设置中填写 BCP 47 标签，例如 zh-Hans。",
+    missing_target_language: "无法导出 EPUB：项目未设置目标语言。请先在项目设置中填写目标语言。",
+    unrepresentable_output_encoding: "无法导出 {file}：输出编码 {encoding} 不能表示译文中的部分字符。请更改项目输出编码。",
+    missing_stage_results: "无法导出：{stage}阶段仍有 {count} 个片段缺少结果。请先完成该阶段。",
+    adapter_capability_missing: "当前 {adapter_id} 文档适配器不支持 {capability}。",
+    adapter_version_incompatible: "文件 {file_id} 的 {adapter_id} 适配器版本与当前版本不兼容，请重新导入源文件。",
+    adapter_state_invalid: "文件 {file_id} 的 {adapter_id} 导入状态无效，请重新导入源文件。",
+    missing_primary_title: "EPUB 缺少有效主标题，无法生成导出文件。请补充源文件元数据后重新导入。",
+  },
+  en: {
+    missing_target_language_tag: "EPUB export is unavailable because the project has no target language tag. Enter a BCP 47 tag such as zh-Hans in Project Settings.",
+    missing_target_language: "EPUB export is unavailable because the project has no target language. Set it in Project Settings first.",
+    unrepresentable_output_encoding: "Cannot export {file}: the {encoding} output encoding cannot represent some translated characters. Change the project output encoding.",
+    missing_stage_results: "Cannot export: {count} segments still lack {stage} results. Complete that stage first.",
+    adapter_capability_missing: "The {adapter_id} document adapter does not support {capability}.",
+    adapter_version_incompatible: "File {file_id} uses an incompatible version of the {adapter_id} adapter. Re-import the source file.",
+    adapter_state_invalid: "The imported {adapter_id} state for file {file_id} is invalid. Re-import the source file.",
+    missing_primary_title: "The EPUB has no valid primary title. Add the source metadata and re-import it before exporting.",
+  },
+};
 
-export function setUiLanguage(language: Language): void {
-  uiLanguage = language;
+const configFieldReasons: Record<Language, Record<string, string>> = {
+  "zh-CN": {
+    invalid_bcp47: "目标语言标签必须是格式正确的 BCP 47 标签，例如 zh-Hans。",
+  },
+  en: {
+    invalid_bcp47: "The target language tag must be a well-formed BCP 47 tag, such as zh-Hans.",
+  },
+};
+
+const stageNames: Record<Language, Record<string, string>> = {
+  "zh-CN": { translated: "翻译", proofread: "校对", polished: "润色" },
+  en: { translated: "translation", proofread: "proofreading", polished: "polishing" },
+};
+
+const broadErrorCodes = new Set([
+  "usage_error",
+  "config_error",
+  "project_error",
+  "storage_error",
+  "external_error",
+  "incomplete_error",
+]);
+
+function interpolate(
+  template: string,
+  params: Record<string, unknown>,
+  language: Language,
+): string {
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
+    const value = name === "stage"
+      ? stageNames[language][String(params[name] ?? "")] ?? params[name]
+      : params[name];
+    return value === undefined ? match : String(value);
+  });
 }
 
 export function translateError(
   code: string,
   params: Record<string, unknown>,
+  language: Language,
 ): string | null {
   if (code === "term_group_error") {
-    return termGroupReasons[uiLanguage][String(params.reason ?? "")] ?? null;
+    return termGroupReasons[language][String(params.reason ?? "")] ?? null;
   }
-  const template = errorCodes[uiLanguage][code];
+  if (code === "export_error") {
+    const template = exportErrorReasons[language][String(params.reason ?? "")];
+    return template ? interpolate(template, params, language) : null;
+  }
+  if (code === "config_field_error") {
+    const template = configFieldReasons[language][String(params.reason ?? "")];
+    return template ? interpolate(template, params, language) : null;
+  }
+  const template = errorCodes[language][code];
   if (!template) return null;
-  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-    String(params[name] ?? match),
-  );
+  return interpolate(template, params, language);
+}
+
+function isErrorPayload(value: unknown): value is ErrorPayload {
+  return typeof value === "object" && value !== null
+    && typeof (value as ErrorPayload).code === "string"
+    && typeof (value as ErrorPayload).params === "object"
+    && (value as ErrorPayload).params !== null
+    && !Array.isArray((value as ErrorPayload).params)
+    && typeof (value as ErrorPayload).error === "string";
+}
+
+export function formatErrorPayload(
+  payload: ErrorPayload,
+  language: Language,
+): string {
+  const localized = translateError(payload.code, payload.params, language);
+  if (!localized) {
+    return payload.error || translate("common.requestFailed", language);
+  }
+  if (
+    broadErrorCodes.has(payload.code)
+    && payload.error
+    && payload.error !== localized
+  ) {
+    return language === "zh-CN"
+      ? `${localized}：${payload.error}`
+      : `${localized}: ${payload.error}`;
+  }
+  return localized;
 }
 
 export function errorMessage(reason: unknown, language: Language): string {
-  return reason instanceof Error ? reason.message : translate("common.requestFailed", language);
+  if (
+    typeof reason === "object"
+    && reason !== null
+    && "payload" in reason
+    && isErrorPayload(reason.payload)
+  ) {
+    return formatErrorPayload(reason.payload, language);
+  }
+  if (isErrorPayload(reason)) return formatErrorPayload(reason, language);
+  if (reason instanceof Error && reason.message) return reason.message;
+  if (typeof reason === "string" && reason) return reason;
+  return translate("common.requestFailed", language);
 }
 
 export function detectLanguage(): Language {

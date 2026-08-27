@@ -8,12 +8,13 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .errors import ConfigError
+from .errors import ConfigError, ConfigFieldError
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
 
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
+LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision")
 
 SCHEMA: dict[str, Any] = {
     "project": {
@@ -25,10 +26,12 @@ SCHEMA: dict[str, Any] = {
     "llm": {
         "preset": None,
         "preset_terminology": None,
+        "preset_terminology_decision": None,
         "preset_translation": None,
         "preset_proofreading": None,
         "preset_polishing": None,
         "temperature_terminology": None,
+        "temperature_terminology_decision": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
         "temperature_polishing": None,
@@ -50,6 +53,10 @@ SCHEMA: dict[str, Any] = {
         "case_insensitive": None,
         "max_terms_per_segment": None,
         "alias_primary_collision": None,
+    },
+    "terminology_decision": {
+        "allow_soft_target_overflow": None,
+        "anchor_overflow_mode": None,
     },
     "validation": {
         "translation": {
@@ -161,13 +168,15 @@ def validate_config(config: dict[str, Any]) -> None:
     if target_language_tag and not is_well_formed_language_tag(
         target_language_tag
     ):
-        raise ConfigError(
-            "project.target_language_tag 必须是格式正确的 BCP 47 语言标签"
+        raise ConfigFieldError(
+            "project.target_language_tag 必须是格式正确的 BCP 47 语言标签",
+            field="project.target_language_tag",
+            reason="invalid_bcp47",
         )
     preset_id = config["llm"]["preset"]
     if not isinstance(preset_id, str) or not preset_id.strip():
         raise ConfigError("llm.preset 必须是非空字符串")
-    for stage in LLM_STAGES:
+    for stage in LLM_MODEL_STAGES:
         value = config["llm"][f"preset_{stage}"]
         if not isinstance(value, str):
             raise ConfigError(f"llm.preset_{stage} 必须是字符串")
@@ -207,6 +216,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("input.encoding_confidence_threshold 必须在 0 到 1 之间")
     for key in (
         "temperature_terminology",
+        "temperature_terminology_decision",
         "temperature_translation",
         "temperature_proofreading",
         "temperature_polishing",
@@ -300,6 +310,20 @@ def validate_config(config: dict[str, Any]) -> None:
         or max_terms <= 0
     ):
         raise ConfigError("terminology.max_terms_per_segment 必须是正整数")
+    decision_config = config["terminology_decision"]
+    if not isinstance(decision_config["allow_soft_target_overflow"], bool):
+        raise ConfigError(
+            "terminology_decision.allow_soft_target_overflow 必须是布尔值"
+        )
+    anchor_overflow_mode = decision_config["anchor_overflow_mode"]
+    if not isinstance(anchor_overflow_mode, str) or anchor_overflow_mode not in {
+        "error",
+        "trim",
+        "compact",
+    }:
+        raise ConfigError(
+            "terminology_decision.anchor_overflow_mode 必须是 error、trim 或 compact"
+        )
     if not isinstance(config["debug"]["enabled"], bool):
         raise ConfigError("debug.enabled 必须是布尔值")
     for key in (
@@ -370,6 +394,17 @@ def load_config(path: Path) -> dict[str, Any]:
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
+    terminology_decision = config.get("terminology_decision")
+    if terminology_decision is None:
+        terminology_decision = {}
+        config["terminology_decision"] = terminology_decision
+    if isinstance(terminology_decision, dict):
+        terminology_decision.setdefault("allow_soft_target_overflow", True)
+        terminology_decision.setdefault("anchor_overflow_mode", "error")
+    llm = config.get("llm")
+    if isinstance(llm, dict):
+        llm.setdefault("preset_terminology_decision", "")
+        llm.setdefault("temperature_terminology_decision", 0.1)
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
@@ -484,7 +519,7 @@ def resolve_global_config(
 
 
 def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
-    if stage is not None and stage not in LLM_STAGES:
+    if stage is not None and stage not in LLM_MODEL_STAGES:
         raise ConfigError(f"未知 LLM 阶段：{stage}")
     override = config["llm"].get(f"preset_{stage}", "") if stage else ""
     return str(override or config["llm"]["preset"])
@@ -521,6 +556,7 @@ def _resolve_llm_config(
                 "context_safety_margin_tokens",
                 "stream",
                 "stream_endpoint",
+                "stream_read_timeout_enabled",
             )
         }
     )

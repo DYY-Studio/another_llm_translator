@@ -15,6 +15,7 @@ dependencies = [
   "keyring>=25,<26",
   "psutil>=5.9,<7",
   "python-multipart>=0.0.20,<1",
+  "regex>=2024.11.6,<2027",
   "uvicorn>=0.30,<1",
 ]
 
@@ -38,6 +39,8 @@ prompts = [
   "prompts/proofreading.zh-CN.middle.txt",
   "prompts/terminology.en.middle.txt",
   "prompts/terminology.zh-CN.middle.txt",
+  "prompts/terminology_decision.en.middle.txt",
+  "prompts/terminology_decision.zh-CN.middle.txt",
   "prompts/translation.en.middle.txt",
   "prompts/translation.zh-CN.middle.txt",
 ]

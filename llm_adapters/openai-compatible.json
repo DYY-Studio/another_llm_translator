@@ -41,6 +41,7 @@
       {"pointer": "/choices/0/delta/reasoning"}
     ],
     "terminal": {"sentinel": "[DONE]"},
+    "allow_clean_eof": true,
     "error_events": [
       {
         "when": {

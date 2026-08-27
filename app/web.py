@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import (
-    LLM_STAGES,
+    LLM_MODEL_STAGES,
     dump_config,
     load_config,
     resolve_global_config,
@@ -50,6 +50,8 @@ from .errors import (
     InvalidCredentialsError,
     ProjectError,
     UsageError,
+    app_error_payload,
+    internal_error_payload,
 )
 from .execution import Scope, full_prompt
 from .llm_adapter import load_json_adapter
@@ -99,6 +101,14 @@ from .stages import (
     import_terms,
     publish_partial_terms,
     run_apply,
+)
+from .term_decision import (
+    apply_decision_draft,
+    decision_review_state,
+    discard_decision_draft,
+    rollback_decision,
+    save_decision_rejections,
+    set_manual_review_resolved,
 )
 from .user_config import effective_path, user_root, write_user
 from .web_store import WebStore
@@ -416,14 +426,19 @@ def create_app(
         if not loopback:
             if not config["lan"]["enabled"]:
                 return JSONResponse(
-                    {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                    {"error": "只允许本机访问", "code": "local_only", "params": {}},
+                    status_code=403,
                 )
             client_ip = request.client.host if request.client else ""
             if not _client_allowed_on_bind(
                 client_ip, config["lan"]["bind_address"]
             ):
                 return JSONResponse(
-                    {"error": "客户端不在允许的网段内", "code": "out_of_subnet"},
+                    {
+                        "error": "客户端不在允许的网段内",
+                        "code": "out_of_subnet",
+                        "params": {},
+                    },
                     status_code=403,
                 )
             path = request.url.path
@@ -443,13 +458,15 @@ def create_app(
                 and not valid_session(request.cookies.get(SESSION_COOKIE))
             ):
                 return JSONResponse(
-                    {"error": "需要登录", "code": "auth_required"}, status_code=401
+                    {"error": "需要登录", "code": "auth_required", "params": {}},
+                    status_code=401,
                 )
             return await call_next(request)
         host = request.headers.get("host", "").split(":", 1)[0]
         if host not in {"127.0.0.1", "localhost", "testserver", "testclient"}:
             return JSONResponse(
-                {"error": "只允许本机访问", "code": "local_only"}, status_code=403
+                {"error": "只允许本机访问", "code": "local_only", "params": {}},
+                status_code=403,
             )
         origin = request.headers.get("origin")
         if origin:
@@ -457,20 +474,18 @@ def create_app(
             origin_host = origin_host.split(":", 1)[0]
             if origin_host not in {"127.0.0.1", "localhost", "testserver"}:
                 return JSONResponse(
-                    {"error": "不允许的请求来源", "code": "invalid_origin"}, status_code=403
+                    {
+                        "error": "不允许的请求来源",
+                        "code": "invalid_origin",
+                        "params": {},
+                    },
+                    status_code=403,
                 )
         return await call_next(request)
 
     @app.exception_handler(AppError)
     async def app_error(_: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            {
-                "error": str(exc),
-                "code": exc.code,
-                "params": exc.params,
-            },
-            status_code=400,
-        )
+        return JSONResponse(app_error_payload(exc), status_code=400)
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -494,6 +509,16 @@ def create_app(
             },
             status_code=400,
         )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        get_logger("web").exception(
+            "unexpected request error method=%s path=%s",
+            request.method,
+            request.url.path,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return JSONResponse(internal_error_payload(), status_code=500)
 
     def welcome_seen() -> bool:
         return (user_root() / ".welcome-seen").is_file()
@@ -715,7 +740,7 @@ def create_app(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         resolve_global_config(config, app_root)
-        for stage in LLM_STAGES:
+        for stage in LLM_MODEL_STAGES:
             resolve_global_config(config, app_root, stage=stage)
         atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
@@ -728,7 +753,7 @@ def create_app(
                 for language in PROMPT_LANGUAGES
                 if (root / "prompts" / prompt_file(stage, language)).is_file()
             ]
-            for stage in LLM_STAGES
+            for stage in LLM_MODEL_STAGES
         }
 
     def validate_language(value: object) -> str:
@@ -756,6 +781,13 @@ def create_app(
             "assembled": full_prompt(stage, content, resolved),
             "languages": available,
         }
+        if stage == "terminology_decision":
+            assembled_phases = {
+                phase: full_prompt(stage, content, resolved, phase=phase)
+                for phase in ("adjudication", "consistency")
+            }
+            result["assembled_phases"] = assembled_phases
+            result["assembled"] = assembled_phases["adjudication"]
         if global_file_for is not None:
             global_path = global_file_for(resolved)
             if global_path.is_file():
@@ -779,7 +811,7 @@ def create_app(
 
     @app.get("/api/v1/global/prompts/{stage}")
     async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         return prompt_view(
@@ -793,7 +825,7 @@ def create_app(
     async def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
@@ -817,7 +849,7 @@ def create_app(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         content, digest = read_prompt_library(stage, language, prompt_id)
-        return {
+        result: dict[str, Any] = {
             "id": prompt_id,
             "stage": stage,
             "language": language,
@@ -825,6 +857,14 @@ def create_app(
             "digest": digest,
             "assembled": full_prompt(stage, content, language),
         }
+        if stage == "terminology_decision":
+            assembled_phases = {
+                phase: full_prompt(stage, content, language, phase=phase)
+                for phase in ("adjudication", "consistency")
+            }
+            result["assembled_phases"] = assembled_phases
+            result["assembled"] = assembled_phases["adjudication"]
+        return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
     async def put_prompt_library_entry(
@@ -1464,6 +1504,85 @@ def create_app(
     async def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)
 
+    @app.get("/api/v1/projects/{name}/terms/decision")
+    async def get_term_decision(name: str) -> dict[str, Any]:
+        return decision_review_state(project(name))
+
+    @app.put("/api/v1/projects/{name}/terms/decision/rejections")
+    async def put_term_decision_rejections(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能修改术语决策草案")
+        values = payload.get("rejected_proposal_ids")
+        if not isinstance(values, list):
+            raise UsageError("rejected_proposal_ids 必须是字符串数组")
+        with project_write_lock(root):
+            return {"draft": save_decision_rejections(root, values)}
+
+    @app.put("/api/v1/projects/{name}/terms/decision/manual-review")
+    async def put_term_decision_manual_review(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        run_id = payload.get("run_id")
+        normalized = payload.get("normalized")
+        resolved = payload.get("resolved")
+        if not isinstance(run_id, str) or not run_id:
+            raise UsageError("run_id 必须是非空字符串")
+        if not isinstance(normalized, str) or not normalized:
+            raise UsageError("normalized 必须是非空字符串")
+        if not isinstance(resolved, bool):
+            raise UsageError("resolved 必须是布尔值")
+        with project_write_lock(root):
+            return {"manual_review": set_manual_review_resolved(
+                root,
+                run_id=run_id,
+                normalized=normalized,
+                resolved=resolved,
+            )}
+
+    @app.post("/api/v1/projects/{name}/terms/decision/apply")
+    async def apply_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能应用术语决策")
+        with project_write_lock(root):
+            result = apply_decision_draft(
+                root,
+                confirm_all=payload.get("confirm") is True,
+                rejected_proposal_ids=[],
+            )
+            return {**result, "terms": WebStore(root).terms()}
+
+    @app.post("/api/v1/projects/{name}/terms/decision/discard")
+    async def discard_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能丢弃术语决策草案")
+        with project_write_lock(root):
+            return discard_decision_draft(
+                root, confirm=payload.get("confirm") is True
+            )
+
+    @app.post("/api/v1/projects/{name}/terms/decision/rollback")
+    async def rollback_term_decision(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能撤销术语决策")
+        with project_write_lock(root):
+            result = rollback_decision(
+                root, confirm=payload.get("confirm") is True
+            )
+            return {**result, "terms": WebStore(root).terms()}
+
     @app.post("/api/v1/projects/{name}/terms/publish-partial")
     async def publish_partial_term_results(
         name: str, payload: dict[str, Any]
@@ -1553,7 +1672,7 @@ def create_app(
         content = dump_config(config)
         root = project(name)
         resolve_project_config(config, presets_root=app_root)
-        for stage in LLM_STAGES:
+        for stage in LLM_MODEL_STAGES:
             resolve_project_config(
                 config, stage=stage, presets_root=app_root
             )
@@ -1563,7 +1682,7 @@ def create_app(
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
     async def get_prompt(name: str, stage: str, language: str = "zh-CN") -> dict[str, Any]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
@@ -1579,7 +1698,7 @@ def create_app(
     async def put_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        if stage not in LLM_STAGES:
+        if stage not in LLM_MODEL_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         language = validate_language(payload.get("language", "zh-CN"))
         content = payload.get("content")
@@ -1686,6 +1805,8 @@ def create_app(
             return value
 
         force = boolean_option("force")
+        replace_draft = boolean_option("replace_draft")
+        acknowledge_manual_review = boolean_option("acknowledge_manual_review")
         reuse_mixed_fingerprints = boolean_option(
             "reuse_mixed_fingerprints"
         )
@@ -1711,11 +1832,17 @@ def create_app(
                 if "language" in payload
                 else None
             ),
+            replace_draft=replace_draft,
+            acknowledge_manual_review=acknowledge_manual_review,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
     async def get_task_options(name: str, stage: str) -> dict[str, Any]:
         return task_options(project(name), stage)
+
+    @app.get("/api/v1/tasks/active")
+    async def active_tasks() -> dict[str, Any]:
+        return {"tasks": app.state.tasks.active_tasks()}
 
     @app.get("/api/v1/tasks/{task_id}")
     async def task(task_id: str) -> dict[str, Any]:

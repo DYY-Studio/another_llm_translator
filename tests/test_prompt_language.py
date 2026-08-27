@@ -52,10 +52,12 @@ def test_full_prompt_assembles_prefix_middle_suffix_in_order(
     middle = f"__MIDDLE_{stage}_{language}__"
     prompt = full_prompt(stage, f" {middle} ", language)
 
-    assert prompt.index(prefix_marker) < prompt.index(middle) < prompt.index(
-        suffix_marker
+    assert (
+        prompt.index(prefix_marker) < prompt.index(middle) < prompt.index(suffix_marker)
     )
-    assert prompt.endswith('{"type":"end"}。' if language == "zh-CN" else '{"type":"end"}.')
+    assert prompt.endswith(
+        '{"type":"end"}。' if language == "zh-CN" else '{"type":"end"}.'
+    )
 
 
 def test_fixed_prompts_define_data_and_output_boundaries() -> None:
@@ -86,6 +88,136 @@ def test_fixed_prompts_define_data_and_output_boundaries() -> None:
         assert "status must be accepted or suggested" in review
         assert "accepted record contains only type, id, and status" in review
         assert "non-empty complete suggested_text" in review
+
+
+def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() -> None:
+    middle = "共同术语政策：优先保持人名译名一致。"
+    adjudication = full_prompt(
+        "terminology_decision", middle, "zh-CN", phase="adjudication"
+    )
+    consistency = full_prompt(
+        "terminology_decision", middle, "zh-CN", phase="consistency"
+    )
+
+    assert middle in adjudication and middle in consistency
+    assert "当前是第一阶段“术语裁决”" in adjudication
+    assert "当前是第二阶段“跨术语一致性复核”" in consistency
+    assert "只包含受保护人工决定" in adjudication
+    assert "只包含受保护人工决定" in consistency
+    assert "disposition 已确定、当前启用且无冲突的第一阶段自动状态" in consistency
+    assert "不得为 anchors 输出任何决策" in consistency
+    assert "changes 是 Patch" in adjudication
+    assert "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环" in consistency
+    assert adjudication != consistency
+
+    adjudication_en = full_prompt(
+        "terminology_decision", "Shared policy.", "en", phase="adjudication"
+    )
+    consistency_en = full_prompt(
+        "terminology_decision", "Shared policy.", "en", phase="consistency"
+    )
+    for prompt in (adjudication_en, consistency_en):
+        assert "enabled root" in prompt
+        assert "self-reference" in prompt
+        assert "chain or cycle" in prompt
+
+
+@pytest.mark.parametrize(
+    ("language", "middle", "markers"),
+    [
+        (
+            "zh-CN",
+            "__共享判断政策__",
+            (
+                "以下固定输出协议优先于可编辑中段",
+                "update 必须且只能含 type、normalized、action、reason、changes",
+                "changes 是 Patch",
+                "中实际需要修改的键",
+                "conflicts 是去重后的历史候选和关系争用证据",
+                "不是投票结果或可选值白名单",
+                "第一阶段存在 category",
+                "evidence.hit_count 是命中 Segment 数",
+                "先覆盖不同 (file_id, part_id) 内容边界",
+                "boundary_ref 是只读的请求内内容边界引用",
+                "description 可保持、清为 null，或改写为简洁的目标语说明",
+                "不得增加无证据事实",
+                "本次 terms[]/anchors[] 中可见",
+                "空 changes 只用于第二阶段",
+                "keep 保留上一阶段有效裁决",
+                "只有显式 update、disable、needs_review 才覆盖第一阶段",
+            ),
+        ),
+        (
+            "en",
+            "__SHARED_JUDGMENT_POLICY__",
+            (
+                "fixed output contract takes precedence over the editable middle",
+                "update contains exactly type, normalized, action, reason, changes",
+                "changes is a Patch",
+                "only fields actually changed",
+                "deduplicated historical candidates and relationship disputes",
+                "not vote totals or an allowed-value whitelist",
+                "In phase one, a term with category",
+                "evidence.hit_count is the number of matching Segments",
+                "prioritizing first hits from different (file_id, part_id) content boundaries",
+                "boundary_ref is a read-only, request-local content-boundary reference",
+                "description may be retained, cleared to null, or rewritten",
+                "must not add unsupported facts",
+                "visible in this request",
+                "Empty changes is allowed only in phase two",
+                "keep preserves the prior-phase disposition",
+                "only an explicit phase-two update, disable, or needs_review overrides it",
+            ),
+        ),
+    ],
+)
+def test_terminology_decision_prompt_defines_unambiguous_output_contract(
+    language: str,
+    middle: str,
+    markers: tuple[str, ...],
+) -> None:
+    for phase in ("adjudication", "consistency"):
+        prompt = full_prompt("terminology_decision", middle, language, phase=phase)
+        assert prompt.index(middle) < prompt.index(markers[0])
+        for marker in markers:
+            assert marker in prompt
+        assert '"action":"update"' in prompt
+        assert '"action":"keep"' in prompt
+        assert '"action":"disable"' in prompt
+        assert '"action":"needs_review"' in prompt
+        assert prompt.count('{"type":"end"}') == 2
+
+
+def test_terminology_decision_middle_defines_evidence_semantics() -> None:
+    markers = {
+        "zh-CN": (
+            "hit_count 表示命中该术语的 Segment 数",
+            "先覆盖不同 (file_id, part_id) 内容边界的首个命中",
+            "boundary_ref 只是本次请求内",
+            "不是票数或可选值白名单",
+            "候选之外的新值",
+            "第一阶段已确定且当前无冲突的自动 anchors",
+            "不得增加证据中没有的事实",
+        ),
+        "en": (
+            "hit_count is the number of Segments matching the term",
+            "first hits from different (file_id, part_id) content boundaries",
+            "boundary_ref is a read-only reference used only within this request",
+            "not votes or an allowed-value whitelist",
+            "new value outside those candidates",
+            "phase-one disposition is determined and currently conflict-free",
+            "Never add facts absent from that evidence",
+        ),
+    }
+
+    for language, expected in markers.items():
+        middle = (
+            ROOT / "prompts" / f"terminology_decision.{language}.middle.txt"
+        ).read_text(encoding="utf-8")
+        for marker in expected:
+            assert marker in middle
+        assert "JSONL" not in middle
+        assert '{"type"' not in middle
 
 
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
@@ -200,15 +332,18 @@ def test_fingerprint_is_language_agnostic_and_tracks_any_language_change(
 
     zh_digest = digests["zh-CN"]
     en_digest = digests["en"]
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": zh_digest, "en": en_digest}
-    ) == baseline
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": zh_digest, "en": "x"}
-    ) != baseline
-    assert stage_fingerprint(
-        config, "translation", {"zh-CN": "x", "en": en_digest}
-    ) != baseline
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": zh_digest, "en": en_digest})
+        == baseline
+    )
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": zh_digest, "en": "x"})
+        != baseline
+    )
+    assert (
+        stage_fingerprint(config, "translation", {"zh-CN": "x", "en": en_digest})
+        != baseline
+    )
 
 
 @pytest.mark.asyncio
@@ -269,10 +404,12 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     tmp_path: Path,
 ) -> None:
     projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(
-        projects_root=projects_root,
-        app_root=tmp_path / "app-root",
-    ))
+    client = TestClient(
+        create_app(
+            projects_root=projects_root,
+            app_root=tmp_path / "app-root",
+        )
+    )
     zh = client.get("/api/v1/global/prompts/translation").json()
     en = client.get(
         "/api/v1/global/prompts/translation", params={"language": "en"}
@@ -283,22 +420,36 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert "The user message is JSON" in en["assembled"]
     assert set(en["languages"]) == {"zh-CN", "en"}
 
-    assert client.put(
-        "/api/v1/global/prompts/translation",
-        json={"language": "fr", "content": "x"},
-    ).status_code == 400
+    decision = client.get("/api/v1/global/prompts/terminology_decision").json()
+    assert set(decision["assembled_phases"]) == {"adjudication", "consistency"}
+    assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
+    assert (
+        "当前是第二阶段“跨术语一致性复核”"
+        in decision["assembled_phases"]["consistency"]
+    )
 
-    assert client.put(
-        "/api/v1/global/prompts/translation",
-        json={"language": "en", "content": "EN MIDDLE"},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/api/v1/global/prompts/translation",
+            json={"language": "fr", "content": "x"},
+        ).status_code
+        == 400
+    )
+
+    assert (
+        client.put(
+            "/api/v1/global/prompts/translation",
+            json={"language": "en", "content": "EN MIDDLE"},
+        ).status_code
+        == 200
+    )
     saved = client.get(
         "/api/v1/global/prompts/translation", params={"language": "en"}
     ).json()
     assert saved["content"] == "EN MIDDLE"
-    assert (
-        tmp_path / "user-root" / "prompts" / "translation.en.middle.txt"
-    ).read_text(encoding="utf-8") == "EN MIDDLE"
+    assert (tmp_path / "user-root" / "prompts" / "translation.en.middle.txt").read_text(
+        encoding="utf-8"
+    ) == "EN MIDDLE"
 
 
 def test_web_task_start_forwards_language(

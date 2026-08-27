@@ -94,6 +94,7 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
       {"pointer": "/choices/0/delta/reasoning"}
     ],
     "terminal": {"sentinel": "[DONE]"},
+    "allow_clean_eof": false,
     "error_events": [
       {
         "when": {"pointer": "/choices/0/finish_reason", "equals": "error"},
@@ -118,17 +119,26 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
 OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
 两类互斥的流式字段。
-`terminal` 二选一声明 sentinel 或条件；每条流必须命中终止条件。`error_events`
+`terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。
+`allow_clean_eof` 是可选布尔值，缺省为 `false`。显式启用后，HTTP 2xx 响应在已
+收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可
+作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。
+这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。读取超时、
+网络中断、SSE/UTF-8/JSON 错误和流内服务错误不属于 clean EOF，仍按原规则失败或重试。
+`error_events`
 声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
 是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
 HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以
 同时报告外层 HTTP 200 和上游 HTTP 504。`usage` 的三个候选指针数组逐事件观察，
 每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
 
-宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在收到终止事件前
-断流或遇到流内服务错误时丢弃完整聚合正文，并按既有 HTTP 尝试次数重试；不会
-隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug 模式才保存原始
-SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
+宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在未满足显式终止
+或已声明的 clean EOF 前断流、或遇到流内服务错误时丢弃完整聚合正文，并按既有
+HTTP 尝试次数重试；不会隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug
+模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制
+完整生成时间。内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；
+Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他
+供应商字段作为隐式终止标记。
 
 ### 响应边界
 
@@ -346,11 +356,11 @@ CLI 的 `init` 与 `files-add` 用可重复的
 
 ### 版本与升级策略
 
-Adapter 版本字符串必须与 File 记录严格相等才能导出，不匹配立即失败。Adapter
-升级或选项变更的方式是移除文件并重新导入：宿主不解释、不迁移 `opaque_state`，
-也不会改写既有 Segment 和阶段结果；指纹变化使旧结果不再复用。兼容范围
-（如 semver 前缀）语义不在当前协议中，等待至少一个真实第二实现出现后由用户
-决策引入；协议版本不匹配的插件直接快速失败。
+Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明
+`readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现
+能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
+File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。
+外部 Adapter 未声明时仍保持严格相等语义。
 
 ### 导出
 
@@ -378,7 +388,7 @@ HTML/ASS 样式标记作为普通正文交给模型，不由首版插件解析�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.3
+### EPUB 0.4
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
 保存各 File 的原始容器，并记录 OPF、spine
@@ -413,9 +423,14 @@ PUBLIC 标识都会快速失败。
 首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出
 保留源槽并在末槽后写入译文。Ruby 是同一文本流中的内联成员；包含 Ruby 的
 复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻
-文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。导入可选择
-`aozora`（默认，`｜原文《Ruby》`）、`base_only` 或 `parenthetical`
-（`原文（Ruby）`）。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
+文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择
+`aozora`（默认）、`short_xml`、`compact` 或 `base_only`。除 `base_only`
+完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空
+`｜base《reading》`；`short_xml` 只向模型使用
+`<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用
+`⟦R:base|Y:reading⟧`。新导入不再提供 `parenthetical`；EPUB 0.4 可直接
+读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。
+无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
 位置快速失败。纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余
 普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个
 Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略译文、校对或润色
@@ -424,7 +439,15 @@ Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略�
 纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉
 标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
 含 HTML 或跨行的形式按普通文本保留。
-`base_only` 和 `parenthetical` 不执行 Ruby 还原。
+`base_only` 不执行 Ruby 还原。short XML 使用标准 XML 实体；compact
+在 base/reading 中用反斜杠转义 `\\`、`|`、`⟦`、`⟧`。两种模型格式的
+非法结构进入既有格式修复预算，不会泄露到用户文本。
+
+Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
+直接相邻的同符号 Ruby 及单 Ruby 内的重复符号在用户/模型表示中合并为
+单个 reading；普通文本、空白和内联格式边界会切断合并。最终 EPUB 导出按
+Unicode 扩展字素簇展开，为每个非空白字素簇写入一个带相同 `rt`
+的 Ruby；普通 reading 仍保持分组 Ruby。
 确定性术语注入使用同一严格青空语法：匹配视图分别保留 base 正文和 reading，
 不把二者拼接。base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
 连续组合，普通正文会切断 reading 组合。因此 `｜漢《かん》｜字《じ》` 可命中
@@ -531,11 +554,12 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
 
-当前 Preset schema 为 3。除现有连接字段外，`stream` 明确控制是否使用所引用
+当前 Preset schema 为 4。除现有连接字段外，`stream` 明确控制是否使用所引用
 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用
-`endpoint`，只允许 `${model}` 占位符）。schema 2 用户 Preset 在 CLI、Web 或
-桌面 sidecar 启动时原子迁移为 schema 3，并补入 `stream = false` 与空的
-`stream_endpoint`；Run 内历史 v2 快照只在内存中按非流式解释，不改写审计文件。
+`endpoint`，只允许 `${model}` 占位符）。schema 2/3 用户 Preset 在 CLI、Web 或
+桌面 sidecar 启动时原子迁移为 schema 4，分别补入非流式默认值与
+`stream_read_timeout_enabled = true`；Run 内历史 v2/v3 快照只在内存中补齐默认值，
+不改写审计文件。
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等

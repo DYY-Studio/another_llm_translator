@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
-import { api } from "../api";
+import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import {
   nativeBridgeAvailable,
   pickNativeFile,
@@ -21,8 +21,19 @@ import {
   type FileMoveCommand,
 } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview, ProjectSummary } from "../types";
-import { translate, type Language } from "../i18n";
+import type {
+  ErrorPayload,
+  ProjectOverview,
+  ProjectSummary,
+  SettingsField,
+  Stage,
+} from "../types";
+import {
+  errorMessage,
+  formatErrorPayload,
+  translate,
+  type Language,
+} from "../i18n";
 
 type InputKind = "file" | "folder";
 
@@ -31,6 +42,18 @@ interface ExportFile {
   size: number;
   mtime: number;
 }
+
+const EXPORT_SETTINGS_FIELDS: Partial<Record<string, SettingsField>> = {
+  missing_target_language_tag: "target_language_tag",
+  missing_target_language: "target_language",
+  unrepresentable_output_encoding: "output_encoding",
+};
+
+const EXPORT_RESULT_STAGES: Partial<Record<string, Stage>> = {
+  translated: "translation",
+  proofread: "proofreading",
+  polished: "polishing",
+};
 
 interface AdapterSummary {
   adapter_id: string;
@@ -191,7 +214,7 @@ function InputQueue({
     folderRef.current?.setAttribute("webkitdirectory", "");
     void api<{ adapters: AdapterSummary[] }>("/api/v1/document-adapters")
       .then((result) => setAdapters(result.adapters))
-      .catch((reason) => setMessage(String(reason)));
+      .catch((reason) => setMessage(errorMessage(reason, language)));
   }, []);
 
   const extensionOwners = new Map<string, string>();
@@ -348,19 +371,21 @@ function InputQueue({
 function ProjectBar({
   projects,
   project,
+  runningProjectIds,
   onProject,
   onCreate,
   language,
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   onProject: (value: string) => void;
   onCreate: () => void;
   language: Language;
 }) {
   return (
     <div className="overview-project-bar">
-      <ProjectPicker projects={projects} project={project} onProject={onProject} language={language} />
+      <ProjectPicker projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={onProject} language={language} />
       <button className="quiet-button" onClick={onCreate}>{translate("project.create", language)}</button>
     </div>
   );
@@ -369,11 +394,13 @@ function ProjectBar({
 function ProjectPicker({
   projects,
   project,
+  runningProjectIds,
   onProject,
   language,
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   onProject: (value: string) => void;
   language: Language;
 }) {
@@ -384,6 +411,8 @@ function ProjectPicker({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const selected = projects.find((item) => item.selector === project) ?? null;
+  const selectedRunning = Boolean(selected && runningProjectIds.has(selected.project_id));
+  const otherRunning = projects.filter((item) => item.selector !== project && runningProjectIds.has(item.project_id)).length;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredProjects = normalizedQuery
     ? projects.filter((item) => (
@@ -469,6 +498,9 @@ function ProjectPicker({
           <strong>{selected?.name ?? translate("project.select", language)}</strong>
           {selected && <small>{selected.path}</small>}
         </span>
+        {(selectedRunning || otherRunning > 0) && <span className="project-picker-status" aria-label={selectedRunning ? translate("project.running", language) : translate("project.otherRunning", language, { count: otherRunning })}>
+          {selectedRunning ? translate("project.running", language) : translate("project.otherRunning", language, { count: otherRunning })}
+        </span>}
         <span className="project-picker-chevron" aria-hidden="true">⌄</span>
       </button>
       {open && (
@@ -502,7 +534,10 @@ function ProjectPicker({
                   <strong>{item.name}</strong>
                   <small title={item.path}>{item.path}</small>
                 </span>
-                {item.selector === project && <span className="project-option-check" aria-hidden="true">✓</span>}
+                <span className="project-option-meta">
+                  {runningProjectIds.has(item.project_id) && <small className="project-running-badge">{translate("project.running", language)}</small>}
+                  {item.selector === project && <span className="project-option-check" aria-hidden="true">✓</span>}
+                </span>
               </button>
             ))}
           </div>
@@ -572,6 +607,7 @@ function AddFilesDialog({
 export function Overview({
   projects,
   project,
+  runningProjectIds,
   value,
   onProject,
   onCreate,
@@ -581,6 +617,7 @@ export function Overview({
 }: {
   projects: ProjectSummary[];
   project: string;
+  runningProjectIds: ReadonlySet<string>;
   value: ProjectOverview | null;
   onProject: (value: string) => void;
   onCreate: () => void;
@@ -636,7 +673,7 @@ export function Overview({
   if (!value) {
     return (
       <div className="page">
-        <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
+        <ProjectBar projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={changeProject} onCreate={onCreate} language={language} />
         <p className="overview-empty-hint">{translate("app.selectOrCreate", language)}</p>
       </div>
     );
@@ -688,7 +725,7 @@ export function Overview({
       selection.reset();
       await onFilesChanged();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setBusy(false);
     }
@@ -706,7 +743,7 @@ export function Overview({
       setRemoving(false);
       await onFilesChanged();
     } catch (value) {
-      setError(String(value));
+      setError(errorMessage(value, language));
     } finally {
       setBusy(false);
     }
@@ -726,7 +763,7 @@ export function Overview({
       await onFilesChanged();
     } catch (reason) {
       if (!saved) setOptimisticOrder(null);
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setBusy(false);
     }
@@ -847,7 +884,7 @@ export function Overview({
       setButtonReorder(null);
       await onDeleted(projectPath);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setBusy(false);
     }
@@ -869,7 +906,7 @@ export function Overview({
         }),
       );
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     } finally {
       setCompacting(false);
     }
@@ -877,7 +914,7 @@ export function Overview({
 
   return (
     <div className="page overview-page">
-      <ProjectBar projects={projects} project={project} onProject={changeProject} onCreate={onCreate} language={language} />
+      <ProjectBar projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={changeProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
         <div className="overview-identity"><h1>{value.name}</h1><p>{value.path}</p></div>
         <div className="summary-strip">
@@ -1047,15 +1084,20 @@ export function ExportView({
   project,
   overview,
   language,
+  onNavigateStage,
+  onOpenSettings,
 }: {
   project: string;
   overview: ProjectOverview;
   language: Language;
+  onNavigateStage: (stage: Stage) => void;
+  onOpenSettings: (field: SettingsField) => void;
 }) {
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [exportError, setExportError] = useState<ErrorPayload | null>(null);
   const [message, setMessage] = useState("");
   const [files, setFiles] = useState<ExportFile[]>([]);
   const [highlighted, setHighlighted] = useState<string[]>([]);
@@ -1081,16 +1123,16 @@ export function ExportView({
   }
 
   useEffect(() => {
-    void refresh().catch((reason) => setError(String(reason)));
+    void refresh().catch((reason) => setError(reason));
   }, [project]);
 
   function openBrowse() {
     setTab("browse");
-    void refresh().catch((reason) => setError(String(reason)));
+    void refresh().catch((reason) => setError(reason));
   }
 
   async function run() {
-    setError(""); setMessage(""); setHighlighted([]);
+    setError(null); setExportError(null); setMessage(""); setHighlighted([]);
     try {
       const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
         method: "POST",
@@ -1113,7 +1155,9 @@ export function ExportView({
         setMessage(translate("export.generated", language, { count: written.length }));
       }
     } catch (reason) {
-      setError(String(reason));
+      const payload = errorPayloadFrom(reason);
+      if (payload?.code === "export_error") setExportError(payload);
+      else setError(reason);
     }
   }
 
@@ -1126,7 +1170,7 @@ export function ExportView({
     filename: string,
     body?: Record<string, unknown>,
   ) {
-    setError("");
+    setError(null);
     try {
       const saved = await saveExport(
         url,
@@ -1135,7 +1179,7 @@ export function ExportView({
       );
       if (saved) setMessage(translate("export.savedTo", language, { path: saved }));
     } catch (reason) {
-      setError(String(reason));
+      setError(reason);
     }
   }
 
@@ -1150,7 +1194,7 @@ export function ExportView({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file: path }),
     }).then(async (response) => {
-      if (!response.ok) throw new Error(`请求失败：${response.status}`);
+      if (!response.ok) throw await apiErrorFromResponse(response);
       const url = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1159,7 +1203,7 @@ export function ExportView({
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-    }).catch((reason) => setError(String(reason)));
+    }).catch((reason) => setError(reason));
   }
 
   function downloadAll() {
@@ -1180,7 +1224,7 @@ export function ExportView({
     if (!window.confirm(translate("export.deleteConfirm", language, { path }))) {
       return;
     }
-    setError(""); setMessage("");
+    setError(null); setMessage("");
     try {
       await api(`/api/v1/projects/${project}/exports/remove`, {
         method: "POST",
@@ -1188,9 +1232,19 @@ export function ExportView({
       });
       await refresh();
     } catch (reason) {
-      setError(String(reason));
+      setError(reason);
     }
   }
+
+  const action = (() => {
+    if (!exportError) return null;
+    const reason = String(exportError.params.reason ?? "");
+    const settingsField = EXPORT_SETTINGS_FIELDS[reason];
+    if (settingsField) return { kind: "settings" as const, field: settingsField };
+    if (reason !== "missing_stage_results") return null;
+    const target = EXPORT_RESULT_STAGES[String(exportError.params.stage ?? "")];
+    return target ? { kind: "stage" as const, stage: target } : null;
+  })();
 
   return (
     <div className="page export-page">
@@ -1199,7 +1253,7 @@ export function ExportView({
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
         <button className={tab === "browse" ? "active" : ""} onClick={openBrowse}>{translate("export.tabBrowse", language)}</button>
       </div>
-      {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
+      {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
       {tab === "export" ? <>
         <div className="export-workspace">
           <div className="export-form-col">
@@ -1207,6 +1261,34 @@ export function ExportView({
             <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
             <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
             <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+            {exportError && (
+              <div className="export-error-card" role="alert">
+                <div className="export-error-heading">
+                  <strong>{translate("export.errorTitle", language)}</strong>
+                  <button
+                    className="export-error-dismiss"
+                    aria-label={translate("common.dismiss", language)}
+                    title={translate("common.dismiss", language)}
+                    onClick={() => setExportError(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <p>{formatErrorPayload(exportError, language)}</p>
+                {action ? <div className="export-error-actions">
+                  {action?.kind === "settings" && (
+                    <button className="quiet-button" onClick={() => onOpenSettings(action.field)}>
+                      {translate("export.openProjectSettings", language)}
+                    </button>
+                  )}
+                  {action?.kind === "stage" && (
+                    <button className="quiet-button" onClick={() => onNavigateStage(action.stage)}>
+                      {translate("export.openStage", language, { stage: translate(`stage.${action.stage}`, language) })}
+                    </button>
+                  )}
+                </div> : null}
+              </div>
+            )}
             {message && (
               <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
             )}
@@ -1281,7 +1363,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
         setParentDir(value.default_projects_path);
         setProjectPath(value.default_projects_path);
       })
-      .catch((reason) => setError(String(reason)));
+      .catch((reason) => setError(errorMessage(reason, language)));
   }, []);
   async function submit() {
     const body = new FormData();
@@ -1305,7 +1387,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
       const result = await api<{ project_selector: string; project_path: string; external: boolean }>("/api/v1/projects", { method: "POST", body });
       onCreated(result.project_selector, result.external ? result.project_path : undefined);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     }
   }
   async function open() {
@@ -1316,7 +1398,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
       });
       onCreated(result.selector, result.external ? result.path : undefined);
     } catch (reason) {
-      setError(String(reason));
+      setError(errorMessage(reason, language));
     }
   }
   return (
@@ -1391,7 +1473,7 @@ function DirectoryPicker({
       setListing(result);
     } catch (reason) {
       if (revision === requestRevision.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason, language));
       }
     } finally {
       if (revision === requestRevision.current) setLoading(false);

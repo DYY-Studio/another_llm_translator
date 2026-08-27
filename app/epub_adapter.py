@@ -13,14 +13,21 @@ from xml.parsers import expat
 from xml.etree import ElementTree
 from uuid import UUID, uuid5
 
+import regex
+
 from .documents import (
     DocumentChoiceOption,
     DocumentImport,
+    EMPHASIS_RUBY_CHARACTERS,
     ImportedFile,
+    aozora_to_model_ruby,
+    compact_emphasis_aozora,
+    escape_model_ruby_literal,
     parse_aozora_text,
 )
 from .errors import (
     ConfigError,
+    ExportError,
     IncompleteError,
     ProjectError,
     StorageError,
@@ -85,7 +92,8 @@ _REQUIRED_INLINE_TEXT_ELEMENTS = {
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.3"
+    version = "0.4"
+    readable_versions = frozenset({"0.3", "0.4"})
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
     import_options = (
@@ -95,8 +103,9 @@ class EPUBDocumentAdapter:
             default="aozora",
             choices=(
                 ("aozora", "青空格式｜原文《Ruby》"),
+                ("short_xml", "模型短 XML（用户显示青空格式）"),
+                ("compact", "模型紧凑格式（用户显示青空格式）"),
                 ("base_only", "仅基础文字"),
-                ("parenthetical", "原文（Ruby）"),
             ),
         ),
         DocumentChoiceOption(
@@ -128,39 +137,82 @@ class EPUBDocumentAdapter:
         language: str,
         opaque_state: dict[str, Any] | None,
     ) -> str | None:
-        if stage not in {"translation", "proofreading", "polishing"}:
+        if stage not in {
+            "terminology",
+            "translation",
+            "proofreading",
+            "polishing",
+        }:
             return None
         if not isinstance(opaque_state, dict):
             raise ConfigError("EPUB Document Adapter 状态无效")
-        if opaque_state.get("inline_format_mode") != "markers":
-            return None
+        ruby_mode = opaque_state.get("ruby_mode", "aozora")
+        requirements: list[str] = []
+        if ruby_mode == "short_xml":
+            requirements.append(
+                (
+                    "source 中的 Ruby 使用 <r><b>base</b><y>reading</y></r>；"
+                    "base 是必须翻译的正文。可删除整个 Ruby 标记并只返回已译 base；"
+                    "保留时必须使用相同严格、闭合、非嵌套结构，reading 必须翻译或转写。"
+                    "XML 特殊字符必须使用标准实体。"
+                    if language == "zh-CN"
+                    else
+                    "Ruby in source uses <r><b>base</b><y>reading</y></r>; "
+                    "base is source text and must be translated. You may drop the "
+                    "whole Ruby structure and return only the translated base. If "
+                    "kept, return the same strict, closed, non-nested structure and "
+                    "translate or transliterate reading. Escape XML special "
+                    "characters with standard entities."
+                )
+            )
+        elif ruby_mode == "compact":
+            requirements.append(
+                (
+                    "source 中的 Ruby 使用 ⟦R:base|Y:reading⟧；base 是必须翻译的正文。"
+                    "可删除整个 Ruby 标记并只返回已译 base；保留时必须使用同一严格结构，"
+                    "reading 必须翻译或转写。在 base/reading 中用 \\\\, \\|, \\⟦, \\⟧ "
+                    "转义保留字符。"
+                    if language == "zh-CN"
+                    else
+                    "Ruby in source uses ⟦R:base|Y:reading⟧; base is source "
+                    "text and must be translated. You may drop the whole Ruby "
+                    "structure and return only the translated base. If kept, use "
+                    "the same strict structure and translate or transliterate "
+                    "reading. Escape reserved characters in base/reading as \\\\, "
+                    "\\|, \\⟦, and \\⟧."
+                )
+            )
         policy = opaque_state.get("inline_format_policy", "tiered")
         if policy not in {"tiered", "strict"}:
             raise ConfigError(f"EPUB 内联格式策略无效：{policy}")
+        if opaque_state.get("inline_format_mode") != "markers":
+            return " ".join(requirements) or None
         if language == "zh-CN":
             if policy == "strict":
-                return (
+                requirements.append(
                     "source 中的受控内联标记（如 <em1>）是 EPUB 格式的一部分；"
                     "必须保留所有已有标记，保持成对、原有顺序和正确嵌套。"
                     "不得新增标记、属性、未知 HTML 或改变标签层级。"
                 )
-            return (
+            else:
+                requirements.append(
                 "source 中的受控内联标记（如 <em1>）用于重建 EPUB 格式；"
                 "语义标记包括 a、abbr、bdi、bdo、cite、code、data、dfn、kbd、"
                 "q、samp、sub、sup、time、var；保留这些已有标记并保持成对、"
                 "原有顺序和正确嵌套。表现层标记 b、em、i、mark、s、small、"
                 "span、strong、u 可以整体省略。不得新增标记、属性、未知 HTML "
                 "或改变标签层级。"
-            )
-        if language == "en":
+                )
+        elif language == "en":
             if policy == "strict":
-                return (
+                requirements.append(
                     "Controlled inline markers in source (such as <em1>) are "
                     "part of the EPUB format. Keep every existing marker with "
                     "its pairing, order, and correct nesting. Never add markers, "
                     "attributes, unknown HTML, or change the tag hierarchy."
                 )
-            return (
+            else:
+                requirements.append(
                 "Controlled inline markers in source (such as <em1>) are used "
                 "to rebuild EPUB formatting. Semantic markers are a, abbr, bdi, "
                 "bdo, cite, code, data, dfn, kbd, q, samp, sub, sup, time, and "
@@ -168,15 +220,27 @@ class EPUBDocumentAdapter:
                 "nesting. Presentation markers b, em, i, mark, s, small, span, "
                 "strong, and u may be omitted as a whole. Never add markers, "
                 "attributes, unknown HTML, or change the tag hierarchy."
-            )
-        raise ConfigError(f"不支持的 Prompt 语言：{language}")
+                )
+        else:
+            raise ConfigError(f"不支持的 Prompt 语言：{language}")
+        return " ".join(requirements)
 
     def normalize_model_output(
         self, *, segment: dict[str, Any], text: str, stage: str
     ) -> str:
         del stage
+        ruby_mode = segment.get("_ruby_mode")
+        marker_ids = {
+            str(item["id"])
+            for item in segment.get("_format_markers", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if ruby_mode == "short_xml":
+            text = _short_xml_to_aozora(text, marker_ids)
+        elif ruby_mode == "compact":
+            text = _compact_to_aozora(text)
         return _normalize_inline_markers(
-            text, segment.get("_format_markers", [])
+            compact_emphasis_aozora(text), segment.get("_format_markers", [])
         )
 
     def import_sources(
@@ -280,16 +344,27 @@ class EPUBDocumentAdapter:
     ) -> list[Path]:
         del output_encoding
         if not target_language_tag:
-            raise IncompleteError(
-                "EPUB 导出需要 project.target_language_tag"
+            raise ExportError(
+                "EPUB 导出需要 project.target_language_tag",
+                reason="missing_target_language_tag",
+                adapter_id="epub",
+                setting="project.target_language_tag",
             )
         target_language = target_language.strip()
         if not target_language:
-            raise IncompleteError(
-                "EPUB 导出需要非空 project.target_language"
+            raise ExportError(
+                "EPUB 导出需要非空 project.target_language",
+                reason="missing_target_language",
+                adapter_id="epub",
+                setting="project.target_language",
             )
         if opaque_state is None:
-            raise IncompleteError("EPUB 文件缺少 Document Adapter 状态")
+            raise ExportError(
+                "EPUB 文件缺少 Document Adapter 状态",
+                reason="adapter_state_invalid",
+                adapter_id="epub",
+                file_id=str(file.get("file_id", "")),
+            )
         state = deepcopy(opaque_state)
         locators = state.get("locators")
         if not isinstance(locators, list) or len(locators) != len(segments):
@@ -392,7 +467,7 @@ class EPUBDocumentAdapter:
                     _set_regular_slot(
                         body,
                         locator.get("slot"),
-                        str(segment["source"]),
+                        str(segment.get("_adapter_source", segment["source"])),
                         target,
                         bilingual=bilingual,
                         ruby_mode=str(state.get("ruby_mode", "")),
@@ -416,7 +491,7 @@ class EPUBDocumentAdapter:
                         _set_composite_slot(
                             body,
                             slot,
-                            str(segment["source"]),
+                            str(segment.get("_adapter_source", segment["source"])),
                             target,
                             bilingual=bilingual,
                             ruby_mode=str(state.get("ruby_mode", "")),
@@ -661,7 +736,11 @@ def _set_opf_publication_metadata(
         and _local_name(child.tag) == "title"
     ]
     if not title_nodes or not (title_nodes[0].text or "").strip():
-        raise IncompleteError("EPUB OPF 缺少有效主标题")
+        raise ExportError(
+            "EPUB OPF 缺少有效主标题",
+            reason="missing_primary_title",
+            adapter_id="epub",
+        )
     suffix = f"（{target_language}"
     if bilingual:
         suffix += "·双语"
@@ -824,6 +903,119 @@ def _slot_contains_ruby(raw: Any) -> bool:
 
 
 _INLINE_MARKER_RE = re.compile(r"</?([a-z][a-z0-9]*\d+)>")
+_COMPACT_ESCAPES = frozenset("\\|⟦⟧")
+
+
+def _xml_fragment_content(
+    element: ElementTree.Element,
+    marker_ids: set[str],
+) -> str:
+    parts: list[str] = [element.text or ""]
+    for child in list(element):
+        if child.attrib:
+            raise IncompleteError("EPUB short_xml 输出不允许属性")
+        name = _local_name(child.tag)
+        if name == "r":
+            children = list(child)
+            if (
+                child.text
+                or len(children) != 2
+                or _local_name(children[0].tag) != "b"
+                or _local_name(children[1].tag) != "y"
+                or children[0].attrib
+                or children[1].attrib
+                or list(children[0])
+                or list(children[1])
+                or children[0].tail
+                or children[1].tail
+                or not children[0].text
+                or not children[1].text
+                or any(
+                    character in "\r\n"
+                    for character in f"{children[0].text}{children[1].text}"
+                )
+            ):
+                raise IncompleteError("EPUB short_xml Ruby 结构无效")
+            parts.append(f"｜{children[0].text}《{children[1].text}》")
+        elif name in marker_ids:
+            parts.append(f"<{name}>")
+            parts.append(_xml_fragment_content(child, marker_ids))
+            parts.append(f"</{name}>")
+        else:
+            raise IncompleteError(f"EPUB short_xml 输出包含未知标记：{name}")
+        parts.append(child.tail or "")
+    return "".join(parts)
+
+
+def _short_xml_to_aozora(text: str, marker_ids: set[str]) -> str:
+    if "<" not in text and ">" not in text:
+        return text
+    if "<!" in text or "<?" in text:
+        raise IncompleteError("EPUB short_xml 输出包含非法 XML 声明")
+    try:
+        root = ElementTree.fromstring(f"<root>{text}</root>")
+    except ElementTree.ParseError as exc:
+        raise IncompleteError("EPUB short_xml 输出不是合法 XML") from exc
+    return _xml_fragment_content(root, marker_ids)
+
+
+def _read_compact_value(
+    text: str,
+    cursor: int,
+    terminator: str,
+) -> tuple[str, int]:
+    parts: list[str] = []
+    while cursor < len(text):
+        if text.startswith(terminator, cursor):
+            return "".join(parts), cursor + len(terminator)
+        character = text[cursor]
+        if character == "\\":
+            cursor += 1
+            if cursor >= len(text) or text[cursor] not in _COMPACT_ESCAPES:
+                raise IncompleteError("EPUB compact Ruby 包含无效转义")
+            parts.append(text[cursor])
+            cursor += 1
+            continue
+        if character in "\r\n":
+            raise IncompleteError("EPUB compact Ruby 不能跨行")
+        parts.append(character)
+        cursor += 1
+    raise IncompleteError("EPUB compact Ruby 缺少结束符")
+
+
+def _read_compact_literal(text: str, cursor: int) -> tuple[str, int]:
+    parts: list[str] = []
+    while cursor < len(text):
+        if text.startswith("⟦R:", cursor):
+            break
+        character = text[cursor]
+        if character == "\\":
+            cursor += 1
+            if cursor >= len(text) or text[cursor] not in _COMPACT_ESCAPES:
+                raise IncompleteError("EPUB compact Ruby 包含无效转义")
+            parts.append(text[cursor])
+            cursor += 1
+            continue
+        parts.append(character)
+        cursor += 1
+    return "".join(parts), cursor
+
+
+def _compact_to_aozora(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        literal, marker = _read_compact_literal(text, cursor)
+        parts.append(literal)
+        if marker >= len(text):
+            break
+        base, after_base = _read_compact_value(text, marker + 3, "|Y:")
+        reading, after_reading = _read_compact_value(text, after_base, "⟧")
+        if not base or not reading:
+            raise IncompleteError("EPUB compact Ruby 缺少 base 或 reading")
+        parts.append(f"｜{base}《{reading}》")
+        cursor = after_reading
+    return "".join(parts)
 
 
 def _normalize_inline_markers(text: str, formats: Any) -> str:
@@ -937,7 +1129,13 @@ def _text_slots(
         return len(path) >= len(ancestor) and path[: len(ancestor)] == ancestor
 
     def model_run() -> tuple[str, list[dict[str, Any]]]:
-        if inline_format_mode != "markers":
+        has_ruby = any(
+            isinstance(locator, dict) and locator.get("kind") == "ruby"
+            for locator, _ in semantic_run
+        )
+        if inline_format_mode != "markers" and not (
+            has_ruby and ruby_mode in {"short_xml", "compact"}
+        ):
             return "", []
         entries: list[dict[str, Any]] = []
         for path, name in format_elements:
@@ -984,7 +1182,27 @@ def _text_slots(
                 ends.get(index, []), key=lambda value: len(value["path"]), reverse=True
             ):
                 parts.append(f"</{item['id']}>")
-        return "".join(parts), entries
+        rendered = "".join(parts)
+        if ruby_mode not in {"aozora", "short_xml", "compact"}:
+            return rendered, entries
+        converted: list[str] = []
+        cursor = 0
+        for match in _INLINE_MARKER_RE.finditer(rendered):
+            literal = compact_emphasis_aozora(rendered[cursor : match.start()])
+            converted.append(
+                aozora_to_model_ruby(literal, ruby_mode)
+                if "｜" in literal
+                else escape_model_ruby_literal(literal, ruby_mode)
+            )
+            converted.append(match.group())
+            cursor = match.end()
+        literal = compact_emphasis_aozora(rendered[cursor:])
+        converted.append(
+            aozora_to_model_ruby(literal, ruby_mode)
+            if "｜" in literal
+            else escape_model_ruby_literal(literal, ruby_mode)
+        )
+        return "".join(converted), entries
 
     def add_regular(locator: dict[str, Any], text: str | None) -> None:
         if not text:
@@ -992,6 +1210,22 @@ def _text_slots(
         if text.isspace() and not semantic_run:
             return
         semantic_run.append((locator, text))
+
+    def display_run(formats: list[dict[str, Any]]) -> str:
+        groups: list[tuple[tuple[str, ...], str]] = []
+        for index, (_, text) in enumerate(semantic_run):
+            signature = tuple(
+                str(item["id"])
+                for item in formats
+                if int(item["start"]) <= index <= int(item["end"])
+            )
+            if groups and groups[-1][0] == signature:
+                groups[-1] = (signature, groups[-1][1] + text)
+            else:
+                groups.append((signature, text))
+        return "".join(
+            compact_emphasis_aozora(text) for _, text in groups
+        )
 
     def flush_run() -> None:
         if not semantic_run:
@@ -1032,6 +1266,11 @@ def _text_slots(
             }
         source = "".join(item[1] for item in semantic_run)
         model_source, formats = model_run()
+        if ruby_mode in {"aozora", "short_xml", "compact"}:
+            compacted_source = display_run(formats)
+            if compacted_source != source:
+                locator["adapter_source"] = source
+            source = compacted_source
         if formats:
             locator["formats"] = formats
         values.append((locator, source, model_source or None))
@@ -1045,16 +1284,24 @@ def _text_slots(
             location=location,
             path=child_path,
         )
+        model_ruby = (
+            aozora_to_model_ruby(ruby, ruby_mode)
+            if ruby_mode in {"short_xml", "compact"}
+            else None
+        )
         tail = child.tail or ""
+        locator = {
+            "path": child_path,
+            "kind": "ruby",
+            "source": ruby,
+            "tail": tail,
+            "tail_in_source": False,
+        }
+        if model_ruby is not None:
+            locator["model_source"] = model_ruby
         semantic_run.append(
             (
-                {
-                    "path": child_path,
-                    "kind": "ruby",
-                    "source": ruby,
-                    "tail": tail,
-                    "tail_in_source": False,
-                },
+                locator,
                 ruby + tail,
             )
         )
@@ -1212,7 +1459,7 @@ def _set_regular_slot(
     bilingual: bool,
     ruby_mode: str = "",
 ) -> None:
-    if ruby_mode == "aozora":
+    if ruby_mode in {"aozora", "short_xml", "compact"}:
         fragments, found_ruby = parse_aozora_text(target)
         if found_ruby:
             _set_regular_aozora(
@@ -1433,10 +1680,24 @@ def _insert_fragments(
             continue
         if reading is None:
             raise IncompleteError("EPUB Aozora Ruby 片段损坏")
-        ruby = _new_aozora_ruby(parent, text, reading)
-        parent.insert(insert_at, ruby)
-        insert_at += 1
-        last_inserted = ruby
+        bases = (
+            regex.findall(r"\X", text)
+            if reading in EMPHASIS_RUBY_CHARACTERS
+            else [text]
+        )
+        for base in bases:
+            if base.isspace():
+                if last_inserted is not None:
+                    last_inserted.tail = (last_inserted.tail or "") + base
+                elif previous is not None:
+                    previous.tail = (previous.tail or "") + base
+                else:
+                    parent.text = (parent.text or "") + base
+                continue
+            ruby = _new_aozora_ruby(parent, base, reading)
+            parent.insert(insert_at, ruby)
+            insert_at += 1
+            last_inserted = ruby
     return last_inserted
 
 
@@ -1587,7 +1848,7 @@ def _set_composite_slot(
         return
     if _composite_source(slots, members) != source:
         raise IncompleteError("EPUB 复合 Segment 与原文不一致")
-    if ruby_mode == "aozora":
+    if ruby_mode in {"aozora", "short_xml", "compact"}:
         _, found_ruby = parse_aozora_text(target)
         if found_ruby:
             _set_composite_aozora(
@@ -1659,7 +1920,7 @@ def _set_ruby_slot(
     if not isinstance(raw, dict):
         raise IncompleteError("EPUB Ruby 定位 slot 损坏")
     parent, ruby = _resolve_ruby_slot(root, raw)
-    if ruby_mode == "aozora":
+    if ruby_mode in {"aozora", "short_xml", "compact"}:
         fragments, found_ruby = parse_aozora_text(target)
         if found_ruby:
             ruby_tail = ruby.tail or ""

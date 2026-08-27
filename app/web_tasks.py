@@ -9,7 +9,12 @@ from typing import Any
 
 from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
-from .errors import UsageError
+from .errors import (
+    AppError,
+    UsageError,
+    app_error_payload,
+    internal_error_payload,
+)
 from .execution import (
     Scope,
     choose_running_run,
@@ -20,7 +25,15 @@ from .execution import (
 )
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
+from .logging_utils import get_logger
 from .project import load_segments
+from .sqlite_storage import (
+    latest_stage_summary,
+    read_json,
+    read_jsonl,
+    record_exists,
+    utc_now,
+)
 from .stages import (
     load_terms,
     prompt_middle_digests,
@@ -29,12 +42,16 @@ from .stages import (
     run_terminology,
     run_translation,
 )
-from .sqlite_storage import (
-    latest_stage_summary,
-    read_json,
-    read_jsonl,
-    record_exists,
-    utc_now,
+from .term_decision import (
+    STAGE as TERMINOLOGY_DECISION_STAGE,
+)
+from .term_decision import (
+    current_decision_draft,
+    decision_checkpoint_progress,
+    decision_plan,
+    decision_resume_compatibility,
+    manual_review_state,
+    run_terminology_decision,
 )
 
 
@@ -49,6 +66,13 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _require_decision_library(project: Path) -> dict[str, Any]:
+    library = load_terms(project)
+    if library is None or not library.get("terms"):
+        raise UsageError("没有已发布术语库可供自动决策")
+    return library
+
+
 def _running_run(
     project: Path, stage: str, current_config: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -58,13 +82,16 @@ def _running_run(
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
     old_config = load_run_config(project / "runs" / run_id)
-    return {
+    result = {
         "run_id": run_id,
         "started_at": manifest.get("started_at"),
         "scope": manifest.get("scope"),
         "previous": _endpoint_summary(old_config),
         "current": _endpoint_summary(current_config),
     }
+    if isinstance(manifest.get("last_interruption"), dict):
+        result["last_interruption"] = manifest["last_interruption"]
+    return result
 
 
 def _stage_summary(
@@ -154,6 +181,64 @@ def _terminology_summary(
 
 
 def task_options(project: Path, stage: str) -> dict[str, Any]:
+    if stage == TERMINOLOGY_DECISION_STAGE:
+        library = _require_decision_library(project)
+        overrides = read_json(
+            project, project / "terminology" / "overrides.json"
+        )
+        protected = {
+            str(item["normalized"])
+            for item in overrides.get("overrides", [])
+        }
+        has_eligible = any(
+            str(item["normalized"]) not in protected
+            and not bool(item.get("disabled", False))
+            for item in library.get("terms", [])
+        )
+        config = load_project_config(project, stage=stage)
+        plan = decision_plan(project) if has_eligible else None
+        selected = len(plan["eligible"]) if plan else 0
+        running_run = _running_run(project, stage, config)
+        if running_run is not None:
+            compatible, reason = decision_resume_compatibility(
+                project,
+                str(running_run["run_id"]),
+                source_terms_revision=int(library["terms_revision"]),
+            )
+            running_run["completed_steps"] = decision_checkpoint_progress(
+                project, str(running_run["run_id"])
+            )
+            running_run["total_steps"] = selected * 2
+            running_run["resume_compatible"] = compatible
+            running_run["resume_incompatibility_reason"] = reason
+        return {
+            "stage": stage,
+            "preset": {
+                "id": str(config["_llm_preset_id"]),
+                "model": str(config["llm"]["model"]),
+            },
+            "selected": selected,
+            "protected": len(plan["protected"]) if plan else len(protected),
+            "overflow_policy": {
+                "allow_soft_target_overflow": bool(
+                    config["terminology_decision"]["allow_soft_target_overflow"]
+                ),
+                "anchor_overflow_mode": str(
+                    config["terminology_decision"]["anchor_overflow_mode"]
+                ),
+            },
+            "completed": 0,
+            "pending": selected,
+            "failed": 0,
+            "current_fingerprint_completed": 0,
+            "mismatched_fingerprint_completed": 0,
+            "running_run": running_run,
+            "has_pending_draft": current_decision_draft(project) is not None,
+            "estimated_requests": int(plan["estimated_requests"]) if plan else 0,
+            "estimated_input_tokens": (
+                int(plan["estimated_input_tokens"]) if plan else 0
+            ),
+        }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
     segments = load_segments(project)
@@ -205,13 +290,14 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
 class WebTask:
     task_id: str
     project: Path
+    project_id: str
     stage: str
     status: str = "queued"
     created_at: str = field(default_factory=utc_now)
     started_at: str | None = None
     completed_at: str | None = None
     summary: dict[str, Any] | None = None
-    error: str | None = None
+    error: dict[str, object] | None = None
     completed_segments: int = 0
     failed_segments: int = 0
     total_segments: int = 0
@@ -222,6 +308,7 @@ class WebTask:
             "output_tokens": 0,
             "total_tokens": 0,
             "available": False,
+            "partial": False,
         }
     )
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -230,6 +317,7 @@ class WebTask:
         return {
             "task_id": self.task_id,
             "project": self.project.name,
+            "project_id": self.project_id,
             "stage": self.stage,
             "status": self.status,
             "created_at": self.created_at,
@@ -267,12 +355,15 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        replace_draft: bool = False,
+        acknowledge_manual_review: bool = False,
     ) -> dict[str, Any]:
         if stage not in {
             "terminology",
             "translation",
             "proofreading",
             "polishing",
+            TERMINOLOGY_DECISION_STAGE,
             "run-all",
         }:
             raise UsageError(f"未知后台阶段：{stage}")
@@ -283,9 +374,10 @@ class WebTaskManager:
             )
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("run_action 必须是 resume、decline 或 null")
-        if stage == "run-all":
-            if run_action is not None:
-                raise UsageError("run-all 不支持 run_action")
+        if stage == "run-all" and run_action is not None:
+            raise UsageError("run-all 不支持 run_action")
+        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
+            raise UsageError("自动术语决策不支持复用已发布结果")
         async with self.guard:
             active_id = self.active_by_project.get(project)
             if active_id is not None:
@@ -294,8 +386,43 @@ class WebTaskManager:
                     raise UsageError(
                         f"项目已有后台任务：{active.task_id}"
                     )
-            if stage != "run-all":
+            selected_count = 0
+            if stage == TERMINOLOGY_DECISION_STAGE:
+                library = _require_decision_library(project)
+                current_terms_revision = int(library["terms_revision"])
+                if (
+                    run_action != "resume"
+                    and not acknowledge_manual_review
+                    and manual_review_state(project)["remaining"] > 0
+                ):
+                    raise UsageError(
+                        "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
+                    )
+                running = find_running_runs(project, stage)
+                if run_action == "resume":
+                    if not running:
+                        raise UsageError(f"{stage} 没有可续用的 running Run")
+                    if force:
+                        raise UsageError("续用 Run 时不能同时指定 force")
+                    compatible, reason = decision_resume_compatibility(
+                        project,
+                        str(running[0]["run_id"]),
+                        source_terms_revision=current_terms_revision,
+                    )
+                    if not compatible:
+                        raise UsageError(
+                            f"{reason}；请结束旧 Run 并强制新建"
+                        )
+                elif running:
+                    if run_action != "decline" or not force:
+                        raise UsageError(
+                            "发现未完成 Run，必须选择续用或强制重做全部"
+                        )
+                elif run_action == "decline" and not force:
+                    raise UsageError("结束自动决策 Run 时必须同时指定 force")
+            elif stage != "run-all":
                 options = task_options(project, stage)
+                selected_count = int(options["selected"])
                 running_run = options["running_run"]
                 if run_action == "resume":
                     if running_run is None:
@@ -322,10 +449,11 @@ class WebTaskManager:
             state = WebTask(
                 task_id=task_id,
                 project=project,
-                stage=stage,
-                total_segments=(
-                    int(options["selected"]) if stage != "run-all" else 0
+                project_id=str(
+                    read_json(project, project / "project.json")["project_id"]
                 ),
+                stage=stage,
+                total_segments=selected_count,
             )
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
@@ -336,6 +464,7 @@ class WebTaskManager:
                     reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                     run_action=run_action,
                     prompt_language=prompt_language,
+                    replace_draft=replace_draft,
                 )
             )
             return state.view()
@@ -348,6 +477,7 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        replace_draft: bool = False,
     ) -> None:
         state.status = "running"
         state.started_at = utc_now()
@@ -393,7 +523,16 @@ class WebTaskManager:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
                                 usage_base = raw_usage
-                if state.stage == "terminology":
+                if state.stage == TERMINOLOGY_DECISION_STAGE:
+                    summary = await run_terminology_decision(
+                        state.project,
+                        replace_draft=replace_draft,
+                        resume_run_id=resume_run_id,
+                        prompt_language=prompt_language,
+                        on_progress=progress,
+                        on_usage=usage_changed,
+                    )
+                elif state.stage == "terminology":
                     summary = await run_terminology(
                         state.project,
                         scope,
@@ -452,9 +591,18 @@ class WebTaskManager:
             )
         except asyncio.CancelledError:
             state.status = "cancelled"
+        except AppError as exc:
+            state.status = "failed"
+            state.error = app_error_payload(exc)
         except Exception as exc:
             state.status = "failed"
-            state.error = str(exc)
+            state.error = internal_error_payload()
+            get_logger(state.stage).exception(
+                "unexpected background task error task_id=%s project=%s",
+                state.task_id,
+                state.project,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
         finally:
             state.completed_at = utc_now()
             async with self.guard:
@@ -466,6 +614,22 @@ class WebTaskManager:
             return self.tasks[task_id].view()
         except KeyError as exc:
             raise UsageError(f"未知后台任务：{task_id}") from exc
+
+    def active_tasks(self) -> list[dict[str, Any]]:
+        active = {
+            "queued",
+            "running",
+            "cancelling",
+        }
+        states = [
+            state.view()
+            for state in self.tasks.values()
+            if state.status in active
+        ]
+        return sorted(
+            states,
+            key=lambda value: (str(value["created_at"]), str(value["task_id"])),
+        )
 
     def is_running(self, project: Path, stage: str) -> bool:
         return any(
@@ -500,6 +664,6 @@ def _task_usage(
     *,
     resuming: bool,
 ) -> dict[str, Any]:
-    if current is None:
-        return unavailable_usage()
-    return combine_usage(previous, current) if resuming else current
+    if resuming:
+        return combine_usage(previous, current)
+    return current or unavailable_usage()
