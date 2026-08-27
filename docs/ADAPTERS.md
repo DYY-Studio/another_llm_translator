@@ -1,7 +1,7 @@
 # Adapter 契约
 
-本文区分已经实现的契约与 provisional 设计。实现行为以测试和
-`docs/MINIMAL.md` 为准。
+本文区分已实现的契约与 provisional 设计。实现行为以测试和
+[`MINIMAL.md`](MINIMAL.md) 为准。
 
 ## 1. 声明式 JSON LLM Adapter（已实现）
 
@@ -116,7 +116,7 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 `pointer` 指向字符串增量，可选 `when` 条件为
 `{"pointer": "...", "equals": <primitive>}` 或
 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
-未知事件忽略。`reasoning_events` 可以为空，首版内置 Anthropic 不暴露 thinking。
+未知事件忽略。`reasoning_events` 可以为空；内置 Anthropic 不暴露 thinking。
 OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
 两类互斥的流式字段。
 `terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。
@@ -244,9 +244,9 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应
   缺少该结构时快速失败。
 
-四个内置定义都声明 `streaming` 与 `usage` 映射；示例 Preset 见
+四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见
 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与
-`openai-responses.json`。四个内置定义均声明 `models` 与 `usage` 映射：
+`openai-responses.json`。
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
 Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对
 路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
@@ -384,7 +384,7 @@ cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
 连续，正文可以跨多行。单语导出替换 cue 正文，双语导出在同一 cue 中追加换行和译文。
 输入换行会规范化为 LF，输出换行、末尾换行和编码由插件与宿主输出契约决定。
 
-HTML/ASS 样式标记作为普通正文交给模型，不由首版插件解析或保证保留；译文不得包含
+HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证保留；译文不得包含
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
@@ -587,13 +587,8 @@ Preset 修改立即影响所有引用项目，不维护版本历史。Adapter �
 改用其他 Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持内联
 连接配置。
 
-### 后期能力（未实现）
+### 未实现能力
 
-路线 Stage 10 的 `models` 请求与响应映射、规范化 `usage` 映射和任务内
-汇总已实现（见 §1）。模型发现只由用户手动触发，缺少 usage 时明确显示
-不可用。流式使用 Preset 的显式开关，不改变普通请求的 body、术语注入或
-持久化语义。
-
-路线 Stage 11 才考虑单 Preset 多 API Key。Preset 仍只记录密钥环境变量名；
+单 Preset 多 API Key 尚未实现。Preset 仍只记录一个凭据引用；
 每 Key 限流、调度、失效恢复和 Run 审计必须先形成可测试规则。该能力不提供
 Provider fallback，也不静默吞掉鉴权或配额错误。

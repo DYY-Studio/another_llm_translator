@@ -173,7 +173,7 @@ EPUB ZIP/XML 处理和 Unicode 归一化。
 - 声明式 LLM Adapter、HTTP 调用、限流和重试。
 - 术语、翻译、校对、润色和 apply。
 - inspect 与原文档格式导出。
-- 只绑定本机回环地址的 Web Alpha。
+- 默认只允许本机回环访问的 Web 工作台。
 
 ## 2.2 项目内容
 
@@ -370,7 +370,8 @@ text = text.replace("\r\n", "\n").replace("\r", "\n")
 segments = text.split("\n")
 ```
 
-这样可以保留文件首部、正文中的连续空行和尾部空 Segment。原换行符、BOM、末尾换行状态和输入字节不进入项目契约，也不决定输出格式。
+这样可以保留文件首部、正文中的连续空行和尾部空 Segment。原换行符、BOM、末尾换行状态
+和输入字节不进入项目契约，也不决定输出格式。
 
 每个文件记录：
 
@@ -617,7 +618,8 @@ completed
 failed
 ```
 
-`pending` 由缺少记录推导。缺少上游结果是阶段启动检查问题，不建立 `blocked` 状态。设置变化只产生 warning，不建立 `stale` 状态。
+`pending` 由缺少记录推导。缺少上游结果是阶段启动检查问题，不建立 `blocked` 状态。
+设置变化只产生 warning，不建立 `stale` 状态。
 
 结果选择始终查找最新 completed，而不是机械采用最后一条 JSONL 记录。同一 Segment 强制重做失败时：
 
@@ -625,7 +627,8 @@ failed
 - 最近失败仍可由 inspect 查看。
 - 当前命令返回“选定范围未全部完成”。
 
-普通阶段命令只处理没有 completed 的 pending 和 failed。`--force` 才把选定范围内已有 completed 的非空 Segment 重新加入待处理集合。
+普通阶段命令只处理没有 completed 的 pending 和 failed。只有 `--force` 会把选定范围内已有
+completed 的非空 Segment 重新加入待处理集合。
 
 ## 3.3 阶段设置指纹
 
@@ -648,7 +651,8 @@ failed
 翻译还包含启用的文字校验器 ID、插件及 Validator 版本和 `exhausted_mode`。
 最大校验重试次数只影响执行，不进入指纹。
 
-上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
+上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹
+只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
 
 指纹不包含：
 
@@ -845,9 +849,13 @@ previous_segments = 3
 - 失败结果不能作为可信目标文本上文。
 - 术语上文始终只含源文。
 
-翻译、校对和润色请求把当前请求内的待处理 Segment 依次编号为 `"1"`、`"2"`……；模型只返回这些短 ID。宿主在解析后映射回持久 Segment ID，未知、重复或缺失短 ID 仍按格式修正规则处理。格式修正、校验修复、上下文拆分和超长 Segment part 请求各自重新编号。术语请求不发送 Segment ID。
+翻译、校对和润色请求把待处理 Segment 依次编号为 `"1"`、`"2"`……，模型只返回这些短 ID。
+宿主在解析后映射回持久 Segment ID；未知、重复或缺失短 ID 仍按格式修正规则处理。
+格式修正、校验修复、上下文拆分和超长 Segment part 请求各自重新编号。术语请求不发送
+Segment ID。
 
-诊断详情只在本次运行的有界内存中保留短 ID 到持久 Segment ID 的映射；摘要接口不传输该映射。项目数据、阶段结果、普通日志和 debug manifest 继续只使用持久 Segment ID。
+诊断详情只在本次运行的有界内存中保留短 ID 到持久 Segment ID 的映射，摘要接口不传输
+该映射。项目数据、阶段结果、普通日志和 debug manifest 只使用持久 Segment ID。
 
 `ordered_by_file`：
 
@@ -1019,7 +1027,7 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 该副条目的独立译名、类别和说明。相关推荐中的“快速移除”复用可恢复的 disabled
 移除语义；有成员的组主仍不可移除。
 
-### 自动术语决策（开发版）
+### 自动术语决策
 
 自动术语决策是独立、显式触发的 `terminology_decision` LLM 阶段，不属于
 `run-all`。它只审查当前已发布且启用、没有人工 override 的术语；override 仅作为
@@ -1087,7 +1095,8 @@ alias 或组修改不得借完整 override 清除冲突。通过后在一个 SQL
 
 审核界面使用术语页内的全宽工作区。建议默认接受，用户可以按类型、接受状态和文本筛选，
 冲突候选和关系争用也参与搜索。Proposal 与 `needs_review` 保存对应的只读冲突证据；界面
-展示历史类别/推荐译名候选、alias 归属和组关系争用。`needs_review` 不参与自动应用；应用或全部拒绝完成后，
+展示历史类别、推荐译名候选、alias 归属、组关系争用，以及 Description 的完整新旧文本。
+`needs_review` 不参与自动应用；应用或全部拒绝完成后，
 它们进入持久人工待办队列。队列状态写入对应 Run manifest，旧 Run 缺少处理字段时按未处理
 读取；同一 normalized 以最新完成 Run 的人工项为准。存在待处理草案时，旧队列继续保留但
 在审核工作区中暂不开放，避免用户同时处理两个决策世代；启动新一轮决策前必须确认，只有
@@ -1103,22 +1112,6 @@ reading 视图。构造一次 LLM 请求时，focus 与 anchors 的可见样本�
 顺序或权重。Token 预估和实际请求使用同一投影。草案、人工待办和审核接口仍保存完整定位；
 旧草案缺少 `part_id` 时仍可查看。Anchor 使用 `compact` 策略时只移除样本，不改变按
 Segment 计算的命中计数。
-
-自动决策的 `hit_count` 表示命中术语的 Segment 数，不是一个 Segment 内的字符出现次数。
-每个术语最多提供五条不同 Segment 的上下文：先覆盖不同 `(file_id, part_id)` 内容边界的
-首个命中，再按源文顺序补充其余 Segment，因此单文件项目也可以得到五条样本。模型只看到
-请求内连续编号的 `boundary_ref`；相同编号表示样本来自同一内容边界，不表示全局 ID、顺序
-或权重。草案和审核页仍保留完整 File、part 和 Segment 定位。
-
-历史类别、推荐译名和关系争用会作为去重证据交给模型，它们不是按票数选胜者的统计，也
-不是封闭的可选值列表；源文和全书上下文支持时，草案可以提出候选之外的新值。第一阶段
-不能保留未裁决的类别或推荐译名冲突；证据不足时会进入人工待办。Description 可以保留、
-清空，或基于当前说明、源文样本和可见参考整理成简洁的目标语说明，不能添加无证据事实。
-
-第二阶段只把人工决定和“第一阶段已确定、当前无冲突”的自动状态用作 anchors；
-`needs_review`、disabled 或仍有冲突的状态不会影响其他术语。审核页会展示并搜索历史候选、
-alias 归属和组关系争用，也会完整显示 Description 的旧文本与新文本。未解决关系组件会
-整体恢复到运行前状态后进入人工待办，应用草案前还会再次检查术语 revision 和冲突状态。
 
 ### 术语交换
 
@@ -1201,7 +1194,8 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 - end 前结构有效的 Segment 立即逐条保存，即使响应随后截断也不回滚。
 - 后续格式修正只请求未决 Segment。
 
-没有已发布术语库时允许直接 translate，但必须醒目警告，并在 Run 中记录 `terms_revision = null`。`run-all` 会先完成术语任务再翻译。
+没有已发布术语库时允许直接 translate，但必须醒目警告，并在 Run 中记录
+`terms_revision = null`。`run-all` 会先完成术语任务再翻译。
 
 ### 翻译文字校验
 
@@ -1213,7 +1207,8 @@ Segment。`ordered_by_file` 的 `reference_context` 使用带 `source` 的对象
 - `preferred_term_usage`：由独立的可信术语校验插件提供；只检查宿主实际匹配且带
   推荐译名的术语是否至少在候选译文中出现一次。该校验是 advisory，默认关闭。
 
-长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母；纯数字和标点不触发。该校验器默认关闭。
+长片段必须至少包含 12 个非空白字符、占源文非空白内容至少 30%，并包含 Unicode 字母。
+纯数字和标点不触发。该校验器默认关闭。
 
 校验发生在结构解析成功之后、写 completed 之前。
 
@@ -1386,9 +1381,14 @@ Chunk 目标同时受 `target_chunk_input_tokens` 约束。估算必须覆盖：
 增加服务端上下文超限或实际 ITPM 超限风险。该估算不保证与任一模型、语言或
 Prompt 的真实分词结果一致，使用者应依据实际分词器和端点行为调节。
 
-每次尝试加入 Segment 后重新渲染并估算完整 Prompt。普通 Run 创建后才规划下一批 Chunk，调度器只保留与 `max_parallel` 同阶的有界缓冲；Chunk ID 在进入调度时生成，调试模式随生成追加 Chunk Manifest。取消后不再继续规划。Chunk 参数只影响本次请求组合，不影响任何已完成 Segment。
+每次尝试加入 Segment 后，重新渲染并估算完整 Prompt。普通 Run 创建后才规划下一批 Chunk，
+调度器只保留与 `max_parallel` 同阶的有界缓冲。Chunk ID 在进入调度时生成；调试模式随生成
+追加 Chunk Manifest。取消后不再继续规划。Chunk 参数只影响本次请求组合，不影响任何已完成
+Segment。
 
-`target_chunk_input_tokens` 是软目标。贪心累计时，加入下一个 Segment 将超过目标便结束当前 Chunk；单个 Segment 自身超过目标但仍低于模型输入硬限制时，可以单独发送。文件末尾和范围末尾的短尾 Chunk 允许明显低于目标。
+`target_chunk_input_tokens` 是软目标。贪心累计时，加入下一个 Segment 将超过目标便结束
+当前 Chunk。单个 Segment 自身超过目标但仍低于模型输入硬限制时，可以单独发送。
+文件末尾和范围末尾的短尾 Chunk 允许明显低于目标。
 
 配置或请求在发送前失败的情况：
 
@@ -1461,7 +1461,12 @@ Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。Preset �
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
 
-RPM 和 ITPM 使用单进程 60 秒滑动窗口。检查与预约由同一个异步锁保护。每次实际 HTTP 尝试都重新预约额度，失败后不返还。RPM 大于 0 时，实际尝试还按 `60 / RPM` 的最小间隔串行预约发起许可；首个尝试立即预约，HTTP 请求发出后释放该许可，因而不会在启动时突发。RPM 为 0 时不启用该节奏；ITPM 为 0 时不参与 Token 窗口；两者都为 0 时仍受 `max_parallel` 限制。
+RPM 和 ITPM 使用单进程 60 秒滑动窗口。检查与预约由同一个异步锁保护。每次实际 HTTP
+尝试都重新预约额度，失败后不返还。
+
+RPM 大于 0 时，实际尝试还会按 `60 / RPM` 的最小间隔串行预约发起许可。首个尝试立即
+预约，HTTP 请求发出后释放该许可，避免启动时突发。RPM 为 0 时不启用该节奏；ITPM 为 0
+时不参与 Token 窗口；两者都为 0 时仍受 `max_parallel` 限制。
 
 ## 5.3 重试与部分响应
 
@@ -1555,7 +1560,9 @@ Segment 进度恢复不读取 Chunk ID、Chunk Manifest 或 Request 状态。Run
 - SQLite 中的 Segment 阶段结果、术语任务进度与候选。
 - 人类可读 `app.log`。
 
-CLI 无论 debug 是否启用都将带时间、级别和阶段的实时日志写入 stderr，并把相同基本日志写入 `app.log`；最终命令汇总单独以 JSON 写入 stdout。日志不得包含正文、译文、Prompt、API Key 或完整 Payload。
+CLI 无论是否启用 debug，都会将带时间、级别和阶段的实时日志写入 stderr，并把相同基本
+日志写入 `app.log`。最终命令汇总单独以 JSON 写入 stdout。日志不得包含正文、译文、
+Prompt、API Key 或完整 Payload。
 
 本地 Web 将相同安全摘要写入应用级 `logs/app.log`，按大小轮转，不因项目切换
 而清空；同时在有界内存中保留当前进程的结构化日志供仪表盘读取。仪表盘还为
@@ -1661,7 +1668,8 @@ python -m app.main run-all PROJECT
 语义：
 
 - `--force`：重做选定范围内所有非空 Segment，覆盖普通 pending/failed 筛选。
-- `--dry-run`：不写文件、不创建 Run、不更新模板、不调用 LLM；它会耗尽规划器，报告范围、设置警告、完整 Chunk 数和 Token 估算。普通 Run 不在启动前生成全部 Chunk。
+- `--dry-run`：不写文件、不创建 Run、不更新模板、不调用 LLM。它会耗尽规划器，报告范围、
+  设置警告、完整 Chunk 数和 Token 估算。普通 Run 不在启动前生成全部 Chunk。
 - `--allow-outdated-base`：仅用于 apply，允许应用基于旧上游结果的建议。
 - `--allow-missing`：仅用于 export，允许使用阶段回退。
 - `--bilingual`：仅用于 export。
@@ -1823,7 +1831,7 @@ TXT 可以使用任意一致的文本行分隔方式。验收不检查换行符�
 或输出字节，只检查逻辑行和可见空行结构。EPUB 验收检查 spine 顺序、XHTML
 结构及未修改资源仍可读取。
 
-## 6.4 本地 Web Alpha
+## 6.4 本地 Web
 
 `python -m app.web` 只允许绑定 `127.0.0.1` 或 `localhost`。HTTP 层拒绝非
 本机 Host 和跨站 Origin。Web 创建项目时不预选文档格式；待输入列表可分多次
@@ -1949,7 +1957,7 @@ SameSite=lax 的会话 Cookie（30 天），会话保存在内存，重启或停
 失效，长期账密保留。回环访问始终免认证。停止共享时清除全部会话。公开端点
 仅限 `/api/v1/server/status`、`/api/v1/server/interfaces`、登录/登出与非 `/api/`
 静态资源。留空认证必须显式确认警告：同网段设备拥有完整项目和 LLM 操作权限；
-未认证共享时 Web 常驻显示该警告。首版使用 HTTP，不实现 TLS、多账号、角色或
+未认证共享时 Web 常驻显示该警告。局域网共享使用 HTTP，不实现 TLS、多账号、角色或
 密码找回。
 
 ### 桌面壳（Tauri）

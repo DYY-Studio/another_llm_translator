@@ -1,4 +1,4 @@
-# Another LLM Translator terminology validation plugin
+# Another LLM Translator Terminology Validation Plugin
 
 This package is the reference external Translation Validator for Another LLM
 Translator. It provides the optional `preferred_term_usage` validator.
@@ -16,5 +16,5 @@ Install it in a Python environment with the host package:
 python -m pip install another-llm-translator-term-validation
 ```
 
-The official desktop build includes the plugin, but it is disabled by default.
-There is currently no runtime plugin installation or upgrade mechanism.
+The official desktop build includes the plugin, but disables it by default.
+The desktop application does not support runtime plugin installation or upgrades.
