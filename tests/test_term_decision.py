@@ -3031,6 +3031,53 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
     assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
 
 
+def test_web_rejects_decision_resume_after_terms_revision_changes(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    run_id, _, _, _ = create_complete_legacy_group_run(project)
+    terms = read_json(project, project / "terminology" / "terms.json")
+    terms["terms_revision"] = 2
+    write_json(project, project / "terminology" / "terms.json", terms)
+
+    client = TestClient(create_app(projects_root=project.parent))
+    options = client.get(
+        "/api/v1/projects/decision-demo/task-options/terminology_decision"
+    )
+    assert options.status_code == 200
+    running = options.json()["running_run"]
+    assert running["run_id"] == run_id
+    assert running["resume_compatible"] is False
+    assert "revision" in running["resume_incompatibility_reason"]
+
+    resumed = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision", "run_action": "resume"},
+    )
+    assert resumed.status_code == 400
+    assert "revision" in resumed.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
+def test_web_rejects_decision_task_without_published_terms(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    terms = read_json(project, project / "terminology" / "terms.json")
+    terms["terms"] = []
+    write_json(project, project / "terminology" / "terms.json", terms)
+
+    client = TestClient(create_app(projects_root=project.parent))
+    response = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+
+    assert response.status_code == 400
+    assert "没有已发布术语库" in response.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
 def test_web_decision_failure_exposes_saved_run_for_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

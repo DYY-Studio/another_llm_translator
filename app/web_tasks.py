@@ -66,6 +66,13 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _require_decision_library(project: Path) -> dict[str, Any]:
+    library = load_terms(project)
+    if library is None or not library.get("terms"):
+        raise UsageError("没有已发布术语库可供自动决策")
+    return library
+
+
 def _running_run(
     project: Path, stage: str, current_config: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -175,9 +182,7 @@ def _terminology_summary(
 
 def task_options(project: Path, stage: str) -> dict[str, Any]:
     if stage == TERMINOLOGY_DECISION_STAGE:
-        library = load_terms(project)
-        if library is None or not library.get("terms"):
-            raise UsageError("没有已发布术语库可供自动决策")
+        library = _require_decision_library(project)
         overrides = read_json(
             project, project / "terminology" / "overrides.json"
         )
@@ -196,7 +201,9 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         running_run = _running_run(project, stage, config)
         if running_run is not None:
             compatible, reason = decision_resume_compatibility(
-                project, str(running_run["run_id"])
+                project,
+                str(running_run["run_id"]),
+                source_terms_revision=int(library["terms_revision"]),
             )
             running_run["completed_steps"] = decision_checkpoint_progress(
                 project, str(running_run["run_id"])
@@ -381,6 +388,8 @@ class WebTaskManager:
                     )
             selected_count = 0
             if stage == TERMINOLOGY_DECISION_STAGE:
+                library = _require_decision_library(project)
+                current_terms_revision = int(library["terms_revision"])
                 if (
                     run_action != "resume"
                     and not acknowledge_manual_review
@@ -396,7 +405,9 @@ class WebTaskManager:
                     if force:
                         raise UsageError("续用 Run 时不能同时指定 force")
                     compatible, reason = decision_resume_compatibility(
-                        project, str(running[0]["run_id"])
+                        project,
+                        str(running[0]["run_id"]),
+                        source_terms_revision=current_terms_revision,
                     )
                     if not compatible:
                         raise UsageError(
