@@ -1429,8 +1429,23 @@ def decision_checkpoint_progress(project: Path, run_id: str) -> int:
 
 
 def decision_resume_compatibility(
-    project: Path, run_id: str
+    project: Path,
+    run_id: str,
+    *,
+    source_terms_revision: int,
 ) -> tuple[bool, str | None]:
+    try:
+        manifest = read_json(
+            project, project / "runs" / run_id / "manifest.json"
+        )
+    except StorageError:
+        return False, "旧 Run 的 manifest 不可读"
+    try:
+        manifest_revision = int(manifest.get("source_terms_revision", -1))
+    except (TypeError, ValueError):
+        return False, "旧 Run 缺少有效的术语库 revision"
+    if manifest_revision != source_terms_revision:
+        return False, "术语库 revision 已变化，不能续用自动决策 Run"
     path = _checkpoint_path(project, run_id)
     if not path.is_file():
         return False, "旧 Run 缺少术语决策检查点规则版本"
@@ -1438,6 +1453,8 @@ def decision_resume_compatibility(
         checkpoint = _read_checkpoint_file(path)
     except StorageError:
         return False, "旧 Run 的术语决策检查点不可读"
+    if checkpoint.get("source_terms_revision") != source_terms_revision:
+        return False, "术语库 revision 已变化，不能续用自动决策 Run"
     if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
         return False, "旧 Run 使用不兼容的术语决策输出协议"
     return True, None
@@ -2238,13 +2255,10 @@ async def run_terminology_decision(
     revision = int(library["terms_revision"])
     resumed_steps = 0
     if resume_run_id is not None:
-        resume_manifest = read_json(
-            project, project / "runs" / resume_run_id / "manifest.json"
-        )
-        if int(resume_manifest.get("source_terms_revision", -1)) != revision:
-            raise UsageError("术语库 revision 已变化，不能续用自动决策 Run")
         compatible, incompatibility_reason = decision_resume_compatibility(
-            project, resume_run_id
+            project,
+            resume_run_id,
+            source_terms_revision=revision,
         )
         if not compatible:
             raise UsageError(f"{incompatibility_reason}；请显式结束旧 Run 并强制新建")
