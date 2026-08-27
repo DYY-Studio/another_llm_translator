@@ -168,9 +168,6 @@ Preset、可处理/受保护术语数量及请求和 Token 估算；草案中可
 alias 归属和组关系争用，也会完整显示 Description 的旧文本与新文本。未解决关系组件会
 整体恢复到运行前状态后进入人工待办，应用草案前还会再次检查术语 revision 和冲突状态。
 
-当前决策规则版本为 7。规则版本 6 的未完成 Run 不能续作，需要结束后强制新建；旧草案
-仍可查看、保存拒绝项或丢弃，但不能应用，必须重新生成。
-
 ### 4.2 翻译
 
 进入“翻译”，选择运行范围并启动任务。已完成 Segment 默认复用；失败和未完成内容可以继续处理。
@@ -256,20 +253,6 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 | short_xml | `<r><b>base</b><y>reading</y></r>`| `<r><b>漢字</b><y>かんじ</y></r>` | ✅ |
 | compact | `⟦B:base\|Y:reading⟧` | `⟦B:漢字\|Y:かんじ⟧` | ✅ | 
 | base_only | `base` | `漢字` | - |
-
-需要根据使用的模型选择其最适应的格式，以下是少量模型的测试结果，经供参考。
-| 模型 | 综合成绩 | 首选 | 正确率 | 备选 | 正确率 |
-| -- | :--: | -- | :--: | -- | :--: |
-| Muse Spark 1.2 | ~92.1% | aozora | ~100% | short_xml | ~100% |
-| MiniMax M3 | ~79.1% | short_xml | ~99% | aozora/compact | ~96% |
-| GLM 5.2 | ~77.3% | short_xml | ~94% | aozora | ~92% |
-| Ox Alpha | ~75.5% | compact | ~98% | aozora | ~97% |
-| DeepSeek V4 Flash 0731 | ~70.7% | short_xml | ~95% | aozora | ~94% |
-
-- **正确率**：只反应该模型的 formatter 正确性，不表示其翻译和自动决策的可靠性。
-- **综合成绩**：在极端场景和极简提示词下进行的自动决策与翻译验证，由于机器校验不完全可靠，可能有部分误差。
-
-所有模型均使用 `reasoning_effort=high, temperature=0, top_p=0.95`。
 
 #### Ruby 连续强调符号压缩
 - 避免 LLM 在处理 Emphasis Ruby 时因连续Ruby出现文本理解不当、强调符号数不一致的情况
