@@ -251,7 +251,7 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留�
 | -- | -- | -- | :--: |
 | aozora | `｜base《reading》` | `｜漢字《かんじ》` | ❌ |
 | short_xml | `<r><b>base</b><y>reading</y></r>`| `<r><b>漢字</b><y>かんじ</y></r>` | ✅ |
-| compact | `⟦B:base\|Y:reading⟧` | `⟦B:漢字\|Y:かんじ⟧` | ✅ | 
+| compact | `⟦R:base\|Y:reading⟧` | `⟦R:漢字\|Y:かんじ⟧` | ✅ |
 | base_only | `base` | `漢字` | - |
 
 #### Ruby 连续强调符号压缩
