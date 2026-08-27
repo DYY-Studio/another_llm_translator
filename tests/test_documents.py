@@ -17,8 +17,10 @@ from app.documents import (
     DocumentChoiceOption,
     DocumentExportJob,
     ImportedFile,
+    aozora_to_model_ruby,
     compact_emphasis_aozora,
     decode_plaintext,
+    escape_model_ruby_literal,
     publish_document_exports,
 )
 from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
@@ -1171,6 +1173,40 @@ def test_epub_model_ruby_output_normalizes_to_aozora(
         text=model_text,
         stage="translation",
     ) in {"｜汉字 & 词《hànzì》", "｜汉|字《hànzì》"}
+
+
+def test_epub_compact_ruby_round_trips_escaped_literal_text() -> None:
+    source = "前｜汉《hàn》后\\|字⟦R:字|Y:读⟧⟧\\"
+    model_text = aozora_to_model_ruby(source, "compact")
+
+    assert get_document_adapter("epub").normalize_model_output(
+        segment={"source": source, "_ruby_mode": "compact"},
+        text=model_text,
+        stage="translation",
+    ) == source
+
+
+def test_epub_compact_ruby_unescapes_plain_literal_text() -> None:
+    source = "普通\\文本|⟦R:base|Y:reading⟧⟧"
+    model_text = escape_model_ruby_literal(source, "compact")
+
+    assert get_document_adapter("epub").normalize_model_output(
+        segment={"source": source, "_ruby_mode": "compact"},
+        text=model_text,
+        stage="translation",
+    ) == source
+
+
+@pytest.mark.parametrize("model_text", ["普通\\q", "普通\\"])
+def test_epub_compact_ruby_rejects_invalid_literal_escapes(
+    model_text: str,
+) -> None:
+    with pytest.raises(IncompleteError):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source", "_ruby_mode": "compact"},
+            text=model_text,
+            stage="translation",
+        )
 
 
 @pytest.mark.parametrize(
