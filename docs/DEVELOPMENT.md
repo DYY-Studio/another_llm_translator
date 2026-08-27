@@ -105,9 +105,10 @@ bash scripts/desktop-dev.sh
 - `ANOTHER_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
 
 `scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
-`another_llm_translator.plugins` entry point 及其发行元数据。官方构建会检查 SRT
-和术语校验 entry point 已安装后再冻结；这提供构建时插件装配，不提供成品运行时
-安装任意插件。
+`another_llm_translator.plugins` entry point 及其发行元数据。
+
+官方构建会检查 SRT 和术语校验 entry point 已安装后再冻结。这只提供构建时插件装配，
+不提供成品运行时安装任意插件。
 
 发布改名不保留旧包名、命令、环境变量或插件组。默认用户数据目录由旧名称迁移到
 `another-llm-translator`：只有新目录不存在时才迁移；新目录存在则跳过且不覆盖旧目录。
@@ -172,27 +173,32 @@ projects/<name>/
 prompt_library/<stage>/<language>/<prompt-id>.middle.txt
 ```
 
-`prompt-id` 只允许以小写字母开头并包含小写字母、数字和连字符。仓库条目使用
-UTF-8 原子写入，按阶段和语言隔离；读取、覆盖或删除仓库条目不会修改全局 Prompt、
-项目 Prompt 或项目元数据。仓库内容不进入 Bundle Hash、阶段指纹或 Run 快照，直到
-用户将其载入项目编辑器并显式保存为项目 Prompt。
+`prompt-id` 只允许以小写字母开头并包含小写字母、数字和连字符。仓库条目使用 UTF-8
+原子写入，并按阶段和语言隔离。读取、覆盖或删除仓库条目不会修改全局 Prompt、
+项目 Prompt 或项目元数据。
+
+仓库内容不进入 Bundle Hash、阶段指纹或 Run 快照，直到用户将其载入项目编辑器并显式
+保存为项目 Prompt。
 
 `project.sqlite` 是项目权威存储。Run 目录提供可读的 manifest 与设置快照，
 但不能代替数据库判断进度。
 
 普通日志不得记录完整 Prompt、源文、鉴权 Header、未脱敏请求正文或流式增量正文。
-Debug 记录可能含敏感内容；启用时会保存每个流式 Attempt 收集到的原始 SSE
-`data` 事件，只能用于明确的本地诊断。诊断 API 只返回流式事件数、接收字节数和
-首事件耗时，完整正文仍须通过格式解析与校验后才进入请求详情。Document Adapter
-和 LLM Adapter 插件是可信同进程扩展，不提供沙箱。
 
-Preset schema 4 的 `stream` 必须由用户显式开启，且只对声明 `streaming` SSE
-规则的 JSON LLM Adapter 有效。启动 CLI、Web 或桌面 sidecar 会先原子迁移用户
-schema 2/3 Preset 和 schema 1 Adapter；迁移失败应终止启动，不留下兼容副本。流式
-请求默认使用 `request_timeout_seconds` 作为连接及连续读取的空闲超时；关闭
-`stream_read_timeout_enabled` 后只取消连续读取超时，不限制完整生成
-时间；EOF、读取超时和流内错误会丢弃半成品并沿 HTTP 尝试次数重试，不自动回退为
-非流式。
+> [!CAUTION]
+> Debug 记录可能包含敏感内容。启用后会保存每个流式 Attempt 收集到的原始 SSE `data`
+> 事件，只能用于明确的本地诊断。
+
+诊断 API 只返回流式事件数、接收字节数和首事件耗时。完整正文通过格式解析与校验后，
+才会进入请求详情。
+
+Document Adapter 和 LLM Adapter 插件是可信同进程扩展，不提供沙箱。
+
+Preset schema 4 的 `stream` 必须由用户显式开启，且只对声明 `streaming` SSE 规则的 JSON LLM Adapter 有效。
+
+启动 CLI、Web 或桌面 sidecar 会先原子迁移用户 schema 2/3 Preset 和 schema 1 Adapter；迁移失败应终止启动，不留下兼容副本。
+
+流式请求默认使用 `request_timeout_seconds` 作为连接及连续读取的空闲超时；关闭 `stream_read_timeout_enabled` 后只取消连续读取超时，不限制完整生成时间；EOF、读取超时和流内错误会丢弃半成品并沿 HTTP 尝试次数重试，不自动回退为非流式。
 
 ## 7. 验证
 

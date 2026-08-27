@@ -53,10 +53,11 @@
 - `gemini`：system 消息剥离到顶层字段，user/assistant 映射为 `contents`
   数组的 `role: "user"/"model"` 与 `parts: [{"text": ...}]`。
 
-`body` 模板可使用 `${system}` 占位符读取剥离后的 system 文本（多条消息以
-空行拼接），例如 Anthropic 的顶层 `system` 与 Gemini 的 `system_instruction`。
-该占位符对 `openai` 格式同样可渲染，但 system 消息仍保留在 `${messages}`
-中，通常不应同时使用。
+`body` 模板可使用 `${system}` 占位符读取剥离后的 system 文本（多条消息以空行拼接）。
+例如，Anthropic 使用顶层 `system`，Gemini 使用 `system_instruction`。
+
+该占位符对 `openai` 格式同样可渲染，但 system 消息仍保留在 `${messages}` 中，
+通常不应同时使用。
 
 ### 请求边界
 
@@ -73,8 +74,10 @@
   `${max_output_tokens}`、`${stream}`。占位符必须独占一个 JSON 字符串值，
   替换后保留数组、数字和布尔类型。
 - Header 可使用上述占位符及 `${api_key}`；嵌入字符串时结果为字符串。
-- `${api_key}` 禁止出现在 body；URL 不支持模板，因此密钥也不能进入 URL。
 - 未知字段、未知占位符、混合 body 文本占位符和非法 schema 立即失败。
+
+> [!CAUTION]
+> `${api_key}` 禁止出现在 body。URL 不支持模板，因此密钥也不能进入 URL。
 
 ### SSE 流式规则（可选）
 
@@ -111,51 +114,42 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 }
 ```
 
-`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset
-`extra_body` 的顶层字段冲突。`content_events` 必须非空；每项以
-`pointer` 指向字符串增量，可选 `when` 条件为
-`{"pointer": "...", "equals": <primitive>}` 或
-`{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，
-未知事件忽略。`reasoning_events` 可以为空；内置 Anthropic 不暴露 thinking。
-OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容
-两类互斥的流式字段。
-`terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。
-`allow_clean_eof` 是可选布尔值，缺省为 `false`。显式启用后，HTTP 2xx 响应在已
-收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可
-作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。
-这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。读取超时、
-网络中断、SSE/UTF-8/JSON 错误和流内服务错误不属于 clean EOF，仍按原规则失败或重试。
-`error_events`
-声明流内错误、可选字符串消息路径和可选 `status_pointer`。状态路径命中后必须
-是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际
-HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以
-同时报告外层 HTTP 200 和上游 HTTP 504。`usage` 的三个候选指针数组逐事件观察，
-每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
+`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset `extra_body` 的顶层字段冲突。
 
-宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在未满足显式终止
-或已声明的 clean EOF 前断流、或遇到流内服务错误时丢弃完整聚合正文，并按既有
-HTTP 尝试次数重试；不会隐式改为非流式。普通日志和诊断摘要不包含增量正文，debug
-模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制
-完整生成时间。内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；
-Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他
-供应商字段作为隐式终止标记。
+`content_events` 必须非空；每项以 `pointer` 指向字符串增量，可选 `when` 条件为 `{"pointer": "...", "equals": <primitive>}` 或 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，未知事件忽略。
+
+`reasoning_events` 可以为空；内置 Anthropic 不暴露 thinking。OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容两类互斥的流式字段。
+
+`terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。`allow_clean_eof` 是可选布尔值，缺省为 `false`。
+
+显式启用后，HTTP 2xx 响应在已收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。
+
+读取超时、网络中断、SSE/UTF-8/JSON 错误和流内服务错误不属于 clean EOF，仍按原规则失败或重试。`error_events` 声明流内错误、可选字符串消息路径和可选 `status_pointer`。
+
+状态路径命中后必须是 100–599 的整数；它表示 Provider 在 SSE 事件中报告的上游状态，不覆盖实际 HTTP 响应的 `http_status`。例如 OpenAI-compatible 的 `finish_reason=error` 可以同时报告外层 HTTP 200 和上游 HTTP 504。
+
+`usage` 的三个候选指针数组逐事件观察，每个指标保留最后一个非负整数，只有声明的全部指标都取得时 usage 才可用。
+
+宿主严格处理 UTF-8、CRLF/LF、chunk 边界、注释和多行 `data:`，在未满足显式终止或已声明的 clean EOF 前断流、或遇到流内服务错误时丢弃完整聚合正文，并按既有 HTTP 尝试次数重试；不会隐式改为非流式。
+
+普通日志和诊断摘要不包含增量正文，debug 模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
+
+内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他供应商字段作为隐式终止标记。
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。
-JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为
-最后一个元素、`-2` 为倒数第二。当思考块总是排在最前、文本块在最后时
-（Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。
-越界、空数组与普通缺失路径同样快速失败。
-可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。也可使用非空
-的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，
-首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或
-拼接多个字段。
+`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一
-严格规则从 content 开头剥离一个完整已知思考 Tag；若结构化字段与内嵌块同时
-非空则快速失败，不猜测拼接顺序。`reasoning_content` 只存在于当前请求生命
-周期，不进入阶段记录。debug 模式只保留原始响应，不新增思考副本。
+当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+
+也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
+
+Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一严格规则，
+从 content 开头剥离一个完整已知思考 Tag。若结构化字段与内嵌块同时非空则快速失败，
+不猜测拼接顺序。
+
+`reasoning_content` 只存在于当前请求生命周期，不进入阶段记录。debug 模式只保留原始响应，
+不新增思考副本。
 
 常规 HTTP 状态与网络异常不由 Adapter 分类。需要特殊签名、非 JSON body、
 非 JSON 成功响应或特殊错误解析的端点超出当前声明式 schema 范围。
@@ -222,34 +216,28 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 ### 内置 Adapter 定义
 
-- `openai-compatible`：Bearer API Key，Chat Completions body，正文 pointer
-  `/choices/0/message/content`，推理 pointers 为
-  `/choices/0/message/reasoning_content`、`/choices/0/message/reasoning`，SSE
-  增量对应为 `/choices/0/delta/reasoning_content`、`/choices/0/delta/reasoning`。
-- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层
-  `system`，pointer `/content/-1/text`。未启用 thinking 时 content 首块即
-  文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。
-  不配置 reasoning 指针；需要思考正文时可复制定义并设
-  `/content/-2/thinking`。未启用 thinking 或思考块缺失时结果为 null；字段
-  存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset
-  `endpoint` 的 `${model}` 占位符进入请求路径，pointer
-  `/candidates/0/content/parts/-1/text`。不内置 thinkingConfig，思考模型
-  默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配
-  `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是
-  字符串或 null 时快速失败。
-- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），
-  body 含 `"store": false`，pointer `/output/-1/content/-1/text`。宿主直接
-  解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明
-  tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应
-  缺少该结构时快速失败。
+- `openai-compatible`：
+  - 使用 Bearer API Key 和 Chat Completions body。
+  - 正文 pointer 为 `/choices/0/message/content`。
+  - 推理 pointers 为 `/choices/0/message/reasoning_content` 和
+    `/choices/0/message/reasoning`。
+  - SSE 推理增量对应 `/choices/0/delta/reasoning_content` 和
+    `/choices/0/delta/reasoning`。
+- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层 `system`，pointer `/content/-1/text`。
 
-四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见
-`llm_presets/anthropic-claude.json`、`google-gemini.json` 与
-`openai-responses.json`。
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置
-Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对
-路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+  未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
+
+  未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
+- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
+
+  不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
+- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
+
+  宿主直接解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明 tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应缺少该结构时快速失败。
+
+四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
+
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
 ## 2. Document Adapter（Beta）
 
@@ -273,18 +261,13 @@ class DocumentAdapter(Protocol):
     def export_sources(...) -> list[Path]: ...
 ```
 
-`export_sources` 还会收到宿主项目配置中的 `target_language: str` 和
-`target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的
-BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，
-或在标签为空时明确拒绝导出。宿主不按 Adapter ID 推断语言行为。更新该导出参数
-后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+`export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按
-当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。
-返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
-青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，
-不通过此方法重复声明。
-内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
+宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+
+`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+
+青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，不通过此方法重复声明。内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
 
 所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
 
@@ -298,12 +281,11 @@ decoded: DecodedPlaintext = decode_plaintext(
 )
 ```
 
-`DecodedPlaintext` 返回 `text`、探测到的 `encoding_detected`、实际使用的
-`encoding_used`、探测置信度 `encoding_confidence` 和不可变的 `warnings`。API
-只负责字节到文本的严格解码：它处理 BOM、chardet 探测、GB2312/GBK 到 GB18030
-及 ASCII 到 UTF-8 的归一化，并在首选编码失败后只尝试一次 fallback。它不负责
-换行规范化、文件发现、格式解析、文件名上下文或配置校验；这些职责仍属于各自的
-Document Adapter 和宿主边界。两次严格解码都失败时抛出 `ProjectError`。
+`DecodedPlaintext` 返回 `text`、探测到的 `encoding_detected`、实际使用的 `encoding_used`、探测置信度 `encoding_confidence` 和不可变的 `warnings`。
+
+API 只负责字节到文本的严格解码：它处理 BOM、chardet 探测、GB2312/GBK 到 GB18030 及 ASCII 到 UTF-8 的归一化，并在首选编码失败后只尝试一次 fallback。
+
+它不负责换行规范化、文件发现、格式解析、文件名上下文或配置校验；这些职责仍属于各自的 Document Adapter 和宿主边界。两次严格解码都失败时抛出 `ProjectError`。
 
 能力名为 `import`、`translated_export` 和 `bilingual_export`。宿主在调用前
 检查所需能力，不支持时明确失败。
@@ -323,44 +305,40 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 - 以临时项目目录完成事务化初始化；
 - 保存通用 File/Segment 记录。
 
-`ImportedFile` 可选返回与 `segments` 一一对应的 `segment_part_ids`。省略时宿主
-将所有 Segment 归入 `document`；提供时每项必须是非空字符串。宿主把该值写入
-Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和参考上下文。
-这不会改变 File 的存储、选择、调度或导出边界；旧项目缺少有效 `part_id` 时要求
-重新创建，不从 locator 推测或迁移。
+`ImportedFile` 可选返回与 `segments` 一一对应的 `segment_part_ids`。省略时宿主将所有 Segment 归入 `document`；提供时每项必须是非空字符串。
+
+宿主把该值写入 Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和参考上下文。这不会改变 File 的存储、选择、调度或导出边界；旧项目缺少有效 `part_id` 时要求重新创建，不从 locator 推测或迁移。
 
 每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
 ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
 
-Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的
-`run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项
-由 Adapter 固化在 File 的 `opaque_state`。Adapter ID 与版本进入阶段指纹
-（内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有
-Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项由 Adapter 固化在 File 的 `opaque_state`。
 
-CLI 的 `init` 与 `files-add` 用可重复的
-`--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如
-`--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名
-`adapter_options` JSON。两者构建同一形状，取值语义统一在宿主
-`validate_document_import_options` 边界校验。
+Adapter ID 与版本进入阶段指纹 （内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有 Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+
+CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。
+
+两者构建同一形状，取值语义统一在宿主 `validate_document_import_options` 边界校验。
 
 ### 契约测试
 
-`tests/test_document_adapter_contract.py` 是外部 Document Adapter 的契约
-基准：它用一个独立的第三方风格 Adapter（`record`，`.rec`）走通全部宿主路径
-——按扩展名与显式 ID 导入、选项校验与透传、`opaque_state` 存储往返、
-`part_id`/`model_source` 落地、翻译时 `normalize_model_output` 应用、双语与
-纯译文导出、运行选项固化生效，以及 Adapter 缺失、版本不匹配、状态损坏、
-能力不足和指纹跟踪。任何标准第三方 Adapter 必须通过该套件的通用路径。
+`tests/test_document_adapter_contract.py` 是外部 Document Adapter 的契约基准。它使用独立的
+第三方风格 Adapter（`record`，`.rec`）覆盖：
+
+- 按扩展名与显式 ID 导入、选项校验与透传；
+- `opaque_state` 存储往返及 `part_id`/`model_source` 落地；
+- 翻译时应用 `normalize_model_output`，以及双语和纯译文导出；
+- 运行选项固化、指纹跟踪；
+- Adapter 缺失、版本不匹配、状态损坏和能力不足。
+
+任何标准第三方 Adapter 必须通过该套件的通用路径。
 
 ### 版本与升级策略
 
-Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明
-`readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现
-能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
-File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。
-外部 Adapter 未声明时仍保持严格相等语义。
+Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明 `readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
+
+File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。外部 Adapter 未声明时仍保持严格相等语义。
 
 ### 导出
 
@@ -377,8 +355,9 @@ Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都
 ### SRT 0.1（外部插件示例）
 
 SRT 插件位于 `plugins/srt/`，发行包名为 `another-llm-translator-srt`，通过
-`another_llm_translator.plugins` entry point 注册。每个 cue 是一个 Segment，所有
-cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
+`another_llm_translator.plugins` entry point 注册。
+
+每个 cue 是一个 Segment，所有 cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
 
 插件严格接受唯一正整数序号及 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行，序号不要求
 连续，正文可以跨多行。单语导出替换 cue 正文，双语导出在同一 cue 中追加换行和译文。
@@ -390,82 +369,61 @@ HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证�
 
 ### EPUB 0.4
 
-EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter
-保存各 File 的原始容器，并记录 OPF、spine
-顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。每个 spine XHTML
-的归档路径作为 Segment 的 `part_id`；普通透明内联
-元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写
-被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
+EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。
 
-导出时宿主提供 `target_language` 和可选的 `target_language_tag`。EPUB Adapter
-要求语言标签为非空 BCP 47 标签，并要求目标语言名称非空。单语输出的 OPF
-`dc:language` 设为该标签；双语输出把该标签放在第一项，随后保留源语言。已重写
-的 spine XHTML 同时更新根元素的 `lang` 和 `xml:lang`。中文应使用 `zh-Hans` 或
-`zh-Hant`，以便 Apple Books 识别正确的语言和字体。
+每个 spine XHTML 的归档路径作为 Segment 的 `part_id`；普通透明内联元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
 
-译文和双语输出会生成基于项目、File、目标语言标签和输出模式的稳定独立出版标识，
-并将 OPF 主标题分别后缀为 `（目标语言）` 和 `（目标语言·双语）`。同一输出再次
-导出时标识保持不变；每次导出会刷新 EPUB 3 的 `dcterms:modified`，或 EPUB 2 的
-`dc:date opf:event="modification"`，用于阅读器缓存更新。源书原有标识和其他书籍
-元数据保留不变。
+导出时宿主提供 `target_language` 和可选的 `target_language_tag`。EPUB Adapter 要求语言标签为非空 BCP 47 标签，并要求目标语言名称非空。单语输出的 OPF `dc:language` 设为该标签；双语输出把该标签放在第一项，随后保留源语言。
+
+已重写的 spine XHTML 同时更新根元素的 `lang` 和 `xml:lang`。中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
+
+译文和双语输出会生成基于项目、File、目标语言标签和输出模式的稳定独立出版标识，并将 OPF 主标题分别后缀为 `（目标语言）` 和 `（目标语言·双语）`。
+
+同一输出再次导出时标识保持不变；每次导出会刷新 EPUB 3 的 `dcterms:modified`，或 EPUB 2 的 `dc:date opf:event="modification"`，用于阅读器缓存更新。源书原有标识和其他书籍元数据保留不变。
 
 双语模式在单槽 Segment 中按“源文、换行、目标文本”写入；复合 Segment 保留
 所有源槽，并在最后一个槽后追加“换行、目标文本”。body 声明
 `white-space: pre-line`。该规则属于 EPUB Adapter，不是宿主通用排版树。
 
-EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`。EPUB 3 XHTML 可无
-DOCTYPE，或使用无外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 可无 DOCTYPE，
-或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN`，SYSTEM 地址只作为声明数据而不
-会被加载。所有外部 DTD、实体声明、版本不匹配的声明、SYSTEM-only 和错误
-PUBLIC 标识都会快速失败。
+EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`。
 
-普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入
-首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出
-保留源槽并在末槽后写入译文。Ruby 是同一文本流中的内联成员；包含 Ruby 的
-复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻
-文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择
-`aozora`（默认）、`short_xml`、`compact` 或 `base_only`。除 `base_only`
-完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空
-`｜base《reading》`；`short_xml` 只向模型使用
-`<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用
-`⟦R:base|Y:reading⟧`。新导入不再提供 `parenthetical`；EPUB 0.4 可直接
-读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。
-无法确定基础文字和读音的嵌套或残缺结构会带 XHTML
-位置快速失败。纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余
-普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个
-Segment 末尾追加普通译文。`ruby_mode=aozora` 时，模型可以省略译文、校对或润色
-结果中的 Ruby 标记和 reading，但必须翻译属于正文的 base，不能因其位于 Ruby 中
-而照抄。保留时须返回严格闭合的 `｜已翻译base《目标语言适用reading》`，系统会在
-纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉
-标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、
-含 HTML 或跨行的形式按普通文本保留。
-`base_only` 不执行 Ruby 还原。short XML 使用标准 XML 实体；compact
-在 base/reading 中用反斜杠转义 `\\`、`|`、`⟦`、`⟧`。两种模型格式的
-非法结构进入既有格式修复预算，不会泄露到用户文本。
+EPUB 3 XHTML 可无 DOCTYPE，或使用无外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 可无 DOCTYPE，或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN`，SYSTEM 地址只作为声明数据而不会被加载。
 
-Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。
-直接相邻的同符号 Ruby 及单 Ruby 内的重复符号在用户/模型表示中合并为
-单个 reading；普通文本、空白和内联格式边界会切断合并。最终 EPUB 导出按
-Unicode 扩展字素簇展开，为每个非空白字素簇写入一个带相同 `rt`
-的 Ruby；普通 reading 仍保持分组 Ruby。
-确定性术语注入使用同一严格青空语法：匹配视图分别保留 base 正文和 reading，
-不把二者拼接。base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
-连续组合，普通正文会切断 reading 组合。因此 `｜漢《かん》｜字《じ》` 可命中
-“漢字”和“かんじ”，而 `｜漢《かん》A｜字《じ》` 不会把 reading 拼成“かんじ”；
-同一术语从两个视图命中时只注入一次。该匹配规则不改写 Segment 原文或发送给
-模型的 `source`。
+所有外部 DTD、实体声明、版本不匹配的声明、SYSTEM-only 和错误 PUBLIC 标识都会快速失败。
 
-当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合
-`inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是
-默认值，模型只看到净文本。`tiered` 要求语义关键标签保留，表现层标签可整体省略；
-`strict` 要求全部源标签保留。EPUB Adapter 仅在 `markers` 模式向对应请求的
-Prompt 注入上述保留要求，并把受控标记校验交给自身：未知、重复、
-未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
-其中 `tiered` 的语义标签为 `a`、`abbr`、`bdi`、`bdo`、`cite`、`code`、`data`、
-`dfn`、`kbd`、`q`、`samp`、`sub`、`sup`、`time`、`var`；表现层标签为 `b`、`em`、
-`i`、`mark`、`s`、`small`、`span`、`strong`、`u`，后者可整体省略。
-纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；
-详情界面同时显示净文本与模型文本预览。
+普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出保留源槽并在末槽后写入译文。
+
+Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`。
+
+除 `base_only` 完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。
+
+新导入不再提供 `parenthetical`；EPUB 0.4 可直接读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
+
+纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个 Segment 末尾追加普通译文。
+
+`ruby_mode=aozora` 时，模型可以省略译文、校对或润色结果中的 Ruby 标记和 reading，但必须翻译属于正文的 base，不能因其位于 Ruby 中而照抄。
+
+保留时须返回严格闭合的 `｜已翻译base《目标语言适用reading》`，系统会在纯译文和双语译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配时应去掉标记和 reading，仅返回已翻译 base。没有返回 Ruby 不会触发重试；不完整、嵌套、含 HTML 或跨行的形式按普通文本保留。
+
+`base_only` 不执行 Ruby 还原。short XML 使用标准 XML 实体；compact 在 base/reading 中用反斜杠转义 `\\`、`|`、`⟦`、`⟧`。两种模型格式的非法结构进入既有格式修复预算，不会泄露到用户文本。
+
+Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。直接相邻的同符号 Ruby 及单 Ruby 内的重复符号在用户/模型表示中合并为单个 reading；普通文本、空白和内联格式边界会切断合并。
+
+最终 EPUB 导出按 Unicode 扩展字素簇展开，为每个非空白字素簇写入一个带相同 `rt` 的 Ruby；普通 reading 仍保持分组 Ruby。确定性术语注入使用同一严格青空语法：匹配视图分别保留 base 正文和 reading，不把二者拼接。
+
+base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会连续组合，普通正文会切断 reading 组合。因此 `｜漢《かん》｜字《じ》` 可命中 “漢字”和“かんじ”，而 `｜漢《かん》A｜字《じ》` 不会把 reading 拼成“かんじ”；同一术语从两个视图命中时只注入一次。
+
+该匹配规则不改写 Segment 原文或发送给模型的 `source`。
+
+当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是默认值，模型只看到净文本。
+
+`tiered` 要求语义关键标签保留，表现层标签可整体省略；`strict` 要求全部源标签保留。
+
+EPUB Adapter 仅在 `markers` 模式向对应请求的 Prompt 注入上述保留要求，并把受控标记校验交给自身：未知、重复、未闭合、错误嵌套或破坏父子关系的结果进入既有格式修复预算，耗尽后 Segment 失败。
+
+其中 `tiered` 的语义标签为 `a`、`abbr`、`bdi`、`bdo`、`cite`、`code`、`data`、`dfn`、`kbd`、`q`、`samp`、`sub`、`sup`、`time`、`var`；表现层标签为 `b`、`em`、`i`、`mark`、`s`、`small`、`span`、`strong`、`u`，后者可整体省略。
+
+纯译文仍使用原标签和 attrs 的空骨架写回，模型标记不会作为 HTML 直接写入 EPUB；详情界面同时显示净文本与模型文本预览。
 
 每个 Run 的 `document_adapter_prompt_requirements.json` 和 manifest 会保存按 File
 生成的本地化要求快照；`prompt.txt` 保存宿主基础 Prompt。请求实际使用的 Prompt
@@ -504,18 +462,15 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；
-每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收
-`TranslationValidationContext` 的 `validate(context)`。上下文只包含当前 Segment
-的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或
-Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
 
-`TranslationValidationMatch.severity` 为 `error` 或 `advisory`。`error` 必须指向
-候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的
-建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为
-warning。首个真实外部示例是可选的
-`another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查
-实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
+上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+
+`TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
+
+`error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。
+
+首个真实外部示例是可选的 `another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
 from app.translation_validation import (
@@ -548,18 +503,14 @@ class MyValidator:
 
 ## 5. LLM Preset（已实现）
 
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，
-并保存端点、模型、鉴权环境变量名、模型 Token 能力和
-端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色
-分别选择覆盖；空覆盖使用全局 Preset。Run 保存当前阶段实际解析的 Preset
-快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、鉴权环境变量名、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
-当前 Preset schema 为 4。除现有连接字段外，`stream` 明确控制是否使用所引用
-Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用
-`endpoint`，只允许 `${model}` 占位符）。schema 2/3 用户 Preset 在 CLI、Web 或
-桌面 sidecar 启动时原子迁移为 schema 4，分别补入非流式默认值与
-`stream_read_timeout_enabled = true`；Run 内历史 v2/v3 快照只在内存中补齐默认值，
-不改写审计文件。
+Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
+
+当前 Preset schema 为 4。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。
+
+schema 2/3 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 4，分别补入非流式默认值与 `stream_read_timeout_enabled = true`；Run 内历史 v2/v3 快照只在内存中补齐默认值，不改写审计文件。
+
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
 Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 等
