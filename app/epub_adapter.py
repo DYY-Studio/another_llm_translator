@@ -903,6 +903,7 @@ def _slot_contains_ruby(raw: Any) -> bool:
 
 
 _INLINE_MARKER_RE = re.compile(r"</?([a-z][a-z0-9]*\d+)>")
+_COMPACT_ESCAPES = frozenset("\\|⟦⟧")
 
 
 def _xml_fragment_content(
@@ -970,7 +971,7 @@ def _read_compact_value(
         character = text[cursor]
         if character == "\\":
             cursor += 1
-            if cursor >= len(text) or text[cursor] not in "\\|⟦⟧":
+            if cursor >= len(text) or text[cursor] not in _COMPACT_ESCAPES:
                 raise IncompleteError("EPUB compact Ruby 包含无效转义")
             parts.append(text[cursor])
             cursor += 1
@@ -982,15 +983,32 @@ def _read_compact_value(
     raise IncompleteError("EPUB compact Ruby 缺少结束符")
 
 
+def _read_compact_literal(text: str, cursor: int) -> tuple[str, int]:
+    parts: list[str] = []
+    while cursor < len(text):
+        if text.startswith("⟦R:", cursor):
+            break
+        character = text[cursor]
+        if character == "\\":
+            cursor += 1
+            if cursor >= len(text) or text[cursor] not in _COMPACT_ESCAPES:
+                raise IncompleteError("EPUB compact Ruby 包含无效转义")
+            parts.append(text[cursor])
+            cursor += 1
+            continue
+        parts.append(character)
+        cursor += 1
+    return "".join(parts), cursor
+
+
 def _compact_to_aozora(text: str) -> str:
     parts: list[str] = []
     cursor = 0
     while cursor < len(text):
-        marker = text.find("⟦R:", cursor)
-        if marker < 0:
-            parts.append(text[cursor:])
+        literal, marker = _read_compact_literal(text, cursor)
+        parts.append(literal)
+        if marker >= len(text):
             break
-        parts.append(text[cursor:marker])
         base, after_base = _read_compact_value(text, marker + 3, "|Y:")
         reading, after_reading = _read_compact_value(text, after_base, "⟧")
         if not base or not reading:
