@@ -39,6 +39,8 @@ prompts = [
   "prompts/proofreading.zh-CN.middle.txt",
   "prompts/terminology.en.middle.txt",
   "prompts/terminology.zh-CN.middle.txt",
+  "prompts/terminology_decision.en.middle.txt",
+  "prompts/terminology_decision.zh-CN.middle.txt",
   "prompts/translation.en.middle.txt",
   "prompts/translation.zh-CN.middle.txt",
 ]
