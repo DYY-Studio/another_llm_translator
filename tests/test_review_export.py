@@ -540,8 +540,10 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
 
 
 @pytest.mark.asyncio
-async def test_review_format_retry_carries_parse_error_details(
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+async def test_review_format_retry_uses_abstract_guidance(
     tmp_path: Path,
+    stage: str,
 ) -> None:
     project = await create_project(tmp_path, "one")
     review_calls = 0
@@ -567,9 +569,14 @@ async def test_review_format_retry_carries_parse_error_details(
                 content = json.dumps({"segments": [{"id": "1"}]})
             else:
                 correction = payload["format_correction"]
-                assert "第 1 行" in correction
-                assert "未知 type" in correction
-                assert "缺少最终 end 记录" in correction
+                assert "当前待处理内容" in correction
+                assert "JSONL 结构" in correction
+                assert "固定字段" in correction
+                assert "完整" in correction
+                assert "上次" not in correction
+                assert "第 1 行" not in correction
+                assert "未知 type" not in correction
+                assert "缺少最终 end 记录" not in correction
                 records = [
                     {
                         "type": "segment",
@@ -589,9 +596,7 @@ async def test_review_format_retry_carries_parse_error_details(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(
-            project, "proofreading", Scope(), http_client=client
-        )
+        summary = await run_review(project, stage, Scope(), http_client=client)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]

@@ -754,13 +754,10 @@ async def _localized_request_loop(
             str | None,
             int,
             list[dict[str, Any]],
-            list[str],
         ]
-    ] = [(group, initial_parent_request_id, 0, group[:1], [])]
+    ] = [(group, initial_parent_request_id, 0, group[:1])]
     while tasks:
-        items, parent_request_id, format_attempt, anchor, format_errors = (
-            tasks.pop(0)
-        )
+        items, parent_request_id, format_attempt, anchor = tasks.pop(0)
         expected = [str(item["segment_id"]) for item in items]
         payload = payload_builder(items or anchor)
         if not items:
@@ -786,9 +783,7 @@ async def _localized_request_loop(
             ]
             payload["validation_repair"] = _VALIDATION_REPAIR[prompt_language]
         if format_attempt:
-            payload["format_correction"] = _correction_with_errors(
-                format_correction, format_errors, prompt_language
-            )
+            payload["format_correction"] = format_correction
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -835,7 +830,7 @@ async def _localized_request_loop(
             exhausted.extend(unresolved)
             continue
         if not unresolved:
-            tasks.append(([], request_id, format_attempt + 1, anchor, parse_errors))
+            tasks.append(([], request_id, format_attempt + 1, anchor))
             continue
         unresolved_groups = contiguous_groups(
             (by_id[segment_id] for segment_id in unresolved),
@@ -849,7 +844,6 @@ async def _localized_request_loop(
                 request_id,
                 format_attempt + 1,
                 unresolved_group[:1],
-                parse_errors,
             )
             for unresolved_group in unresolved_groups
         )
@@ -1041,13 +1035,14 @@ def _document_prompt_requirement_helpers(
 
 _FORMAT_CORRECTION = {
     "zh-CN": (
-        "上次响应违反输出协议或遗漏项目。只处理当前待处理内容并遵守固定字段；"
-        '每行一个紧凑 JSON 对象，末行精确为 {"type":"end"}。'
+        "只处理当前待处理内容，并完整覆盖本次内容，遵守固定字段。"
+        "严格 JSONL 结构：每个非空物理行一个紧凑 JSON 对象，仅用换行分隔记录，"
+        '末行精确为 {"type":"end"}。'
     ),
     "en": (
-        "The previous response violated the output protocol or omitted items. "
-        "Process only the current pending content and follow the fixed fields; "
-        'write one compact JSON object per line and end with exactly {"type":"end"}.'
+        "Process only the current pending content, cover it completely, and follow "
+        "the fixed fields. Use strict JSONL structure: one compact JSON object per "
+        'non-empty physical line, separated only by newlines, ending exactly with {"type":"end"}.'
     ),
 }
 
@@ -1071,14 +1066,6 @@ def _has_hard_validation_findings(findings: list[dict[str, Any]]) -> bool:
     return any(
         str(item.get("severity", "error")) == "error" for item in findings
     )
-
-
-def _correction_with_errors(
-    correction: str, errors: list[str], language: str
-) -> str:
-    if language == "zh-CN" and errors:
-        return f"{correction}\n错误详情：{'；'.join(errors[:5])}"
-    return correction
 
 
 def load_terms(project: Path) -> dict[str, Any] | None:
@@ -2342,9 +2329,7 @@ async def run_terminology(
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
-                payload["format_correction"] = _correction_with_errors(
-                    _FORMAT_CORRECTION[language], parse_errors, language
-                )
+                payload["format_correction"] = _FORMAT_CORRECTION[language]
             messages = render_messages(prompt_for_items(unresolved), payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)

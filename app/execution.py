@@ -372,7 +372,7 @@ def _make_stage_selection(
     )
 
 
-PROMPT_RULES_VERSION = 10
+PROMPT_RULES_VERSION = 11
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
