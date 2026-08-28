@@ -219,6 +219,7 @@ class StageSelection:
 class JSONLDocument:
     records: tuple[dict[str, Any], ...]
     errors: tuple[str, ...]
+    error_codes: tuple[str, ...]
     complete: bool
 
 
@@ -2776,6 +2777,7 @@ def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
     body = extract_jsonl_content(content)
     records: list[dict[str, Any]] = []
     errors: list[str] = []
+    error_codes: list[str] = []
     seen_end = False
     for line_number, raw_line in enumerate(body.split("\n"), start=1):
         line = raw_line.strip()
@@ -2783,29 +2785,36 @@ def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
             continue
         if seen_end:
             errors.append(f"第 {line_number} 行位于 end 之后")
+            error_codes.append("after_end")
             continue
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
             errors.append(f"第 {line_number} 行不是合法 JSON 对象")
+            error_codes.append("invalid_json")
             continue
         if not isinstance(value, dict):
             errors.append(f"第 {line_number} 行必须是 JSON 对象")
+            error_codes.append("non_object")
             continue
         item_type = value.get("type")
         if item_type == "end":
             if set(value) != {"type"}:
                 errors.append(f"第 {line_number} 行 end 记录含有额外字段")
+                error_codes.append("invalid_end")
             seen_end = True
             continue
         if item_type != record_type:
             errors.append(f"第 {line_number} 行包含未知 type")
+            error_codes.append("unknown_type")
             continue
         records.append(value)
     if not seen_end:
         errors.append("响应缺少最终 end 记录")
+        error_codes.append("missing_end")
     return JSONLDocument(
         records=tuple(records),
         errors=tuple(errors),
+        error_codes=tuple(error_codes),
         complete=seen_end and not errors,
     )

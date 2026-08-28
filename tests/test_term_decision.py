@@ -1717,6 +1717,85 @@ async def test_decision_format_repair_lists_exact_target_scope(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "markers"),
+    [
+        (
+            "zh-CN",
+            ("每个非空物理行", "只输出协议允许", "最终记录必须且只能是精确"),
+        ),
+        (
+            "en",
+            (
+                "Each non-empty physical line",
+                "Only output protocol-allowed",
+                "The final record must be exactly",
+            ),
+        ),
+    ],
+)
+async def test_decision_format_repair_abstracts_and_deduplicates_document_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    markers: tuple[str, ...],
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
+        return [(states, [])], len(states)
+
+    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if calls == 1:
+            content = (
+                '{"type":\n'
+                '{"type":"unknown"}\n'
+                '{"type":"decision","normalized":"alice",'
+                '"action":"keep","reason":"ok"}\n'
+                '{"type":"decision","normalized":"bob",'
+                '"action":"keep","reason":"ok"}\n'
+                '{"type":"end","extra":true}\n'
+                '{"type":"decision","normalized":"alice",'
+                '"action":"keep","reason":"after"}\n'
+            )
+        elif "format_correction" in payload:
+            correction = payload["format_correction"]
+            errors = correction["errors"]
+            messages = [item["message"] for item in errors]
+            assert len(messages) == len(set(messages))
+            assert len(messages) == 3
+            assert all("第 " not in message for message in messages)
+            assert all("unknown" not in message for message in messages)
+            assert all("invalid_document" not in item for item in errors)
+            for marker in markers:
+                assert any(marker in message for message in messages)
+            content = llm_jsonl(decision_response(payload))
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(
+                project, prompt_language=language, http_client=client
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert calls == 3
+
+
+@pytest.mark.asyncio
 async def test_format_repair_preserves_valid_records_and_retries_only_unresolved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

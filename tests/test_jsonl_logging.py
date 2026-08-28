@@ -32,6 +32,7 @@ def test_jsonl_extraction_accepts_bom_crlf_blanks_and_supported_fence() -> None:
     document = parse_jsonl_document(content, record_type="segment")
     assert document.complete is True
     assert document.records[0]["id"] == "S1"
+    assert document.error_codes == ()
 
 
 @pytest.mark.parametrize("label", ["jsonl", "ndjson", "json", ""])
@@ -83,6 +84,18 @@ def test_jsonl_extraction_rejects_malformed_or_nonleading_thought_blocks(
     document = parse_jsonl_document(content, record_type="segment")
     assert document.complete is False
     assert document.errors
+
+
+def test_jsonl_document_exposes_stable_error_codes_alongside_diagnostics() -> None:
+    document = parse_jsonl_document(
+        '{"type":"unknown"}\n'
+        '{"type":"end","extra":true}\n'
+        '{"type":"segment","id":"S1","translation":"x"}\n',
+        record_type="segment",
+    )
+
+    assert document.error_codes == ("unknown_type", "invalid_end", "after_end")
+    assert all("第 " in message for message in document.errors)
 
 
 def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
