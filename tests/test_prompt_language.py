@@ -494,7 +494,11 @@ async def test_english_format_correction_contains_no_chinese(tmp_path: Path) -> 
             content = json.dumps({"segments": []})
         else:
             correction = payload["format_correction"]
-            assert "previous response violated the output protocol" in correction
+            assert "current pending content" in correction
+            assert "JSONL structure" in correction
+            assert "fixed fields" in correction
+            assert "complete" in correction
+            assert "previous response" not in correction
             assert not any("\u4e00" <= char <= "\u9fff" for char in correction)
             content = llm_jsonl(
                 [

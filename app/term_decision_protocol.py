@@ -16,6 +16,47 @@ PATCH_FIELDS = frozenset(
 )
 UPDATE_ACTION_KEYS = SIMPLE_ACTION_KEYS | {"changes"}
 
+_JSONL_RETRY_CATEGORY = {
+    "invalid_json": "record_json",
+    "non_object": "record_object",
+    "after_end": "end_record",
+    "invalid_end": "end_record",
+    "unknown_type": "record_type",
+    "missing_end": "end_record",
+}
+
+_JSONL_RETRY_GUIDANCE = {
+    "zh-CN": {
+        "record_json": (
+            "每个非空物理行都必须是合法 JSON 对象，且一个对象不能跨行。"
+        ),
+        "record_object": (
+            "每个非空物理行都必须是 JSON 对象，不要输出数组、字符串或其他 JSON 值。"
+        ),
+        "end_record": (
+            '最终记录必须且只能是精确的 {"type":"end"}，end 之后不得再有任何记录。'
+        ),
+        "record_type": "只输出协议允许的 decision 记录和最终 end 记录。",
+    },
+    "en": {
+        "record_json": (
+            "Each non-empty physical line must be one valid JSON object, and an "
+            "object must not span lines."
+        ),
+        "record_object": (
+            "Each non-empty physical line must be a JSON object; do not output an "
+            "array, string, or other JSON value."
+        ),
+        "end_record": (
+            'The final record must be exactly {"type":"end"}, and no record may '
+            "follow it."
+        ),
+        "record_type": (
+            "Only output protocol-allowed decision records and the final end record."
+        ),
+    },
+}
+
 
 _PROTOCOL = {
     "zh-CN": (
@@ -91,6 +132,26 @@ def terminology_decision_protocol(language: str) -> str:
     return _PROTOCOL[language]
 
 
+def _retry_errors(errors: list[dict[str, Any]], language: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen_document_categories: set[str] = set()
+    for error in errors:
+        document_code = error.get("_document_error_code")
+        if document_code is None and error.get("code") == "invalid_document":
+            document_code = "invalid_json"
+        if isinstance(document_code, str):
+            category = _JSONL_RETRY_CATEGORY[document_code]
+            if category in seen_document_categories:
+                continue
+            seen_document_categories.add(category)
+            result.append({"message": _JSONL_RETRY_GUIDANCE[language][category]})
+            continue
+        result.append(
+            {key: value for key, value in error.items() if not key.startswith("_")}
+        )
+    return result
+
+
 def format_correction(
     *,
     language: str,
@@ -106,7 +167,7 @@ def format_correction(
     )
     return {
         "instruction": instruction,
-        "errors": errors,
+        "errors": _retry_errors(errors, language),
         "previous_invalid_records": previous_invalid_records,
         "accepted_normalized": accepted_normalized,
         "target_normalized": target_normalized,

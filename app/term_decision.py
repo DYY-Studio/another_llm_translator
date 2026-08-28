@@ -946,7 +946,14 @@ def _analyze_decisions(
 ]:
     document = parse_jsonl_document(content, record_type="decision")
     errors = [
-        {"code": "invalid_document", "message": message} for message in document.errors
+        {
+            "code": "invalid_document",
+            "message": message,
+            "_document_error_code": error_code,
+        }
+        for message, error_code in zip(
+            document.errors, document.error_codes, strict=True
+        )
     ]
     batch_error = bool(document.errors)
     expected = {str(item["normalized"]): item for item in focus}
