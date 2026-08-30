@@ -248,6 +248,8 @@ python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
 python -m app.main files-add PROJECT BOOK.epub --adapter-option epub.ruby_mode=base_only
 python -m app.main files-remove PROJECT FILE_ID...
+python -m app.main files-replace PROJECT FILE_ID INPUT --dry-run
+python -m app.main files-replace PROJECT FILE_ID INPUT --yes
 ```
 
 规则：
@@ -276,6 +278,19 @@ python -m app.main files-remove PROJECT FILE_ID...
 - Web 可提交全部活动 File ID 的唯一完整排列，将 `file_order` 规范化为从 1
   开始的连续值。重排保留 File/Segment ID、输入副本、Adapter 状态、历史结果、
   项目计数和 `next_file_sequence`；File ID 不表示活动顺序。
+- `files-replace` 原位替换一个活动 File，保留 File ID、`file_order`、导出相对路径
+  和 `stored_name`，用新 Adapter 状态及新 Segment 列表更新源副本。Segment ID 是
+  稳定的不透明身份，位置只由 `file_order` 与 `line_index` 决定；新增 Segment 的
+  ID 不要求按当前位置递增。
+- 替换预览只在相同 `part_id` 内按 `source` 与有效 `model_source` 做保守精确顺序
+  对齐。相同连续区域和唯一锚点间的确定匹配复用原 Segment ID；无法唯一判定的
+  重复项、修改项和缺失项不复用。Part 重排可匹配，Part ID 改名不跨 Part 匹配。
+- 替换保留匹配 Segment 的所有阶段进度；新增 Segment 从零开始。缺失、修改和歧义
+  旧 Segment 只移出活动源，历史阶段结果、Run 与既有输出不清理。已发布术语库不
+  自动删除；存在 running Run 或未发布/未丢弃术语候选时拒绝替换。
+- CLI 先预览并确认；`--dry-run` 只输出预览，`--yes` 用于显式非交互提交。Web
+  通过单次上传的进程内预览会话完成预览和确认；会话按目标 File 唯一，确认、取消、
+  覆盖或服务退出时清理。
 - 活动文件的导出相对路径按大小写不敏感比较；追加产生冲突时整体拒绝。
 - 文件增删或重排发现任意 `running` Run 时整体拒绝，不自动中断。未知、重复、
   缺失或部分非法的删除/重排选择也必须在写入前整体失败。

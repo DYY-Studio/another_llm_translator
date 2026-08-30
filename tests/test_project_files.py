@@ -4,24 +4,22 @@ import asyncio
 import json
 import os
 import sqlite3
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, select_scope, stage_result_path
+from app.file_replacement import align_segments
 from app.main import build_parser, parse_adapter_option_args, run
 from app.project import (
     add_project_files,
+    apply_file_replacement,
     init_project,
+    prepare_file_replacement,
     remove_project_files,
     reorder_project_files,
-)
-from app.stages import (
-    export_project,
-    inspect_full,
-    run_apply,
-    run_terminology,
 )
 from app.sqlite_storage import (
     append_jsonl,
@@ -32,8 +30,411 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
+from app.stages import (
+    export_project,
+    inspect_full,
+    run_apply,
+    run_terminology,
+)
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
+
+
+def replacement_segment(
+    segment_id: str,
+    source: str,
+    *,
+    part_id: str = "document",
+    model_source: str | None = None,
+) -> dict[str, object]:
+    return {
+        "segment_id": segment_id,
+        "file_id": "F0001",
+        "line_index": 0,
+        "part_id": part_id,
+        "source": source,
+        "model_source": model_source,
+        "is_empty": source == "",
+    }
+
+
+def test_segment_alignment_preserves_ordered_matches_across_insertions() -> None:
+    old = [
+        replacement_segment("old-a", "A"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-b", "B"),
+    ]
+    new = [
+        replacement_segment("new-a", "A"),
+        replacement_segment("new-extra", "EXTRA"),
+        replacement_segment("new-anchor", "ANCHOR"),
+        replacement_segment("new-b", "B"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 0, 2: 1, 3: 2}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_segment_alignment_does_not_reuse_ambiguous_duplicate_text() -> None:
+    old = [
+        replacement_segment("old-dup-1", "DUP"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-dup-2", "DUP"),
+    ]
+    new = [
+        replacement_segment("new-dup-1", "DUP"),
+        replacement_segment("new-anchor", "ANCHOR"),
+        replacement_segment("new-dup-2", "DUP"),
+        replacement_segment("new-dup-3", "DUP"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {1: 1}
+    assert result.ambiguous_old_indices == (0, 2)
+    assert result.ambiguous_new_indices == (0, 2, 3)
+
+
+def test_segment_alignment_marks_reordered_duplicate_occurrences_ambiguous() -> None:
+    old = [
+        replacement_segment("old-dup-before", "DUP"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-dup-after", "DUP"),
+    ]
+    new = [
+        replacement_segment("new-dup-before", "DUP"),
+        replacement_segment("new-dup-after", "DUP"),
+        replacement_segment("new-anchor", "ANCHOR"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {2: 1}
+    assert result.ambiguous_old_indices == (0, 2)
+    assert result.ambiguous_new_indices == (0, 1)
+
+
+def test_segment_alignment_reuses_exact_duplicate_run_around_change() -> None:
+    old = [
+        replacement_segment("old-dup-1", "DUP"),
+        replacement_segment("old-dup-2", "DUP"),
+        replacement_segment("old-change", "OLD"),
+    ]
+    new = [
+        replacement_segment("new-dup-1", "DUP"),
+        replacement_segment("new-dup-2", "DUP"),
+        replacement_segment("new-change", "NEW"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 0, 1: 1}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_segment_alignment_matches_reordered_parts_independently() -> None:
+    old = [
+        replacement_segment("old-a", "A", part_id="a"),
+        replacement_segment("old-b", "B", part_id="a"),
+        replacement_segment("old-c", "C", part_id="b"),
+    ]
+    new = [
+        replacement_segment("new-c", "C", part_id="b"),
+        replacement_segment("new-a", "A", part_id="a"),
+        replacement_segment("new-b", "B", part_id="a"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 2, 1: 0, 2: 1}
+
+
+def test_segment_alignment_requires_effective_model_source_match() -> None:
+    old = [replacement_segment("old", "A", model_source="model A")]
+    new = [replacement_segment("new", "A", model_source="model B")]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_file_replacement_preserves_ids_and_progress_when_inserting_segment(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A\nANCHOR\nB", encoding="utf-8")
+    replacement.write_text("A\nEXTRA\nANCHOR\nB", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    append_jsonl(
+        project,
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=str(old_segments[2]["segment_id"]),
+            status="completed",
+            text="B译文",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=None,
+            run_id="RUN-OLD",
+            request_id="REQ-OLD",
+        ),
+    )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+
+    assert plan.impact["preserved_segment_count"] == 3
+    assert plan.impact["added_segment_count"] == 1
+    assert plan.impact["removed_segment_count"] == 0
+    apply_file_replacement(project, plan)
+
+    segments = read_segments(project)
+    assert [item["source"] for item in segments] == ["A", "EXTRA", "ANCHOR", "B"]
+    assert [item["segment_id"] for item in segments] == [
+        old_segments[0]["segment_id"],
+        "F0001-S000004",
+        old_segments[1]["segment_id"],
+        old_segments[2]["segment_id"],
+    ]
+    assert [item["line_index"] for item in segments] == [0, 1, 2, 3]
+    assert read_jsonl(project, stage_result_path(project, "translation"))[-1][
+        "segment_id"
+    ] == old_segments[2]["segment_id"]
+
+
+def test_file_replacement_removes_changed_segments_but_keeps_history(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("KEEP\nCHANGE\nREMOVE", encoding="utf-8")
+    replacement.write_text("KEEP\nCHANGED", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    history_path = stage_result_path(project, "translation")
+    for segment in old_segments:
+        append_jsonl(
+            project,
+            history_path,
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=str(segment["segment_id"]),
+                status="completed",
+                text=f"译:{segment['source']}",
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=None,
+                run_id="RUN-OLD",
+                request_id=f"REQ-{segment['line_index']}",
+            ),
+        )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    assert plan.impact["preserved_segment_count"] == 1
+    assert plan.impact["added_segment_count"] == 1
+    assert plan.impact["removed_segment_count"] == 2
+    apply_file_replacement(project, plan)
+
+    active_ids = {str(item["segment_id"]) for item in read_segments(project)}
+    assert active_ids == {str(old_segments[0]["segment_id"]), "F0001-S000004"}
+    assert {str(item["segment_id"]) for item in read_jsonl(project, history_path)} == {
+        str(item["segment_id"]) for item in old_segments
+    }
+
+
+def test_file_replacement_does_not_reuse_ids_across_replacements(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    first = tmp_path / "book-1.txt"
+    second = tmp_path / "book-2.txt"
+    original.write_text("A", encoding="utf-8")
+    first.write_text("B", encoding="utf-8")
+    second.write_text("C", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    apply_file_replacement(
+        project, prepare_file_replacement(project, "F0001", first)
+    )
+    first_id = str(read_segments(project)[0]["segment_id"])
+    apply_file_replacement(
+        project, prepare_file_replacement(project, "F0001", second)
+    )
+
+    assert first_id == "F0001-S000002"
+    assert read_segments(project)[0]["segment_id"] == "F0001-S000003"
+
+
+def test_file_replacement_rejects_directory_input(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    original.write_text("A", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    (replacement_dir / "one.txt").write_text("B", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="单个文件"):
+        prepare_file_replacement(project, "F0001", replacement_dir)
+
+
+def test_file_replacement_requires_publishing_pending_term_candidates(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    metadata = read_json(project, project / "project.json")
+    task_id = "TERM-TASK-REPLACE"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            terms=[{"source": "A", "category": "name"}],
+        ),
+    )
+
+    with pytest.raises(UsageError, match="未发布的术语候选"):
+        prepare_file_replacement(project, "F0001", replacement)
+
+
+def test_epub_file_replacement_reuses_part_progress_and_new_locators(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A</p><p>ANCHOR</p></body></html>"
+        ),
+    )
+    make_epub(
+        replacement,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A</p><p>EXTRA</p><p>ANCHOR</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="book",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    for segment in old_segments:
+        append_jsonl(
+            project,
+            stage_result_path(project, "translation"),
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=str(segment["segment_id"]),
+                status="completed",
+                text=f"译:{segment['source']}",
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=None,
+                run_id="RUN-OLD",
+                request_id=f"REQ-{segment['line_index']}",
+            ),
+        )
+
+    apply_file_replacement(
+        project,
+        prepare_file_replacement(project, "F0001", replacement),
+    )
+
+    segments = read_segments(project)
+    assert [item["source"] for item in segments] == ["A", "EXTRA", "ANCHOR"]
+    assert [item["segment_id"] for item in segments] == [
+        old_segments[0]["segment_id"],
+        "F0001-S000003",
+        old_segments[1]["segment_id"],
+    ]
+    file_record = read_files(project)[0]
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
+    assert len(state["state"]["locators"]) == 3
+    exported = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=True,
+        output_format="original",
+    )
+    with zipfile.ZipFile(project / exported["written"][0]) as archive:
+        chapter = archive.read("OEBPS/text/ch1.xhtml")
+    assert b"\xe8\xaf\x91:A" in chapter
+    assert b"EXTRA" in chapter
+
+
+def test_file_replacement_restores_source_when_publish_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored_path = project / "input" / str(read_files(project)[0]["stored_name"])
+    original_replace = os.replace
+
+    def fail_new_publish(source: str | Path, target: str | Path) -> None:
+        if str(source).endswith("/new-input"):
+            raise OSError("replacement publish failed")
+        original_replace(source, target)
+
+    monkeypatch.setattr("app.project.os.replace", fail_new_publish)
+    with pytest.raises(OSError, match="replacement publish failed"):
+        apply_file_replacement(project, plan)
+
+    assert stored_path.read_text(encoding="utf-8") == "A"
+    assert [item["source"] for item in read_segments(project)] == ["A"]
 
 
 def init_empty(
@@ -131,6 +532,77 @@ def test_parse_adapter_option_args_builds_adapter_dict() -> None:
     for value in ("a.b", "=x", "a=x", ".b=x", "a.=x", "a.b.c=x"):
         with pytest.raises(UsageError, match="格式无效"):
             parse_adapter_option_args([value])
+
+
+def test_files_replace_cli_parser_accepts_preview_and_confirmation_flags() -> None:
+    parser = build_parser()
+    preview = parser.parse_args(
+        ["files-replace", "sample", "F0001", "revised.txt", "--dry-run"]
+    )
+    assert preview.command == "files-replace"
+    assert preview.file_id == "F0001"
+    assert preview.dry_run is True
+    assert preview.yes is False
+
+    confirmed = parser.parse_args(
+        ["files-replace", "sample", "F0001", "revised.txt", "--yes"]
+    )
+    assert confirmed.yes is True
+    assert confirmed.dry_run is False
+
+
+def test_files_replace_cli_dry_run_and_yes_apply(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one\ntwo", encoding="utf-8")
+    replacement.write_text("one\ninserted\ntwo", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    assert run(["files-replace", str(project), "F0001", str(replacement), "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["preserved_segment_count"] == 2
+    assert [item["source"] for item in read_segments(project)] == ["one", "two"]
+
+    assert run(["files-replace", str(project), "F0001", str(replacement), "--yes"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["added_segment_count"] == 1
+    assert [item["source"] for item in read_segments(project)] == [
+        "one",
+        "inserted",
+        "two",
+    ]
+
+
+def test_files_replace_cli_requires_confirmation_in_non_tty(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    with pytest.raises(UsageError, match="--dry-run 或 --yes"):
+        run(["files-replace", str(project), "F0001", str(replacement)])
+
+
+def test_file_replacement_rejects_changed_stored_source_after_preview(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    stored.write_text("changed outside preview", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="源文件已变化"):
+        apply_file_replacement(project, plan)
 
 
 def test_empty_project_can_open_inspect_and_add_txt_files(
