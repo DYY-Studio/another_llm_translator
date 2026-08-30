@@ -210,6 +210,7 @@ def test_file_replacement_preserves_ids_and_progress_when_inserting_segment(
         old_segments[2]["segment_id"],
     ]
     assert [item["line_index"] for item in segments] == [0, 1, 2, 3]
+    assert read_files(project)[0]["next_segment_sequence"] == 5
     assert read_jsonl(project, stage_result_path(project, "translation"))[-1][
         "segment_id"
     ] == old_segments[2]["segment_id"]

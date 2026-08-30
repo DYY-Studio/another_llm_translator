@@ -609,6 +609,7 @@ def init_project(
                     encoding_confidence=item.encoding_confidence,
                     encoding_used=item.encoding_used,
                     segment_count=len(segments),
+                    next_segment_sequence=len(segments) + 1,
                     document_adapter_id=document_adapter.adapter_id,
                     document_adapter_version=document_adapter.version,
                     document_adapter_state=(
@@ -1282,6 +1283,7 @@ def add_project_files(
                 encoding_confidence=item.encoding_confidence,
                 encoding_used=item.encoding_used,
                 segment_count=len(item.segments),
+                next_segment_sequence=len(item.segments) + 1,
                 document_adapter_id=adapter.adapter_id,
                 document_adapter_version=adapter.version,
                 document_adapter_state=(
