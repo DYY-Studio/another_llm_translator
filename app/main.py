@@ -17,7 +17,9 @@ from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .project import (
     add_project_files,
+    apply_file_replacement,
     init_project,
+    prepare_file_replacement,
     remove_project_files,
     resolve_project,
     resolve_project_parent,
@@ -103,6 +105,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     files_remove.add_argument("project")
     files_remove.add_argument("file_ids", nargs="+")
+
+    files_replace = subparsers.add_parser(
+        "files-replace", help="用新源文件原位替换项目中的一个文件"
+    )
+    files_replace.add_argument("project")
+    files_replace.add_argument("file_id")
+    files_replace.add_argument("input")
+    files_replace.add_argument(
+        "--adapter-option",
+        dest="adapter_options",
+        action="append",
+        metavar="ADAPTER.OPTION=VALUE",
+        help="目标 Document Adapter 选项；可重复使用",
+    )
+    replacement_choice = files_replace.add_mutually_exclusive_group()
+    replacement_choice.add_argument(
+        "--dry-run", action="store_true", help="只输出替换预览，不修改项目"
+    )
+    replacement_choice.add_argument(
+        "--yes", action="store_true", help="跳过交互确认并提交替换"
+    )
 
     inspect = subparsers.add_parser("inspect", help="检查项目状态")
     inspect.add_argument("project")
@@ -332,6 +355,44 @@ def run(argv: list[str] | None = None) -> int:
             "command complete command=files-remove files=%d segments=%d",
             summary["removed_files"],
             summary["removed_segments"],
+        )
+        return 0
+    if args.command == "files-replace":
+        project = _resolve_project(args)
+        if not args.dry_run and not args.yes and not sys.stdin.isatty():
+            raise UsageError("非交互环境必须使用 --dry-run 或 --yes")
+        adapter_options = (
+            parse_adapter_option_args(args.adapter_options)
+            if args.adapter_options
+            else None
+        )
+        with project_write_lock(project):
+            plan = prepare_file_replacement(
+                project,
+                args.file_id,
+                Path(args.input),
+                adapter_options=adapter_options,
+            )
+        if args.dry_run:
+            summary = dict(plan.impact)
+            summary["preview_token"] = plan.preview_token
+            summary["warnings"] = list(plan.warnings)
+            emit_summary(summary)
+            return 0
+        if not args.yes:
+            emit_summary({**plan.impact, "warnings": list(plan.warnings)})
+            answer = input("确认替换源文件？[y/N] ").strip().casefold()
+            if answer not in {"y", "yes"}:
+                raise UsageError("已取消源文件替换")
+        with project_write_lock(project):
+            summary = apply_file_replacement(project, plan)
+        emit_summary(summary)
+        logger.info(
+            "command complete command=files-replace file=%s preserved=%d added=%d removed=%d",
+            args.file_id,
+            summary["preserved_segment_count"],
+            summary["added_segment_count"],
+            summary["removed_segment_count"],
         )
         return 0
     if args.command == "inspect":

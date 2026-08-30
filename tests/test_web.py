@@ -27,6 +27,7 @@ from app.sqlite_storage import (
     read_files,
     read_json,
     read_jsonl,
+    read_segments,
     record_exists,
     record_header,
     write_json,
@@ -195,6 +196,115 @@ def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
     )
     assert created.status_code == 200
     assert created.json()["project_selector"] == "empty"
+
+
+def test_web_file_replacement_preview_confirm_preserves_file_identity(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    preview = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-preview",
+        files={
+            "file": (
+                "revised.txt",
+                b"one\ninserted\ntwo",
+                "text/plain",
+            )
+        },
+    )
+
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["preview_id"]
+    assert preview_payload["file_id"] == "F0001"
+    assert preview_payload["old_segment_count"] == 2
+    assert preview_payload["new_segment_count"] == 3
+    assert preview_payload["preserved_segment_count"] == 2
+    assert preview_payload["added_segment_count"] == 1
+
+    confirmed = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-confirm",
+        json={"preview_id": preview_payload["preview_id"]},
+    )
+
+    assert confirmed.status_code == 200
+    result = confirmed.json()
+    assert result["file_id"] == "F0001"
+    assert result["preserved_segment_count"] == 2
+    files = read_files(project)
+    assert files[0]["file_id"] == "F0001"
+    assert files[0]["original_name"] == "input.txt"
+    assert [item["source"] for item in read_segments(project)] == [
+        "one",
+        "inserted",
+        "two",
+    ]
+    stored = project / "input" / str(files[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "one\ninserted\ntwo"
+
+
+def test_web_file_replacement_preview_is_single_use_and_cleans_temp_files(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("first.txt", b"first", "text/plain")},
+        )
+        assert first.status_code == 200
+        first_id = first.json()["preview_id"]
+        first_root = app.state.replacement_previews[
+            (projects_root / "sample").resolve(), "F0001"
+        ].temporary_root
+        assert first_root.is_dir()
+
+        second = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("second.txt", b"second", "text/plain")},
+        )
+        assert second.status_code == 200
+        second_id = second.json()["preview_id"]
+        second_root = app.state.replacement_previews[
+            (projects_root / "sample").resolve(), "F0001"
+        ].temporary_root
+        assert second_id != first_id
+        assert not first_root.exists()
+        assert second_root.is_dir()
+
+        stale = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{first_id}"
+        )
+        assert stale.status_code == 400
+        cancelled = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{second_id}"
+        )
+        assert cancelled.status_code == 200
+        assert not second_root.exists()
+
+    assert not app.state.replacement_previews
+
+
+def test_web_file_replacement_accepts_one_server_side_path(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    replacement = tmp_path / "server-replacement.txt"
+    replacement.write_text("server\nfile", encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root))
+
+    preview = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-preview",
+        data={"server_path": str(replacement)},
+    )
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert payload["new_segment_count"] == 2
+    assert client.delete(
+        f"/api/v1/projects/sample/files/F0001/replacement-preview/{payload['preview_id']}"
+    ).status_code == 200
 
 
 def test_web_long_query_inputs_use_post_bodies(tmp_path: Path) -> None:

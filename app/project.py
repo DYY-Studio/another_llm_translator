@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
 from .config import LLM_MODEL_STAGES, load_config
 from .documents import (
@@ -25,11 +27,16 @@ from .errors import (
     ProjectError,
     UsageError,
 )
+from .file_replacement import SegmentAlignment, align_segments
 from .sqlite_storage import (
     database_path,
+    latest_stage_summary,
     new_record_id,
     read_adapter_state,
+    read_json,
+    read_jsonl,
     read_project_meta,
+    record_exists,
     record_header,
     replace_source,
     utc_now,
@@ -66,6 +73,25 @@ _TXT_EXTENSIONS = frozenset({".txt", ".text"})
 class InputFile:
     path: Path
     original_name: str
+
+
+@dataclass(frozen=True)
+class FileReplacementPlan:
+    project: Path
+    project_id: str
+    file_id: str
+    input_path: Path
+    old_file: dict[str, Any]
+    new_file: dict[str, Any]
+    old_segments: tuple[dict[str, Any], ...]
+    new_segments: tuple[dict[str, Any], ...]
+    adapter: DocumentAdapter
+    adapter_states: tuple[dict[str, Any], ...]
+    source_snapshot: str
+    input_digest: str
+    preview_token: str
+    impact: dict[str, object]
+    warnings: tuple[str, ...]
 
 
 def natural_path_key(
@@ -703,6 +729,471 @@ def _resolve_file_adapters(
             raise ProjectError("项目 File 缺少 Document Adapter 版本；请重新创建项目")
         resolved.append(item)
     return resolved
+
+
+_REPLACEMENT_STAGES = (
+    "translation",
+    "proofreading",
+    "proofreading_applied",
+    "polishing",
+    "polishing_applied",
+)
+
+
+def _replacement_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _replacement_input_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise UsageError(f"无法读取替换输入：{path}: {exc}") from exc
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _replacement_source_snapshot(
+    file_record: dict[str, Any],
+    segments: Iterable[dict[str, Any]],
+    *,
+    source_digest: str | None = None,
+) -> str:
+    return _replacement_digest(
+        {
+            "file": {
+                key: file_record.get(key)
+                for key in (
+                    "file_id",
+                    "file_order",
+                    "original_name",
+                    "stored_name",
+                    "document_adapter_id",
+                    "document_adapter_version",
+                    "document_adapter_state",
+                    "segment_count",
+                    "next_segment_sequence",
+                )
+            },
+            "source_digest": source_digest,
+            "segments": [
+                {
+                    key: segment.get(key)
+                    for key in (
+                        "segment_id",
+                        "file_id",
+                        "line_index",
+                        "part_id",
+                        "source",
+                        "is_empty",
+                        "model_source",
+                    )
+                }
+                for segment in segments
+            ],
+        }
+    )
+
+
+def _next_segment_sequence(
+    file_record: dict[str, Any], segments: Iterable[dict[str, Any]]
+) -> int:
+    configured = file_record.get("next_segment_sequence")
+    next_value = (
+        configured
+        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0
+        else 1
+    )
+    file_id = str(file_record["file_id"])
+    for segment in segments:
+        match = re.fullmatch(
+            re.escape(file_id) + r"-S(\d+)", str(segment.get("segment_id", ""))
+        )
+        if match:
+            next_value = max(next_value, int(match.group(1)) + 1)
+    return next_value
+
+
+def _replacement_segments(
+    *,
+    project_id: str,
+    file_id: str,
+    imported: ImportedFile,
+    old_segments: list[dict[str, Any]],
+    alignment: SegmentAlignment,
+    next_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    part_ids = imported.segment_part_ids
+    if part_ids is None:
+        raise ProjectError("替换输入缺少 segment_part_ids")
+    model_sources = imported.model_sources
+    if model_sources is not None and len(model_sources) != len(imported.segments):
+        raise ProjectError("替换输入 model_sources 与 Segment 数量不一致")
+    values: list[dict[str, Any]] = []
+    sequence = next_sequence
+    for line_index, source in enumerate(imported.segments):
+        old_index = alignment.preserved_new_to_old.get(line_index)
+        model_source = (
+            model_sources[line_index] if model_sources is not None else None
+        )
+        if old_index is not None:
+            value = dict(old_segments[old_index])
+            value.update(
+                line_index=line_index,
+                file_id=file_id,
+                part_id=part_ids[line_index],
+                source=source,
+                is_empty=source == "" or source.isspace(),
+                model_source=model_source,
+            )
+        else:
+            segment_id = f"{file_id}-S{sequence:06d}"
+            sequence += 1
+            fields: dict[str, object] = {
+                "segment_id": segment_id,
+                "file_id": file_id,
+                "line_index": line_index,
+                "part_id": part_ids[line_index],
+                "source": source,
+                "is_empty": source == "" or source.isspace(),
+                "model_source": model_source,
+            }
+            value = record_header(
+                "source_segment",
+                project_id,
+                record_id=segment_id,
+                **fields,
+            )
+        values.append(value)
+    return values, sequence
+
+
+def _replacement_impact(
+    project: Path,
+    old_segments: list[dict[str, Any]],
+    new_segments: list[dict[str, Any]],
+    alignment: SegmentAlignment,
+    warnings: Iterable[str],
+) -> dict[str, object]:
+    preserved_old_indices = set(alignment.preserved_new_to_old.values())
+    preserved_count = len(alignment.preserved_new_to_old)
+    removed_ids = [
+        str(segment["segment_id"])
+        for index, segment in enumerate(old_segments)
+        if index not in preserved_old_indices
+    ]
+    preserved_ids = [
+        str(old_segments[old_index]["segment_id"])
+        for old_index in alignment.preserved_new_to_old.values()
+    ]
+    preserved_completed: dict[str, int] = {}
+    removed_completed: dict[str, int] = {}
+    for stage in _REPLACEMENT_STAGES:
+        old_states = latest_stage_summary(project, stage, [
+            *preserved_ids,
+            *removed_ids,
+        ])
+        preserved_completed[stage] = sum(
+            bool(old_states.get(segment_id, {}).get("completed"))
+            for segment_id in preserved_ids
+        )
+        removed_completed[stage] = sum(
+            bool(old_states.get(segment_id, {}).get("completed"))
+            for segment_id in removed_ids
+        )
+    return {
+        "old_segment_count": len(old_segments),
+        "new_segment_count": len(new_segments),
+        "preserved_segment_count": preserved_count,
+        "added_segment_count": len(new_segments) - preserved_count,
+        "removed_segment_count": len(old_segments) - preserved_count,
+        "ambiguous_old_segment_count": len(alignment.ambiguous_old_indices),
+        "ambiguous_new_segment_count": len(alignment.ambiguous_new_indices),
+        "preserved_completed_by_stage": preserved_completed,
+        "removed_completed_by_stage": removed_completed,
+        "warnings": list(warnings),
+    }
+
+
+def _replacement_has_pending_terms(project: Path) -> bool:
+    active_path = project / "terminology" / "active_task.json"
+    if not record_exists(project, active_path):
+        return False
+    active = read_json(project, active_path)
+    if active.get("status") not in {"active", "completed"}:
+        return False
+    task_id = str(active.get("active_task_id", ""))
+    return any(
+        bool(record.get("terms"))
+        for record in read_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            task_id=task_id,
+        )
+    )
+
+
+def _replacement_file(
+    files: Iterable[dict[str, Any]], file_id: str
+) -> dict[str, Any]:
+    for file_record in files:
+        if str(file_record.get("file_id")) == file_id:
+            return file_record
+    raise UsageError(f"未知文件 ID：{file_id}")
+
+
+def prepare_file_replacement(
+    project: Path,
+    file_id: str,
+    input_path: Path,
+    *,
+    adapter_options: dict[str, dict[str, str]] | None = None,
+) -> FileReplacementPlan:
+    running = _running_run_ids(project)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能替换文件：{', '.join(running)}"
+        )
+    if _replacement_has_pending_terms(project):
+        raise UsageError("存在未发布的术语候选，发布或丢弃后才能替换文件")
+    metadata, files, segments = _source_records(project)
+    old_file = _replacement_file(files, file_id)
+    input_path = Path(input_path)
+    if input_path.is_symlink() or not input_path.is_file():
+        raise UsageError(f"替换输入必须是单个文件：{input_path}")
+    old_segments = [
+        segment for segment in segments if str(segment["file_id"]) == file_id
+    ]
+    old_input = project / "input" / str(old_file.get("stored_name", ""))
+    if not old_input.is_file():
+        raise ProjectError(f"项目源副本缺失：{file_id}")
+    old_input_digest = _replacement_input_digest(old_input)
+    adapter_id = str(old_file["document_adapter_id"])
+    if adapter_options and set(adapter_options) - {adapter_id}:
+        raise UsageError("替换只能使用目标 Document Adapter 的选项")
+    config = load_config(project / "config.toml")
+    imports, warnings = _import_project_inputs(
+        [str(input_path)],
+        recursive=False,
+        config=config,
+        document_adapter_id=adapter_id,
+        adapter_options=adapter_options,
+    )
+    if len(imports) != 1:
+        raise UsageError("替换输入必须由 Document Adapter 解析为一个 File")
+    adapter, imported = imports[0]
+    temporary_new_segments = [
+        {
+            "segment_id": f"__replacement-{index}",
+            "file_id": file_id,
+            "line_index": index,
+            "part_id": imported.segment_part_ids[index]
+            if imported.segment_part_ids is not None
+            else "document",
+            "source": imported.segments[index],
+            "model_source": (
+                imported.model_sources[index]
+                if imported.model_sources is not None
+                else None
+            ),
+        }
+        for index in range(len(imported.segments))
+    ]
+    alignment = align_segments(old_segments, temporary_new_segments)
+    next_sequence = _next_segment_sequence(old_file, old_segments)
+    new_segments, next_sequence = _replacement_segments(
+        project_id=str(metadata["project_id"]),
+        file_id=file_id,
+        imported=imported,
+        old_segments=old_segments,
+        alignment=alignment,
+        next_sequence=next_sequence,
+    )
+    new_file = dict(old_file)
+    new_file.update(
+        encoding_detected=imported.encoding_detected,
+        encoding_confidence=imported.encoding_confidence,
+        encoding_used=imported.encoding_used,
+        segment_count=len(new_segments),
+        document_adapter_id=adapter.adapter_id,
+        document_adapter_version=adapter.version,
+        next_segment_sequence=next_sequence,
+    )
+    state_path = old_file.get("document_adapter_state")
+    if imported.opaque_state is None:
+        new_file["document_adapter_state"] = None
+        adapter_states: tuple[dict[str, Any], ...] = ()
+    else:
+        if not isinstance(state_path, str) or not state_path:
+            state_path = (
+                Path("source")
+                / "adapters"
+                / adapter.adapter_id
+                / f"{file_id}.json"
+            ).as_posix()
+        new_file["document_adapter_state"] = state_path
+        adapter_states = (
+            record_header(
+                "document_adapter_state",
+                str(metadata["project_id"]),
+                record_id=f"DOCUMENT-{file_id}",
+                adapter_id=adapter.adapter_id,
+                adapter_version=adapter.version,
+                file_id=file_id,
+                state=imported.opaque_state,
+            ),
+        )
+    source_snapshot = _replacement_source_snapshot(
+        old_file,
+        old_segments,
+        source_digest=old_input_digest,
+    )
+    input_digest = _replacement_input_digest(Path(input_path))
+    preview_token = _replacement_digest(
+        {
+            "source_snapshot": source_snapshot,
+            "input_digest": input_digest,
+            "adapter_id": adapter.adapter_id,
+            "adapter_version": adapter.version,
+            "segments": [
+                {
+                    key: value.get(key)
+                    for key in ("part_id", "source", "model_source")
+                }
+                for value in new_segments
+            ],
+            "adapter_state": imported.opaque_state,
+        }
+    )
+    impact = _replacement_impact(
+        project,
+        old_segments,
+        new_segments,
+        alignment,
+        warnings,
+    )
+    impact["file_id"] = file_id
+    return FileReplacementPlan(
+        project=project.resolve(),
+        project_id=str(metadata["project_id"]),
+        file_id=file_id,
+        input_path=Path(input_path).resolve(),
+        old_file=dict(old_file),
+        new_file=new_file,
+        old_segments=tuple(dict(item) for item in old_segments),
+        new_segments=tuple(dict(item) for item in new_segments),
+        adapter=adapter,
+        adapter_states=adapter_states,
+        source_snapshot=source_snapshot,
+        input_digest=input_digest,
+        preview_token=preview_token,
+        impact=impact,
+        warnings=tuple(warnings),
+    )
+
+
+def apply_file_replacement(
+    project: Path,
+    plan: FileReplacementPlan,
+) -> dict[str, object]:
+    root = project.resolve()
+    if root != plan.project:
+        raise UsageError("替换预览不属于当前项目")
+    running = _running_run_ids(root)
+    if running:
+        raise UsageError(
+            f"存在未完成 Run，不能替换文件：{', '.join(running)}"
+        )
+    if _replacement_has_pending_terms(root):
+        raise UsageError("存在未发布的术语候选，发布或丢弃后才能替换文件")
+    metadata, files, segments = _source_records(root)
+    if str(metadata.get("project_id")) != plan.project_id:
+        raise UsageError("替换预览不属于当前项目")
+    current_file = _replacement_file(files, plan.file_id)
+    current_segments = [
+        segment for segment in segments if str(segment["file_id"]) == plan.file_id
+    ]
+    current_input = root / "input" / str(current_file.get("stored_name", ""))
+    current_input_digest = (
+        _replacement_input_digest(current_input)
+        if current_input.is_file()
+        else None
+    )
+    if _replacement_source_snapshot(
+        current_file,
+        current_segments,
+        source_digest=current_input_digest,
+    ) != plan.source_snapshot:
+        raise UsageError("项目源文件已变化，请重新生成替换预览")
+    if _replacement_input_digest(plan.input_path) != plan.input_digest:
+        raise UsageError("替换输入已变化，请重新生成替换预览")
+    if not root.joinpath("input", str(current_file["stored_name"])).is_file():
+        raise ProjectError(f"项目源副本缺失：{current_file['file_id']}")
+
+    new_files = [
+        plan.new_file if str(item["file_id"]) == plan.file_id else item
+        for item in files
+    ]
+    new_segments = [
+        *[item for item in segments if str(item["file_id"]) != plan.file_id],
+        *plan.new_segments,
+    ]
+    new_metadata = dict(metadata)
+    new_metadata.update(segment_count=len(new_segments))
+    for key in (
+        "document_adapter_id",
+        "document_adapter_version",
+        "document_adapter_state",
+    ):
+        new_metadata.pop(key, None)
+    retained_states = [
+        state
+        for file_record in files
+        if str(file_record["file_id"]) != plan.file_id
+        and (state := read_adapter_state(root, str(file_record["file_id"]))) is not None
+    ]
+    all_states = [*retained_states, *plan.adapter_states]
+    staging = Path(tempfile.mkdtemp(prefix=".files-replace.", dir=root))
+    staged_input = staging / "new-input"
+    old_input = root / "input" / str(current_file["stored_name"])
+    held_input = staging / "old-input"
+    old_moved = False
+    new_published = False
+    committed = False
+    try:
+        shutil.copy2(plan.input_path, staged_input)
+        os.replace(old_input, held_input)
+        old_moved = True
+        os.replace(staged_input, old_input)
+        new_published = True
+        replace_source(root, new_files, new_segments, new_metadata, all_states)
+        committed = True
+    except Exception:
+        if not committed:
+            if new_published and old_input.exists():
+                old_input.unlink()
+            if old_moved and held_input.exists():
+                old_input.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(held_input, old_input)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    result = dict(plan.impact)
+    result.update(
+        replaced_file_id=plan.file_id,
+        file_count=len(new_files),
+        segment_count=len(new_segments),
+        preview_token=plan.preview_token,
+    )
+    return result
 
 
 def add_project_files(
