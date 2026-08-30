@@ -32,8 +32,18 @@ def make_app_root(tmp_path: Path) -> Path:
     (root / "llm_adapters").mkdir()
     (root / "llm_presets").mkdir()
     source_root = Path(__file__).parents[1]
+    config_text = (source_root / "config" / "config.toml").read_text(
+        encoding="utf-8"
+    )
+    config_text = config_text.replace(
+        "base_delay_seconds = 2.0", "base_delay_seconds = 0"
+    )
+    config_text = config_text.replace(
+        "max_delay_seconds = 60.0", "max_delay_seconds = 0"
+    )
+    config_text = config_text.replace("jitter_seconds = 1.0", "jitter_seconds = 0")
     (root / "config" / "config.toml").write_text(
-        (source_root / "config" / "config.toml").read_text(encoding="utf-8"),
+        config_text,
         encoding="utf-8",
     )
     for source in (source_root / "prompts").glob("*.middle.txt"):
