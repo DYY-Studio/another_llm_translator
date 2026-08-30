@@ -123,22 +123,24 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
 
 
 @pytest.mark.parametrize(
-    ("language", "middle", "markers"),
+    ("language", "middle", "input_markers", "output_markers"),
     [
         (
             "zh-CN",
             "__共享判断政策__",
             (
+                "conflicts 是去重后的历史候选和关系争用证据",
+                "不是投票结果或可选值白名单",
+                "evidence.hit_count 是命中 Segment 数",
+                "先覆盖不同 (file_id, part_id) 内容边界",
+                "boundary_ref 是只读的请求内内容边界引用",
+            ),
+            (
                 "以下固定输出协议优先于可编辑中段",
                 "update 必须且只能含 type、normalized、action、reason、changes",
                 "changes 是 Patch",
                 "中实际需要修改的键",
-                "conflicts 是去重后的历史候选和关系争用证据",
-                "不是投票结果或可选值白名单",
                 "第一阶段存在 category",
-                "evidence.hit_count 是命中 Segment 数",
-                "先覆盖不同 (file_id, part_id) 内容边界",
-                "boundary_ref 是只读的请求内内容边界引用",
                 "description 可保持、清为 null，或改写为简洁的目标语说明",
                 "不得增加无证据事实",
                 "本次 terms[]/anchors[] 中可见",
@@ -151,16 +153,18 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
             "en",
             "__SHARED_JUDGMENT_POLICY__",
             (
+                "deduplicated historical candidates and relationship disputes",
+                "not vote totals or an allowed-value whitelist",
+                "evidence.hit_count is the number of matching Segments",
+                "prioritizing first hits from different (file_id, part_id) content boundaries",
+                "boundary_ref is a read-only, request-local content-boundary reference",
+            ),
+            (
                 "fixed output contract takes precedence over the editable middle",
                 "update contains exactly type, normalized, action, reason, changes",
                 "changes is a Patch",
                 "only fields actually changed",
-                "deduplicated historical candidates and relationship disputes",
-                "not vote totals or an allowed-value whitelist",
                 "In phase one, a term with category",
-                "evidence.hit_count is the number of matching Segments",
-                "prioritizing first hits from different (file_id, part_id) content boundaries",
-                "boundary_ref is a read-only, request-local content-boundary reference",
                 "description may be retained, cleared to null, or rewritten",
                 "must not add unsupported facts",
                 "visible in this request",
@@ -174,13 +178,17 @@ def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() ->
 def test_terminology_decision_prompt_defines_unambiguous_output_contract(
     language: str,
     middle: str,
-    markers: tuple[str, ...],
+    input_markers: tuple[str, ...],
+    output_markers: tuple[str, ...],
 ) -> None:
     for phase in ("adjudication", "consistency"):
         prompt = full_prompt("terminology_decision", middle, language, phase=phase)
-        assert prompt.index(middle) < prompt.index(markers[0])
-        for marker in markers:
-            assert marker in prompt
+        for marker in input_markers:
+            assert prompt.index(marker) < prompt.index(middle)
+            assert prompt.count(marker) == 1
+        for marker in output_markers:
+            assert prompt.index(middle) < prompt.index(marker)
+            assert prompt.count(marker) == 1
         assert '"action":"update"' in prompt
         assert '"action":"keep"' in prompt
         assert '"action":"disable"' in prompt
@@ -188,25 +196,52 @@ def test_terminology_decision_prompt_defines_unambiguous_output_contract(
         assert prompt.count('{"type":"end"}') == 2
 
 
-def test_terminology_decision_middle_defines_evidence_semantics() -> None:
-    markers = {
+def test_terminology_decision_middle_excludes_fixed_input_and_output_rules() -> None:
+    forbidden = {
         "zh-CN": (
-            "hit_count 表示命中该术语的 Segment 数",
-            "先覆盖不同 (file_id, part_id) 内容边界的首个命中",
-            "boundary_ref 只是本次请求内",
-            "不是票数或可选值白名单",
-            "候选之外的新值",
-            "第一阶段已确定且当前无冲突的自动 anchors",
-            "不得增加证据中没有的事实",
+            "hit_count",
+            "samples",
+            "boundary_ref",
+            "terms[]",
+            "anchors[]",
+            "normalized",
+            "JSONL",
         ),
         "en": (
-            "hit_count is the number of Segments matching the term",
-            "first hits from different (file_id, part_id) content boundaries",
-            "boundary_ref is a read-only reference used only within this request",
-            "not votes or an allowed-value whitelist",
-            "new value outside those candidates",
-            "phase-one disposition is determined and currently conflict-free",
-            "Never add facts absent from that evidence",
+            "hit_count",
+            "samples",
+            "boundary_ref",
+            "terms[]",
+            "anchors[]",
+            "normalized",
+            "JSONL",
+        ),
+    }
+
+    for language, markers in forbidden.items():
+        middle = (
+            ROOT / "prompts" / f"terminology_decision.{language}.middle.txt"
+        ).read_text(encoding="utf-8")
+        for marker in markers:
+            assert marker not in middle
+        assert '{"type"' not in middle
+
+
+def test_terminology_decision_middle_requires_description_deaccumulation() -> None:
+    markers = {
+        "zh-CN": (
+            "Description 不是扫描观察、证据片段或历史说明的汇总",
+            "重复、并列堆积、互相矛盾或泛泛描述",
+            "不得原样保留",
+            "压缩为一条简洁、有区分力的目标语说明",
+            "无法提炼出有效区分信息时清空",
+        ),
+        "en": (
+            "A Description is not a collection of scan observations, evidence fragments, or historical notes",
+            "repetitive, piled-up, contradictory, or generic",
+            "must not be kept unchanged",
+            "condense it into one concise target-language explanation that materially disambiguates",
+            "clear it when no useful distinction can be extracted",
         ),
     }
 
@@ -216,8 +251,6 @@ def test_terminology_decision_middle_defines_evidence_semantics() -> None:
         ).read_text(encoding="utf-8")
         for marker in expected:
             assert marker in middle
-        assert "JSONL" not in middle
-        assert '{"type"' not in middle
 
 
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
