@@ -31,6 +31,7 @@ def use_llm_preset(
         )
     source = source_root / "llm_presets" / "default.json"
     definition = json.loads(source.read_text(encoding="utf-8"))
+    definition.update(requests_per_minute=0, input_tokens_per_minute=0)
     definition.update(changes)
     (presets / "default.json").write_text(
         json.dumps(definition, ensure_ascii=False), encoding="utf-8"

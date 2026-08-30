@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import keyring
@@ -37,5 +39,21 @@ def fake_keyring() -> FakeKeyring:
 
 @pytest.fixture(autouse=True)
 def isolated_user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(tmp_path / "user-root"))
+    user_root = tmp_path / "user-root"
+    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(user_root))
     monkeypatch.setenv("ANOTHER_LLM_LANGUAGE", "zh-CN")
+
+    runtime_root = tmp_path / "runtime-global"
+    (runtime_root / "llm_adapters").mkdir(parents=True)
+    (runtime_root / "llm_presets").mkdir()
+    source_root = Path(__file__).parents[1]
+    for source in (source_root / "llm_adapters").glob("*.json"):
+        shutil.copy2(source, runtime_root / "llm_adapters" / source.name)
+    preset = json.loads(
+        (source_root / "llm_presets" / "default.json").read_text(encoding="utf-8")
+    )
+    preset.update(requests_per_minute=0, input_tokens_per_minute=0)
+    (runtime_root / "llm_presets" / "default.json").write_text(
+        json.dumps(preset, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.setattr("app.config.APP_ROOT", runtime_root)
