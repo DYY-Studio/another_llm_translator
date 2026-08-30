@@ -8,7 +8,7 @@ import type {
   DiagnosticsResponse,
 } from "../types";
 import { errorMessage, translate, type Language } from "../i18n";
-import { STORAGE_KEYS } from "../storageMigration";
+import { STORAGE_KEYS } from "../storageKeys";
 
 type DetailTab = "request" | "content" | "reasoning" | "attempts";
 type ThroughputMetric = "input" | "output" | "total";

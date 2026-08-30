@@ -8,10 +8,9 @@
     <script>
       (() => {
         const key = "another-llm-translator.theme.v1";
-        const legacyKey = "minimal-llm-translator.theme.v1";
         let mode = "system";
         try {
-          const stored = localStorage.getItem(key) ?? localStorage.getItem(legacyKey);
+          const stored = localStorage.getItem(key);
           if (stored === "light" || stored === "dark" || stored === "system") mode = stored;
         } catch {}
         const theme = mode === "system"

@@ -21,13 +21,12 @@ import type {
   ThemeMode,
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
-import { migrateLegacyLocalStorage, STORAGE_KEYS } from "./storageMigration";
+import { STORAGE_KEYS } from "./storageKeys";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
 const RECENT_PROJECTS_STORAGE_KEY = STORAGE_KEYS.recentProjects;
 const SELECTED_PROJECT_STORAGE_KEY = "another-llm-translator.selected-project.v1";
-migrateLegacyLocalStorage(window.localStorage);
 const runnable: Partial<Record<Stage, LLMStage>> = {
   terminology: "terminology",
   translation: "translation",
