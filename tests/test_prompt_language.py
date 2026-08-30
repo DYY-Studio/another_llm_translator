@@ -227,6 +227,32 @@ def test_terminology_decision_middle_excludes_fixed_input_and_output_rules() -> 
         assert '{"type"' not in middle
 
 
+def test_terminology_decision_middle_requires_description_deaccumulation() -> None:
+    markers = {
+        "zh-CN": (
+            "Description 不是扫描观察、证据片段或历史说明的汇总",
+            "重复、并列堆积、互相矛盾或泛泛描述",
+            "不得原样保留",
+            "压缩为一条简洁、有区分力的目标语说明",
+            "无法提炼出有效区分信息时清空",
+        ),
+        "en": (
+            "A Description is not a collection of scan observations, evidence fragments, or historical notes",
+            "repetitive, piled-up, contradictory, or generic",
+            "must not be kept unchanged",
+            "condense it into one concise target-language explanation that materially disambiguates",
+            "clear it when no useful distinction can be extracted",
+        ),
+    }
+
+    for language, expected in markers.items():
+        middle = (
+            ROOT / "prompts" / f"terminology_decision.{language}.middle.txt"
+        ).read_text(encoding="utf-8")
+        for marker in expected:
+            assert marker in middle
+
+
 @pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
 def test_segment_prompts_require_translated_aozora_ruby_base(stage: str) -> None:
     zh = full_prompt(stage, "项目要求。", "zh-CN")
