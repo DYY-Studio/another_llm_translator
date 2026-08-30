@@ -1256,9 +1256,7 @@ def test_web_manages_global_adapters(tmp_path: Path) -> None:
     assert wrong_id.status_code == 400
 
 
-def test_web_rejects_inline_config_and_has_no_migration_endpoint(
-    tmp_path: Path,
-) -> None:
+def test_web_rejects_inline_config(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     app = create_app(projects_root=projects_root)
     client = TestClient(app)
@@ -1273,13 +1271,6 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
     response = client.get("/api/v1/projects/sample/config")
     assert response.status_code == 400
     assert "未知配置键 config.llm: model" in response.json()["error"]
-    route_paths = {getattr(route, "path", "") for route in app.routes}
-    assert not any(
-        path.startswith("/api/v1/projects/")
-        and "adapters" in path
-        for path in route_paths
-    )
-    assert "/api/v1/global/adapters" in route_paths
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:

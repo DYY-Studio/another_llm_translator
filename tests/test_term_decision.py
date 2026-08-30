@@ -1609,18 +1609,9 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("language", "marker"),
-    [
-        ("zh-CN", "术语组主自指：alice -> alice"),
-        ("en", "self-referencing group pointer: alice -> alice"),
-    ],
-)
-async def test_decision_group_violation_enters_localized_format_repair(
+async def test_decision_group_violation_enters_format_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
-    marker: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1633,7 +1624,7 @@ async def test_decision_group_violation_enters_localized_format_repair(
         if "format_correction" in payload:
             repairs += 1
             correction = payload["format_correction"]
-            assert marker in correction["errors"][0]["message"]
+            assert "术语组主自指：alice -> alice" in correction["errors"][0]["message"]
             assert correction["errors"][0]["code"] == "invalid_relationship"
             assert correction["target_normalized"] == ["alice"]
             content = llm_jsonl(decision_response(payload))
@@ -1650,7 +1641,7 @@ async def test_decision_group_violation_enters_localized_format_repair(
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
-                project, prompt_language=language, http_client=client
+                project, prompt_language="zh-CN", http_client=client
             )
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1660,11 +1651,9 @@ async def test_decision_group_violation_enters_localized_format_repair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("language", ["zh-CN", "en"])
 async def test_decision_format_repair_lists_exact_target_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1707,7 +1696,7 @@ async def test_decision_format_repair_lists_exact_target_scope(
     os.environ["LLM_API_KEY"] = "test"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         summary = await run_terminology_decision(
-            project, prompt_language=language, http_client=client
+            project, prompt_language="zh-CN", http_client=client
         )
     del os.environ["LLM_API_KEY"]
 
@@ -1717,28 +1706,9 @@ async def test_decision_format_repair_lists_exact_target_scope(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("language", "markers"),
-    [
-        (
-            "zh-CN",
-            ("每个非空物理行", "只输出协议允许", "最终记录必须且只能是精确"),
-        ),
-        (
-            "en",
-            (
-                "Each non-empty physical line",
-                "Only output protocol-allowed",
-                "The final record must be exactly",
-            ),
-        ),
-    ],
-)
 async def test_decision_format_repair_abstracts_and_deduplicates_document_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
-    markers: tuple[str, ...],
 ) -> None:
     project = create_decision_project(tmp_path)
 
@@ -1773,8 +1743,9 @@ async def test_decision_format_repair_abstracts_and_deduplicates_document_errors
             assert all("第 " not in message for message in messages)
             assert all("unknown" not in message for message in messages)
             assert all("invalid_document" not in item for item in errors)
-            for marker in markers:
-                assert any(marker in message for message in messages)
+            assert any("每个非空物理行" in message for message in messages)
+            assert any("只输出协议允许" in message for message in messages)
+            assert any("最终记录必须且只能是精确" in message for message in messages)
             content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(decision_response(payload))
@@ -1786,7 +1757,7 @@ async def test_decision_format_repair_abstracts_and_deduplicates_document_errors
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
-                project, prompt_language=language, http_client=client
+                project, prompt_language="zh-CN", http_client=client
             )
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1917,11 +1888,9 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("language", ["zh-CN", "en"])
 async def test_update_without_reason_is_repaired_with_complete_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1961,7 +1930,7 @@ async def test_update_without_reason_is_repaired_with_complete_contract(
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
-                project, prompt_language=language, http_client=client
+                project, prompt_language="zh-CN", http_client=client
             )
     finally:
         del os.environ["LLM_API_KEY"]

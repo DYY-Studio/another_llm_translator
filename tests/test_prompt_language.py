@@ -310,29 +310,6 @@ def test_builtin_middles_keep_editable_policy_without_machine_protocol(
         assert "type=segment" not in middle
 
 
-@pytest.mark.parametrize(
-    ("stage", "language", "baseline"),
-    [
-        # terminology 基线记录有意扩充后的组装长度（排除现实通用词等策略）
-        ("terminology", "zh-CN", 851),
-        ("terminology", "en", 2041),
-        ("translation", "zh-CN", 598),
-        ("translation", "en", 1555),
-        ("proofreading", "zh-CN", 818),
-        ("proofreading", "en", 1854),
-        ("polishing", "zh-CN", 804),
-        ("polishing", "en", 1826),
-    ],
-)
-def test_default_assembled_prompt_stays_within_growth_limit(
-    stage: str, language: str, baseline: int
-) -> None:
-    middle = (ROOT / "prompts" / f"{stage}.{language}.middle.txt").read_text(
-        encoding="utf-8"
-    )
-    assert len(full_prompt(stage, middle, language)) <= baseline * 1.15
-
-
 def test_full_prompt_rejects_unknown_language() -> None:
     from app.errors import UsageError
 

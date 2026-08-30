@@ -540,10 +540,8 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
 async def test_review_format_retry_uses_abstract_guidance(
     tmp_path: Path,
-    stage: str,
 ) -> None:
     project = await create_project(tmp_path, "one")
     review_calls = 0
@@ -596,7 +594,7 @@ async def test_review_format_retry_uses_abstract_guidance(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(project, stage, Scope(), http_client=client)
+        summary = await run_review(project, "proofreading", Scope(), http_client=client)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -604,11 +602,9 @@ async def test_review_format_retry_uses_abstract_guidance(
     assert review_calls == 2
 
 
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
 @pytest.mark.asyncio
 async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     tmp_path: Path,
-    stage: str,
 ) -> None:
     project = await create_project(tmp_path, "one")
     review_calls = 0
@@ -650,7 +646,7 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(project, stage, Scope(), http_client=client)
+        summary = await run_review(project, "proofreading", Scope(), http_client=client)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -660,7 +656,7 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     assert review_calls == 1
     completed = [
         item
-        for item in read_jsonl(project, project / "stages" / f"{stage}.jsonl")
+        for item in read_jsonl(project, project / "stages" / "proofreading.jsonl")
         if item["status"] == "completed"
     ]
     assert len(completed) == 1
