@@ -410,7 +410,18 @@ python -m app.main init --empty --name novel --parent-dir /absolute/parent
 python -m app.main files-add novel chapter-1.txt chapter-2.txt
 python -m app.main files-add novel appendix.epub
 python -m app.main files-remove novel F0001
+python -m app.main files-replace novel F0001 chapter-1-revised.txt --dry-run
+python -m app.main files-replace novel F0001 chapter-1-revised.txt --yes
 ```
+
+`files-replace` 保留目标 File 的 ID、顺序和导出文件名。命令先按同一 `part_id` 内
+的源文与模型源文做保守精确对齐，预览会报告保留、新增、移除和歧义 Segment，以及
+受影响的阶段进度。可确认一致的 Segment 会继续使用原译文；新增、修改、缺失或
+无法唯一确认的重复 Segment 从零开始。`--dry-run` 只预览；交互终端默认显示预览
+后询问确认，脚本需显式使用 `--yes`。
+
+项目存在运行中的任务或未发布的术语扫描候选时，必须先结束该任务或发布/丢弃候选。
+历史阶段结果和既有输出不会被自动删除，已发布术语也不会因源文件替换而自动移除。
 
 EPUB 可以显式指定 Adapter 和导入选项：
 
