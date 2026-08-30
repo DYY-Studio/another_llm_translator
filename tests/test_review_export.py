@@ -678,7 +678,6 @@ async def test_oversized_review_segment_is_combined_once(
         text = config_path.read_text(encoding="utf-8")
         use_llm_preset(
             tmp_path,
-            monkeypatch,
             context_window_tokens=1200,
             max_output_tokens=300,
             context_safety_margin_tokens=100,
