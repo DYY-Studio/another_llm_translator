@@ -49,11 +49,10 @@ def isolated_user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source_root = Path(__file__).parents[1]
     for source in (source_root / "llm_adapters").glob("*.json"):
         shutil.copy2(source, runtime_root / "llm_adapters" / source.name)
-    preset = json.loads(
-        (source_root / "llm_presets" / "default.json").read_text(encoding="utf-8")
-    )
-    preset.update(requests_per_minute=0, input_tokens_per_minute=0)
-    (runtime_root / "llm_presets" / "default.json").write_text(
-        json.dumps(preset, ensure_ascii=False), encoding="utf-8"
-    )
+    for source in (source_root / "llm_presets").glob("*.json"):
+        preset = json.loads(source.read_text(encoding="utf-8"))
+        preset.update(requests_per_minute=0, input_tokens_per_minute=0)
+        (runtime_root / "llm_presets" / source.name).write_text(
+            json.dumps(preset, ensure_ascii=False), encoding="utf-8"
+        )
     monkeypatch.setattr("app.config.APP_ROOT", runtime_root)
