@@ -414,7 +414,8 @@ python -m app.main files-replace novel F0001 chapter-1-revised.txt --dry-run
 python -m app.main files-replace novel F0001 chapter-1-revised.txt --yes
 ```
 
-`files-replace` 保留目标 File 的 ID、顺序和导出文件名。命令先按同一 `part_id` 内
+`files-replace` 保留目标 File 的 ID、顺序和导出文件名，并更新新内容的编码信息、
+Adapter 版本、Adapter 状态和 Segment 计数。命令先按同一 `part_id` 内
 的源文与模型源文做保守精确对齐，预览会报告保留、新增、移除和歧义 Segment，以及
 受影响的阶段进度。可确认一致的 Segment 会继续使用原译文；新增、修改、缺失或
 无法唯一确认的重复 Segment 从零开始。`--dry-run` 只预览；交互终端默认显示预览

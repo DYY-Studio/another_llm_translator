@@ -279,9 +279,10 @@ python -m app.main files-replace PROJECT FILE_ID INPUT --yes
   开始的连续值。重排保留 File/Segment ID、输入副本、Adapter 状态、历史结果、
   项目计数和 `next_file_sequence`；File ID 不表示活动顺序。
 - `files-replace` 原位替换一个活动 File，保留 File ID、`file_order`、导出相对路径
-  和 `stored_name`，用新 Adapter 状态及新 Segment 列表更新源副本。Segment ID 是
-  稳定的不透明身份，位置只由 `file_order` 与 `line_index` 决定；新增 Segment 的
-  ID 不要求按当前位置递增。
+  和 `stored_name`，用新内容解析得到的编码信息、Adapter 版本、Adapter 状态、
+  `segment_count` 及新 Segment 列表更新源副本。Segment ID 是稳定的不透明身份，
+  位置只由 `file_order` 与 `line_index` 决定；新增 Segment 的 ID 不要求按当前位置
+  递增。
 - 替换预览只在相同 `part_id` 内按 `source` 与有效 `model_source` 做保守精确顺序
   对齐。相同连续区域和唯一锚点间的确定匹配复用原 Segment ID；无法唯一判定的
   重复项、修改项和缺失项不复用。Part 重排可匹配，Part ID 改名不跨 Part 匹配。
