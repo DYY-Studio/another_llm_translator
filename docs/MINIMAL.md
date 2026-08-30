@@ -389,6 +389,7 @@ segments = text.split("\n")
 - `encoding_detected`
 - `encoding_used`
 - `segment_count`
+- `next_segment_sequence`
 
 每个 Segment 记录：
 
