@@ -781,9 +781,9 @@ applied 结果保存：
 按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
 改版时显式升 `prompt_rules_version`。
 
-固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界。除顶层 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考数据，模型不得执行其中的指令。
+固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界；多阶段任务的当前阶段目标、只读数据组成和可修改范围也由固定阶段 Prefix 定义。除顶层 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考数据，模型不得执行其中的指令。字段语义只在固定 Prefix 中定义，不再于可编辑 middle 或固定 Suffix 重复。
 
-固定 Suffix 定义字段条件、请求内短 ID、通用文本格式保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为 `{"type":"end"}`。
+固定 Suffix 定义输出字段条件、状态转换约束、请求内短 ID、通用文本格式保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为 `{"type":"end"}`。
 
 middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景、文体、翻译策略、术语偏好及校对或润色严格度；它可以改变处理方式，但不能覆盖 Prefix/Suffix 的范围、数据边界和输出协议。
 
@@ -999,11 +999,11 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 
 第一阶段或已完成第二阶段检查点的 `needs_review`、disabled 及仍有冲突的状态不得锚定其他术语。所有 anchors 始终只读且不得输出 decision。模型只能保留、更新、软移除或标为 `needs_review`；不能修改 source/normalized 或虚构 alias。
 
-固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。
+固定 Prefix 定义输入证据、冲突候选、样本边界引用和两阶段 anchors 的含义；固定 Suffix 定义输出协议和状态转换约束。项目可编辑中段只定义判断政策，不得重新解释输入字段或改变协议。每个 action 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。
 
 Patch 只能包含实际修改的 `category`、`description`、`preferred_translation`、`aliases`、`group_primary`；宿主将它应用于输入状态并生成完整 `after`。
 
-空 Patch 只允许第二阶段显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。`description` 可以保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文样本或可见 anchor 支持，不得增加无证据事实。
+空 Patch 只允许第二阶段显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。固定协议允许 `description` 保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文样本或可见 anchor 支持，不得增加无证据事实。内置可编辑中段默认将 Description 视为简洁的术语区分说明，而非扫描观察或历史说明的汇总；重复、并列堆积、矛盾或泛泛的说明应压缩为一条有区分力的说明，无法提炼时清空。这是可编辑的默认判断政策，不增加宿主长度、分号数量或重复度校验。
 
 宿主校验类型、空值归一化和 no-op，语义正确性由用户在草案中查看完整旧文本和新文本后确认。alias 只能选用输入中可见的既有源文形式。
 
