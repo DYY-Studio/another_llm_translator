@@ -270,7 +270,7 @@ class EPUBDocumentAdapter:
         with zipfile.ZipFile(path) as archive:
             entries = _validated_entries(archive)
             opf_path = _opf_path(archive, entries)
-            document_paths, spine_paths, epub_version = _publication_paths(
+            document_paths, epub_version = _publication_paths(
                 archive, entries, opf_path
             )
             segments: list[str] = []
@@ -329,7 +329,6 @@ class EPUBDocumentAdapter:
                     encoding_confidence=1.0,
                     opaque_state={
                         "opf_path": opf_path,
-                        "spine_paths": spine_paths,
                         "locators": locators,
                         "ruby_mode": ruby_mode,
                         "inline_format_mode": inline_format_mode,
@@ -414,7 +413,7 @@ class EPUBDocumentAdapter:
             opf_path = state.get("opf_path")
             if not isinstance(opf_path, str):
                 raise IncompleteError("EPUB 状态缺少 OPF 路径")
-            _, epub_version = _spine_paths(archive, entries, opf_path)
+            _, epub_version = _publication_paths(archive, entries, opf_path)
             opf_root = _parse_xml(archive.read(opf_path), opf_path)
             source_languages = _opf_languages(opf_root)
             _set_opf_languages(
@@ -897,7 +896,7 @@ def _publication_paths(
     archive: zipfile.ZipFile,
     entries: dict[str, zipfile.ZipInfo],
     opf_path: str,
-) -> tuple[list[tuple[str, str]], list[str], str]:
+) -> tuple[list[tuple[str, str]], str]:
     root = _parse_xml(archive.read(opf_path), opf_path)
     if _local_name(root.tag) != "package":
         raise ProjectError(f"EPUB OPF 根元素无效：{opf_path}")
@@ -962,16 +961,7 @@ def _publication_paths(
     if ncx_path is not None:
         paths.append(("ncx", ncx_path))
     paths.extend(("xhtml", path) for path in spine_paths)
-    return paths, spine_paths, version[0]
-
-
-def _spine_paths(
-    archive: zipfile.ZipFile,
-    entries: dict[str, zipfile.ZipInfo],
-    opf_path: str,
-) -> tuple[list[str], str]:
-    _, spine_paths, version = _publication_paths(archive, entries, opf_path)
-    return spine_paths, version
+    return paths, version[0]
 
 
 def _safe_archive_path(base: str, value: str) -> str:
