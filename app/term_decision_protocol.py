@@ -127,8 +127,6 @@ def _retry_errors(errors: list[dict[str, Any]], language: str) -> list[dict[str,
     seen_document_categories: set[str] = set()
     for error in errors:
         document_code = error.get("_document_error_code")
-        if document_code is None and error.get("code") == "invalid_document":
-            document_code = "invalid_json"
         if isinstance(document_code, str):
             category = _JSONL_RETRY_CATEGORY[document_code]
             if category in seen_document_categories:
