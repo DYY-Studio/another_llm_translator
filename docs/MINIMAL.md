@@ -292,11 +292,13 @@ python -m app.main files-remove PROJECT FILE_ID...
 Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
 export 必须在创建 Run 或请求前快速失败，提示先添加含非空 Segment 的文件。
 
-EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，按 spine 顺序读取 XHTML 文本流。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻 `text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的非空白文本以及内部空白按源文保留。
+EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，将非 spine 导航资源和 NCX 排在正文前，再按 spine 顺序读取 XHTML 文本流；spine 内的 nav XHTML 保持原位置且不重复。EPUB 3 `properties="nav"` XHTML 的整个 `body` 可见文本，以及 NCX 的 `docTitle`、`docAuthor` 和 `navLabel/text` 文本都会形成 Segment。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻 `text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的非空白文本以及内部空白按源文保留。
 
-每个 spine XHTML 是一个 `part_id`，但仍属于同一个 EPUB File；原 EPUB 及不透明定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
+每个 XHTML/NCX 资源是一个 `part_id`，但仍属于同一个 EPUB File；原 EPUB 及不透明定位状态用于重建输出；导航链接、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
 
 EPUB 3 XHTML 允许省略 DOCTYPE，或使用不含外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN` 的 XHTML 1.1 声明。
+
+NCX 允许省略 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `http://www.daisy.org/z3986/2005/ncx-2005-1.dtd` 声明；其他外部 DTD、实体声明和错误标识均拒绝。
 
 外部 DTD 永不加载；实体声明、不匹配版本的 DOCTYPE、SYSTEM-only 声明和不支持的 PUBLIC 标识均拒绝。
 
@@ -312,7 +314,7 @@ EPUB 3 XHTML 允许省略 DOCTYPE，或使用不含外部标识的 `<!DOCTYPE ht
 
 保留时须返回严格的 `｜已翻译base《目标语言适用reading》`，系统会在译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配目标语言时应去掉标记和 reading，仅返回已翻译 base。没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML 或跨行的形式保持普通文本。
 
-`base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.4 可读取 0.3/0.4 状态，不改写旧 File、Segment、locator 或阶段结果。
+`base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.5 可读取 0.3/0.4/0.5 状态，不改写旧 File、Segment、locator 或阶段结果；旧 File 需重新导入才会增加目录 Segment。
 
 Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。相邻同符号 Ruby 和单 Ruby 的重复符号合并为一个 reading；普通文本、空白、块边界和受控内联格式边界会切断合并。
 

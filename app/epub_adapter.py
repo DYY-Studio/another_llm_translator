@@ -44,6 +44,9 @@ _DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 _XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 _PUBLICATION_ID_NAMESPACE = UUID("2e22f6f0-4406-4f02-a9ee-0d4a8a3a4a82")
 _OPF_EVENT_ATTRIBUTE = f"{{{_OPF_NAMESPACE}}}event"
+_NCX_MEDIA_TYPE = "application/x-dtbncx+xml"
+_NCX_PUBLIC_ID = "-//NISO//DTD ncx 2005-1//EN"
+_NCX_SYSTEM_ID = "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"
 _SKIPPED_TEXT_ELEMENTS = {"head", "script", "style", "title"}
 _INLINE_TEXT_ELEMENTS = {
     "a",
@@ -92,8 +95,8 @@ _REQUIRED_INLINE_TEXT_ELEMENTS = {
 
 class EPUBDocumentAdapter:
     adapter_id = "epub"
-    version = "0.4"
-    readable_versions = frozenset({"0.3", "0.4"})
+    version = "0.5"
+    readable_versions = frozenset({"0.3", "0.4", "0.5"})
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
     import_options = (
@@ -267,41 +270,49 @@ class EPUBDocumentAdapter:
         with zipfile.ZipFile(path) as archive:
             entries = _validated_entries(archive)
             opf_path = _opf_path(archive, entries)
-            xhtml_paths, epub_version = _spine_paths(
+            document_paths, spine_paths, epub_version = _publication_paths(
                 archive, entries, opf_path
             )
             segments: list[str] = []
             model_sources: list[str | None] = []
             segment_part_ids: list[str] = []
             locators: list[dict[str, Any]] = []
-            for xhtml_path in xhtml_paths:
-                root = _parse_xml(
-                    archive.read(xhtml_path),
-                    xhtml_path,
-                    doctype_policy=f"epub{epub_version}_xhtml",
-                )
-                body = next(
-                    (
-                        element
-                        for element in root.iter()
-                        if _local_name(element.tag) == "body"
-                    ),
-                    None,
-                )
-                if body is None:
-                    continue
+            for resource_type, resource_path in document_paths:
+                if resource_type == "ncx":
+                    root = _parse_ncx(archive.read(resource_path), resource_path)
+                    text_root = root
+                else:
+                    root = _parse_xml(
+                        archive.read(resource_path),
+                        resource_path,
+                        doctype_policy=f"epub{epub_version}_xhtml",
+                    )
+                    text_root = next(
+                        (
+                            element
+                            for element in root.iter()
+                            if _local_name(element.tag) == "body"
+                        ),
+                        None,
+                    )
+                    if text_root is None:
+                        continue
                 for locator, source, model_source in _text_slots(
-                    body,
+                    text_root,
                     ruby_mode=ruby_mode,
                     inline_format_mode=inline_format_mode,
                     inline_format_policy=inline_format_policy,
-                    location=xhtml_path,
+                    location=resource_path,
                 ):
                     segments.append(source)
                     model_sources.append(model_source)
-                    segment_part_ids.append(xhtml_path)
+                    segment_part_ids.append(resource_path)
                     locators.append(
-                        {"path": xhtml_path, "slot": locator}
+                        {
+                            "path": resource_path,
+                            "resource_type": resource_type,
+                            "slot": locator,
+                        }
                     )
         if not segments:
             raise ProjectError("EPUB spine 中没有可翻译文本")
@@ -318,7 +329,7 @@ class EPUBDocumentAdapter:
                     encoding_confidence=1.0,
                     opaque_state={
                         "opf_path": opf_path,
-                        "spine_paths": xhtml_paths,
+                        "spine_paths": spine_paths,
                         "locators": locators,
                         "ruby_mode": ruby_mode,
                         "inline_format_mode": inline_format_mode,
@@ -374,7 +385,9 @@ class EPUBDocumentAdapter:
         ordered_segments = sorted(
             segments, key=lambda value: int(value["line_index"])
         )
-        by_xhtml: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        by_resource: dict[
+            tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]
+        ] = {}
         for segment, locator in zip(ordered_segments, locators, strict=True):
             if not isinstance(locator, dict) or not isinstance(
                 locator.get("path"), str
@@ -382,7 +395,19 @@ class EPUBDocumentAdapter:
                 raise IncompleteError("EPUB Segment 定位状态损坏")
             if not isinstance(locator.get("slot"), dict):
                 raise IncompleteError("EPUB Segment 定位 slot 损坏")
-            by_xhtml.setdefault(locator["path"], []).append((segment, locator))
+            resource_type = locator.get("resource_type")
+            if resource_type is None:
+                if str(file.get("document_adapter_version", "")) not in {
+                    "0.3",
+                    "0.4",
+                }:
+                    raise IncompleteError("EPUB Segment 定位资源类型缺失")
+                resource_type = "xhtml"
+            if resource_type not in {"xhtml", "ncx"}:
+                raise IncompleteError("EPUB Segment 定位资源类型无效")
+            by_resource.setdefault((resource_type, locator["path"]), []).append(
+                (segment, locator)
+            )
         changed: dict[str, bytes] = {}
         with zipfile.ZipFile(source_path) as archive:
             entries = _validated_entries(archive)
@@ -412,11 +437,36 @@ class EPUBDocumentAdapter:
             changed[opf_path] = ElementTree.tostring(
                 opf_root, encoding="utf-8", xml_declaration=True
             )
-            for xhtml_path, items in by_xhtml.items():
-                if xhtml_path not in entries:
+            for (resource_type, resource_path), items in by_resource.items():
+                if resource_path not in entries:
                     raise IncompleteError(
-                        f"EPUB 状态引用了缺失资源：{xhtml_path}"
+                        f"EPUB 状态引用了缺失资源：{resource_path}"
                     )
+                resolved: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+                for segment, locator in items:
+                    segment_id = str(segment["segment_id"])
+                    target = output_text.get(segment_id)
+                    if target is None:
+                        raise IncompleteError(
+                            f"EPUB 导出缺少结果：{segment_id}"
+                        )
+                    resolved.append((segment, locator, target))
+                if resource_type == "ncx":
+                    root = _parse_ncx(archive.read(resource_path), resource_path)
+                    _set_xml_language(root, target_language_tag)
+                    for segment, locator, target in resolved:
+                        _set_regular_slot(
+                            root,
+                            locator.get("slot"),
+                            str(segment.get("_adapter_source", segment["source"])),
+                            target,
+                            bilingual=bilingual,
+                        )
+                    changed[resource_path] = ElementTree.tostring(
+                        root, encoding="utf-8", xml_declaration=True
+                    )
+                    continue
+                xhtml_path = resource_path
                 root = _parse_xml(
                     archive.read(xhtml_path),
                     xhtml_path,
@@ -434,7 +484,7 @@ class EPUBDocumentAdapter:
                     raise IncompleteError(
                         f"EPUB XHTML 缺少 body：{xhtml_path}"
                     )
-                _set_xhtml_language(root, target_language_tag)
+                _set_xml_language(root, target_language_tag)
                 if bilingual:
                     style = body.get("style", "")
                     addition = "white-space: pre-line"
@@ -442,15 +492,6 @@ class EPUBDocumentAdapter:
                         "style",
                         f"{style.rstrip(';')}; {addition}".lstrip("; "),
                     )
-                resolved: list[tuple[dict[str, Any], dict[str, Any], str]] = []
-                for segment, locator in items:
-                    segment_id = str(segment["segment_id"])
-                    target = output_text.get(segment_id)
-                    if target is None:
-                        raise IncompleteError(
-                            f"EPUB 导出缺少结果：{segment_id}"
-                        )
-                    resolved.append((segment, locator, target))
                 plain_items: list[
                     tuple[dict[str, Any], dict[str, Any], str]
                 ] = []
@@ -565,6 +606,13 @@ def _parse_xml(
         raise ProjectError(f"EPUB XML 无效：{location}: {exc}") from exc
 
 
+def _parse_ncx(payload: bytes, location: str) -> ElementTree.Element:
+    root = _parse_xml(payload, location, doctype_policy="epub2_ncx")
+    if _local_name(root.tag) != "ncx":
+        raise ProjectError(f"EPUB NCX 根元素无效：{location}")
+    return root
+
+
 def _validate_xml_declarations(
     payload: bytes,
     *,
@@ -575,6 +623,7 @@ def _validate_xml_declarations(
         "no_external",
         "epub2_xhtml",
         "epub3_xhtml",
+        "epub2_ncx",
     }:
         raise ProjectError(f"EPUB XML 校验策略无效：{doctype_policy}")
     parser = expat.ParserCreate()
@@ -593,6 +642,14 @@ def _validate_xml_declarations(
                 raise ProjectError(
                     f"EPUB XML 不允许外部 DTD 标识：{location}"
                 )
+            return
+        if doctype_policy == "epub2_ncx":
+            if (
+                name.casefold() != "ncx"
+                or public_id != _NCX_PUBLIC_ID
+                or system_id != _NCX_SYSTEM_ID
+            ):
+                raise ProjectError(f"EPUB NCX DOCTYPE 标识无效：{location}")
             return
         if name.casefold() != "html":
             raise ProjectError(f"EPUB XHTML DOCTYPE 名称无效：{location}")
@@ -669,11 +726,12 @@ def _set_opf_languages(
         metadata.insert(first_index + offset, element)
 
 
-def _set_xhtml_language(
+def _set_xml_language(
     root: ElementTree.Element, target_language_tag: str
 ) -> None:
-    root.set("lang", target_language_tag)
     root.set(f"{{{_XML_NAMESPACE}}}lang", target_language_tag)
+    if _local_name(root.tag) == "html":
+        root.set("lang", target_language_tag)
 
 
 def _project_id(project: Path) -> str:
@@ -835,44 +893,85 @@ def _opf_path(
     raise ProjectError("EPUB container.xml 缺少 rootfile")
 
 
-def _spine_paths(
+def _publication_paths(
     archive: zipfile.ZipFile,
     entries: dict[str, zipfile.ZipInfo],
     opf_path: str,
-) -> tuple[list[str], str]:
+) -> tuple[list[tuple[str, str]], list[str], str]:
     root = _parse_xml(archive.read(opf_path), opf_path)
     if _local_name(root.tag) != "package":
         raise ProjectError(f"EPUB OPF 根元素无效：{opf_path}")
     version = root.get("version")
     if version not in {"2.0", "3.0"}:
         raise ProjectError(f"EPUB OPF 版本不支持：{opf_path}")
-    manifest: dict[str, tuple[str, str]] = {}
+    manifest: dict[str, tuple[str, str, str]] = {}
     spine: list[str] = []
+    toc_id: str | None = None
     for element in root.iter():
         name = _local_name(element.tag)
         if name == "item" and element.get("id") and element.get("href"):
             manifest[str(element.get("id"))] = (
                 str(element.get("href")),
                 str(element.get("media-type", "")),
+                str(element.get("properties", "")),
             )
         elif name == "itemref" and element.get("idref"):
             spine.append(str(element.get("idref")))
+        elif name == "spine" and element.get("toc") is not None:
+            toc_id = str(element.get("toc"))
     base = posixpath.dirname(opf_path)
-    paths = []
+    spine_paths: list[str] = []
     for item_id in spine:
         item = manifest.get(item_id)
         if item is None:
             raise ProjectError(f"EPUB spine 引用了未知 manifest ID：{item_id}")
-        href, media_type = item
+        href, media_type, _ = item
         if media_type != "application/xhtml+xml":
             continue
         resolved = _safe_archive_path(base, unquote(href.split("#", 1)[0]))
         if resolved not in entries:
             raise ProjectError(f"EPUB spine 资源不存在：{resolved}")
-        paths.append(resolved)
-    if not paths:
+        spine_paths.append(resolved)
+    if not spine_paths:
         raise ProjectError("EPUB spine 没有 XHTML 内容")
-    return paths, version[0]
+    nav_paths: list[str] = []
+    for href, media_type, properties in manifest.values():
+        if "nav" not in properties.split():
+            continue
+        if media_type != "application/xhtml+xml":
+            raise ProjectError("EPUB nav 资源必须是 XHTML")
+        resolved = _safe_archive_path(base, unquote(href.split("#", 1)[0]))
+        if resolved not in entries:
+            raise ProjectError(f"EPUB nav 资源不存在：{resolved}")
+        nav_paths.append(resolved)
+    ncx_path: str | None = None
+    if toc_id is not None:
+        item = manifest.get(toc_id)
+        if item is None:
+            raise ProjectError(f"EPUB spine toc 引用了未知 manifest ID：{toc_id}")
+        href, media_type, _ = item
+        if media_type != _NCX_MEDIA_TYPE:
+            raise ProjectError("EPUB spine toc 必须引用 NCX 资源")
+        ncx_path = _safe_archive_path(base, unquote(href.split("#", 1)[0]))
+        if ncx_path not in entries:
+            raise ProjectError(f"EPUB NCX 资源不存在：{ncx_path}")
+    spine_set = set(spine_paths)
+    paths: list[tuple[str, str]] = [
+        ("xhtml", path) for path in nav_paths if path not in spine_set
+    ]
+    if ncx_path is not None:
+        paths.append(("ncx", ncx_path))
+    paths.extend(("xhtml", path) for path in spine_paths)
+    return paths, spine_paths, version[0]
+
+
+def _spine_paths(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+    opf_path: str,
+) -> tuple[list[str], str]:
+    _, spine_paths, version = _publication_paths(archive, entries, opf_path)
+    return spine_paths, version
 
 
 def _safe_archive_path(base: str, value: str) -> str:

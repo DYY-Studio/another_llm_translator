@@ -367,15 +367,17 @@ HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.4
+### EPUB 0.5
 
-EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。
+EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序、导航资源以及 Segment 到 XHTML/NCX 文本流和 `text`/`tail` 槽位的定位。
 
-每个 spine XHTML 的归档路径作为 Segment 的 `part_id`；普通透明内联元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
+每个 spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 `spine toc` 指向的 NCX 的归档路径作为 Segment 的 `part_id`。非 spine 导航资源排在正文前；spine 内导航保持原位置且不会重复。普通透明内联元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写包含翻译 Segment 的 XHTML/NCX，保留导航链接、元数据、图片、CSS、字体和其他资源。
+
+EPUB 3 导航 XHTML 的整个 `body` 可见文本会进入翻译；NCX 的 `docTitle`、`docAuthor` 和所有 `navLabel` 下的 `text` 会进入翻译。NCX 的 `content src` 等定位属性不会翻译。
 
 导出时宿主提供 `target_language` 和可选的 `target_language_tag`。EPUB Adapter 要求语言标签为非空 BCP 47 标签，并要求目标语言名称非空。单语输出的 OPF `dc:language` 设为该标签；双语输出把该标签放在第一项，随后保留源语言。
 
-已重写的 spine XHTML 同时更新根元素的 `lang` 和 `xml:lang`。中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
+已重写的 XHTML 同时更新根元素的 `lang` 和 `xml:lang`；NCX 更新根元素的 `xml:lang`。中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
 
 译文和双语输出会生成基于项目、File、目标语言标签和输出模式的稳定独立出版标识，并将 OPF 主标题分别后缀为 `（目标语言）` 和 `（目标语言·双语）`。
 
@@ -389,6 +391,8 @@ EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`。
 
 EPUB 3 XHTML 可无 DOCTYPE，或使用无外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 可无 DOCTYPE，或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN`，SYSTEM 地址只作为声明数据而不会被加载。
 
+NCX 可无 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `ncx-2005-1.dtd` SYSTEM 地址；其他 NCX 外部 DTD、实体声明和错误声明都会快速失败。
+
 所有外部 DTD、实体声明、版本不匹配的声明、SYSTEM-only 和错误 PUBLIC 标识都会快速失败。
 
 普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出保留源槽并在末槽后写入译文。
@@ -397,7 +401,7 @@ Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以
 
 除 `base_only` 完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。
 
-新导入不再提供 `parenthetical`；EPUB 0.4 可直接读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
+新导入不再提供 `parenthetical`；EPUB 0.5 可直接读取和导出既有 0.3/0.4 File，包括旧 `parenthetical` 状态，但不迁移或改写。旧 File 需重新导入才会生成目录 Segment。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
 
 纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个 Segment 末尾追加普通译文。
 

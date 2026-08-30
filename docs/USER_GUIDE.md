@@ -261,8 +261,8 @@ Web 会记住上次选中的项目 ID。外部项目先按已保存路径重新�
 - 文件范围：全部文件或指定 File。
 - 单语或双语对照。
 
-TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留导航、元数据、图片、
-CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
+TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会翻译已纳入 Segment 的目录文本，
+并保留导航链接、元数据、图片、CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
 
 > [!IMPORTANT]
 > 部分 Adapter（如 EPUB）要求项目设置目标语言标签，否则无法导出。
@@ -281,9 +281,9 @@ CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直�
 
 ### EPUB
 
-- 支持 OPF 2.0/3.0 和 spine XHTML。
-- 保留文档 part 边界及未翻译资源。
-- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入。
+- 支持 OPF 2.0/3.0、spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 NCX；目录资源会作为待翻译内容。
+- 非 spine 目录资源排在正文前，spine 内 nav 保持原位置且不重复；保留文档 part 边界及导航链接、元数据和其他未翻译资源。
+- EPUB Adapter 0.5 可直接使用既有 0.3/0.4 File，无需重新导入；旧 File 需重新导入才会新增目录 Segment。
 - 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
 
 #### Ruby 标签转换

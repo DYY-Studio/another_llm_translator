@@ -129,6 +129,9 @@ def make_epub(
     *,
     xhtml: bytes | None = None,
     xhtmls: tuple[bytes, ...] | None = None,
+    nav_xhtml: bytes | None = None,
+    nav_in_spine: bool = False,
+    ncx: bytes | None = None,
     opf_version: str = "3.0",
     opf_languages: tuple[str, ...] = (),
     opf_titles: tuple[str, ...] = ("Demo",),
@@ -154,10 +157,23 @@ def make_epub(
         'media-type="application/xhtml+xml"/>'.encode()
         for index in range(1, len(chapters) + 1)
     )
+    if nav_xhtml is not None:
+        manifest += (
+            b'<item id="nav" href="nav.xhtml" '
+            b'media-type="application/xhtml+xml" properties="nav"/>'
+        )
+    if ncx is not None:
+        manifest += (
+            b'<item id="ncx" href="toc.ncx" '
+            b'media-type="application/x-dtbncx+xml"/>'
+        )
     spine = b"".join(
         f'<itemref idref="c{index}"/>'.encode()
         for index in range(1, len(chapters) + 1)
     )
+    if nav_xhtml is not None and nav_in_spine:
+        spine = b'<itemref idref="nav"/>' + spine
+    spine_attribute = b' toc="ncx"' if ncx is not None else b""
     titles = b"".join(
         f"<dc:title>{value}</dc:title>".encode()
         for value in opf_titles
@@ -194,7 +210,7 @@ def make_epub(
         + b'<manifest>' + manifest
         + b'<item id="css" href="style.css" media-type="text/css"/>'
         + b'<item id="cover" href="cover.png" media-type="image/png"/></manifest>'
-        + b'<spine>' + spine + b'</spine></package>'
+        + b'<spine' + spine_attribute + b'>' + spine + b'</spine></package>'
     )
     with zipfile.ZipFile(
         path, "w", compression=zipfile.ZIP_DEFLATED
@@ -208,6 +224,10 @@ def make_epub(
         archive.writestr("OEBPS/content.opf", opf)
         for index, chapter in enumerate(chapters, start=1):
             archive.writestr(f"OEBPS/text/ch{index}.xhtml", chapter)
+        if nav_xhtml is not None:
+            archive.writestr("OEBPS/nav.xhtml", nav_xhtml)
+        if ncx is not None:
+            archive.writestr("OEBPS/toc.ncx", ncx)
         archive.writestr("OEBPS/style.css", b"body { color: #222; }")
         archive.writestr("OEBPS/cover.png", b"\x89PNG\r\nfixture")
 
@@ -283,6 +303,142 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
         assert b"white-space: pre-line" in chapter
+
+
+def test_epub3_nav_is_imported_before_spine_and_exported(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "navigation.epub"
+    make_epub(
+        source,
+        nav_xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml" '
+            b'xmlns:epub="http://www.idpf.org/2007/ops">'
+            b"<body><nav epub:type=\"toc\"><ol>"
+            b'<li><a href="text/ch1.xhtml">Contents</a></li>'
+            b'<li><a href="text/ch1.xhtml#chapter">Chapter One</a></li>'
+            b"</ol></nav></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="navigation",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    segments = read_segments(project)
+    assert [item["source"] for item in segments] == [
+        "Contents",
+        "Chapter One",
+        "Chapter One",
+        "Hello world.",
+    ]
+    assert [item["part_id"] for item in segments[:2]] == [
+        "OEBPS/nav.xhtml",
+        "OEBPS/nav.xhtml",
+    ]
+    state = read_json(project, project / str(read_files(project)[0]["document_adapter_state"]))
+    assert state["state"]["locators"][0]["resource_type"] == "xhtml"
+
+    add_translations(project)
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+    with zipfile.ZipFile(project / result["written"][0]) as archive:
+        nav = archive.read("OEBPS/nav.xhtml")
+        assert b"\xe8\xaf\x91\xef\xbc\x9aContents" in nav
+        assert b'href="text/ch1.xhtml#chapter"' in nav
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        nav = archive.read("OEBPS/nav.xhtml")
+        assert b"Contents\n\xe8\xaf\x91\xef\xbc\x9aContents" in nav
+
+
+def test_epub3_nav_in_spine_is_not_imported_twice(tmp_path: Path) -> None:
+    source = tmp_path / "spine-navigation.epub"
+    make_epub(
+        source,
+        nav_xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<nav><ol><li><a href="text/ch1.xhtml">Contents</a></li>'
+            b"</ol></nav></body></html>"
+        ),
+        nav_in_spine=True,
+    )
+
+    imported = get_document_adapter("epub").import_sources(
+        [str(source)], recursive=False, config={}, options={"ruby_mode": "aozora"}
+    )
+
+    assert [item for item in imported.files[0].segments if item == "Contents"] == [
+        "Contents"
+    ]
+
+
+def test_epub2_ncx_is_imported_and_exported_without_changing_links(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ncx.epub"
+    make_epub(
+        source,
+        opf_version="2.0",
+        ncx=(
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" '
+            b'"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">'
+            b"<docTitle><text>Demo Book</text></docTitle>"
+            b"<docAuthor><text>Demo Author</text></docAuthor>"
+            b"<navMap><navPoint id=\"one\"><navLabel>"
+            b'<text>Chapter One</text></navLabel><content src="text/ch1.xhtml"/>'
+            b"</navPoint></navMap></ncx>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="ncx",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    segments = read_segments(project)
+    assert [item["source"] for item in segments[:3]] == [
+        "Demo Book",
+        "Demo Author",
+        "Chapter One",
+    ]
+    assert [item["part_id"] for item in segments[:3]] == [
+        "OEBPS/toc.ncx",
+        "OEBPS/toc.ncx",
+        "OEBPS/toc.ncx",
+    ]
+
+    add_translations(project)
+    translated = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+    bilingual = export_project(
+        project, "translated", bilingual=True, allow_missing=False
+    )
+    with zipfile.ZipFile(project / translated["written"][0]) as archive:
+        ncx = archive.read("OEBPS/toc.ncx")
+        root = ElementTree.fromstring(ncx)
+        assert root.get("{http://www.w3.org/XML/1998/namespace}lang") == "zh-Hans"
+        assert "译：Demo Book" in "".join(root.itertext())
+        assert any(
+            element.get("src") == "text/ch1.xhtml"
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "content"
+        )
+    with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
+        ncx = archive.read("OEBPS/toc.ncx")
+        assert b"Demo Book\n\xe8\xaf\x91\xef\xbc\x9aDemo Book" in ncx
 
 
 def test_epub_export_rewrites_language_metadata_and_xhtml_attributes(
@@ -671,7 +827,7 @@ def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
         "OEBPS/text/ch2.xhtml",
         "OEBPS/text/ch2.xhtml",
     ]
-    assert files[0]["document_adapter_version"] == "0.4"
+    assert files[0]["document_adapter_version"] == "0.5"
 
 
 @pytest.mark.parametrize("parts", [(), ("only-one",), ("", "two")])
@@ -1698,19 +1854,23 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
         "file_id": "F0001",
         "adapter_id": "epub",
         "project_version": "future",
-        "current_version": "0.4",
+        "current_version": "0.5",
     }
 
 
-def test_epub_04_reads_03_state_without_migrating_project(
+@pytest.mark.parametrize("legacy_version", ["0.3", "0.4"])
+def test_epub_05_reads_legacy_state_without_migrating_project(
     tmp_path: Path,
+    legacy_version: str,
 ) -> None:
     project = init_epub(tmp_path)
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state_record = read_json(project, state_path)
-    file_record["document_adapter_version"] = "0.3"
-    state_record["adapter_version"] = "0.3"
+    file_record["document_adapter_version"] = legacy_version
+    state_record["adapter_version"] = legacy_version
+    for locator in state_record["state"]["locators"]:
+        locator.pop("resource_type", None)
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
             "UPDATE files SET payload_json = ? WHERE file_id = ?",
@@ -1727,8 +1887,8 @@ def test_epub_04_reads_03_state_without_migrating_project(
     )
 
     assert result["files"] == 1
-    assert read_files(project)[0]["document_adapter_version"] == "0.3"
-    assert read_json(project, state_path)["adapter_version"] == "0.3"
+    assert read_files(project)[0]["document_adapter_version"] == legacy_version
+    assert read_json(project, state_path)["adapter_version"] == legacy_version
 
 
 def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
