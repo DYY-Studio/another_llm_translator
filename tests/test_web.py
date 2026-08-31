@@ -2910,6 +2910,199 @@ async def test_web_task_manager_active_tasks_excludes_terminal_states(
     assert manager.active_tasks() == []
 
 
+@pytest.mark.asyncio
+async def test_web_task_manager_queues_projects_fifo_until_slot_is_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered: list[Path] = []
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered.append(project)
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.sleep(0)
+    assert entered == [first_project, second_project]
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert manager.tasks[third["task_id"]].asyncio_task is not None
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert entered == [first_project, second_project, third_project]
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_can_cancel_queued_task_without_using_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    cancelled = await manager.cancel(second["task_id"])
+    assert cancelled["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.active_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_raising_limit_promotes_fifo_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    assert manager.get(second["task_id"])["status"] == "queued"
+    await manager.set_max_active_projects(2)
+    for _ in range(20):
+        if manager.get(second["task_id"])["status"] == "running":
+            break
+        await asyncio.sleep(0)
+    assert manager.get(second["task_id"])["status"] == "running"
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_revalidates_queued_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_module.task_options
+    second_calls = 0
+
+    def changed_options(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+        if project == second_project and second_calls == 2:
+            raise UsageError("排队期间项目设置已变化")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.tasks[second["task_id"]].asyncio_task is not None
+    await manager.tasks[second["task_id"]].asyncio_task
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
+
+
 def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:

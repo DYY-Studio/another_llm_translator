@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -312,6 +313,12 @@ class WebTask:
         }
     )
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _scope: Scope = field(default_factory=Scope, repr=False)
+    _reuse_mixed_fingerprints: bool = field(default=False, repr=False)
+    _run_action: str | None = field(default=None, repr=False)
+    _prompt_language: str | None = field(default=None, repr=False)
+    _replace_draft: bool = field(default=False, repr=False)
+    _acknowledge_manual_review: bool = field(default=False, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -340,11 +347,142 @@ class WebTask:
 
 
 class WebTaskManager:
-    def __init__(self, diagnostics: Diagnostics | None = None) -> None:
+    def __init__(
+        self,
+        diagnostics: Diagnostics | None = None,
+        *,
+        max_active_projects: int = 2,
+    ) -> None:
+        if (
+            not isinstance(max_active_projects, int)
+            or isinstance(max_active_projects, bool)
+            or max_active_projects < 1
+        ):
+            raise UsageError("max_active_projects 必须是正整数")
         self.tasks: dict[str, WebTask] = {}
         self.active_by_project: dict[Path, str] = {}
+        self.queued_task_ids: deque[str] = deque()
+        self.running_task_ids: set[str] = set()
+        self.max_active_projects = max_active_projects
         self.guard = asyncio.Lock()
         self.diagnostics = diagnostics
+
+    def _validate_start(
+        self,
+        project: Path,
+        stage: str,
+        *,
+        scope: Scope,
+        reuse_mixed_fingerprints: bool,
+        run_action: str | None,
+        acknowledge_manual_review: bool,
+        ensure_unique: bool,
+    ) -> int:
+        if stage not in {
+            "terminology",
+            "translation",
+            "proofreading",
+            "polishing",
+            TERMINOLOGY_DECISION_STAGE,
+            "run-all",
+        }:
+            raise UsageError(f"未知后台阶段：{stage}")
+        force = scope.force
+        if force and reuse_mixed_fingerprints:
+            raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
+        if run_action not in {None, "resume", "decline"}:
+            raise UsageError("run_action 必须是 resume、decline 或 null")
+        if stage == "run-all" and run_action is not None:
+            raise UsageError("run-all 不支持 run_action")
+        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
+            raise UsageError("自动术语决策不支持复用已发布结果")
+        if ensure_unique:
+            active_id = self.active_by_project.get(project)
+            if active_id is not None:
+                active = self.tasks[active_id]
+                if active.status in {"queued", "running", "cancelling"}:
+                    raise UsageError(f"项目已有后台任务：{active.task_id}")
+        selected_count = 0
+        if stage == TERMINOLOGY_DECISION_STAGE:
+            library = _require_decision_library(project)
+            current_terms_revision = int(library["terms_revision"])
+            if (
+                run_action != "resume"
+                and not acknowledge_manual_review
+                and manual_review_state(project)["remaining"] > 0
+            ):
+                raise UsageError(
+                    "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
+                )
+            running = find_running_runs(project, stage)
+            if run_action == "resume":
+                if not running:
+                    raise UsageError(f"{stage} 没有可续用的 running Run")
+                if force:
+                    raise UsageError("续用 Run 时不能同时指定 force")
+                compatible, reason = decision_resume_compatibility(
+                    project,
+                    str(running[0]["run_id"]),
+                    source_terms_revision=current_terms_revision,
+                )
+                if not compatible:
+                    raise UsageError(f"{reason}；请结束旧 Run 并强制新建")
+            elif running:
+                if run_action != "decline" or not force:
+                    raise UsageError("发现未完成 Run，必须选择续用或强制重做全部")
+            elif run_action == "decline" and not force:
+                raise UsageError("结束自动决策 Run 时必须同时指定 force")
+        elif stage != "run-all":
+            options = task_options(project, stage)
+            selected_count = int(options["selected"])
+            running_run = options["running_run"]
+            if run_action == "resume":
+                if running_run is None:
+                    raise UsageError(f"{stage} 没有可续用的 running Run")
+                if force or reuse_mixed_fingerprints:
+                    raise UsageError("续用 Run 时不能同时指定 force 或复用结果")
+            else:
+                if running_run is not None and run_action != "decline":
+                    raise UsageError("发现未完成 Run，必须选择续用或结束并新建")
+                if (
+                    options["mismatched_fingerprint_completed"]
+                    and not force
+                    and not reuse_mixed_fingerprints
+                ):
+                    raise UsageError(
+                        "存在不同设置指纹的已完成结果，必须明确选择复用或 force"
+                    )
+        return selected_count
+
+    def _dispatch_locked(self) -> None:
+        while (
+            len(self.running_task_ids) < self.max_active_projects
+            and self.queued_task_ids
+        ):
+            task_id = self.queued_task_ids.popleft()
+            state = self.tasks[task_id]
+            if state.status != "queued":
+                continue
+            state.status = "running"
+            self.running_task_ids.add(task_id)
+            state.asyncio_task = asyncio.create_task(
+                self._run(
+                    state,
+                    scope=state._scope,
+                    reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
+                    run_action=state._run_action,
+                    prompt_language=state._prompt_language,
+                    replace_draft=state._replace_draft,
+                    acknowledge_manual_review=state._acknowledge_manual_review,
+                )
+            )
+
+    async def set_max_active_projects(self, value: int) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise UsageError("max_active_projects 必须是正整数")
+        async with self.guard:
+            self.max_active_projects = value
+            self._dispatch_locked()
 
     async def start(
         self,
@@ -358,93 +496,16 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
     ) -> dict[str, Any]:
-        if stage not in {
-            "terminology",
-            "translation",
-            "proofreading",
-            "polishing",
-            TERMINOLOGY_DECISION_STAGE,
-            "run-all",
-        }:
-            raise UsageError(f"未知后台阶段：{stage}")
-        force = scope.force
-        if force and reuse_mixed_fingerprints:
-            raise UsageError(
-                "force 与 reuse_mixed_fingerprints 不能同时使用"
-            )
-        if run_action not in {None, "resume", "decline"}:
-            raise UsageError("run_action 必须是 resume、decline 或 null")
-        if stage == "run-all" and run_action is not None:
-            raise UsageError("run-all 不支持 run_action")
-        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
-            raise UsageError("自动术语决策不支持复用已发布结果")
         async with self.guard:
-            active_id = self.active_by_project.get(project)
-            if active_id is not None:
-                active = self.tasks[active_id]
-                if active.status in {"queued", "running", "cancelling"}:
-                    raise UsageError(
-                        f"项目已有后台任务：{active.task_id}"
-                    )
-            selected_count = 0
-            if stage == TERMINOLOGY_DECISION_STAGE:
-                library = _require_decision_library(project)
-                current_terms_revision = int(library["terms_revision"])
-                if (
-                    run_action != "resume"
-                    and not acknowledge_manual_review
-                    and manual_review_state(project)["remaining"] > 0
-                ):
-                    raise UsageError(
-                        "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
-                    )
-                running = find_running_runs(project, stage)
-                if run_action == "resume":
-                    if not running:
-                        raise UsageError(f"{stage} 没有可续用的 running Run")
-                    if force:
-                        raise UsageError("续用 Run 时不能同时指定 force")
-                    compatible, reason = decision_resume_compatibility(
-                        project,
-                        str(running[0]["run_id"]),
-                        source_terms_revision=current_terms_revision,
-                    )
-                    if not compatible:
-                        raise UsageError(
-                            f"{reason}；请结束旧 Run 并强制新建"
-                        )
-                elif running:
-                    if run_action != "decline" or not force:
-                        raise UsageError(
-                            "发现未完成 Run，必须选择续用或强制重做全部"
-                        )
-                elif run_action == "decline" and not force:
-                    raise UsageError("结束自动决策 Run 时必须同时指定 force")
-            elif stage != "run-all":
-                options = task_options(project, stage)
-                selected_count = int(options["selected"])
-                running_run = options["running_run"]
-                if run_action == "resume":
-                    if running_run is None:
-                        raise UsageError(f"{stage} 没有可续用的 running Run")
-                    if force or reuse_mixed_fingerprints:
-                        raise UsageError(
-                            "续用 Run 时不能同时指定 force 或复用结果"
-                        )
-                else:
-                    if running_run is not None and run_action != "decline":
-                        raise UsageError(
-                            "发现未完成 Run，必须选择续用或结束并新建"
-                        )
-                    if (
-                        options["mismatched_fingerprint_completed"]
-                        and not force
-                        and not reuse_mixed_fingerprints
-                    ):
-                        raise UsageError(
-                            "存在不同设置指纹的已完成结果，"
-                            "必须明确选择复用或 force"
-                        )
+            selected_count = self._validate_start(
+                project,
+                stage,
+                scope=scope,
+                reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                run_action=run_action,
+                acknowledge_manual_review=acknowledge_manual_review,
+                ensure_unique=True,
+            )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,
@@ -455,18 +516,16 @@ class WebTaskManager:
                 stage=stage,
                 total_segments=selected_count,
             )
+            state._scope = scope
+            state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
+            state._run_action = run_action
+            state._prompt_language = prompt_language
+            state._replace_draft = replace_draft
+            state._acknowledge_manual_review = acknowledge_manual_review
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
-            state.asyncio_task = asyncio.create_task(
-                self._run(
-                    state,
-                    scope=scope,
-                    reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-                    run_action=run_action,
-                    prompt_language=prompt_language,
-                    replace_draft=replace_draft,
-                )
-            )
+            self.queued_task_ids.append(task_id)
+            self._dispatch_locked()
             return state.view()
 
     async def _run(
@@ -478,8 +537,8 @@ class WebTaskManager:
         run_action: str | None,
         prompt_language: str | None = None,
         replace_draft: bool = False,
+        acknowledge_manual_review: bool = False,
     ) -> None:
-        state.status = "running"
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
         resuming = False
@@ -501,6 +560,15 @@ class WebTaskManager:
                 else nullcontext()
             )
             with diagnostics_context, project_write_lock(state.project):
+                self._validate_start(
+                    state.project,
+                    state.stage,
+                    scope=scope,
+                    reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                    run_action=run_action,
+                    acknowledge_manual_review=acknowledge_manual_review,
+                    ensure_unique=False,
+                )
                 resume_run_id = None
                 if state.stage != "run-all":
                     resume_run_id, _ = choose_running_run(
@@ -606,8 +674,10 @@ class WebTaskManager:
         finally:
             state.completed_at = utc_now()
             async with self.guard:
+                self.running_task_ids.discard(state.task_id)
                 if self.active_by_project.get(state.project) == state.task_id:
                     self.active_by_project.pop(state.project, None)
+                self._dispatch_locked()
 
     def get(self, task_id: str) -> dict[str, Any]:
         try:
@@ -647,15 +717,57 @@ class WebTaskManager:
         )
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
-        try:
-            state = self.tasks[task_id]
-        except KeyError as exc:
-            raise UsageError(f"未知后台任务：{task_id}") from exc
-        if state.status not in {"queued", "running"} or state.asyncio_task is None:
-            raise UsageError("后台任务当前不可取消")
-        state.status = "cancelling"
-        state.asyncio_task.cancel()
-        return state.view()
+        async with self.guard:
+            try:
+                state = self.tasks[task_id]
+            except KeyError as exc:
+                raise UsageError(f"未知后台任务：{task_id}") from exc
+            if state.status == "queued":
+                self.queued_task_ids = deque(
+                    value for value in self.queued_task_ids if value != task_id
+                )
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                if self.active_by_project.get(state.project) == task_id:
+                    self.active_by_project.pop(state.project, None)
+                return state.view()
+            if state.status != "running" or state.asyncio_task is None:
+                raise UsageError("后台任务当前不可取消")
+            state.status = "cancelling"
+            state.asyncio_task.cancel()
+            return state.view()
+
+    async def shutdown(self) -> None:
+        async with self.guard:
+            queued = [
+                self.tasks[task_id]
+                for task_id in self.queued_task_ids
+                if self.tasks[task_id].status == "queued"
+            ]
+            self.queued_task_ids.clear()
+            for state in queued:
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                if self.active_by_project.get(state.project) == state.task_id:
+                    self.active_by_project.pop(state.project, None)
+            running = [
+                self.tasks[task_id]
+                for task_id in self.running_task_ids
+                if self.tasks[task_id].asyncio_task is not None
+            ]
+            for state in running:
+                if state.status == "running":
+                    state.status = "cancelling"
+                state.asyncio_task.cancel()
+        if running:
+            await asyncio.gather(
+                *(
+                    state.asyncio_task
+                    for state in running
+                    if state.asyncio_task is not None
+                ),
+                return_exceptions=True,
+            )
 
 
 def _task_usage(

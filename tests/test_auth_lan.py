@@ -4,7 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.credentials import save_lan_password
-from app.server_config import load_server_config, save_server_config
+from app.server_config import (
+    default_server_config,
+    load_server_config,
+    save_server_config,
+)
 from app.user_config import user_root
 from app.web import create_app
 from tests.conftest import FakeKeyring
@@ -59,6 +63,31 @@ def test_lan_blocked_by_default(tmp_path) -> None:
     response = client.get("/api/v1/server/status")
     assert response.status_code == 403
     assert response.json()["code"] == "local_only"
+
+
+def test_server_config_defaults_to_two_active_projects() -> None:
+    config = default_server_config()
+    assert config["tasks"]["max_active_projects"] == 2
+
+
+def test_server_status_reports_and_updates_project_limit() -> None:
+    client = make_client()
+    status = client.get("/api/v1/server/status")
+    assert status.status_code == 200
+    assert status.json()["tasks"]["max_active_projects"] == 2
+
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 4},
+        },
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 4
+    )
 
 
 def test_lan_open_without_auth_but_status_warns() -> None:
