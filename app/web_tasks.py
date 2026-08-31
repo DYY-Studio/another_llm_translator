@@ -58,6 +58,7 @@ from .term_decision import (
     manual_review_state,
     run_terminology_decision,
 )
+from .term_decision import _decision_fingerprint
 
 
 def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
@@ -291,6 +292,36 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
     }
 
 
+def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
+    config = load_project_config(project, stage=stage)
+    library = load_terms(project)
+    terms_revision = (
+        int(library["terms_revision"])
+        if stage != "terminology" and library is not None
+        else None
+    )
+    return stage_fingerprint(
+        config,
+        stage,
+        prompt_middle_digests(project, stage),
+        terms_revision=terms_revision,
+    )
+
+
+def _decision_fingerprint_snapshot(
+    project: Path, prompt_language: str | None
+) -> str:
+    plan = decision_plan(project, prompt_language)
+    return _decision_fingerprint(plan["config"], plan["prompts"], plan["library"])
+
+
+@dataclass(frozen=True)
+class _StartDecision:
+    selected_count: int
+    running_run_id: str | None
+    fingerprints: tuple[tuple[str, str], ...]
+
+
 @dataclass
 class WebTask:
     task_id: str
@@ -323,6 +354,7 @@ class WebTask:
     _prompt_language: str | None = field(default=None, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
+    _start_decision: _StartDecision | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -475,7 +507,8 @@ class WebTaskManager:
         run_action: str | None,
         acknowledge_manual_review: bool,
         ensure_unique: bool,
-    ) -> int:
+        prompt_language: str | None,
+    ) -> _StartDecision:
         if stage not in {
             "terminology",
             "translation",
@@ -501,6 +534,7 @@ class WebTaskManager:
                 if active.status in {"queued", "running", "cancelling"}:
                     raise UsageError(f"项目已有后台任务：{active.task_id}")
         selected_count = 0
+        running_run_id: str | None = None
         if stage == TERMINOLOGY_DECISION_STAGE:
             library = _require_decision_library(project)
             current_terms_revision = int(library["terms_revision"])
@@ -513,6 +547,8 @@ class WebTaskManager:
                     "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
                 )
             running = find_running_runs(project, stage)
+            if running:
+                running_run_id = str(running[0]["run_id"])
             if run_action == "resume":
                 if not running:
                     raise UsageError(f"{stage} 没有可续用的 running Run")
@@ -534,6 +570,8 @@ class WebTaskManager:
             options = task_options(project, stage)
             selected_count = int(options["selected"])
             running_run = options["running_run"]
+            if running_run is not None:
+                running_run_id = str(running_run["run_id"])
             if run_action == "resume":
                 if running_run is None:
                     raise UsageError(f"{stage} 没有可续用的 running Run")
@@ -550,7 +588,22 @@ class WebTaskManager:
                     raise UsageError(
                         "存在不同设置指纹的已完成结果，必须明确选择复用或 force"
                     )
-        return selected_count
+        if stage == TERMINOLOGY_DECISION_STAGE:
+            fingerprints = (
+                (stage, _decision_fingerprint_snapshot(project, prompt_language)),
+            )
+        elif stage == "run-all":
+            fingerprints = tuple(
+                (item, _stage_fingerprint_snapshot(project, item))
+                for item in LLM_STAGES
+            )
+        else:
+            fingerprints = ((stage, _stage_fingerprint_snapshot(project, stage)),)
+        return _StartDecision(
+            selected_count=selected_count,
+            running_run_id=running_run_id,
+            fingerprints=fingerprints,
+        )
 
     def _dispatch_locked(self) -> None:
         if self._shutting_down:
@@ -611,7 +664,7 @@ class WebTaskManager:
         async with self.guard:
             if self._shutting_down:
                 raise UsageError("任务管理器正在关闭")
-            selected_count = self._validate_start(
+            decision = self._validate_start(
                 project,
                 stage,
                 scope=scope,
@@ -619,6 +672,7 @@ class WebTaskManager:
                 run_action=run_action,
                 acknowledge_manual_review=acknowledge_manual_review,
                 ensure_unique=True,
+                prompt_language=prompt_language,
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -628,7 +682,7 @@ class WebTaskManager:
                     read_json(project, project / "project.json")["project_id"]
                 ),
                 stage=stage,
-                total_segments=selected_count,
+                total_segments=decision.selected_count,
             )
             state._scope = scope
             state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
@@ -636,6 +690,7 @@ class WebTaskManager:
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
+            state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
             self.queued_task_ids.append(task_id)
@@ -677,7 +732,7 @@ class WebTaskManager:
                 else nullcontext()
             )
             with diagnostics_context, project_write_lock(state.project):
-                self._validate_start(
+                decision = self._validate_start(
                     state.project,
                     state.stage,
                     scope=scope,
@@ -685,7 +740,13 @@ class WebTaskManager:
                     run_action=run_action,
                     acknowledge_manual_review=acknowledge_manual_review,
                     ensure_unique=False,
+                    prompt_language=prompt_language,
                 )
+                if (
+                    state._start_decision is not None
+                    and decision != state._start_decision
+                ):
+                    raise UsageError("排队期间项目选择或设置已变化")
                 shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
                 if state.stage == "run-all":
                     for stage in LLM_STAGES:
@@ -694,9 +755,10 @@ class WebTaskManager:
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
                         )
-                        if key in shared_limiters:
-                            continue
                         limiter, release = self.limiter_pool.acquire(config)
+                        if key in shared_limiters:
+                            release()
+                            continue
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
