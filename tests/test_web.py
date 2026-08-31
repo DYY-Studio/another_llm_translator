@@ -3354,6 +3354,71 @@ def test_shared_limiter_pool_rejects_inconsistent_limits_for_same_preset() -> No
 
 
 @pytest.mark.asyncio
+async def test_shared_limiter_pool_merges_rpm_and_itpm_across_projects() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    itpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-itpm",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    first, release_first = pool.acquire(itpm_config)
+    second, release_second = pool.acquire({**itpm_config})
+    assert first is second
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == [60.0]
+    release_first()
+    release_second()
+
+    now[0] = 0.0
+    sleeps.clear()
+    rpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-rpm",
+        "execution": {"requests_per_minute": 2, "input_tokens_per_minute": 0},
+    }
+    first, release_first = pool.acquire(rpm_config)
+    second, release_second = pool.acquire({**rpm_config})
+    await first.acquire(1)
+    await second.acquire(1)
+    assert sleeps == [30.0]
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
+async def test_shared_limiter_pool_isolates_different_hash_counters() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    first_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    second_config = {**first_config, "_llm_preset_hash": "hash-b"}
+    first, release_first = pool.acquire(first_config)
+    second, release_second = pool.acquire(second_config)
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == []
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
 async def test_web_tasks_pass_shared_limiter_to_same_preset_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

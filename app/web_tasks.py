@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -366,9 +366,11 @@ class SharedLimiterPool:
         self,
         *,
         clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         retention_seconds: float = 60.0,
     ) -> None:
         self.clock = clock
+        self.sleeper = sleeper
         self.retention_seconds = retention_seconds
         self.entries: dict[tuple[str, str], _LimiterEntry] = {}
 
@@ -408,6 +410,8 @@ class SharedLimiterPool:
                 limiter=SlidingWindowLimiter(
                     requests_per_minute,
                     input_tokens_per_minute,
+                    clock=self.clock,
+                    sleeper=self.sleeper,
                 ),
                 requests_per_minute=requests_per_minute,
                 input_tokens_per_minute=input_tokens_per_minute,

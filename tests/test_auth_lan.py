@@ -4,10 +4,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.credentials import save_lan_password
+from app.errors import ConfigError
 from app.server_config import (
     default_server_config,
     load_server_config,
     save_server_config,
+    server_config_path,
 )
 from app.user_config import user_root
 from app.web import create_app
@@ -88,6 +90,18 @@ def test_server_status_reports_and_updates_project_limit() -> None:
     assert (
         client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 4
     )
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 1},
+        },
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 1
+    )
     missing_tasks = client.put(
         "/api/v1/server/config",
         json={
@@ -96,6 +110,20 @@ def test_server_status_reports_and_updates_project_limit() -> None:
         },
     )
     assert missing_tasks.status_code == 400
+
+
+@pytest.mark.parametrize("value", [True, 0, -1])
+def test_server_config_rejects_invalid_project_limits(value: object) -> None:
+    client = make_client()
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": value},
+        },
+    )
+    assert response.status_code == 400
 
 
 def test_lan_open_without_auth_but_status_warns() -> None:
@@ -300,3 +328,35 @@ def test_server_config_toml_round_trip_preserves_bools() -> None:
     assert loaded["lan"]["bind_address"] == "192.168.1.5"
     assert loaded["auth"]["required"] is True
     assert loaded["auth"]["username"] == "me"
+
+
+def test_legacy_server_config_loads_default_and_save_writes_tasks_section() -> None:
+    path = server_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[lan]\nenabled = false\nbind_address = ""\n\n'
+        '[auth]\nrequired = false\nusername = ""\n',
+        encoding="utf-8",
+    )
+
+    loaded = load_server_config()
+    assert loaded["tasks"]["max_active_projects"] == 2
+    save_server_config(loaded)
+    saved = path.read_text(encoding="utf-8")
+    assert "[tasks]" in saved
+    assert "max_active_projects = 2" in saved
+
+
+@pytest.mark.parametrize("literal", ["true", "0", "-1"])
+def test_server_config_toml_rejects_invalid_project_limit_literals(
+    literal: str,
+) -> None:
+    path = server_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"[tasks]\nmax_active_projects = {literal}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="max_active_projects"):
+        load_server_config()
