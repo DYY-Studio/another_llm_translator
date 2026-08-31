@@ -14,6 +14,7 @@ from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
 from .errors import (
     AppError,
+    ConfigError,
     UsageError,
     app_error_payload,
     internal_error_payload,
@@ -352,6 +353,8 @@ class WebTask:
 @dataclass
 class _LimiterEntry:
     limiter: SlidingWindowLimiter
+    requests_per_minute: int
+    input_tokens_per_minute: int
     leases: int = 0
     released_at: float | None = None
 
@@ -396,16 +399,25 @@ class SharedLimiterPool:
         now = self.clock()
         self._prune(now)
         key = self._key(config)
+        execution = config["execution"]
+        requests_per_minute = int(execution["requests_per_minute"])
+        input_tokens_per_minute = int(execution["input_tokens_per_minute"])
         entry = self.entries.get(key)
         if entry is None:
-            execution = config["execution"]
             entry = _LimiterEntry(
                 limiter=SlidingWindowLimiter(
-                    int(execution["requests_per_minute"]),
-                    int(execution["input_tokens_per_minute"]),
-                )
+                    requests_per_minute,
+                    input_tokens_per_minute,
+                ),
+                requests_per_minute=requests_per_minute,
+                input_tokens_per_minute=input_tokens_per_minute,
             )
             self.entries[key] = entry
+        elif (
+            entry.requests_per_minute != requests_per_minute
+            or entry.input_tokens_per_minute != input_tokens_per_minute
+        ):
+            raise ConfigError("相同 Preset 身份的共享限流配置不一致")
         entry.leases += 1
         entry.released_at = None
         released = False

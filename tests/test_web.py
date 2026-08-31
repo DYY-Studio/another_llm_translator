@@ -18,7 +18,7 @@ import app.web as web_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
-from app.errors import UsageError
+from app.errors import ConfigError, UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
@@ -3132,6 +3132,22 @@ def test_shared_limiter_pool_reuses_only_identical_preset_hashes() -> None:
     expired, release_expired = pool.acquire(first_config)
     assert expired is not first
     release_expired()
+
+
+def test_shared_limiter_pool_rejects_inconsistent_limits_for_same_preset() -> None:
+    pool = SharedLimiterPool()
+    config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    pool.acquire(config)
+    changed = {
+        **config,
+        "execution": {"requests_per_minute": 4, "input_tokens_per_minute": 40},
+    }
+    with pytest.raises(ConfigError, match="共享限流配置不一致"):
+        pool.acquire(changed)
 
 
 @pytest.mark.asyncio
