@@ -268,6 +268,7 @@ def _import_project_inputs(
     document_adapter_id: str | None,
     original_names: list[str] | None = None,
     adapter_options: dict[str, dict[str, str]] | None = None,
+    allow_replacement_choices: bool = False,
 ) -> tuple[list[tuple[DocumentAdapter, ImportedFile]], list[str]]:
     from .plugins import (
         get_document_adapter,
@@ -288,7 +289,9 @@ def _import_project_inputs(
             recursive=recursive,
             config=config,
             options=validate_document_import_options(
-                adapter, option_values.get(adapter.adapter_id)
+                adapter,
+                option_values.get(adapter.adapter_id),
+                allow_replacement_choices=allow_replacement_choices,
             ),
         )
         files = [_normalize_imported_file(item) for item in imported.files]
@@ -316,7 +319,9 @@ def _import_project_inputs(
             recursive=False,
             config=config,
             options=validate_document_import_options(
-                adapter, option_values.get(adapter.adapter_id)
+                adapter,
+                option_values.get(adapter.adapter_id),
+                allow_replacement_choices=allow_replacement_choices,
             ),
         )
         if len(imported.files) != 1:
@@ -777,6 +782,7 @@ def _replacement_source_snapshot(
     segments: Iterable[dict[str, Any]],
     *,
     source_digest: str | None = None,
+    adapter_state: dict[str, Any] | None = None,
 ) -> str:
     return _replacement_digest(
         {
@@ -794,6 +800,7 @@ def _replacement_source_snapshot(
                     "next_segment_sequence",
                 )
             },
+            "adapter_state": adapter_state,
             "source_digest": source_digest,
             "segments": [
                 {
@@ -1024,6 +1031,7 @@ def prepare_file_replacement(
             config=config,
             document_adapter_id=adapter_id,
             adapter_options={adapter_id: replacement_adapter_options},
+            allow_replacement_choices=True,
         )
         if len(imports) != 1:
             raise UsageError("替换输入必须由 Document Adapter 解析为一个 File")
@@ -1090,6 +1098,7 @@ def prepare_file_replacement(
             old_file,
             old_segments,
             source_digest=old_input_digest,
+            adapter_state=previous_state,
         )
         impact = _replacement_impact(
             project,
@@ -1152,10 +1161,14 @@ def apply_file_replacement(
         if current_input.is_file()
         else None
     )
+    current_state = _adapter_opaque_state(
+        read_adapter_state(root, plan.file_id)
+    )
     if _replacement_source_snapshot(
         current_file,
         current_segments,
         source_digest=current_input_digest,
+        adapter_state=current_state,
     ) != plan.source_snapshot:
         raise UsageError("项目源文件已变化，请重新生成替换预览")
     if _replacement_input_digest(plan.staged_input) != plan.input_digest:

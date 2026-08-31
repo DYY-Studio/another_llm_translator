@@ -819,7 +819,7 @@ function ReplacementDialog({
                     {option.label}
                     <select
                       disabled={busy || parentBusy}
-                      value={options[option.option_id] ?? option.default}
+                      value={options[option.option_id] ?? ""}
                       onChange={(event) => setOptions({ ...options, [option.option_id]: event.target.value })}
                     >
                       {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}

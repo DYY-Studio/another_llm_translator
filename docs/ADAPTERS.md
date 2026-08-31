@@ -321,6 +321,8 @@ Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相
 
 `replacement_options()` 用 File 的 `opaque_state` 恢复当前 File 的全部导入和运行选项。它必须返回与声明完全一致的字符串键值，并由宿主再次校验取值；缺失、额外、类型错误或非法值都直接失败，不静默使用声明默认值。Adapter 可以在读取旧的、仍可读状态时按该版本既有语义提供默认值。
 
+仅供受控替换使用的历史选项可以声明为 `replacement_choices`；它们不会出现在新导入选项中，但会在逐 File 替换对话框中作为当前值保留并允许用户改为现行选项。
+
 普通设置修改不会追溯既有 File。`files-replace` 是受控重新导入：替换预览通过逐 File 的 `replacement-options` API 显示当前值，用户可以修改任意已声明选项；未覆盖的选项沿用当前 File 值，确认前会展示旧值、新值和变化键。新选项随后固化到新的 `opaque_state`，不需要迁移既有项目。
 
 CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。

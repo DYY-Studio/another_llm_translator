@@ -334,6 +334,8 @@ NCX 允许省略 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标
 
 `base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.5 可读取 0.3/0.4/0.5 状态，不改写旧 File、Segment、locator 或阶段结果；旧 File 需重新导入才会增加目录 Segment。
 
+文件替换仍会保留旧 File 的 `parenthetical` 作为默认选项；用户可在预览中改为现行 Ruby 选项。
+
 Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。相邻同符号 Ruby 和单 Ruby 的重复符号合并为一个 reading；普通文本、空白、块边界和受控内联格式边界会切断合并。
 
 用户 source/result 使用合并后的青空；最终 EPUB 译文区按 Unicode 扩展字素簇展开为逐字 Ruby，空白保持普通文本。嵌套 Ruby、空读音和无法确定读音结构的输入会带 XHTML 位置拒绝。

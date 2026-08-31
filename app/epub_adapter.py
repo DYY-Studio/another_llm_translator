@@ -110,6 +110,7 @@ class EPUBDocumentAdapter:
                 ("compact", "模型紧凑格式（用户显示青空格式）"),
                 ("base_only", "仅基础文字"),
             ),
+            replacement_choices=(("parenthetical", "原文（Ruby）"),),
         ),
         DocumentChoiceOption(
             option_id="inline_format_mode",

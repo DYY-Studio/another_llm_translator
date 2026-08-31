@@ -746,6 +746,101 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
     assert overridden.impact["changed_adapter_options"] == ["ruby_mode"]
 
 
+def test_file_replacement_supports_legacy_epub_parenthetical_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-legacy-options",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    file_record["document_adapter_version"] = "0.3"
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    state_record["adapter_version"] = "0.3"
+    state_record["state"]["ruby_mode"] = "parenthetical"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
+        )
+    write_json(project, state_path, state_record)
+
+    preserved = prepare_file_replacement(project, "F0001", replacement)
+    overridden = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+    )
+    try:
+        assert preserved.impact["previous_adapter_options"]["ruby_mode"] == (
+            "parenthetical"
+        )
+        assert preserved.impact["replacement_adapter_options"]["ruby_mode"] == (
+            "parenthetical"
+        )
+        assert overridden.impact["replacement_adapter_options"]["ruby_mode"] == (
+            "aozora"
+        )
+    finally:
+        preserved.cleanup()
+        overridden.cleanup()
+
+
+def test_file_replacement_rejects_stale_adapter_state_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-stale-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "ruby_mode": "aozora",
+                "inline_format_mode": "markers",
+                "inline_format_policy": "tiered",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    first = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"inline_format_policy": "strict"}},
+    )
+    second = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"inline_format_policy": "tiered"}},
+    )
+    try:
+        apply_file_replacement(project, first)
+        with pytest.raises(UsageError, match="项目源文件已变化"):
+            apply_file_replacement(project, second)
+    finally:
+        first.cleanup()
+        second.cleanup()
+    state = read_json(project, project / "source/adapters/epub/F0001.json")
+    assert state["state"]["inline_format_policy"] == "strict"
+
+
 def test_file_replacement_restores_source_when_publish_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

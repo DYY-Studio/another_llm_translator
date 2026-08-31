@@ -138,6 +138,9 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
             seen_options: set[str] = set()
             for option in options:
                 choice_ids = [choice_id for choice_id, _ in option.choices]
+                replacement_choice_ids = [
+                    choice_id for choice_id, _ in option.replacement_choices
+                ]
                 choices_valid = all(
                     choice_id and label
                     for choice_id, label in option.choices
@@ -150,6 +153,12 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     or len(set(choice_ids)) != len(choice_ids)
                     or not choices_valid
                     or option.default not in choice_ids
+                    or len(set(replacement_choice_ids)) != len(replacement_choice_ids)
+                    or set(choice_ids) & set(replacement_choice_ids)
+                    or not all(
+                        choice_id and label
+                        for choice_id, label in option.replacement_choices
+                    )
                 ):
                     raise ConfigError(
                         f"Document Adapter 导入选项声明无效："
@@ -165,6 +174,9 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                 )
             for option in run_options:
                 choice_ids = [choice_id for choice_id, _ in option.choices]
+                replacement_choice_ids = [
+                    choice_id for choice_id, _ in option.replacement_choices
+                ]
                 if (
                     not option.option_id
                     or option.option_id in seen_options
@@ -173,6 +185,12 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     or len(set(choice_ids)) != len(choice_ids)
                     or not all(choice_id and label for choice_id, label in option.choices)
                     or option.default not in choice_ids
+                    or len(set(replacement_choice_ids)) != len(replacement_choice_ids)
+                    or set(choice_ids) & set(replacement_choice_ids)
+                    or not all(
+                        choice_id and label
+                        for choice_id, label in option.replacement_choices
+                    )
                 ):
                     raise ConfigError(
                         f"Document Adapter 运行选项声明无效："
@@ -284,7 +302,10 @@ def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
 
 
 def validate_document_import_options(
-    adapter: DocumentAdapter, values: dict[str, str] | None
+    adapter: DocumentAdapter,
+    values: dict[str, str] | None,
+    *,
+    allow_replacement_choices: bool = False,
 ) -> dict[str, str]:
     provided = values or {}
     declarations = {
@@ -305,6 +326,8 @@ def validate_document_import_options(
     }.items():
         value = provided.get(option_id, option.default)
         choices = {choice_id for choice_id, _ in option.choices}
+        if allow_replacement_choices:
+            choices.update(choice_id for choice_id, _ in option.replacement_choices)
         if value not in choices:
             raise UsageError(
                 f"{adapter.adapter_id}.{option_id} 取值无效：{value}"
@@ -315,6 +338,8 @@ def validate_document_import_options(
             continue
         value = provided[option.option_id]
         choices = {choice_id for choice_id, _ in option.choices}
+        if allow_replacement_choices:
+            choices.update(choice_id for choice_id, _ in option.replacement_choices)
         if value not in choices:
             raise UsageError(
                 f"{adapter.adapter_id}.{option.option_id} 取值无效：{value}"
@@ -347,7 +372,9 @@ def document_adapter_replacement_options(
             f"Document Adapter 替换选项不完整：{adapter.adapter_id}"
         )
     try:
-        resolved = validate_document_import_options(adapter, values)
+        resolved = validate_document_import_options(
+            adapter, values, allow_replacement_choices=True
+        )
     except UsageError as exc:
         raise ConfigError(
             f"Document Adapter 替换选项取值无效：{adapter.adapter_id}"
@@ -359,14 +386,32 @@ def document_adapter_replacement_options(
                 f"{adapter.adapter_id} 包含未知替换选项：{', '.join(unknown)}"
             )
         candidate = {**resolved, **overrides}
-        resolved = validate_document_import_options(adapter, candidate)
+        resolved = validate_document_import_options(
+            adapter, candidate, allow_replacement_choices=True
+        )
     return resolved
 
 
-def document_adapter_summaries() -> list[dict[str, object]]:
+def document_adapter_summaries(
+    *, include_replacement_choices: bool = False
+) -> list[dict[str, object]]:
     values = []
     for plugin in load_plugins():
         for adapter in plugin.document_adapters:
+            def summarize_option(option: DocumentChoiceOption) -> dict[str, object]:
+                choices = list(option.choices)
+                if include_replacement_choices:
+                    choices.extend(option.replacement_choices)
+                return {
+                    "option_id": option.option_id,
+                    "label": option.label,
+                    "default": option.default,
+                    "choices": [
+                        {"value": value, "label": label}
+                        for value, label in choices
+                    ],
+                }
+
             values.append(
                 {
                     "adapter_id": adapter.adapter_id,
@@ -376,27 +421,10 @@ def document_adapter_summaries() -> list[dict[str, object]]:
                     "capabilities": sorted(adapter.capabilities),
                     "extensions": sorted(adapter.extensions),
                     "import_options": [
-                        {
-                            "option_id": option.option_id,
-                            "label": option.label,
-                            "default": option.default,
-                            "choices": [
-                                {"value": value, "label": label}
-                                for value, label in option.choices
-                            ],
-                        }
-                        for option in adapter.import_options
+                        summarize_option(option) for option in adapter.import_options
                     ],
                     "run_options": [
-                        {
-                            "option_id": option.option_id,
-                            "label": option.label,
-                            "default": option.default,
-                            "choices": [
-                                {"value": value, "label": label}
-                                for value, label in option.choices
-                            ],
-                        }
+                        summarize_option(option)
                         for option in getattr(adapter, "run_options", ())
                     ],
                 }

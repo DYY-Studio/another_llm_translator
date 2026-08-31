@@ -28,6 +28,7 @@ from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+    document_adapter_replacement_options,
     get_document_adapter,
     get_document_adapter_for_extension,
     load_plugins,
@@ -2191,6 +2192,18 @@ def test_document_adapter_choice_options_apply_defaults_and_validate_values() ->
         validate_document_import_options(epub, {"ruby_mode": "invalid"})
     with pytest.raises(UsageError, match="取值无效"):
         validate_document_import_options(epub, {"ruby_mode": "parenthetical"})
+    assert document_adapter_replacement_options(
+        epub,
+        opaque_state={
+            "ruby_mode": "parenthetical",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
+    ) == {
+        "ruby_mode": "parenthetical",
+        "inline_format_mode": "plain",
+        "inline_format_policy": "tiered",
+    }
 
 
 def test_plugin_host_rejects_invalid_choice_option(

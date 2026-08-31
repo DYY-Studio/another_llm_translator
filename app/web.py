@@ -740,7 +740,9 @@ def create_app(
         )
         summary = next(
             item
-            for item in document_adapter_summaries()
+            for item in document_adapter_summaries(
+                include_replacement_choices=True
+            )
             if item["adapter_id"] == adapter_id
         )
         return {"adapter": summary, "values": values}
