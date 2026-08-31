@@ -284,13 +284,10 @@ def create_app(
     )
     app.state.external_projects = set()
     app.state.server_config = server_config or load_server_config()
+    tasks_config = app.state.server_config.get("tasks", {})
     app.state.tasks = WebTaskManager(
         app.state.diagnostics,
-        max_active_projects=int(
-            app.state.server_config.get("tasks", {}).get(
-                "max_active_projects", 2
-            )
-        ),
+        max_active_projects=tasks_config.get("max_active_projects", 2),
     )
     app.state.sessions: dict[str, float] = {}
     app.state.replacement_previews: dict[tuple[Path, str], ReplacementPreviewSession] = {}
@@ -1176,12 +1173,10 @@ def create_app(
         auth = payload.get("auth")
         if not isinstance(lan, dict) or not isinstance(auth, dict):
             raise UsageError("lan 和 auth 必须是对象")
-        tasks = payload.get("tasks", {})
+        tasks = payload.get("tasks")
         if not isinstance(tasks, dict):
             raise UsageError("tasks 必须是对象")
-        max_active_projects = tasks.get(
-            "max_active_projects", app.state.tasks.max_active_projects
-        )
+        max_active_projects = tasks.get("max_active_projects")
         if (
             not isinstance(max_active_projects, int)
             or isinstance(max_active_projects, bool)

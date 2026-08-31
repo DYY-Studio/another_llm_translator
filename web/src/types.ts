@@ -152,6 +152,7 @@ export interface DiagnosticsRequestSummary {
   project: string | null;
   stage: string | null;
   request_id: string;
+  task_id?: string | null;
   model: string;
   transport: "non_streaming" | "sse";
   status: DiagnosticsRequestStatus;
@@ -586,6 +587,7 @@ export interface ServerStatus {
   auth: { required: boolean; username: string };
   authed: boolean;
   loopback: boolean;
+  tasks: { max_active_projects: number };
 }
 
 export interface InterfaceEntry {

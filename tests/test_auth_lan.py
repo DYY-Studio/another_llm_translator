@@ -88,6 +88,14 @@ def test_server_status_reports_and_updates_project_limit() -> None:
     assert (
         client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 4
     )
+    missing_tasks = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+        },
+    )
+    assert missing_tasks.status_code == 400
 
 
 def test_lan_open_without_auth_but_status_warns() -> None:
@@ -174,6 +182,7 @@ def test_disabling_sharing_clears_sessions_and_blocks_lan(
         json={
             "lan": {"enabled": False, "bind_address": ""},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert saved.status_code == 200
@@ -195,6 +204,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "10.0.0.99"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert bad_address.status_code == 400
@@ -204,6 +214,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": True, "username": "me"},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert no_password.status_code == 400
@@ -213,6 +224,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "0.0.0.0"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert all_interfaces.status_code == 200
@@ -222,6 +234,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": True, "username": "me", "password": "s3cret"},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert saved.status_code == 200
@@ -233,6 +246,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert warning.status_code == 200
