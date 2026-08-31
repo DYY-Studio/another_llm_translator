@@ -637,7 +637,9 @@ class WebTaskManager:
 
         try:
             diagnostics_context = (
-                self.diagnostics.activate(state.project.name, state.stage)
+                self.diagnostics.activate(
+                    state.project.name, state.stage, task_id=state.task_id
+                )
                 if self.diagnostics is not None
                 else nullcontext()
             )

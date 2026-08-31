@@ -44,7 +44,7 @@ from .credentials import (
     save_credential,
     save_lan_password,
 )
-from .diagnostics import Diagnostics
+from .diagnostics import DiagnosticsHub
 from .errors import (
     AppError,
     ExternalError,
@@ -279,7 +279,9 @@ def create_app(
     app = FastAPI(title="Another LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
-    app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
+    app.state.diagnostics = DiagnosticsHub(
+        log_path or user_root() / "logs" / "app.log"
+    )
     app.state.external_projects = set()
     app.state.server_config = server_config or load_server_config()
     app.state.tasks = WebTaskManager(

@@ -9,7 +9,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.diagnostics import Diagnostics
+from app.diagnostics import Diagnostics, DiagnosticsHub
 from app.errors import ExternalError
 from app.execution import LLMClient, SlidingWindowLimiter, render_messages
 from app.logging_utils import get_logger
@@ -37,6 +37,101 @@ def test_diagnostics_keeps_bounded_global_logs_and_filters(tmp_path: Path) -> No
     }
     assert snapshot["filters"]["projects"] == ["first", "second"]
     assert (tmp_path / "logs" / "app.log").is_file()
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_hub_keeps_concurrent_task_sessions_separate(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    entered = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def run_task(task_id: str, project: str, release: asyncio.Event) -> None:
+        with hub.activate(project, "translation", task_id=task_id):
+            hub.begin_request(
+                request_id=f"REQ-{task_id}",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.set_usage(
+                {
+                    "input_tokens": 10 if task_id == "T1" else 20,
+                    "output_tokens": 1 if task_id == "T1" else 2,
+                    "total_tokens": 11 if task_id == "T1" else 22,
+                    "available": True,
+                    "partial": False,
+                }
+            )
+            entered.set()
+            await release.wait()
+
+    first = asyncio.create_task(run_task("T1", "first", release_first))
+    second = asyncio.create_task(run_task("T2", "second", release_second))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert entered.is_set()
+    active = hub.snapshot()
+    assert active["metrics"]["total_requests"] == 2
+    assert {
+        item["task_id"] for item in active["requests"]["items"]
+    } == {"T1", "T2"}
+    assert active["metrics"]["input_tokens"] == 30
+    assert active["metrics"]["output_tokens"] == 3
+    assert active["metrics"]["usage_available"] is True
+
+    release_first.set()
+    await first
+    remaining = hub.snapshot()
+    assert remaining["metrics"]["total_requests"] == 1
+    assert remaining["metrics"]["project"] == "second"
+    assert hub.request_detail("REQ-T1")["status"] == "interrupted"
+    assert hub.request_detail("REQ-T2")["status"] == "running"
+    assert hub.snapshot(project="second")["requests"]["total"] == 1
+    release_second.set()
+    await second
+
+
+def test_diagnostics_hub_filters_metrics_and_requests_by_project(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-FIRST",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.request_finished(
+            request_id="REQ-FIRST",
+            attempt=1,
+            latency_seconds=0.1,
+            status=200,
+            error=False,
+        )
+        hub.complete_request("REQ-FIRST", content="ok", reasoning_content=None)
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-SECOND",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.request_finished(
+            request_id="REQ-SECOND",
+            attempt=1,
+            latency_seconds=0.3,
+            status=500,
+            error=True,
+        )
+
+    filtered = hub.snapshot(project="second")
+    assert filtered["metrics"]["total_requests"] == 0
+    assert filtered["requests"]["total"] == 1
+    assert filtered["requests"]["items"][0]["task_id"] == "T2"
 
 
 def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> None:
