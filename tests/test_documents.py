@@ -2204,6 +2204,16 @@ def test_document_adapter_choice_options_apply_defaults_and_validate_values() ->
         "inline_format_mode": "plain",
         "inline_format_policy": "tiered",
     }
+    with pytest.raises(UsageError, match="取值无效"):
+        document_adapter_replacement_options(
+            epub,
+            opaque_state={
+                "ruby_mode": "aozora",
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            },
+            overrides={"ruby_mode": "parenthetical"},
+        )
 
 
 def test_plugin_host_rejects_invalid_choice_option(

@@ -855,6 +855,14 @@ def test_web_replacement_options_use_file_values_and_preview_overrides(
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
+    ruby_options = next(
+        item
+        for item in options.json()["adapter"]["import_options"]
+        if item["option_id"] == "ruby_mode"
+    )
+    assert "parenthetical" not in {
+        choice["value"] for choice in ruby_options["choices"]
+    }
 
     preview = client.post(
         "/api/v1/projects/ruby-replace-options/files/F0001/replacement-preview",

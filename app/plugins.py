@@ -385,7 +385,11 @@ def document_adapter_replacement_options(
             raise UsageError(
                 f"{adapter.adapter_id} 包含未知替换选项：{', '.join(unknown)}"
             )
-        candidate = {**resolved, **overrides}
+        explicit = validate_document_import_options(adapter, overrides)
+        candidate = {
+            **resolved,
+            **{option_id: explicit[option_id] for option_id in overrides},
+        }
         resolved = validate_document_import_options(
             adapter, candidate, allow_replacement_choices=True
         )
@@ -393,14 +397,18 @@ def document_adapter_replacement_options(
 
 
 def document_adapter_summaries(
-    *, include_replacement_choices: bool = False
+    *, replacement_values: dict[str, str] | None = None
 ) -> list[dict[str, object]]:
     values = []
     for plugin in load_plugins():
         for adapter in plugin.document_adapters:
             def summarize_option(option: DocumentChoiceOption) -> dict[str, object]:
                 choices = list(option.choices)
-                if include_replacement_choices:
+                if (
+                    replacement_values is not None
+                    and replacement_values.get(option.option_id)
+                    in {value for value, _ in option.replacement_choices}
+                ):
                     choices.extend(option.replacement_choices)
                 return {
                     "option_id": option.option_id,
