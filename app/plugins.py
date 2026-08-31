@@ -380,12 +380,9 @@ def document_adapter_replacement_options(
             f"Document Adapter 替换选项取值无效：{adapter.adapter_id}"
         ) from exc
     if overrides:
-        unknown = sorted(set(overrides) - declared)
-        if unknown:
-            raise UsageError(
-                f"{adapter.adapter_id} 包含未知替换选项：{', '.join(unknown)}"
-            )
-        explicit = validate_document_import_options(adapter, overrides)
+        explicit = _validate_replacement_overrides(
+            adapter, overrides, current=resolved
+        )
         candidate = {
             **resolved,
             **{option_id: explicit[option_id] for option_id in overrides},
@@ -393,6 +390,37 @@ def document_adapter_replacement_options(
         resolved = validate_document_import_options(
             adapter, candidate, allow_replacement_choices=True
         )
+    return resolved
+
+
+def _validate_replacement_overrides(
+    adapter: DocumentAdapter,
+    overrides: dict[str, str],
+    *,
+    current: dict[str, str],
+) -> dict[str, str]:
+    declarations = {
+        option.option_id: option
+        for option in (*adapter.import_options, *getattr(adapter, "run_options", ()))
+    }
+    unknown = sorted(set(overrides) - set(declarations))
+    if unknown:
+        raise UsageError(
+            f"{adapter.adapter_id} 包含未知替换选项：{', '.join(unknown)}"
+        )
+    resolved: dict[str, str] = {}
+    for option_id, value in overrides.items():
+        option = declarations[option_id]
+        current_choices = {choice_id for choice_id, _ in option.choices}
+        legacy_choices = {
+            choice_id for choice_id, _ in option.replacement_choices
+        }
+        if value in current_choices or (
+            value in legacy_choices and current.get(option_id) == value
+        ):
+            resolved[option_id] = value
+            continue
+        raise UsageError(f"{adapter.adapter_id}.{option_id} 取值无效：{value}")
     return resolved
 
 

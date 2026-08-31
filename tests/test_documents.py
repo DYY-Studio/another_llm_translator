@@ -2204,6 +2204,15 @@ def test_document_adapter_choice_options_apply_defaults_and_validate_values() ->
         "inline_format_mode": "plain",
         "inline_format_policy": "tiered",
     }
+    assert document_adapter_replacement_options(
+        epub,
+        opaque_state={
+            "ruby_mode": "parenthetical",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
+        overrides={"ruby_mode": "parenthetical"},
+    )["ruby_mode"] == "parenthetical"
     with pytest.raises(UsageError, match="取值无效"):
         document_adapter_replacement_options(
             epub,

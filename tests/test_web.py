@@ -883,6 +883,63 @@ def test_web_replacement_options_use_file_values_and_preview_overrides(
     assert preview.json()["changed_adapter_options"] == ["ruby_mode"]
 
 
+def test_web_replacement_preserves_legacy_epub_option_values(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    revised = tmp_path / "ruby-revised.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    make_epub(revised, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "ruby-legacy-replace"},
+        files=[("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))],
+    )
+    assert created.status_code == 200
+    project = projects_root / "ruby-legacy-replace"
+    file_record = read_files(project)[0]
+    file_record["document_adapter_version"] = "0.3"
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    state_record["adapter_version"] = "0.3"
+    state_record["state"]["ruby_mode"] = "parenthetical"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
+        )
+    write_json(project, state_path, state_record)
+
+    options = client.get(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-options"
+    )
+    assert options.status_code == 200
+    assert options.json()["values"]["ruby_mode"] == "parenthetical"
+    ruby_choices = next(
+        item
+        for item in options.json()["adapter"]["import_options"]
+        if item["option_id"] == "ruby_mode"
+    )["choices"]
+    assert "parenthetical" in {choice["value"] for choice in ruby_choices}
+
+    preview = client.post(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview",
+        data={"adapter_options": json.dumps({"epub": options.json()["values"]})},
+        files={"file": ("ruby-revised.epub", revised.read_bytes(), "application/epub+zip")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["replacement_adapter_options"]["ruby_mode"] == (
+        "parenthetical"
+    )
+    deleted = client.delete(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview/"
+        + preview.json()["preview_id"]
+    )
+    assert deleted.status_code == 200
+
+
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
     tmp_path: Path,
 ) -> None:
