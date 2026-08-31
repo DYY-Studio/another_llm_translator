@@ -31,6 +31,7 @@ from app.sqlite_storage import (
     read_segments,
     record_exists,
     record_header,
+    replace_source,
     write_json,
 )
 from app.web import create_app
@@ -3151,6 +3152,146 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
         run_action=None,
     )
 
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_scope_counts_actual_selected_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    selected_id = str(read_segments(project)[1]["segment_id"])
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        await release.wait()
+        return {"selected": 1, "completed": 1, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(only_segment=selected_id),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 1
+    release.set()
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+@pytest.mark.asyncio
+async def test_web_task_rejects_same_count_source_change_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_rejects_changed_input_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run_all(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {
+            "stage": "run-all",
+            "selected": 8,
+            "completed": 8,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
     release.set()
     await manager.tasks[first["task_id"]].asyncio_task
     await manager.tasks[second["task_id"]].asyncio_task

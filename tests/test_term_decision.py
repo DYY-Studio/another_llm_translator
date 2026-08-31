@@ -2968,7 +2968,7 @@ def test_web_starts_terminology_decision_task_without_options_local(
     )
     assert started.status_code == 200
     assert started.json()["stage"] == "terminology_decision"
-    assert started.json()["total_segments"] == 0
+    assert started.json()["total_segments"] == 4
 
     task_id = started.json()["task_id"]
     state = client.get(f"/api/v1/tasks/{task_id}").json()

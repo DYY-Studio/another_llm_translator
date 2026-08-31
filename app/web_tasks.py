@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 import uuid
 from collections import deque
@@ -25,13 +27,14 @@ from .execution import (
     choose_running_run,
     combine_usage,
     find_running_runs,
+    select_scope,
     stage_fingerprint,
     unavailable_usage,
 )
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .logging_utils import get_logger
-from .project import load_segments
+from .project import load_segments, load_source_files
 from .sqlite_storage import (
     latest_stage_summary,
     read_json,
@@ -315,11 +318,102 @@ def _decision_fingerprint_snapshot(
     return _decision_fingerprint(plan["config"], plan["prompts"], plan["library"])
 
 
+def _stable_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _selection_snapshot(
+    project: Path,
+    scope: Scope,
+    *,
+    force_all: bool = False,
+) -> tuple[tuple[str, str, int, int, str, str, str], ...]:
+    files = load_source_files(project)
+    segments = load_segments(project)
+    selected = (
+        [segment for segment in segments if not segment["is_empty"]]
+        if force_all
+        else select_scope(segments, files, scope)
+    )
+    file_order = {
+        str(item["file_id"]): int(item["file_order"]) for item in files
+    }
+    return tuple(
+        (
+            str(segment["segment_id"]),
+            str(segment["file_id"]),
+            file_order[str(segment["file_id"])],
+            int(segment["line_index"]),
+            str(segment["part_id"]),
+            str(segment["source"]),
+            str(segment.get("model_source") or ""),
+        )
+        for segment in selected
+    )
+
+
+def _running_runs_snapshot(
+    project: Path,
+    stages: tuple[str, ...],
+) -> tuple[tuple[str, str, str, str], ...]:
+    snapshots: list[tuple[str, str, str, str]] = []
+    for stage in stages:
+        for manifest in find_running_runs(project, stage):
+            run_id = str(manifest["run_id"])
+            stable = {
+                "stage": stage,
+                "run_id": run_id,
+                "status": manifest.get("status"),
+                "started_at": manifest.get("started_at"),
+                "stage_fingerprint": manifest.get("stage_fingerprint"),
+                "scope": manifest.get("scope"),
+                "selected_segment_count": manifest.get("selected_segment_count"),
+                "requested_segment_count": manifest.get("requested_segment_count"),
+                "reused_segment_count": manifest.get("reused_segment_count"),
+            }
+            snapshots.append(
+                (
+                    stage,
+                    run_id,
+                    str(manifest.get("status", "")),
+                    _stable_digest(stable),
+                )
+            )
+    return tuple(snapshots)
+
+
+def _decision_input_snapshot(plan: dict[str, Any]) -> str:
+    return _stable_digest(
+        {
+            "terms_revision": plan["library"]["terms_revision"],
+            "overrides": plan["overrides_document"],
+            "protected": sorted(str(value) for value in plan["protected"]),
+            "eligible": plan["eligible"],
+            "states": plan["states"],
+            "source_conflicts": plan["source_conflicts"],
+            "evidence": plan["evidence"],
+            "language": plan["language"],
+        }
+    )
+
+
 @dataclass(frozen=True)
 class _StartDecision:
     selected_count: int
     running_run_id: str | None
     fingerprints: tuple[tuple[str, str], ...]
+    selection_snapshots: tuple[
+        tuple[str, tuple[tuple[str, str, int, int, str, str, str], ...]], ...
+    ]
+    running_runs: tuple[tuple[str, str, str, str], ...]
+    decision_inputs: str | None = None
+    options_selected_count: int | None = None
 
 
 @dataclass
@@ -535,8 +629,15 @@ class WebTaskManager:
                     raise UsageError(f"项目已有后台任务：{active.task_id}")
         selected_count = 0
         running_run_id: str | None = None
+        decision_plan_snapshot: dict[str, Any] | None = None
+        selection_snapshots: tuple[
+            tuple[str, tuple[tuple[str, str, int, int, str, str, str], ...]], ...
+        ] = ()
+        options_selected_count: int | None = None
         if stage == TERMINOLOGY_DECISION_STAGE:
-            library = _require_decision_library(project)
+            decision_plan_snapshot = decision_plan(project, prompt_language)
+            library = decision_plan_snapshot["library"]
+            selected_count = len(decision_plan_snapshot["eligible"]) * 2
             current_terms_revision = int(library["terms_revision"])
             if (
                 run_action != "resume"
@@ -568,7 +669,14 @@ class WebTaskManager:
                 raise UsageError("结束自动决策 Run 时必须同时指定 force")
         elif stage != "run-all":
             options = task_options(project, stage)
-            selected_count = int(options["selected"])
+            options_selected_count = int(options["selected"])
+            selection = _selection_snapshot(
+                project,
+                scope,
+                force_all=stage == "terminology" and scope.force,
+            )
+            selected_count = len(selection)
+            selection_snapshots = ((stage, selection),)
             running_run = options["running_run"]
             if running_run is not None:
                 running_run_id = str(running_run["run_id"])
@@ -592,17 +700,43 @@ class WebTaskManager:
             fingerprints = (
                 (stage, _decision_fingerprint_snapshot(project, prompt_language)),
             )
+            decision_inputs = _decision_input_snapshot(decision_plan_snapshot)
         elif stage == "run-all":
+            selection_snapshots = tuple(
+                (
+                    item,
+                    _selection_snapshot(
+                        project,
+                        scope,
+                        force_all=item == "terminology" and scope.force,
+                    ),
+                )
+                for item in LLM_STAGES
+            )
+            selected_count = sum(
+                len(selection) for _, selection in selection_snapshots
+            )
             fingerprints = tuple(
                 (item, _stage_fingerprint_snapshot(project, item))
                 for item in LLM_STAGES
             )
+            decision_inputs = None
         else:
             fingerprints = ((stage, _stage_fingerprint_snapshot(project, stage)),)
+            decision_inputs = None
+        relevant_stages = (
+            LLM_STAGES
+            if stage == "run-all"
+            else (stage,)
+        )
         return _StartDecision(
             selected_count=selected_count,
             running_run_id=running_run_id,
             fingerprints=fingerprints,
+            selection_snapshots=selection_snapshots,
+            running_runs=_running_runs_snapshot(project, relevant_stages),
+            decision_inputs=decision_inputs,
+            options_selected_count=options_selected_count,
         )
 
     def _dispatch_locked(self) -> None:
