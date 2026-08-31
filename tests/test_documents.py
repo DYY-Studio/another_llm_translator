@@ -297,9 +297,11 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
     with zipfile.ZipFile(translated_path) as archive:
         assert archive.read("OEBPS/style.css") == b"body { color: #222; }"
         assert archive.read("OEBPS/cover.png") == b"\x89PNG\r\nfixture"
-        assert b"\xe8\xaf\x91\xef\xbc\x9aHello world." in archive.read(
-            "OEBPS/text/ch1.xhtml"
-        )
+        chapter = archive.read("OEBPS/text/ch1.xhtml")
+        assert b'<html xmlns="http://www.w3.org/1999/xhtml"' in chapter
+        assert b"<html:" not in chapter
+        assert re.search(rb"(?:<|\s)ns\d+:|xmlns:ns\d+", chapter) is None
+        assert b"\xe8\xaf\x91\xef\xbc\x9aHello world." in chapter
     with zipfile.ZipFile(bilingual_path) as archive:
         chapter = archive.read("OEBPS/text/ch1.xhtml")
         assert b"Hello world.\n" in chapter
@@ -353,6 +355,10 @@ def test_epub3_nav_is_imported_before_spine_and_exported(
     )
     with zipfile.ZipFile(project / result["written"][0]) as archive:
         nav = archive.read("OEBPS/nav.xhtml")
+        assert b'<html xmlns="http://www.w3.org/1999/xhtml"' in nav
+        assert b"<html:" not in nav
+        assert re.search(rb"(?:<|\s)ns\d+:|xmlns:ns\d+", nav) is None
+        assert b'epub:type="toc"' in nav
         assert b"\xe8\xaf\x91\xef\xbc\x9aContents" in nav
         assert b'href="text/ch1.xhtml#chapter"' in nav
     with zipfile.ZipFile(project / bilingual["written"][0]) as archive:
@@ -429,6 +435,8 @@ def test_epub2_ncx_is_imported_and_exported_without_changing_links(
     )
     with zipfile.ZipFile(project / translated["written"][0]) as archive:
         ncx = archive.read("OEBPS/toc.ncx")
+        assert b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"' in ncx
+        assert re.search(rb"(?:<|\s)ns\d+:|xmlns:ns\d+", ncx) is None
         root = ElementTree.fromstring(ncx)
         assert root.get("{http://www.w3.org/XML/1998/namespace}lang") == "zh-Hans"
         assert "译：Demo Book" in "".join(root.itertext())

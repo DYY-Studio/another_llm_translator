@@ -41,6 +41,9 @@ MAX_EPUB_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_EPUB_COMPRESSION_RATIO = 200
 _OPF_NAMESPACE = "http://www.idpf.org/2007/opf"
 _DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
+_XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+_EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
+_NCX_NAMESPACE = "http://www.daisy.org/z3986/2005/ncx/"
 _XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 _PUBLICATION_ID_NAMESPACE = UUID("2e22f6f0-4406-4f02-a9ee-0d4a8a3a4a82")
 _OPF_EVENT_ATTRIBUTE = f"{{{_OPF_NAMESPACE}}}event"
@@ -482,6 +485,7 @@ class EPUBDocumentAdapter:
                             target,
                             bilingual=bilingual,
                         )
+                    ElementTree.register_namespace("", _NCX_NAMESPACE)
                     changed[resource_path] = ElementTree.tostring(
                         root, encoding="utf-8", xml_declaration=True
                     )
@@ -557,6 +561,8 @@ class EPUBDocumentAdapter:
                             bilingual=bilingual,
                             ruby_mode=str(state.get("ruby_mode", "")),
                         )
+                ElementTree.register_namespace("", _XHTML_NAMESPACE)
+                ElementTree.register_namespace("epub", _EPUB_NAMESPACE)
                 changed[xhtml_path] = ElementTree.tostring(
                     root, encoding="utf-8", xml_declaration=True
                 )
