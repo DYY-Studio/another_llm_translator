@@ -978,6 +978,8 @@ class WebTaskManager:
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                         prompt_language=prompt_language,
                         limiters=shared_limiters,
+                        on_progress=progress,
+                        on_usage=usage_changed,
                     )
             state.summary = summary
             state.completed_segments = int(summary.get("completed", 0)) + int(

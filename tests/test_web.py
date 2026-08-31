@@ -3302,6 +3302,62 @@ async def test_web_run_all_rejects_changed_input_before_promotion(
 
 
 @pytest.mark.asyncio
+async def test_web_run_all_reports_progress_and_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def fake_run_all(*_: object, **kwargs: object) -> dict[str, object]:
+        progress = kwargs["on_progress"]
+        usage = kwargs["on_usage"]
+        assert callable(progress)
+        assert callable(usage)
+        progress(1, 0, 4)
+        usage(
+            {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            }
+        )
+        return {
+            "stage": "run-all",
+            "selected": 4,
+            "requested": 4,
+            "reused": 0,
+            "completed": 1,
+            "failed": 0,
+            "pending": 3,
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            },
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["completed_segments"] == 1
+    assert state["total_segments"] == 4
+    assert state["usage"]["total_tokens"] == 17
+
+
+@pytest.mark.asyncio
 async def test_web_task_manager_rejects_changed_fingerprint_before_promotion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
