@@ -81,6 +81,37 @@ def test_segment_alignment_preserves_ordered_matches_across_insertions() -> None
     assert result.ambiguous_new_indices == ()
 
 
+def test_segment_alignment_reuses_multiple_anchors_and_each_gap() -> None:
+    old = [
+        replacement_segment("old-prefix", "PREFIX"),
+        replacement_segment("old-one", "ONE"),
+        replacement_segment("old-two", "TWO"),
+        replacement_segment("old-three", "THREE"),
+        replacement_segment("old-suffix", "SUFFIX"),
+    ]
+    new = [
+        replacement_segment("new-prefix", "PREFIX"),
+        replacement_segment("new-insert-one", "INSERT-ONE"),
+        replacement_segment("new-one", "ONE"),
+        replacement_segment("new-insert-two", "INSERT-TWO"),
+        replacement_segment("new-two", "TWO"),
+        replacement_segment("new-three", "THREE"),
+        replacement_segment("new-suffix", "SUFFIX"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {
+        0: 0,
+        2: 1,
+        4: 2,
+        5: 3,
+        6: 4,
+    }
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
 def test_segment_alignment_does_not_reuse_ambiguous_duplicate_text() -> None:
     old = [
         replacement_segment("old-dup-1", "DUP"),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -29,23 +30,24 @@ def _longest_increasing_subsequence(
 ) -> list[tuple[int, int]]:
     if not candidates:
         return []
-    lengths = [1] * len(candidates)
+    tails: list[int] = []
+    tail_indices: list[int] = []
     previous = [-1] * len(candidates)
-    best_index = 0
     for index, (_, new_index) in enumerate(candidates):
-        for prior in range(index):
-            if candidates[prior][1] >= new_index:
-                continue
-            candidate_length = lengths[prior] + 1
-            if candidate_length > lengths[index]:
-                lengths[index] = candidate_length
-                previous[index] = prior
-        if lengths[index] > lengths[best_index]:
-            best_index = index
+        position = bisect_left(tails, new_index)
+        if position:
+            previous[index] = tail_indices[position - 1]
+        if position == len(tails):
+            tails.append(new_index)
+            tail_indices.append(index)
+        else:
+            tails[position] = new_index
+            tail_indices[position] = index
     result: list[tuple[int, int]] = []
-    while best_index >= 0:
-        result.append(candidates[best_index])
-        best_index = previous[best_index]
+    index = tail_indices[-1]
+    while index >= 0:
+        result.append(candidates[index])
+        index = previous[index]
     result.reverse()
     return result
 
@@ -72,12 +74,15 @@ def _patience_alignment(
 
     old_counts = Counter(key for _, key in old)
     new_counts = Counter(key for _, key in new)
+    new_unique_positions = {
+        key: new_index
+        for new_index, key in new
+        if new_counts[key] == 1
+    }
     candidates = [
-        (old_index, new_index)
+        (old_index, new_unique_positions[old_key])
         for old_index, old_key in old
-        for new_index, new_key in new
-        if old_key == new_key
-        and old_counts[old_key] == new_counts[new_key] == 1
+        if old_counts[old_key] == 1 and old_key in new_unique_positions
     ]
     anchors = _longest_increasing_subsequence(candidates)
     if not anchors:
@@ -137,11 +142,15 @@ def _patience_alignment(
 
     matches: dict[int, int] = {}
     ambiguous: set[tuple[str, str]] = set()
+    old_positions = {index: position for position, (index, _) in enumerate(old)}
+    new_positions = {index: position for position, (index, _) in enumerate(new)}
     old_cursor = 0
     new_cursor = 0
     for old_anchor, new_anchor in anchors:
-        old_gap = [(index, key) for index, key in old if old_cursor <= index < old_anchor]
-        new_gap = [(index, key) for index, key in new if new_cursor <= index < new_anchor]
+        old_anchor_position = old_positions[old_anchor]
+        new_anchor_position = new_positions[new_anchor]
+        old_gap = old[old_cursor:old_anchor_position]
+        new_gap = new[new_cursor:new_anchor_position]
         gap_matches, gap_ambiguous = _patience_alignment(
             old_gap,
             new_gap,
@@ -151,11 +160,11 @@ def _patience_alignment(
         matches.update(gap_matches)
         ambiguous.update(gap_ambiguous)
         matches[new_anchor] = old_anchor
-        old_cursor = old_anchor + 1
-        new_cursor = new_anchor + 1
+        old_cursor = old_anchor_position + 1
+        new_cursor = new_anchor_position + 1
     tail_matches, tail_ambiguous = _patience_alignment(
-        [(index, key) for index, key in old if index >= old_cursor],
-        [(index, key) for index, key in new if index >= new_cursor],
+        old[old_cursor:],
+        new[new_cursor:],
         all_old_counts=all_old_counts,
         all_new_counts=all_new_counts,
     )
