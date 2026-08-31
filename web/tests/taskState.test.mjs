@@ -89,6 +89,20 @@ test("does not let an older terminal fetch replace a newer active project task",
   assert.equal(merged.one.status, "running");
 });
 
+test("does not let an older terminal fetch replace a newer terminal project task", () => {
+  const oldRunning = task("one", "T1", "running");
+  const newerCompleted = task("one", "T2", "completed");
+  const oldCompleted = task("one", "T1", "completed");
+  const merged = reconcileTaskCollection(
+    { one: newerCompleted },
+    [],
+    [oldRunning],
+    { T1: oldCompleted },
+  );
+  assert.equal(merged.one.task_id, "T2");
+  assert.equal(merged.one.status, "completed");
+});
+
 test("does not remove a newer task while an older terminal fetch is pending", () => {
   const oldRunning = task("one", "T1", "running");
   const newerRunning = task("one", "T2", "running");

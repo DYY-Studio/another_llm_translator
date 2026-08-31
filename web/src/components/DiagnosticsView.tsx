@@ -238,6 +238,18 @@ export function DiagnosticsView({ language }: { language: Language }) {
   }, [level, project, stage, query]);
 
   useEffect(() => {
+    summaryLoadRef.current += 1;
+    requestFeedRef.current = { sessionId: "", cursor: 0 };
+    setRequestSummaries(new Map());
+    setRequestTotal(0);
+    setValue(null);
+    setSelectedRequest(null);
+    setDetail(null);
+    setDetailError("");
+    setError("");
+  }, [level, project, stage, query]);
+
+  useEffect(() => {
     let stopped = false;
     let timer: number | undefined;
     const poll = async () => {

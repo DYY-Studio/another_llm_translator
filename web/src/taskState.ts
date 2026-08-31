@@ -35,7 +35,6 @@ export function reconcileTaskCollection(
       if (
         !currentProject
         || currentProject.task_id === task.task_id
-        || !isActiveTaskStatus(currentProject.status)
       ) {
         merged[finalState.project_id] = finalState;
       }
