@@ -28,6 +28,10 @@ from .errors import (
     UsageError,
 )
 from .file_replacement import SegmentAlignment, align_segments
+from .plugins import (
+    document_adapter_replacement_options,
+    get_document_adapter,
+)
 from .sqlite_storage import (
     database_path,
     latest_stage_summary,
@@ -368,6 +372,12 @@ class TXTDocumentAdapter:
     ) -> str | None:
         del stage, language, opaque_state
         return None
+
+    def replacement_options(
+        self, *, opaque_state: dict[str, Any] | None
+    ) -> dict[str, str]:
+        del opaque_state
+        return {}
 
     def import_sources(
         self,
@@ -946,6 +956,15 @@ def _replacement_file(
     raise UsageError(f"未知文件 ID：{file_id}")
 
 
+def _adapter_opaque_state(
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    nested = state.get("state")
+    return nested if isinstance(nested, dict) else state
+
+
 def prepare_file_replacement(
     project: Path,
     file_id: str,
@@ -975,13 +994,26 @@ def prepare_file_replacement(
     adapter_id = str(old_file["document_adapter_id"])
     if adapter_options and set(adapter_options) - {adapter_id}:
         raise UsageError("替换只能使用目标 Document Adapter 的选项")
+    adapter = get_document_adapter(adapter_id)
+    previous_state = _adapter_opaque_state(
+        read_adapter_state(project, file_id)
+    )
+    previous_adapter_options = document_adapter_replacement_options(
+        adapter,
+        opaque_state=previous_state,
+    )
+    replacement_adapter_options = document_adapter_replacement_options(
+        adapter,
+        opaque_state=previous_state,
+        overrides=(adapter_options or {}).get(adapter_id),
+    )
     config = load_config(project / "config.toml")
     imports, warnings = _import_project_inputs(
         [str(input_path)],
         recursive=False,
         config=config,
         document_adapter_id=adapter_id,
-        adapter_options=adapter_options,
+        adapter_options={adapter_id: replacement_adapter_options},
     )
     if len(imports) != 1:
         raise UsageError("替换输入必须由 Document Adapter 解析为一个 File")
@@ -1056,6 +1088,13 @@ def prepare_file_replacement(
         warnings,
     )
     impact["file_id"] = file_id
+    impact["previous_adapter_options"] = previous_adapter_options
+    impact["replacement_adapter_options"] = replacement_adapter_options
+    impact["changed_adapter_options"] = sorted(
+        option_id
+        for option_id, value in replacement_adapter_options.items()
+        if previous_adapter_options.get(option_id) != value
+    )
     return FileReplacementPlan(
         project=project.resolve(),
         project_id=str(metadata["project_id"]),

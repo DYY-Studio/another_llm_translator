@@ -257,13 +257,17 @@ class DocumentAdapter(Protocol):
         *, stage: str, language: str, opaque_state: dict | None
     ) -> str | None: ...
 
+    def replacement_options(
+        *, opaque_state: dict | None
+    ) -> dict[str, str]: ...
+
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
 ```
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `11`；旧协议插件会快速失败。
 
 `model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
@@ -315,7 +319,9 @@ ID、版本和状态位置；宿主只校验归属、版本和完整性，不解
 
 Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项由 Adapter 固化在 File 的 `opaque_state`。
 
-Adapter ID 与版本进入阶段指纹 （内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有 Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+`replacement_options()` 用 File 的 `opaque_state` 恢复当前 File 的全部导入和运行选项。它必须返回与声明完全一致的字符串键值，并由宿主再次校验取值；缺失、额外、类型错误或非法值都直接失败，不静默使用声明默认值。Adapter 可以在读取旧的、仍可读状态时按该版本既有语义提供默认值。
+
+普通设置修改不会追溯既有 File。`files-replace` 是受控重新导入：替换预览通过逐 File 的 `replacement-options` API 显示当前值，用户可以修改任意已声明选项；未覆盖的选项沿用当前 File 值，确认前会展示旧值、新值和变化键。新选项随后固化到新的 `opaque_state`，不需要迁移既有项目。
 
 CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。
 
@@ -346,7 +352,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 10。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 11。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -457,7 +463,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=10,
+        protocol_version=11,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -466,7 +472,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `11`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
 
 上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 

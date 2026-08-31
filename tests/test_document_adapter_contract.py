@@ -13,7 +13,11 @@ from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope, stage_fingerprint
 from app.main import run
-from app.plugins import PLUGIN_PROTOCOL_VERSION, PluginDescriptor
+from app.plugins import (
+    PLUGIN_PROTOCOL_VERSION,
+    PluginDescriptor,
+    document_adapter_replacement_options,
+)
 from app.project import init_project, load_segments, load_source_files
 from app.sqlite_storage import read_json, write_json
 from app.stages import _project_context, export_project, run_translation
@@ -59,6 +63,16 @@ class RecordDocumentAdapter:
     ) -> str | None:
         del stage, language, opaque_state
         return None
+
+    def replacement_options(
+        self, *, opaque_state: dict[str, object] | None
+    ) -> dict[str, str]:
+        if not isinstance(opaque_state, dict):
+            raise IncompleteError("Record 文件缺少 Document Adapter 状态")
+        return {
+            "source_style": str(opaque_state.get("source_style", "plain")),
+            "line_ending": str(opaque_state.get("line_ending", "lf")),
+        }
 
     def normalize_model_output(
         self, *, segment: dict[str, object], text: str, stage: str
@@ -627,3 +641,30 @@ def test_contract_cli_adapter_option_reaches_import_options(
     assert code == 0
     project = parent / "cli-demo"
     assert load_segments(project)[0]["model_source"] == "<k1>line one</k1>"
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"source_style": "plain"}, "不完整"),
+        (
+            {"source_style": "plain", "line_ending": "lf", "extra": "x"},
+            "不完整",
+        ),
+        ({"source_style": "invalid", "line_ending": "lf"}, "取值无效"),
+    ],
+)
+def test_document_adapter_replacement_options_require_exact_valid_values(
+    values: dict[str, str], message: str
+) -> None:
+    class FixtureAdapter(RecordDocumentAdapter):
+        def replacement_options(
+            self, *, opaque_state: dict[str, object] | None
+        ) -> dict[str, str]:
+            del opaque_state
+            return values
+
+    with pytest.raises(ConfigError, match=message):
+        document_adapter_replacement_options(
+            FixtureAdapter(), opaque_state={"source_style": "plain"}
+        )

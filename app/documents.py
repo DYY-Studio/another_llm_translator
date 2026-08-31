@@ -295,6 +295,12 @@ class DocumentAdapter(Protocol):
         opaque_state: dict[str, Any] | None,
     ) -> str | None: ...
 
+    def replacement_options(
+        self,
+        *,
+        opaque_state: dict[str, Any] | None,
+    ) -> dict[str, str]: ...
+
     def import_sources(
         self,
         inputs: list[str],

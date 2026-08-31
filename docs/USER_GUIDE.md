@@ -284,7 +284,9 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会翻译�
 - 支持 OPF 2.0/3.0、spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 NCX；目录资源会作为待翻译内容。
 - 非 spine 目录资源排在正文前，spine 内 nav 保持原位置且不重复；保留文档 part 边界及导航链接、元数据和其他未翻译资源。
 - EPUB Adapter 0.5 可直接使用既有 0.3/0.4 File，无需重新导入；旧 File 需重新导入才会新增目录 Segment。
-- 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
+- 普通设置修改不会追溯既有 File。替换源文件时，替换对话框会按该 File 的当前
+  Adapter 选项初始化，用户仍可编辑任意选项；预览会显示旧值、新值和受影响的
+  Segment，确认后新选项随 File 状态保存。
 
 #### Ruby 标签转换
 
@@ -420,6 +422,9 @@ Adapter 版本、Adapter 状态和 Segment 计数。命令先按同一 `part_id`
 受影响的阶段进度。可确认一致的 Segment 会继续使用原译文；新增、修改、缺失或
 无法唯一确认的重复 Segment 从零开始。`--dry-run` 只预览；交互终端默认显示预览
 后询问确认，脚本需显式使用 `--yes`。
+
+替换时 `--adapter-option ADAPTER.OPTION=VALUE` 只覆盖指定选项；未指定选项沿用
+目标 File 的当前值。Web 替换对话框具有相同语义，并在确认前展示选项变化。
 
 项目存在运行中的任务或未发布的术语扫描候选时，必须先结束该任务或发布/丢弃候选。
 历史阶段结果和既有输出不会被自动删除，已发布术语也不会因源文件替换而自动移除。

@@ -129,6 +129,14 @@ interface ReplacementImpact {
   preserved_completed_by_stage: Record<string, number>;
   removed_completed_by_stage: Record<string, number>;
   warnings: string[];
+  previous_adapter_options: Record<string, string>;
+  replacement_adapter_options: Record<string, string>;
+  changed_adapter_options: string[];
+}
+
+interface ReplacementOptionsResponse {
+  adapter: AdapterSummary;
+  values: Record<string, string>;
 }
 
 interface ReplacementSource {
@@ -651,15 +659,13 @@ function ReplacementDialog({
   useEffect(() => {
     let active = true;
     setLoadingAdapter(true);
-    void api<{ adapters: AdapterSummary[] }>("/api/v1/document-adapters")
+    void api<ReplacementOptionsResponse>(
+      `/api/v1/projects/${project}/files/${file.file_id}/replacement-options`,
+    )
       .then((value) => {
         if (!active) return;
-        const target = value.adapters.find((item) => item.adapter_id === file.document_adapter_id);
-        setAdapter(target ?? null);
-        setOptions(Object.fromEntries(
-          (target?.import_options ?? []).map((option) => [option.option_id, option.default]),
-        ));
-        if (!target) setError(translate("overview.replaceAdapterUnavailable", language));
+        setAdapter(value.adapter);
+        setOptions(value.values);
       })
       .catch((reason) => {
         if (active) setError(errorMessage(reason, language));
@@ -668,7 +674,7 @@ function ReplacementDialog({
         if (active) setLoadingAdapter(false);
       });
     return () => { active = false; };
-  }, [file.document_adapter_id, language]);
+  }, [file.file_id, language, project]);
 
   function chooseFile(value: File | undefined) {
     if (!value) return;
@@ -734,21 +740,23 @@ function ReplacementDialog({
     if (!preview) return;
     setBusy(true);
     setError("");
+    let result: ReplacementImpact;
     try {
-      const result = await api<ReplacementImpact>(
+      result = await api<ReplacementImpact>(
         `/api/v1/projects/${project}/files/${file.file_id}/replacement-confirm`,
         {
           method: "POST",
           body: JSON.stringify({ preview_id: preview.preview_id }),
         },
       );
-      await onCompleted(result);
-      onClose();
     } catch (reason) {
       setError(errorMessage(reason, language));
-    } finally {
       setBusy(false);
+      return;
     }
+    setPreview(null);
+    setBusy(false);
+    onCompleted(result);
   }
 
   const stageCounts = (values: Record<string, number>) => (
@@ -756,6 +764,9 @@ function ReplacementDialog({
       <span key={stage}>{stage}: {count}</span>
     ))
   );
+  const optionDefinitions = adapter
+    ? [...adapter.import_options, ...adapter.run_options]
+    : [];
 
   return (
     <div className="modal-backdrop" onMouseDown={() => void cancelPreview()}>
@@ -801,9 +812,9 @@ function ReplacementDialog({
                 {source?.label ?? translate("overview.replaceNoSource", language)}
               </span>
             </div>
-            {adapter && adapter.import_options.length > 0 && (
+            {optionDefinitions.length > 0 && (
               <div className="replacement-options">
-                {adapter.import_options.map((option) => (
+                {optionDefinitions.map((option) => (
                   <label key={option.option_id}>
                     {option.label}
                     <select
@@ -839,6 +850,19 @@ function ReplacementDialog({
             )}
             {stageCounts(preview.removed_completed_by_stage).length > 0 && (
               <div><strong>{translate("overview.replaceRemovedProgress", language)}</strong>{stageCounts(preview.removed_completed_by_stage)}</div>
+            )}
+            {preview.changed_adapter_options.length > 0 && (
+              <div className="replacement-option-changes">
+                <strong>{translate("overview.replaceOptionsChanged", language)}</strong>
+                {preview.changed_adapter_options.map((optionId) => {
+                  const option = optionDefinitions.find((item) => item.option_id === optionId);
+                  return (
+                    <div key={optionId}>
+                      {option?.label ?? optionId}: {preview.previous_adapter_options[optionId]} → {preview.replacement_adapter_options[optionId]}
+                    </div>
+                  );
+                })}
+              </div>
             )}
             {preview.warnings.map((warning) => <p className="warning-text" key={warning}>{warning}</p>)}
           </div>
@@ -1324,7 +1348,7 @@ export function Overview({
           busy={busy}
           language={language}
           onClose={() => setReplacementTarget(null)}
-          onCompleted={async (result) => {
+          onCompleted={(result) => {
             setStorageMessage(translate("overview.replaceDone", language, {
               file: replacementTarget.name,
               preserved: result.preserved_segment_count,
@@ -1332,7 +1356,10 @@ export function Overview({
               removed: result.removed_segment_count,
             }));
             selection.reset();
-            await onFilesChanged();
+            setReplacementTarget(null);
+            void onFilesChanged().catch((reason) => {
+              setError(errorMessage(reason, language));
+            });
           }}
         />
       )}

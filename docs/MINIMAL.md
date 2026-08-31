@@ -280,7 +280,9 @@ python -m app.main files-replace PROJECT FILE_ID INPUT --yes
   项目计数和 `next_file_sequence`；File ID 不表示活动顺序。
 - `files-replace` 原位替换一个活动 File，保留 File ID、`file_order`、导出相对路径
   和 `stored_name`，用新内容解析得到的编码信息、Adapter 版本、Adapter 状态、
-  `segment_count` 及新 Segment 列表更新源副本。Segment ID 是稳定的不透明身份，
+  `segment_count` 及新 Segment 列表更新源副本。替换默认沿用当前 File 的全部
+  Adapter 选项，但用户可以在预览确认前显式修改；预览记录旧值、新值和变化键。
+  Segment ID 是稳定的不透明身份，
   位置只由 `file_order` 与 `line_index` 决定；新增 Segment 的 ID 不要求按当前位置
   递增。
 - 替换预览只在相同 `part_id` 内按 `source` 与有效 `model_source` 做保守精确顺序
@@ -320,7 +322,7 @@ NCX 允许省略 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标
 
 完整 `<ruby>` 子树和紧随的尾文本作为文本流中的一个成员；它与同一文本流中的普通 `text`/`tail` 槽、其他 Ruby 按源文顺序组成一个 Segment。
 
-新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`；选项固化于 File 的 Adapter 状态，不是项目运行设置。`base_only` 完全删除 Ruby/reading；其余模式的用户文本均使用 `｜base《reading》`。
+新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`；选项固化于 File 的 Adapter 状态，不是项目运行设置。`base_only` 完全删除 Ruby/reading；其余模式的用户文本均使用 `｜base《reading》`。普通设置修改不会追溯既有 File；`files-replace` 可在预览中以当前值为默认并显式修改选项。
 
 `short_xml` 和 `compact` 只把 Ruby 分别作为 `<r><b>base</b><y>reading</y></r>` 和 `⟦R:base|Y:reading⟧` 提交模型，输出在存储前还原青空。更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。
 
@@ -340,7 +342,7 @@ EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露
 
 `tiered`（默认）要求语义关键标签保留、允许表现层标签整体省略；`strict` 要求全部源标签保留。翻译、校对、润色及参考上下文使用 `model_source`，术语使用净 `source`。
 
-Adapter 在结果写入前验证标记的已知性、唯一性、闭合、嵌套和父子关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新导入；运行选项随 Adapter 状态和阶段指纹保存。
+Adapter 在结果写入前验证标记的已知性、唯一性、闭合、嵌套和父子关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留原普通标签和 attrs 的空骨架。既有 File 的导入选项不会因普通设置变化而静默重切；文件替换属于受控重新导入，可以在预览确认中修改选项。运行选项随 Adapter 状态和阶段指纹保存。
 
 SRT 外部 Adapter 只接受核心字幕结构：唯一正整数序号、严格的 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行和非空正文；序号不要求连续，正文可跨多行。每个 cue 是一个 Segment，序号和时间行写入 `opaque_state`。
 

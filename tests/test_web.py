@@ -790,6 +790,60 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert state["state"]["ruby_mode"] == "short_xml"
 
 
+def test_web_replacement_options_use_file_values_and_preview_overrides(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "ruby-replace-options",
+            "adapter_options": json.dumps(
+                {
+                    "epub": {
+                        "ruby_mode": "base_only",
+                        "inline_format_mode": "markers",
+                        "inline_format_policy": "strict",
+                    }
+                }
+            ),
+        },
+        files=[("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))],
+    )
+    assert created.status_code == 200
+
+    options = client.get(
+        "/api/v1/projects/ruby-replace-options/files/F0001/replacement-options"
+    )
+    assert options.status_code == 200
+    assert options.json()["values"] == {
+        "ruby_mode": "base_only",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+
+    preview = client.post(
+        "/api/v1/projects/ruby-replace-options/files/F0001/replacement-preview",
+        data={
+            "adapter_options": json.dumps(
+                {"epub": {"ruby_mode": "short_xml"}}
+            )
+        },
+        files={"file": ("revised.epub", epub.read_bytes(), "application/epub+zip")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["previous_adapter_options"] == options.json()["values"]
+    assert preview.json()["replacement_adapter_options"] == {
+        "ruby_mode": "short_xml",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert preview.json()["changed_adapter_options"] == ["ruby_mode"]
+
+
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
     tmp_path: Path,
 ) -> None:

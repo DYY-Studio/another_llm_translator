@@ -133,6 +133,26 @@ class EPUBDocumentAdapter:
         ),
     )
 
+    def replacement_options(
+        self, *, opaque_state: dict[str, Any] | None
+    ) -> dict[str, str]:
+        if not isinstance(opaque_state, dict):
+            raise ConfigError("EPUB Document Adapter 状态无效")
+        defaults = {
+            "ruby_mode": "aozora",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        }
+        values: dict[str, str] = {}
+        for option_id, default in defaults.items():
+            value = opaque_state.get(option_id, default)
+            if not isinstance(value, str):
+                raise ConfigError(
+                    f"EPUB Document Adapter 状态选项无效：{option_id}"
+                )
+            values[option_id] = value
+        return values
+
     def model_prompt_requirements(
         self,
         *,

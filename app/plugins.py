@@ -17,7 +17,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 10
+PLUGIN_PROTOCOL_VERSION = 11
 PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 
@@ -184,6 +184,11 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     f"Document Adapter 缺少 model_prompt_requirements："
                     f"{adapter.adapter_id}"
                 )
+            if not callable(getattr(adapter, "replacement_options", None)):
+                raise ConfigError(
+                    f"Document Adapter 缺少 replacement_options："
+                    f"{adapter.adapter_id}"
+                )
             seen_adapters.add(adapter.adapter_id)
         validators = getattr(plugin, "translation_validators", None)
         if not isinstance(validators, tuple):
@@ -315,6 +320,46 @@ def validate_document_import_options(
                 f"{adapter.adapter_id}.{option.option_id} 取值无效：{value}"
             )
         resolved[option.option_id] = value
+    return resolved
+
+
+def document_adapter_replacement_options(
+    adapter: DocumentAdapter,
+    *,
+    opaque_state: dict[str, Any] | None,
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve persisted Adapter choices and apply explicit replacements."""
+    values = adapter.replacement_options(opaque_state=opaque_state)
+    if not isinstance(values, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in values.items()
+    ):
+        raise ConfigError(
+            f"Document Adapter 替换选项返回值无效：{adapter.adapter_id}"
+        )
+    declared = {
+        option.option_id
+        for option in (*adapter.import_options, *getattr(adapter, "run_options", ()))
+    }
+    if set(values) != declared:
+        raise ConfigError(
+            f"Document Adapter 替换选项不完整：{adapter.adapter_id}"
+        )
+    try:
+        resolved = validate_document_import_options(adapter, values)
+    except UsageError as exc:
+        raise ConfigError(
+            f"Document Adapter 替换选项取值无效：{adapter.adapter_id}"
+        ) from exc
+    if overrides:
+        unknown = sorted(set(overrides) - declared)
+        if unknown:
+            raise UsageError(
+                f"{adapter.adapter_id} 包含未知替换选项：{', '.join(unknown)}"
+            )
+        candidate = {**resolved, **overrides}
+        resolved = validate_document_import_options(adapter, candidate)
     return resolved
 
 

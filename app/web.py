@@ -62,7 +62,9 @@ from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .logging_utils import get_logger
 from .plugins import (
+    document_adapter_replacement_options,
     document_adapter_summaries,
+    get_document_adapter,
     get_document_adapter_for_extension,
     resolve_translation_validators,
 )
@@ -85,6 +87,7 @@ from .project import (
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
+    load_source_files,
 )
 from .prompt_library import (
     delete_prompt_library,
@@ -93,6 +96,7 @@ from .prompt_library import (
     save_prompt_library,
 )
 from .server_config import load_server_config, save_server_config
+from .sqlite_storage import read_adapter_state
 from .sqlite_storage import (
     atomic_write_json,
     atomic_write_text,
@@ -703,6 +707,40 @@ def create_app(
     @app.get("/api/v1/document-adapters")
     async def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
+
+    @app.get(
+        "/api/v1/projects/{name}/files/{file_id}/replacement-options"
+    )
+    async def replacement_options(name: str, file_id: str) -> dict[str, Any]:
+        root = project(name)
+        file_record = next(
+            (
+                item
+                for item in load_source_files(root)
+                if str(item.get("file_id")) == file_id
+            ),
+            None,
+        )
+        if file_record is None:
+            raise UsageError(f"未知文件 ID：{file_id}")
+        adapter_id = str(file_record["document_adapter_id"])
+        adapter = get_document_adapter(adapter_id)
+        state = read_adapter_state(root, file_id)
+        opaque_state = (
+            state.get("state")
+            if isinstance(state, dict) and isinstance(state.get("state"), dict)
+            else state
+        )
+        values = document_adapter_replacement_options(
+            adapter,
+            opaque_state=opaque_state,
+        )
+        summary = next(
+            item
+            for item in document_adapter_summaries()
+            if item["adapter_id"] == adapter_id
+        )
+        return {"adapter": summary, "values": values}
 
     @app.get("/api/v1/translation-validators")
     async def translation_validators() -> dict[str, Any]:

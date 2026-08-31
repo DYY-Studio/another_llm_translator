@@ -37,7 +37,7 @@ from app.stages import (
     run_apply,
     run_terminology,
 )
-from tests.test_documents import make_epub
+from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_foundation import make_app_root
 
 
@@ -498,6 +498,54 @@ def test_epub_file_replacement_reuses_part_progress_and_new_locators(
         chapter = archive.read("OEBPS/text/ch1.xhtml")
     assert b"\xe8\xaf\x91:A" in chapter
     assert b"EXTRA" in chapter
+
+
+def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "ruby_mode": "base_only",
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    preserved = prepare_file_replacement(project, "F0001", replacement)
+    assert preserved.impact["previous_adapter_options"] == {
+        "ruby_mode": "base_only",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert preserved.impact["replacement_adapter_options"] == preserved.impact[
+        "previous_adapter_options"
+    ]
+    assert preserved.impact["changed_adapter_options"] == []
+
+    overridden = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+    )
+    assert overridden.impact["replacement_adapter_options"] == {
+        "ruby_mode": "short_xml",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert overridden.impact["changed_adapter_options"] == ["ruby_mode"]
 
 
 def test_file_replacement_restores_source_when_publish_fails(
