@@ -28,6 +28,7 @@ from app.sqlite_storage import (
     read_jsonl,
     read_segments,
     record_header,
+    replace_source,
     write_json,
 )
 from app.stages import (
@@ -335,6 +336,68 @@ def test_file_replacement_requires_publishing_pending_term_candidates(
         prepare_file_replacement(project, "F0001", replacement)
 
 
+def test_file_replacement_allows_completed_published_term_candidates(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    metadata = read_json(project, project / "project.json")
+    task_id = "TERM-TASK-PUBLISHED-REPLACE"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="completed",
+            terms_revision=1,
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            terms=[{"source": "A", "category": "name"}],
+        ),
+    )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+
+    assert plan.impact["added_segment_count"] == 1
+
+
+def test_file_replacement_rejects_invalid_persisted_segment_sequence(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    files = read_files(project)
+    files[0]["next_segment_sequence"] = 0
+    metadata = read_json(project, project / "project.json")
+    replace_source(
+        project,
+        files,
+        read_segments(project),
+        metadata,
+    )
+
+    with pytest.raises(ProjectError, match="next_segment_sequence"):
+        prepare_file_replacement(project, "F0001", replacement)
+
+
 def test_epub_file_replacement_reuses_part_progress_and_new_locators(
     tmp_path: Path,
 ) -> None:
@@ -432,6 +495,30 @@ def test_file_replacement_restores_source_when_publish_fails(
 
     monkeypatch.setattr("app.project.os.replace", fail_new_publish)
     with pytest.raises(OSError, match="replacement publish failed"):
+        apply_file_replacement(project, plan)
+
+    assert stored_path.read_text(encoding="utf-8") == "A"
+    assert [item["source"] for item in read_segments(project)] == ["A"]
+
+
+def test_file_replacement_restores_source_when_database_update_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored_path = project / "input" / str(read_files(project)[0]["stored_name"])
+
+    def fail_database_update(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise StorageError("database update failed")
+
+    monkeypatch.setattr("app.project.replace_source", fail_database_update)
+    with pytest.raises(StorageError, match="database update failed"):
         apply_file_replacement(project, plan)
 
     assert stored_path.read_text(encoding="utf-8") == "A"
@@ -563,11 +650,16 @@ def test_files_replace_cli_dry_run_and_yes_apply(tmp_path: Path, capsys: pytest.
     assert run(["files-replace", str(project), "F0001", str(replacement), "--dry-run"]) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["preserved_segment_count"] == 2
+    assert "preview_token" not in preview
     assert [item["source"] for item in read_segments(project)] == ["one", "two"]
 
     assert run(["files-replace", str(project), "F0001", str(replacement), "--yes"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["added_segment_count"] == 1
+    assert "replaced_file_id" not in result
+    assert "file_count" not in result
+    assert "segment_count" not in result
+    assert "preview_token" not in result
     assert [item["source"] for item in read_segments(project)] == [
         "one",
         "inserted",

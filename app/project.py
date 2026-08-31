@@ -81,17 +81,12 @@ class FileReplacementPlan:
     project_id: str
     file_id: str
     input_path: Path
-    old_file: dict[str, Any]
     new_file: dict[str, Any]
-    old_segments: tuple[dict[str, Any], ...]
     new_segments: tuple[dict[str, Any], ...]
-    adapter: DocumentAdapter
     adapter_states: tuple[dict[str, Any], ...]
     source_snapshot: str
     input_digest: str
-    preview_token: str
     impact: dict[str, object]
-    warnings: tuple[str, ...]
 
 
 def natural_path_key(
@@ -807,12 +802,16 @@ def _replacement_source_snapshot(
 def _next_segment_sequence(
     file_record: dict[str, Any], segments: Iterable[dict[str, Any]]
 ) -> int:
-    configured = file_record.get("next_segment_sequence")
-    next_value = (
-        configured
-        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0
-        else 1
-    )
+    if "next_segment_sequence" in file_record:
+        configured = file_record["next_segment_sequence"]
+        if (
+            not isinstance(configured, int)
+            or isinstance(configured, bool)
+            or configured <= 0
+        ):
+            raise ProjectError("next_segment_sequence 必须是正整数")
+        return configured
+    next_value = 1
     file_id = str(file_record["file_id"])
     for segment in segments:
         match = re.fullmatch(
@@ -833,11 +832,7 @@ def _replacement_segments(
     next_sequence: int,
 ) -> tuple[list[dict[str, Any]], int]:
     part_ids = imported.segment_part_ids
-    if part_ids is None:
-        raise ProjectError("替换输入缺少 segment_part_ids")
     model_sources = imported.model_sources
-    if model_sources is not None and len(model_sources) != len(imported.segments):
-        raise ProjectError("替换输入 model_sources 与 Segment 数量不一致")
     values: list[dict[str, Any]] = []
     sequence = next_sequence
     for line_index, source in enumerate(imported.segments):
@@ -929,7 +924,7 @@ def _replacement_has_pending_terms(project: Path) -> bool:
     if not record_exists(project, active_path):
         return False
     active = read_json(project, active_path)
-    if active.get("status") not in {"active", "completed"}:
+    if active.get("status") != "active":
         return False
     task_id = str(active.get("active_task_id", ""))
     return any(
@@ -993,12 +988,7 @@ def prepare_file_replacement(
     adapter, imported = imports[0]
     temporary_new_segments = [
         {
-            "segment_id": f"__replacement-{index}",
-            "file_id": file_id,
-            "line_index": index,
-            "part_id": imported.segment_part_ids[index]
-            if imported.segment_part_ids is not None
-            else "document",
+            "part_id": imported.segment_part_ids[index],
             "source": imported.segments[index],
             "model_source": (
                 imported.model_sources[index]
@@ -1051,29 +1041,13 @@ def prepare_file_replacement(
                 file_id=file_id,
                 state=imported.opaque_state,
             ),
-        )
+    )
     source_snapshot = _replacement_source_snapshot(
         old_file,
         old_segments,
         source_digest=old_input_digest,
     )
     input_digest = _replacement_input_digest(Path(input_path))
-    preview_token = _replacement_digest(
-        {
-            "source_snapshot": source_snapshot,
-            "input_digest": input_digest,
-            "adapter_id": adapter.adapter_id,
-            "adapter_version": adapter.version,
-            "segments": [
-                {
-                    key: value.get(key)
-                    for key in ("part_id", "source", "model_source")
-                }
-                for value in new_segments
-            ],
-            "adapter_state": imported.opaque_state,
-        }
-    )
     impact = _replacement_impact(
         project,
         old_segments,
@@ -1087,17 +1061,12 @@ def prepare_file_replacement(
         project_id=str(metadata["project_id"]),
         file_id=file_id,
         input_path=Path(input_path).resolve(),
-        old_file=dict(old_file),
         new_file=new_file,
-        old_segments=tuple(dict(item) for item in old_segments),
         new_segments=tuple(dict(item) for item in new_segments),
-        adapter=adapter,
         adapter_states=adapter_states,
         source_snapshot=source_snapshot,
         input_digest=input_digest,
-        preview_token=preview_token,
         impact=impact,
-        warnings=tuple(warnings),
     )
 
 
@@ -1136,8 +1105,6 @@ def apply_file_replacement(
         raise UsageError("项目源文件已变化，请重新生成替换预览")
     if _replacement_input_digest(plan.input_path) != plan.input_digest:
         raise UsageError("替换输入已变化，请重新生成替换预览")
-    if not root.joinpath("input", str(current_file["stored_name"])).is_file():
-        raise ProjectError(f"项目源副本缺失：{current_file['file_id']}")
 
     new_files = [
         plan.new_file if str(item["file_id"]) == plan.file_id else item
@@ -1168,7 +1135,6 @@ def apply_file_replacement(
     held_input = staging / "old-input"
     old_moved = False
     new_published = False
-    committed = False
     try:
         shutil.copy2(plan.input_path, staged_input)
         os.replace(old_input, held_input)
@@ -1176,24 +1142,16 @@ def apply_file_replacement(
         os.replace(staged_input, old_input)
         new_published = True
         replace_source(root, new_files, new_segments, new_metadata, all_states)
-        committed = True
     except Exception:
-        if not committed:
-            if new_published and old_input.exists():
-                old_input.unlink()
-            if old_moved and held_input.exists():
-                old_input.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(held_input, old_input)
+        if new_published and old_input.exists():
+            old_input.unlink()
+        if old_moved and held_input.exists():
+            old_input.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(held_input, old_input)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     result = dict(plan.impact)
-    result.update(
-        replaced_file_id=plan.file_id,
-        file_count=len(new_files),
-        segment_count=len(new_segments),
-        preview_token=plan.preview_token,
-    )
     return result
 
 

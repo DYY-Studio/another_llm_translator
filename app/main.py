@@ -375,12 +375,10 @@ def run(argv: list[str] | None = None) -> int:
             )
         if args.dry_run:
             summary = dict(plan.impact)
-            summary["preview_token"] = plan.preview_token
-            summary["warnings"] = list(plan.warnings)
             emit_summary(summary)
             return 0
         if not args.yes:
-            emit_summary({**plan.impact, "warnings": list(plan.warnings)})
+            emit_summary(plan.impact)
             answer = input("确认替换源文件？[y/N] ").strip().casefold()
             if answer not in {"y", "yes"}:
                 raise UsageError("已取消源文件替换")
