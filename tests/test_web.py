@@ -3103,6 +3103,209 @@ async def test_web_task_manager_revalidates_queued_start(
     assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
 
 
+@pytest.mark.asyncio
+async def test_web_task_manager_cancels_before_coroutine_start_without_leaking_slot(
+    tmp_path: Path,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.cancel(started["task_id"])
+    await asyncio.gather(
+        manager.tasks[started["task_id"]].asyncio_task,
+        return_exceptions=True,
+    )
+
+    assert manager.get(started["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_shutdown_cancels_queued_and_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.shutdown()
+
+    assert manager.get(first["task_id"])["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert not manager.queued_task_ids
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+    with pytest.raises(UsageError, match="任务管理器正在关闭"):
+        await manager.start(
+            first_project,
+            "translation",
+            scope=Scope(),
+            reuse_mixed_fingerprints=False,
+            run_action=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_lowering_limit_does_not_preempt_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = {project: asyncio.Event() for project in (first_project, second_project)}
+    releases = {project: asyncio.Event() for project in (first_project, second_project)}
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project in entered:
+            entered[project].set()
+            await releases[project].wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(*(event.wait() for event in entered.values()))
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.set_max_active_projects(1)
+    assert manager.get(first["task_id"])["status"] == "running"
+    assert manager.get(second["task_id"])["status"] == "running"
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[first_project].set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[second_project].set()
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    entered_projects: list[Path] = []
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered_projects.append(project)
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_module.task_options
+    second_calls = 0
+
+    def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+            if second_calls == 2:
+                raise UsageError("promotion validation failed")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", fail_second_promotion)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    with project_write_lock(third_project):
+        pass
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "promotion validation failed" in str(manager.get(second["task_id"])["error"])
+    assert manager.get(third["task_id"])["status"] == "completed"
+    assert entered_projects == [first_project, third_project]
+
+
 def test_shared_limiter_pool_reuses_only_identical_preset_hashes() -> None:
     now = [0.0]
     pool = SharedLimiterPool(clock=lambda: now[0])

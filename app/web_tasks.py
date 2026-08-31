@@ -459,6 +459,7 @@ class WebTaskManager:
         self.guard = asyncio.Lock()
         self.diagnostics = diagnostics
         self.limiter_pool = limiter_pool or SharedLimiterPool()
+        self._shutting_down = False
 
     def _validate_start(
         self,
@@ -548,6 +549,8 @@ class WebTaskManager:
         return selected_count
 
     def _dispatch_locked(self) -> None:
+        if self._shutting_down:
+            return
         while (
             len(self.running_task_ids) < self.max_active_projects
             and self.queued_task_ids
@@ -569,6 +572,18 @@ class WebTaskManager:
                     acknowledge_manual_review=state._acknowledge_manual_review,
                 )
             )
+            state.asyncio_task.add_done_callback(
+                lambda task, state=state: self._task_done(state, task)
+            )
+
+    def _task_done(self, state: WebTask, task: asyncio.Task[None]) -> None:
+        if task.cancelled() and state.status in {"running", "cancelling"}:
+            state.status = "cancelled"
+            state.completed_at = state.completed_at or utc_now()
+        self.running_task_ids.discard(state.task_id)
+        if self.active_by_project.get(state.project) == state.task_id:
+            self.active_by_project.pop(state.project, None)
+        self._dispatch_locked()
 
     async def set_max_active_projects(self, value: int) -> None:
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -590,6 +605,8 @@ class WebTaskManager:
         acknowledge_manual_review: bool = False,
     ) -> dict[str, Any]:
         async with self.guard:
+            if self._shutting_down:
+                raise UsageError("任务管理器正在关闭")
             selected_count = self._validate_start(
                 project,
                 stage,
@@ -799,11 +816,6 @@ class WebTaskManager:
             state.completed_at = utc_now()
             for release in limiter_releases:
                 release()
-            async with self.guard:
-                self.running_task_ids.discard(state.task_id)
-                if self.active_by_project.get(state.project) == state.task_id:
-                    self.active_by_project.pop(state.project, None)
-                self._dispatch_locked()
 
     def get(self, task_id: str) -> dict[str, Any]:
         try:
@@ -865,6 +877,7 @@ class WebTaskManager:
 
     async def shutdown(self) -> None:
         async with self.guard:
+            self._shutting_down = True
             queued = [
                 self.tasks[task_id]
                 for task_id in self.queued_task_ids
