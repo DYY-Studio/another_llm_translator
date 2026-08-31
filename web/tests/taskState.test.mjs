@@ -68,6 +68,7 @@ test("keeps a fetched terminal state once an observed task leaves the active lis
   const merged = reconcileTaskCollection(
     { one: running },
     [],
+    [running],
     { T1: completed },
   );
   assert.equal(merged.one.status, "completed");
@@ -81,8 +82,35 @@ test("does not let an older terminal fetch replace a newer active project task",
   const merged = reconcileTaskCollection(
     { one: oldRunning },
     [newerRunning],
+    [oldRunning],
     { T1: oldCompleted },
   );
   assert.equal(merged.one.task_id, "T2");
   assert.equal(merged.one.status, "running");
+});
+
+test("does not remove a newer task while an older terminal fetch is pending", () => {
+  const oldRunning = task("one", "T1", "running");
+  const newerRunning = task("one", "T2", "running");
+  const merged = reconcileTaskCollection(
+    { one: newerRunning },
+    [],
+    [oldRunning],
+    { T1: null },
+  );
+  assert.equal(merged.one.task_id, "T2");
+  assert.equal(merged.one.status, "running");
+});
+
+test("removes only the task captured as missing when terminal fetch fails", () => {
+  const missing = task("one", "T1", "running");
+  const unrelated = task("two", "T2", "running");
+  const merged = reconcileTaskCollection(
+    { one: missing, two: unrelated },
+    [],
+    [missing],
+    { T1: null },
+  );
+  assert.equal(merged.one, undefined);
+  assert.equal(merged.two.task_id, "T2");
 });

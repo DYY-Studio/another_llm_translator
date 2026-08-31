@@ -146,7 +146,7 @@ export default function App() {
           const result = terminalResults[index];
           return [item.task_id, result.status === "fulfilled" ? result.value : null];
         }));
-        const updated = reconcileTaskCollection(current, value.tasks, terminal);
+        const updated = reconcileTaskCollection(current, value.tasks, missing, terminal);
         tasksRef.current = updated;
         return updated;
       });
@@ -228,6 +228,7 @@ export default function App() {
         ?? value.projects[0]?.selector
         ?? "";
     });
+    return value.projects;
   }, [syncActiveTasks]);
 
   const refresh = useCallback(async () => {
@@ -336,9 +337,21 @@ export default function App() {
     }
   }
 
-  function openTaskProject(next: TaskState) {
-    const summary = projects.find((item) => item.project_id === next.project_id);
-    if (!summary) return;
+  async function openTaskProject(next: TaskState) {
+    let summary = projects.find((item) => item.project_id === next.project_id);
+    if (!summary) {
+      try {
+        const available = await loadProjects();
+        summary = available.find((item) => item.project_id === next.project_id);
+      } catch (value) {
+        setError(value);
+        return;
+      }
+    }
+    if (!summary) {
+      setError(translate("run.projectUnavailable", language));
+      return;
+    }
     setProject(summary.selector);
     const destination = next.stage === "terminology_decision"
       ? "terminology"
@@ -436,7 +449,7 @@ export default function App() {
         stage={stage}
         task={task}
         tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}
-        onOpenTaskProject={openTaskProject}
+        onOpenTaskProject={(next) => { void openTaskProject(next); }}
         onCancelTask={cancelTask}
         onStage={navigateStage}
         onShowFailures={showFailures}

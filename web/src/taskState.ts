@@ -22,11 +22,12 @@ export function mergeTaskCollection(
 export function reconcileTaskCollection(
   current: Record<string, TaskState>,
   active: TaskState[],
+  missing: TaskState[],
   terminal: Record<string, TaskState | null>,
 ): Record<string, TaskState> {
   const merged = mergeTaskCollection(current, active);
   const activeIds = new Set(active.map((task) => task.task_id));
-  for (const task of Object.values(current)) {
+  for (const task of missing) {
     if (!isActiveTaskStatus(task.status) || activeIds.has(task.task_id)) continue;
     const finalState = terminal[task.task_id];
     if (finalState) {

@@ -39,7 +39,7 @@ export function AppShell({
   stage: Stage;
   task: TaskState | null;
   tasks: TaskState[];
-  onOpenTaskProject: (task: TaskState) => void;
+  onOpenTaskProject: (task: TaskState) => void | Promise<void>;
   onCancelTask: (taskId: string) => void;
   onStage: (value: Stage) => void;
   onShowFailures: () => void;
@@ -165,7 +165,7 @@ export function AppShell({
                           )}
                         </div>
                         <div className="task-panel-actions">
-                          <button className="quiet-button" onClick={() => { setTaskPanelOpen(false); onOpenTaskProject(next); }}>
+                          <button className="quiet-button" onClick={() => { setTaskPanelOpen(false); void onOpenTaskProject(next); }}>
                             {translate("run.openProject", language)}
                           </button>
                           {canCancelTaskStatus(next.status) && (
