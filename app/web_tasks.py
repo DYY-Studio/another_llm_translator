@@ -51,6 +51,7 @@ from .term_decision import (
     STAGE as TERMINOLOGY_DECISION_STAGE,
 )
 from .term_decision import (
+    _decision_fingerprint,
     current_decision_draft,
     decision_checkpoint_progress,
     decision_plan,
@@ -58,7 +59,6 @@ from .term_decision import (
     manual_review_state,
     run_terminology_decision,
 )
-from .term_decision import _decision_fingerprint
 
 
 def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
