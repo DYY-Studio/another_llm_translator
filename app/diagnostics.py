@@ -757,18 +757,22 @@ class DiagnosticsHub(Diagnostics):
             )
 
         usages = [session.usage for session in active_sessions]
-        complete_usage = bool(usages) and all(
-            usage is not None
-            and usage.get("available") is True
+        usage_values = [usage for usage in usages if isinstance(usage, dict)]
+        has_partial_usage = any(
+            usage.get("partial") is True for usage in usage_values
+        )
+        has_exact_usage = any(
+            usage.get("available") is True
             and usage.get("partial") is not True
-            for usage in usages
+            for usage in usage_values
         )
-        partial_usage = any(
-            usage is not None and usage.get("partial") is True
-            for usage in usages
-        ) or bool(usages) and not complete_usage and any(
-            usage is not None for usage in usages
+        has_unavailable_usage = len(usage_values) != len(usages) or any(
+            usage.get("available") is not True
+            and usage.get("partial") is not True
+            for usage in usage_values
         )
+        complete_usage = bool(usages) and not has_partial_usage and not has_unavailable_usage
+        partial_usage = has_partial_usage or (has_exact_usage and has_unavailable_usage)
         observed_usage = complete_usage or partial_usage
         input_tokens = (
             sum(int(usage["input_tokens"]) for usage in usages if usage is not None)

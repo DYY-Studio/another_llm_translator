@@ -134,6 +134,41 @@ def test_diagnostics_hub_filters_metrics_and_requests_by_project(
     assert filtered["requests"]["items"][0]["task_id"] == "T2"
 
 
+def test_diagnostics_hub_distinguishes_unavailable_and_partial_usage(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.set_usage(
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "available": False,
+                "partial": False,
+            }
+        )
+        unavailable = hub.snapshot()["metrics"]
+        assert unavailable["usage_available"] is False
+        assert unavailable["usage_partial"] is False
+
+        with hub.activate("second", "translation", task_id="T2"):
+            hub.set_usage(
+                {
+                    "input_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                    "available": True,
+                    "partial": False,
+                }
+            )
+            partial = hub.snapshot()["metrics"]
+            assert partial["usage_available"] is False
+            assert partial["usage_partial"] is True
+            assert partial["input_tokens"] == 12
+            assert partial["output_tokens"] == 3
+
+
 def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     logger = get_logger("diagnostics-test")
