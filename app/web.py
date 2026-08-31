@@ -38,7 +38,6 @@ from .config import (
 from .credentials import (
     credential_summaries,
     delete_credential,
-    migrate_legacy_credentials,
     read_credential,
     read_lan_password,
     resolve_api_key,
@@ -272,7 +271,6 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
-    migrate_legacy_credentials()
     migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)

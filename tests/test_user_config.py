@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import keyring
 import pytest
 from fastapi.testclient import TestClient
 
 from app.project import bundle_hash, init_project, sync_global_templates
 from app.user_config import (
     effective_path,
-    migrate_legacy_user_root,
     user_root,
     write_user,
 )
@@ -24,49 +24,37 @@ def test_user_root_honors_environment_override(
     assert user_root() == override
 
 
-def test_legacy_default_user_root_moves_when_release_root_is_absent(
-    tmp_path: Path,
-) -> None:
-    legacy = tmp_path / "minimal-llm-translator"
-    legacy.mkdir()
-    (legacy / "marker").write_text("legacy", encoding="utf-8")
-
-    assert migrate_legacy_user_root(base=tmp_path) == "migrated"
-    assert not legacy.exists()
-    assert (tmp_path / "another-llm-translator" / "marker").read_text(
-        encoding="utf-8"
-    ) == "legacy"
-
-
-def test_legacy_default_user_root_skips_when_release_root_exists(
-    tmp_path: Path,
-) -> None:
-    legacy = tmp_path / "minimal-llm-translator"
-    current = tmp_path / "another-llm-translator"
-    legacy.mkdir()
-    current.mkdir()
-    (legacy / "marker").write_text("legacy", encoding="utf-8")
-    (current / "marker").write_text("current", encoding="utf-8")
-
-    assert migrate_legacy_user_root(base=tmp_path) == "skipped"
-    assert legacy.is_dir()
-    assert (current / "marker").read_text(encoding="utf-8") == "current"
-
-
-def test_legacy_default_user_root_reports_move_failure(
+def test_user_root_does_not_scan_or_move_legacy_default_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    legacy = tmp_path / "minimal-llm-translator"
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    legacy_name = "-".join(("minimal", "llm", "translator"))
+    legacy = tmp_path / legacy_name
     legacy.mkdir()
+    (legacy / "marker").write_text("legacy", encoding="utf-8")
 
-    def fail_replace(self: Path, target: Path) -> Path:
-        raise OSError("read-only")
-
-    monkeypatch.setattr(Path, "replace", fail_replace)
-    with pytest.raises(RuntimeError, match="无法将旧数据目录迁移"):
-        migrate_legacy_user_root(base=tmp_path)
+    assert user_root() == tmp_path / "another-llm-translator"
     assert legacy.is_dir()
     assert not (tmp_path / "another-llm-translator").exists()
+
+
+def test_web_app_creation_does_not_access_keyring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+
+    def fail_get_password(*args: object, **kwargs: object) -> None:
+        raise AssertionError("web app creation must not access the keyring")
+
+    monkeypatch.setattr(keyring, "get_password", fail_get_password)
+    app = create_app(
+        projects_root=tmp_path / "projects",
+        app_root=tmp_path / "app-root",
+    )
+
+    assert app.title == "Another LLM Translator"
 
 
 def test_effective_path_prefers_user_copy_and_falls_back_to_builtin(

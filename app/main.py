@@ -8,7 +8,6 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from .credentials import migrate_legacy_credentials
 from .errors import AppError, UsageError
 from .execution import Scope, choose_running_run
 from .i18n import cli_language
@@ -281,7 +280,6 @@ def emit_summary(summary: dict[str, Any]) -> None:
 
 
 def run(argv: list[str] | None = None) -> int:
-    migrate_legacy_credentials()
     migrate_llm_resources()
     configure_cli_logging()
     logger = get_logger()

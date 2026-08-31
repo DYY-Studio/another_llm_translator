@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import time
@@ -12,68 +11,15 @@ import keyring
 
 from .errors import ConfigError, ExternalError
 from .sqlite_storage import atomic_write_json
-from .user_config import (
-    USER_ROOT_OVERRIDE_ENV,
-    default_user_root,
-    legacy_user_root,
-    user_root,
-)
+from .user_config import user_root
 
 SERVICE = "another-llm-translator"
-LEGACY_SERVICE = "minimal-llm-translator"
 LAN_ACCOUNT = "lan-auth"
 _CREDENTIAL_ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*")
-_MIGRATION_LOGGER = logging.getLogger("another_llm_translator.migration")
 
 
 def _index_path() -> Path:
     return user_root() / "credentials" / "index.json"
-
-
-def _indexed_ids(path: Path) -> set[str]:
-    if not path.is_file():
-        return set()
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ConfigError(f"无法读取凭据迁移索引 {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ConfigError(f"凭据迁移索引格式无效：{path}")
-    return {
-        credential_id
-        for credential_id, entry in value.items()
-        if isinstance(credential_id, str)
-        and _CREDENTIAL_ID_RE.fullmatch(credential_id)
-        and isinstance(entry, dict)
-    }
-
-
-def migrate_legacy_credentials(*, base: Path | None = None) -> int:
-    """Copy legacy keyring entries without overwriting release entries."""
-    if base is None and os.environ.get(USER_ROOT_OVERRIDE_ENV):
-        return 0
-    current_index = (
-        _index_path()
-        if base is None
-        else default_user_root(base=base) / "credentials" / "index.json"
-    )
-    old_index = legacy_user_root(base=base) / "credentials" / "index.json"
-    accounts = _indexed_ids(current_index) | _indexed_ids(old_index) | {LAN_ACCOUNT}
-    copied = 0
-    for account in sorted(accounts):
-        try:
-            if keyring.get_password(SERVICE, account) is not None:
-                continue
-            secret = keyring.get_password(LEGACY_SERVICE, account)
-            if secret is None:
-                continue
-            keyring.set_password(SERVICE, account, secret)
-        except keyring.errors.KeyringError as exc:
-            raise ConfigError(f"无法迁移钥匙串凭据 {account}：{exc}") from exc
-        copied += 1
-    if copied:
-        _MIGRATION_LOGGER.info("已迁移 %d 个旧钥匙串条目", copied)
-    return copied
 
 
 def _load_index() -> dict[str, dict[str, int]]:
