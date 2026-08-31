@@ -129,7 +129,6 @@ interface ReplacementImpact {
   preserved_completed_by_stage: Record<string, number>;
   removed_completed_by_stage: Record<string, number>;
   warnings: string[];
-  preview_id?: string;
 }
 
 interface ReplacementSource {
@@ -644,7 +643,7 @@ function ReplacementDialog({
   const [adapter, setAdapter] = useState<AdapterSummary | null>(null);
   const [source, setSource] = useState<ReplacementSource | null>(null);
   const [options, setOptions] = useState<Record<string, string>>({});
-  const [preview, setPreview] = useState<ReplacementImpact | null>(null);
+  const [preview, setPreview] = useState<(ReplacementImpact & { preview_id: string }) | null>(null);
   const [loadingAdapter, setLoadingAdapter] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -701,7 +700,7 @@ function ReplacementDialog({
         "adapter_options",
         JSON.stringify({ [adapter.adapter_id]: options }),
       );
-      setPreview(await api<ReplacementImpact>(
+      setPreview(await api<ReplacementImpact & { preview_id: string }>(
         `/api/v1/projects/${project}/files/${file.file_id}/replacement-preview`,
         { method: "POST", body },
       ));
@@ -717,7 +716,7 @@ function ReplacementDialog({
     setBusy(true);
     setError("");
     try {
-      if (preview?.preview_id) {
+      if (preview) {
         await api(
           `/api/v1/projects/${project}/files/${file.file_id}/replacement-preview/${preview.preview_id}`,
           { method: "DELETE" },
@@ -732,7 +731,7 @@ function ReplacementDialog({
   }
 
   async function confirmPreview() {
-    if (!preview?.preview_id) return;
+    if (!preview) return;
     setBusy(true);
     setError("");
     try {
