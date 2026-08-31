@@ -52,7 +52,7 @@ from app.term_decision import (
     run_terminology_decision,
     save_decision_rejections,
 )
-from app.term_decision_protocol import DECISION_RULES_VERSION
+from app.term_decision_protocol import DECISION_RULES_VERSION, format_correction
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
@@ -119,6 +119,64 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
         ),
     )
     return project
+
+
+def test_semantic_correction_guidance_matches_prompt_language() -> None:
+    errors = [
+        {
+            "code": "invalid_action",
+            "message": "术语决策 action 无效：alice",
+            "normalized": "alice",
+        },
+        {
+            "code": "invalid_fields",
+            "message": "决策字段无效",
+            "normalized": "alice",
+            "fields": ["group_primary"],
+        },
+        {
+            "code": "missing_record",
+            "message": "术语决策缺少记录：bob",
+            "normalized": "bob",
+        },
+        {
+            "code": "invalid_relationship",
+            "message": "术语组主自指：alice -> alice",
+            "normalized": "alice",
+        },
+    ]
+
+    english = format_correction(
+        language="en",
+        errors=errors,
+        previous_invalid_records=[],
+        accepted_normalized=[],
+        target_normalized=["alice", "bob"],
+    )
+    assert [item["code"] for item in english["errors"]] == [
+        "invalid_action",
+        "invalid_fields",
+        "missing_record",
+        "invalid_relationship",
+    ]
+    assert all(
+        not any("\u4e00" <= character <= "\u9fff" for character in item["message"])
+        for item in english["errors"]
+    )
+    assert english["errors"][1]["fields"] == ["group_primary"]
+    assert all(item["normalized"] in {"alice", "bob"} for item in english["errors"])
+
+    chinese = format_correction(
+        language="zh-CN",
+        errors=errors,
+        previous_invalid_records=[],
+        accepted_normalized=[],
+        target_normalized=["alice", "bob"],
+    )
+    assert all(
+        any("\u4e00" <= character <= "\u9fff" for character in item["message"])
+        for item in chinese["errors"]
+    )
 
 
 def write_pending_decision_draft(
@@ -1624,8 +1682,10 @@ async def test_decision_group_violation_enters_format_repair(
         if "format_correction" in payload:
             repairs += 1
             correction = payload["format_correction"]
-            assert "术语组主自指：alice -> alice" in correction["errors"][0]["message"]
+            assert "alias" in correction["errors"][0]["message"]
+            assert "自指" in correction["errors"][0]["message"]
             assert correction["errors"][0]["code"] == "invalid_relationship"
+            assert correction["errors"][0]["normalized"] == "alice"
             assert correction["target_normalized"] == ["alice"]
             content = llm_jsonl(decision_response(payload))
         elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
