@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +20,7 @@ from .errors import (
 )
 from .execution import (
     Scope,
+    SlidingWindowLimiter,
     choose_running_run,
     combine_usage,
     find_running_runs,
@@ -346,12 +349,89 @@ class WebTask:
         }
 
 
+@dataclass
+class _LimiterEntry:
+    limiter: SlidingWindowLimiter
+    leases: int = 0
+    released_at: float | None = None
+
+
+class SharedLimiterPool:
+    """Share provider rate-limit windows among Web tasks in one process."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        retention_seconds: float = 60.0,
+    ) -> None:
+        self.clock = clock
+        self.retention_seconds = retention_seconds
+        self.entries: dict[tuple[str, str], _LimiterEntry] = {}
+
+    @staticmethod
+    def _key(config: dict[str, Any]) -> tuple[str, str]:
+        try:
+            return (
+                str(config["_llm_preset_id"]),
+                str(config["_llm_preset_hash"]),
+            )
+        except KeyError as exc:
+            raise UsageError("LLM Preset 缺少共享限流身份") from exc
+
+    def _prune(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self.entries.items()
+            if entry.leases == 0
+            and entry.released_at is not None
+            and now - entry.released_at >= self.retention_seconds
+        ]
+        for key in expired:
+            self.entries.pop(key, None)
+
+    def acquire(
+        self, config: dict[str, Any]
+    ) -> tuple[SlidingWindowLimiter, Callable[[], None]]:
+        now = self.clock()
+        self._prune(now)
+        key = self._key(config)
+        entry = self.entries.get(key)
+        if entry is None:
+            execution = config["execution"]
+            entry = _LimiterEntry(
+                limiter=SlidingWindowLimiter(
+                    int(execution["requests_per_minute"]),
+                    int(execution["input_tokens_per_minute"]),
+                )
+            )
+            self.entries[key] = entry
+        entry.leases += 1
+        entry.released_at = None
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            current = self.entries.get(key)
+            if current is None:
+                return
+            current.leases = max(0, current.leases - 1)
+            if current.leases == 0:
+                current.released_at = self.clock()
+
+        return entry.limiter, release
+
+
 class WebTaskManager:
     def __init__(
         self,
         diagnostics: Diagnostics | None = None,
         *,
         max_active_projects: int = 2,
+        limiter_pool: SharedLimiterPool | None = None,
     ) -> None:
         if (
             not isinstance(max_active_projects, int)
@@ -366,6 +446,7 @@ class WebTaskManager:
         self.max_active_projects = max_active_projects
         self.guard = asyncio.Lock()
         self.diagnostics = diagnostics
+        self.limiter_pool = limiter_pool or SharedLimiterPool()
 
     def _validate_start(
         self,
@@ -542,6 +623,7 @@ class WebTaskManager:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
         resuming = False
+        limiter_releases: list[Callable[[], None]] = []
 
         def progress(completed: int, failed: int, total: int) -> None:
             state.completed_segments = completed
@@ -569,6 +651,29 @@ class WebTaskManager:
                     acknowledge_manual_review=acknowledge_manual_review,
                     ensure_unique=False,
                 )
+                shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+                if state.stage == "run-all":
+                    for stage in LLM_STAGES:
+                        config = load_project_config(state.project, stage=stage)
+                        key = (
+                            str(config["_llm_preset_id"]),
+                            str(config["_llm_preset_hash"]),
+                        )
+                        if key in shared_limiters:
+                            continue
+                        limiter, release = self.limiter_pool.acquire(config)
+                        shared_limiters[key] = limiter
+                        limiter_releases.append(release)
+                else:
+                    config = load_project_config(state.project, stage=state.stage)
+                    limiter, release = self.limiter_pool.acquire(config)
+                    shared_limiters[
+                        (
+                            str(config["_llm_preset_id"]),
+                            str(config["_llm_preset_hash"]),
+                        )
+                    ] = limiter
+                    limiter_releases.append(release)
                 resume_run_id = None
                 if state.stage != "run-all":
                     resume_run_id, _ = choose_running_run(
@@ -599,6 +704,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(
@@ -609,6 +715,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage == "translation":
                     summary = await run_translation(
@@ -619,6 +726,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage in {"proofreading", "polishing"}:
                     summary = await run_review(
@@ -630,6 +738,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 else:
                     summary = await run_all(
@@ -637,6 +746,7 @@ class WebTaskManager:
                         scope,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                         prompt_language=prompt_language,
+                        limiters=shared_limiters,
                     )
             state.summary = summary
             state.completed_segments = int(summary.get("completed", 0)) + int(
@@ -673,6 +783,8 @@ class WebTaskManager:
             )
         finally:
             state.completed_at = utc_now()
+            for release in limiter_releases:
+                release()
             async with self.guard:
                 self.running_task_ids.discard(state.task_id)
                 if self.active_by_project.get(state.project) == state.task_id:

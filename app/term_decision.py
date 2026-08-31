@@ -2220,6 +2220,7 @@ async def run_terminology_decision(
     resume_run_id: str | None = None,
     prompt_language: str | None = None,
     http_client: httpx.AsyncClient | None = None,
+    limiter: SlidingWindowLimiter | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -2312,10 +2313,11 @@ async def run_terminology_decision(
             requested_count=len(eligible),
             reused_count=0,
         )
-    limiter = SlidingWindowLimiter(
-        int(config["execution"]["requests_per_minute"]),
-        int(config["execution"]["input_tokens_per_minute"]),
-    )
+    if limiter is None:
+        limiter = SlidingWindowLimiter(
+            int(config["execution"]["requests_per_minute"]),
+            int(config["execution"]["input_tokens_per_minute"]),
+        )
     eligible_terms = {str(item["normalized"]) for item in eligible}
     checkpoint = _load_checkpoint(
         project,

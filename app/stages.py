@@ -11,7 +11,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -4939,6 +4939,7 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
+    limiters: Mapping[tuple[str, str], SlidingWindowLimiter] | None = None,
 ) -> dict[str, Any]:
     segments = load_segments(project)
     _require_nonempty_segments(segments)
@@ -4954,13 +4955,18 @@ async def run_all(
         )
         for stage in stages
     }
-    limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
-    for stage, key in resource_keys.items():
-        if key not in limiters:
-            limiters[key] = SlidingWindowLimiter(
-                configs[stage]["execution"]["requests_per_minute"],
-                configs[stage]["execution"]["input_tokens_per_minute"],
-            )
+    if limiters is None:
+        local_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+        for stage, key in resource_keys.items():
+            if key not in local_limiters:
+                local_limiters[key] = SlidingWindowLimiter(
+                    configs[stage]["execution"]["requests_per_minute"],
+                    configs[stage]["execution"]["input_tokens_per_minute"],
+                )
+        limiters = local_limiters
+    missing_limiters = set(resource_keys.values()) - set(limiters)
+    if missing_limiters:
+        raise ConfigError("run-all 缺少阶段共享限流器")
 
     async def execute(
         clients: dict[tuple[str, str], httpx.AsyncClient] | None,

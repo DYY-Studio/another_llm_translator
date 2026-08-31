@@ -34,7 +34,7 @@ from app.sqlite_storage import (
 )
 from app.web import create_app
 from app.web_store import WebStore
-from app.web_tasks import WebTaskManager
+from app.web_tasks import SharedLimiterPool, WebTaskManager
 from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
@@ -3101,6 +3101,74 @@ async def test_web_task_manager_revalidates_queued_start(
     await manager.tasks[second["task_id"]].asyncio_task
     assert manager.get(second["task_id"])["status"] == "failed"
     assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
+
+
+def test_shared_limiter_pool_reuses_only_identical_preset_hashes() -> None:
+    now = [0.0]
+    pool = SharedLimiterPool(clock=lambda: now[0])
+    first_config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    same_config = {**first_config}
+    different_config = {
+        **first_config,
+        "_llm_preset_hash": "hash-b",
+    }
+    first, release_first = pool.acquire(first_config)
+    same, release_same = pool.acquire(same_config)
+    different, release_different = pool.acquire(different_config)
+    assert same is first
+    assert different is not first
+    release_first()
+    release_same()
+    release_different()
+    now[0] = 59.0
+    retained, release_retained = pool.acquire(first_config)
+    assert retained is first
+    release_retained()
+    now[0] = 119.0
+    expired, release_expired = pool.acquire(first_config)
+    assert expired is not first
+    release_expired()
+
+
+@pytest.mark.asyncio
+async def test_web_tasks_pass_shared_limiter_to_same_preset_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    limiters: list[object] = []
+
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        limiters.append(kwargs["limiter"])
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert len(limiters) == 2
+    assert limiters[0] is limiters[1]
 
 
 def test_web_task_options_include_completed_terminology_scans(
