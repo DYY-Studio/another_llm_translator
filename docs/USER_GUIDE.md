@@ -35,8 +35,8 @@ python -m pip install another-llm-translator-term-validation
 从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`。官方桌面构建会在
 构建时装配这两个示例插件；已发布桌面应用暂不提供运行时插件安装。
 
-Another LLM Translator 不再提供旧开发名称对应的命令、环境变量或插件入口。首次启动时，
-若新的默认数据目录不存在，程序会一次性迁移旧默认目录；新目录已存在时保留两者并以新目录为准。
+Another LLM Translator 只识别当前包名、命令、环境变量、插件入口和默认数据目录。旧版本位置中的
+数据不会自动发现、迁移或删除；如需保留，请用户自行处理。
 
 打开 `http://127.0.0.1:8765`。使用 `python -m app.web --port PORT` 可以更换端口。
 前端构建完成后，日常启动只需激活虚拟环境并运行 `python -m app.web`。
