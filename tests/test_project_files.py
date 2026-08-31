@@ -398,6 +398,31 @@ def test_file_replacement_rejects_invalid_persisted_segment_sequence(
         prepare_file_replacement(project, "F0001", replacement)
 
 
+def test_file_replacement_initializes_missing_segment_sequence_from_existing_ids(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    files = read_files(project)
+    segments = read_segments(project)
+    files[0].pop("next_segment_sequence")
+    segments[0]["segment_id"] = "F0001-S000009"
+    metadata = read_json(project, project / "project.json")
+    replace_source(project, files, segments, metadata)
+
+    apply_file_replacement(
+        project,
+        prepare_file_replacement(project, "F0001", replacement),
+    )
+
+    assert read_segments(project)[0]["segment_id"] == "F0001-S000010"
+    assert read_files(project)[0]["next_segment_sequence"] == 11
+
+
 def test_epub_file_replacement_reuses_part_progress_and_new_locators(
     tmp_path: Path,
 ) -> None:
