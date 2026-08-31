@@ -85,12 +85,17 @@ class FileReplacementPlan:
     project_id: str
     file_id: str
     input_path: Path
+    temporary_root: Path
+    staged_input: Path
     new_file: dict[str, Any]
     new_segments: tuple[dict[str, Any], ...]
     adapter_states: tuple[dict[str, Any], ...]
     source_snapshot: str
     input_digest: str
     impact: dict[str, object]
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.temporary_root, ignore_errors=True)
 
 
 def natural_path_key(
@@ -1007,106 +1012,117 @@ def prepare_file_replacement(
         opaque_state=previous_state,
         overrides=(adapter_options or {}).get(adapter_id),
     )
-    config = load_config(project / "config.toml")
-    imports, warnings = _import_project_inputs(
-        [str(input_path)],
-        recursive=False,
-        config=config,
-        document_adapter_id=adapter_id,
-        adapter_options={adapter_id: replacement_adapter_options},
-    )
-    if len(imports) != 1:
-        raise UsageError("替换输入必须由 Document Adapter 解析为一个 File")
-    adapter, imported = imports[0]
-    temporary_new_segments = [
-        {
-            "part_id": imported.segment_part_ids[index],
-            "source": imported.segments[index],
-            "model_source": (
-                imported.model_sources[index]
-                if imported.model_sources is not None
-                else None
-            ),
-        }
-        for index in range(len(imported.segments))
-    ]
-    alignment = align_segments(old_segments, temporary_new_segments)
-    next_sequence = _next_segment_sequence(old_file, old_segments)
-    new_segments, next_sequence = _replacement_segments(
-        project_id=str(metadata["project_id"]),
-        file_id=file_id,
-        imported=imported,
-        old_segments=old_segments,
-        alignment=alignment,
-        next_sequence=next_sequence,
-    )
-    new_file = dict(old_file)
-    new_file.update(
-        encoding_detected=imported.encoding_detected,
-        encoding_confidence=imported.encoding_confidence,
-        encoding_used=imported.encoding_used,
-        segment_count=len(new_segments),
-        document_adapter_id=adapter.adapter_id,
-        document_adapter_version=adapter.version,
-        next_segment_sequence=next_sequence,
-    )
-    state_path = old_file.get("document_adapter_state")
-    if imported.opaque_state is None:
-        new_file["document_adapter_state"] = None
-        adapter_states: tuple[dict[str, Any], ...] = ()
-    else:
-        if not isinstance(state_path, str) or not state_path:
-            state_path = (
-                Path("source")
-                / "adapters"
-                / adapter.adapter_id
-                / f"{file_id}.json"
-            ).as_posix()
-        new_file["document_adapter_state"] = state_path
-        adapter_states = (
-            record_header(
-                "document_adapter_state",
-                str(metadata["project_id"]),
-                record_id=f"DOCUMENT-{file_id}",
-                adapter_id=adapter.adapter_id,
-                adapter_version=adapter.version,
-                file_id=file_id,
-                state=imported.opaque_state,
-            ),
-    )
-    source_snapshot = _replacement_source_snapshot(
-        old_file,
-        old_segments,
-        source_digest=old_input_digest,
-    )
-    input_digest = _replacement_input_digest(Path(input_path))
-    impact = _replacement_impact(
-        project,
-        old_segments,
-        new_segments,
-        alignment,
-        warnings,
-    )
-    impact["file_id"] = file_id
-    impact["previous_adapter_options"] = previous_adapter_options
-    impact["replacement_adapter_options"] = replacement_adapter_options
-    impact["changed_adapter_options"] = sorted(
-        option_id
-        for option_id, value in replacement_adapter_options.items()
-        if previous_adapter_options.get(option_id) != value
-    )
-    return FileReplacementPlan(
-        project=project.resolve(),
-        project_id=str(metadata["project_id"]),
-        file_id=file_id,
-        input_path=Path(input_path).resolve(),
-        new_file=new_file,
-        new_segments=tuple(dict(item) for item in new_segments),
-        adapter_states=adapter_states,
-        source_snapshot=source_snapshot,
-        input_digest=input_digest,
-        impact=impact,
-    )
+    temporary_root = Path(tempfile.mkdtemp(prefix="translator-replacement-"))
+    staged_input = temporary_root / input_path.name
+    try:
+        shutil.copy2(input_path, staged_input)
+        input_digest = _replacement_input_digest(staged_input)
+        config = load_config(project / "config.toml")
+        imports, warnings = _import_project_inputs(
+            [str(staged_input)],
+            recursive=False,
+            config=config,
+            document_adapter_id=adapter_id,
+            adapter_options={adapter_id: replacement_adapter_options},
+        )
+        if len(imports) != 1:
+            raise UsageError("替换输入必须由 Document Adapter 解析为一个 File")
+        if _replacement_input_digest(staged_input) != input_digest:
+            raise UsageError("替换输入在解析期间变化，请重新生成替换预览")
+        adapter, imported = imports[0]
+        temporary_new_segments = [
+            {
+                "part_id": imported.segment_part_ids[index],
+                "source": imported.segments[index],
+                "model_source": (
+                    imported.model_sources[index]
+                    if imported.model_sources is not None
+                    else None
+                ),
+            }
+            for index in range(len(imported.segments))
+        ]
+        alignment = align_segments(old_segments, temporary_new_segments)
+        next_sequence = _next_segment_sequence(old_file, old_segments)
+        new_segments, next_sequence = _replacement_segments(
+            project_id=str(metadata["project_id"]),
+            file_id=file_id,
+            imported=imported,
+            old_segments=old_segments,
+            alignment=alignment,
+            next_sequence=next_sequence,
+        )
+        new_file = dict(old_file)
+        new_file.update(
+            encoding_detected=imported.encoding_detected,
+            encoding_confidence=imported.encoding_confidence,
+            encoding_used=imported.encoding_used,
+            segment_count=len(new_segments),
+            document_adapter_id=adapter.adapter_id,
+            document_adapter_version=adapter.version,
+            next_segment_sequence=next_sequence,
+        )
+        state_path = old_file.get("document_adapter_state")
+        if imported.opaque_state is None:
+            new_file["document_adapter_state"] = None
+            adapter_states: tuple[dict[str, Any], ...] = ()
+        else:
+            if not isinstance(state_path, str) or not state_path:
+                state_path = (
+                    Path("source")
+                    / "adapters"
+                    / adapter.adapter_id
+                    / f"{file_id}.json"
+                ).as_posix()
+            new_file["document_adapter_state"] = state_path
+            adapter_states = (
+                record_header(
+                    "document_adapter_state",
+                    str(metadata["project_id"]),
+                    record_id=f"DOCUMENT-{file_id}",
+                    adapter_id=adapter.adapter_id,
+                    adapter_version=adapter.version,
+                    file_id=file_id,
+                    state=imported.opaque_state,
+                ),
+            )
+        source_snapshot = _replacement_source_snapshot(
+            old_file,
+            old_segments,
+            source_digest=old_input_digest,
+        )
+        impact = _replacement_impact(
+            project,
+            old_segments,
+            new_segments,
+            alignment,
+            warnings,
+        )
+        impact["file_id"] = file_id
+        impact["previous_adapter_options"] = previous_adapter_options
+        impact["replacement_adapter_options"] = replacement_adapter_options
+        impact["changed_adapter_options"] = sorted(
+            option_id
+            for option_id, value in replacement_adapter_options.items()
+            if previous_adapter_options.get(option_id) != value
+        )
+        return FileReplacementPlan(
+            project=project.resolve(),
+            project_id=str(metadata["project_id"]),
+            file_id=file_id,
+            input_path=Path(input_path).resolve(),
+            temporary_root=temporary_root,
+            staged_input=staged_input,
+            new_file=new_file,
+            new_segments=tuple(dict(item) for item in new_segments),
+            adapter_states=adapter_states,
+            source_snapshot=source_snapshot,
+            input_digest=input_digest,
+            impact=impact,
+        )
+    except Exception:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise
 
 
 def apply_file_replacement(
@@ -1142,7 +1158,7 @@ def apply_file_replacement(
         source_digest=current_input_digest,
     ) != plan.source_snapshot:
         raise UsageError("项目源文件已变化，请重新生成替换预览")
-    if _replacement_input_digest(plan.input_path) != plan.input_digest:
+    if _replacement_input_digest(plan.staged_input) != plan.input_digest:
         raise UsageError("替换输入已变化，请重新生成替换预览")
 
     new_files = [
@@ -1175,7 +1191,9 @@ def apply_file_replacement(
     old_moved = False
     new_published = False
     try:
-        shutil.copy2(plan.input_path, staged_input)
+        shutil.copy2(plan.staged_input, staged_input)
+        if _replacement_input_digest(staged_input) != plan.input_digest:
+            raise UsageError("替换输入复制结果已变化，请重新生成替换预览")
         os.replace(old_input, held_input)
         old_moved = True
         os.replace(staged_input, old_input)

@@ -366,33 +366,38 @@ def run(argv: list[str] | None = None) -> int:
             if args.adapter_options
             else None
         )
-        with project_write_lock(project):
-            plan = prepare_file_replacement(
-                project,
-                args.file_id,
-                Path(args.input),
-                adapter_options=adapter_options,
-            )
-        if args.dry_run:
-            summary = dict(plan.impact)
+        plan = None
+        try:
+            with project_write_lock(project):
+                plan = prepare_file_replacement(
+                    project,
+                    args.file_id,
+                    Path(args.input),
+                    adapter_options=adapter_options,
+                )
+            if args.dry_run:
+                summary = dict(plan.impact)
+                emit_summary(summary)
+                return 0
+            if not args.yes:
+                emit_summary(plan.impact)
+                answer = input("确认替换源文件？[y/N] ").strip().casefold()
+                if answer not in {"y", "yes"}:
+                    raise UsageError("已取消源文件替换")
+            with project_write_lock(project):
+                summary = apply_file_replacement(project, plan)
             emit_summary(summary)
+            logger.info(
+                "command complete command=files-replace file=%s preserved=%d added=%d removed=%d",
+                args.file_id,
+                summary["preserved_segment_count"],
+                summary["added_segment_count"],
+                summary["removed_segment_count"],
+            )
             return 0
-        if not args.yes:
-            emit_summary(plan.impact)
-            answer = input("确认替换源文件？[y/N] ").strip().casefold()
-            if answer not in {"y", "yes"}:
-                raise UsageError("已取消源文件替换")
-        with project_write_lock(project):
-            summary = apply_file_replacement(project, plan)
-        emit_summary(summary)
-        logger.info(
-            "command complete command=files-replace file=%s preserved=%d added=%d removed=%d",
-            args.file_id,
-            summary["preserved_segment_count"],
-            summary["added_segment_count"],
-            summary["removed_segment_count"],
-        )
-        return 0
+        finally:
+            if plan is not None:
+                plan.cleanup()
     if args.command == "inspect":
         project = _resolve_project(args)
         warnings = sync_global_templates(project, dry_run=args.dry_run)

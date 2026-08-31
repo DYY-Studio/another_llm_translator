@@ -144,11 +144,14 @@ _WINDOWS_DRIVE_TYPES = {
 @dataclass
 class ReplacementPreviewSession:
     preview_id: str
-    temporary_root: Path
     plan: FileReplacementPlan
 
+    @property
+    def temporary_root(self) -> Path:
+        return self.plan.temporary_root
+
     def cleanup(self) -> None:
-        shutil.rmtree(self.temporary_root, ignore_errors=True)
+        self.plan.cleanup()
 
 
 def _windows_drive_entries() -> list[dict[str, Any]]:
@@ -1456,10 +1459,11 @@ def create_app(
             raise UsageError("必须上传一个替换文件或提供服务端文件路径")
         if file is not None and normalized_server_path:
             raise UsageError("替换只能提供一个文件来源")
-        temporary_root = Path(tempfile.mkdtemp(prefix="translator-replacement-"))
+        upload_root = Path(tempfile.mkdtemp(prefix="translator-replacement-upload-"))
+        plan: FileReplacementPlan | None = None
         try:
             inputs, _, upload_warnings = await stage_uploads(
-                temporary_root,
+                upload_root,
                 [file] if file is not None else [],
                 None,
                 None,
@@ -1475,10 +1479,10 @@ def create_app(
                     Path(inputs[0]),
                     adapter_options=parse_adapter_options(adapter_options),
                 )
+            shutil.rmtree(upload_root, ignore_errors=True)
             preview_id = secrets.token_urlsafe(24)
             session = ReplacementPreviewSession(
                 preview_id=preview_id,
-                temporary_root=temporary_root,
                 plan=plan,
             )
             key = replacement_key(root, file_id)
@@ -1494,7 +1498,9 @@ def create_app(
             result["preview_id"] = preview_id
             return result
         except Exception:
-            shutil.rmtree(temporary_root, ignore_errors=True)
+            if plan is not None:
+                plan.cleanup()
+            shutil.rmtree(upload_root, ignore_errors=True)
             raise
 
     @app.post("/api/v1/projects/{name}/files/{file_id}/replacement-confirm")

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import app.main as main_module
+import app.project as project_module
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, select_scope, stage_result_path
 from app.file_replacement import align_segments
@@ -284,6 +286,143 @@ def test_file_replacement_does_not_reuse_ids_across_replacements(
 
     assert first_id == "F0001-S000002"
     assert read_segments(project)[0]["segment_id"] == "F0001-S000003"
+
+
+def test_file_replacement_uses_staged_input_after_external_change(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    assert plan.staged_input.read_text(encoding="utf-8") == "two"
+    replacement.write_text("three", encoding="utf-8")
+
+    try:
+        apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "two"
+    assert not plan.temporary_root.exists()
+
+
+def test_file_replacement_rejects_staged_input_changed_during_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    imported = project_module._import_project_inputs
+    roots: list[Path] = []
+    original_mkdtemp = project_module.tempfile.mkdtemp
+
+    def capture_root(*args: object, **kwargs: object) -> str:
+        root = original_mkdtemp(*args, **kwargs)
+        roots.append(Path(root))
+        return root
+
+    def mutate_during_parse(*args: object, **kwargs: object) -> object:
+        inputs = args[0]
+        assert isinstance(inputs, list)
+        Path(str(inputs[0])).write_text("tampered", encoding="utf-8")
+        return imported(*args, **kwargs)
+
+    monkeypatch.setattr(project_module, "_import_project_inputs", mutate_during_parse)
+    monkeypatch.setattr(project_module.tempfile, "mkdtemp", capture_root)
+    with pytest.raises(UsageError, match="解析期间变化"):
+        prepare_file_replacement(project, "F0001", replacement)
+    assert roots and not roots[0].exists()
+
+
+def test_file_replacement_rejects_staged_input_changed_before_apply(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    plan.staged_input.write_text("tampered", encoding="utf-8")
+
+    try:
+        with pytest.raises(UsageError, match="替换输入已变化"):
+            apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+
+def test_file_replacement_rejects_project_staging_digest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    copy2 = project_module.shutil.copy2
+
+    def copy_and_tamper(source: str | Path, target: str | Path) -> object:
+        result = copy2(source, target)
+        if Path(target).name == "new-input":
+            Path(target).write_text("tampered", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(project_module.shutil, "copy2", copy_and_tamper)
+    try:
+        with pytest.raises(UsageError, match="复制结果"):
+            apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "one"
+
+
+def test_files_replace_cli_cleans_plan_after_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plans = []
+    prepare = main_module.prepare_file_replacement
+
+    def capture_plan(*args: object, **kwargs: object) -> object:
+        plan = prepare(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(main_module, "prepare_file_replacement", capture_plan)
+    assert (
+        run(
+            [
+                "files-replace",
+                str(project),
+                "F0001",
+                str(replacement),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert len(plans) == 1
+    assert not plans[0].temporary_root.exists()
 
 
 def test_file_replacement_rejects_directory_input(tmp_path: Path) -> None:
