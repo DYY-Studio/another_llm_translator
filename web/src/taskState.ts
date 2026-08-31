@@ -30,7 +30,14 @@ export function reconcileTaskCollection(
     if (!isActiveTaskStatus(task.status) || activeIds.has(task.task_id)) continue;
     const finalState = terminal[task.task_id];
     if (finalState) {
-      merged[finalState.project_id] = finalState;
+      const currentProject = merged[task.project_id];
+      if (
+        !currentProject
+        || currentProject.task_id === task.task_id
+        || !isActiveTaskStatus(currentProject.status)
+      ) {
+        merged[finalState.project_id] = finalState;
+      }
     } else if (merged[task.project_id]?.task_id === task.task_id) {
       delete merged[task.project_id];
     }
