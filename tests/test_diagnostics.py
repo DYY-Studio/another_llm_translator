@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
 import httpx
@@ -167,6 +168,97 @@ def test_diagnostics_hub_distinguishes_unavailable_and_partial_usage(
             assert partial["usage_partial"] is True
             assert partial["input_tokens"] == 12
             assert partial["output_tokens"] == 3
+
+
+def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with ExitStack() as stack:
+        stack.enter_context(hub.activate("first", "translation", task_id="T1"))
+        stack.enter_context(hub.activate("second", "proofreading", task_id="T2"))
+        first = hub.sessions["T1"]
+        second = hub.sessions["T2"]
+        for session, request_id, latency in (
+            (first, "REQ-FIRST", 0.1),
+            (second, "REQ-SECOND", 0.3),
+        ):
+            session.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            session.request_finished(
+                request_id=request_id,
+                attempt=1,
+                latency_seconds=latency,
+                status=200,
+                error=False,
+            )
+
+        aggregate = hub.snapshot()
+        assert aggregate["metrics"]["total_requests"] == 2
+        assert aggregate["metrics"]["average_latency_ms"] == 200.0
+        assert aggregate["metrics"]["p95_latency_ms"] == 300.0
+        assert {item["task_id"] for item in aggregate["requests"]["items"]} == {
+            "T1",
+            "T2",
+        }
+
+        filtered = hub.snapshot(project="first", stage="translation")
+        assert filtered["metrics"]["total_requests"] == 1
+        assert filtered["metrics"]["average_latency_ms"] == 100.0
+        assert filtered["metrics"]["p95_latency_ms"] == 100.0
+        assert filtered["requests"]["total"] == 1
+        assert filtered["requests"]["items"][0]["task_id"] == "T1"
+
+
+def test_diagnostics_hub_keeps_global_terminal_detail_window_across_sessions(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    for index in range(201):
+        task_id = f"T-{index}"
+        request_id = f"REQ-{index}"
+        with hub.activate("project", "translation", task_id=task_id):
+            hub.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[{"role": "user", "content": request_id}],
+                max_attempts=1,
+            )
+            hub.complete_request(request_id, content="response", reasoning_content=None)
+
+    items = hub.snapshot()["requests"]["items"]
+    assert len(items) == 201
+    assert sum(item["detail_available"] for item in items) == 200
+    with pytest.raises(ValueError, match="已从内存释放.*REQ-0"):
+        hub.request_detail("REQ-0")
+    assert hub.request_detail("REQ-200")["request_id"] == "REQ-200"
+
+
+def test_diagnostics_hub_preserves_details_for_more_than_200_active_requests(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with ExitStack() as stack:
+        for index in range(201):
+            task_id = f"ACTIVE-{index}"
+            stack.enter_context(hub.activate("project", "translation", task_id=task_id))
+            hub.begin_request(
+                request_id=f"REQ-ACTIVE-{index}",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+
+        active = hub.snapshot()
+        assert active["metrics"]["total_requests"] == 201
+        assert sum(
+            item["detail_available"] for item in active["requests"]["items"]
+        ) == 201
+        assert hub.request_detail("REQ-ACTIVE-0")["status"] == "running"
 
 
 def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> None:
