@@ -645,7 +645,7 @@ function ReplacementDialog({
   busy: boolean;
   language: Language;
   onClose: () => void;
-  onCompleted: (result: ReplacementImpact) => Promise<void> | void;
+  onCompleted: (result: ReplacementImpact) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [adapter, setAdapter] = useState<AdapterSummary | null>(null);

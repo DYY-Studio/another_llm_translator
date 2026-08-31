@@ -1120,7 +1120,7 @@ def prepare_file_replacement(
             input_digest=input_digest,
             impact=impact,
         )
-    except Exception:
+    except BaseException:
         shutil.rmtree(temporary_root, ignore_errors=True)
         raise
 

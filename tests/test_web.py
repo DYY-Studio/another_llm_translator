@@ -294,6 +294,37 @@ def test_web_file_replacement_preview_is_single_use_and_cleans_temp_files(
     assert not app.state.replacement_previews
 
 
+def test_web_replacement_confirm_failure_retains_preview_for_cancel(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    with TestClient(app) as client:
+        preview = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("revised.txt", b"revised", "text/plain")},
+        )
+        assert preview.status_code == 200
+        preview_id = preview.json()["preview_id"]
+        key = (projects_root / "sample").resolve(), "F0001"
+        session = app.state.replacement_previews[key]
+        session.plan.staged_input.write_text("tampered", encoding="utf-8")
+
+        failed = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-confirm",
+            json={"preview_id": preview_id},
+        )
+        assert failed.status_code == 400
+        assert key in app.state.replacement_previews
+        assert session.temporary_root.is_dir()
+
+        cancelled = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{preview_id}"
+        )
+        assert cancelled.status_code == 200
+        assert not session.temporary_root.exists()
+
+
 def test_web_file_replacement_accepts_one_server_side_path(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     replacement = tmp_path / "server-replacement.txt"

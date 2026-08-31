@@ -96,13 +96,13 @@ from .prompt_library import (
     save_prompt_library,
 )
 from .server_config import load_server_config, save_server_config
-from .sqlite_storage import read_adapter_state
 from .sqlite_storage import (
     atomic_write_json,
     atomic_write_text,
     compact_project_database,
     database_path,
     read_json,
+    read_adapter_state,
 )
 from .stages import (
     export_project,
@@ -1497,7 +1497,7 @@ def create_app(
             ]
             result["preview_id"] = preview_id
             return result
-        except Exception:
+        except BaseException:
             if plan is not None:
                 plan.cleanup()
             shutil.rmtree(upload_root, ignore_errors=True)

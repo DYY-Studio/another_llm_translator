@@ -374,6 +374,34 @@ def test_file_replacement_rejects_staged_input_changed_during_parse(
     assert roots and not roots[0].exists()
 
 
+def test_file_replacement_cleans_staging_on_parse_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    roots: list[Path] = []
+    original_mkdtemp = project_module.tempfile.mkdtemp
+
+    def capture_root(*args: object, **kwargs: object) -> str:
+        root = original_mkdtemp(*args, **kwargs)
+        roots.append(Path(root))
+        return root
+
+    def interrupt_parse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(project_module.tempfile, "mkdtemp", capture_root)
+    monkeypatch.setattr(project_module, "_import_project_inputs", interrupt_parse)
+    with pytest.raises(KeyboardInterrupt):
+        prepare_file_replacement(project, "F0001", replacement)
+    assert roots and not roots[0].exists()
+
+
 def test_file_replacement_rejects_staged_input_changed_before_apply(
     tmp_path: Path,
 ) -> None:
