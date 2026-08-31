@@ -1489,7 +1489,6 @@ async def test_translation_reports_dynamic_output_budget_warning(
     project = await create_project(tmp_path, "one")
     use_llm_preset(
         tmp_path,
-        monkeypatch,
         context_window_tokens=1000,
         context_safety_margin_tokens=100,
         max_output_tokens=5000,
@@ -1582,7 +1581,6 @@ async def test_oversized_segment_is_split_and_saved_once(
     text = config_path.read_text(encoding="utf-8")
     use_llm_preset(
         tmp_path,
-        monkeypatch,
         context_window_tokens=1200,
         max_output_tokens=300,
         context_safety_margin_tokens=100,

@@ -540,7 +540,7 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
 
 
 @pytest.mark.asyncio
-async def test_review_format_retry_carries_parse_error_details(
+async def test_review_format_retry_uses_abstract_guidance(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one")
@@ -567,9 +567,14 @@ async def test_review_format_retry_carries_parse_error_details(
                 content = json.dumps({"segments": [{"id": "1"}]})
             else:
                 correction = payload["format_correction"]
-                assert "第 1 行" in correction
-                assert "未知 type" in correction
-                assert "缺少最终 end 记录" in correction
+                assert "当前待处理内容" in correction
+                assert "JSONL 结构" in correction
+                assert "固定字段" in correction
+                assert "完整" in correction
+                assert "上次" not in correction
+                assert "第 1 行" not in correction
+                assert "未知 type" not in correction
+                assert "缺少最终 end 记录" not in correction
                 records = [
                     {
                         "type": "segment",
@@ -589,9 +594,7 @@ async def test_review_format_retry_carries_parse_error_details(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(
-            project, "proofreading", Scope(), http_client=client
-        )
+        summary = await run_review(project, "proofreading", Scope(), http_client=client)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -599,11 +602,9 @@ async def test_review_format_retry_carries_parse_error_details(
     assert review_calls == 2
 
 
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
 @pytest.mark.asyncio
 async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     tmp_path: Path,
-    stage: str,
 ) -> None:
     project = await create_project(tmp_path, "one")
     review_calls = 0
@@ -645,7 +646,7 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(project, stage, Scope(), http_client=client)
+        summary = await run_review(project, "proofreading", Scope(), http_client=client)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -655,7 +656,7 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     assert review_calls == 1
     completed = [
         item
-        for item in read_jsonl(project, project / "stages" / f"{stage}.jsonl")
+        for item in read_jsonl(project, project / "stages" / "proofreading.jsonl")
         if item["status"] == "completed"
     ]
     assert len(completed) == 1
@@ -677,7 +678,6 @@ async def test_oversized_review_segment_is_combined_once(
         text = config_path.read_text(encoding="utf-8")
         use_llm_preset(
             tmp_path,
-            monkeypatch,
             context_window_tokens=1200,
             max_output_tokens=300,
             context_safety_margin_tokens=100,

@@ -32,6 +32,7 @@ def test_jsonl_extraction_accepts_bom_crlf_blanks_and_supported_fence() -> None:
     document = parse_jsonl_document(content, record_type="segment")
     assert document.complete is True
     assert document.records[0]["id"] == "S1"
+    assert document.error_codes == ()
 
 
 @pytest.mark.parametrize("label", ["jsonl", "ndjson", "json", ""])
@@ -75,14 +76,33 @@ def test_jsonl_extraction_uses_answer_fence_after_thought_block() -> None:
         '<think>mismatched </thought></think>\n{"type":"end"}',
         '说明<think>推理</think>\n{"type":"end"}',
         '```jsonl\n{"type":"end"}\n```\n<think>后置推理</think>',
+        '{"segments":[]}',
+        '[]\n{"type":"end"}',
+        '{"type":"unknown"}\n{"type":"end"}',
+        '{"type":"end","extra":true}',
+        '{"type":"end"}\n{"type":"end"}',
+        '{"type":"end"}\n{"type":"segment","id":"S1","translation":"x"}',
+        '{"type":"segment","id":"S1","translation":"x"}',
     ],
 )
-def test_jsonl_extraction_rejects_malformed_or_nonleading_thought_blocks(
+def test_jsonl_extraction_rejects_malformed_or_incomplete_protocol(
     content: str,
 ) -> None:
     document = parse_jsonl_document(content, record_type="segment")
     assert document.complete is False
     assert document.errors
+
+
+def test_jsonl_document_exposes_stable_error_codes_alongside_diagnostics() -> None:
+    document = parse_jsonl_document(
+        '{"type":"unknown"}\n'
+        '{"type":"end","extra":true}\n'
+        '{"type":"segment","id":"S1","translation":"x"}\n',
+        record_type="segment",
+    )
+
+    assert document.error_codes == ("unknown_type", "invalid_end", "after_end")
+    assert all("第 " in message for message in document.errors)
 
 
 def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
@@ -98,24 +118,6 @@ def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
     assert unresolved == []
     assert errors == []
     assert complete is True
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        '{"segments":[]}',
-        '[]\n{"type":"end"}',
-        '{"type":"unknown"}\n{"type":"end"}',
-        '{"type":"end","extra":true}',
-        '{"type":"end"}\n{"type":"end"}',
-        '{"type":"end"}\n{"type":"segment","id":"S1","translation":"x"}',
-        '{"type":"segment","id":"S1","translation":"x"}',
-    ],
-)
-def test_strict_jsonl_rejects_old_or_incomplete_protocol(content: str) -> None:
-    document = parse_jsonl_document(content, record_type="segment")
-    assert document.complete is False
-    assert document.errors
 
 
 def test_stage_jsonl_validators_reject_duplicates_and_keep_other_valid_rows() -> None:
@@ -398,7 +400,9 @@ async def test_translation_format_retry_regroups_around_valid_nonempty_segment(
 
 
 @pytest.mark.asyncio
-async def test_old_top_level_json_enters_format_correction(tmp_path: Path) -> None:
+async def test_old_top_level_json_enters_current_task_format_correction(
+    tmp_path: Path,
+) -> None:
     project = await create_project(tmp_path, "one")
     calls = 0
 
@@ -413,9 +417,14 @@ async def test_old_top_level_json_enters_format_correction(tmp_path: Path) -> No
             )
         else:
             correction = payload["format_correction"]
-            assert "第 1 行" in correction
-            assert "未知 type" in correction
-            assert "缺少最终 end 记录" in correction
+            assert "当前待处理内容" in correction
+            assert "JSONL 结构" in correction
+            assert "固定字段" in correction
+            assert "完整" in correction
+            assert "上次" not in correction
+            assert "第 1 行" not in correction
+            assert "未知 type" not in correction
+            assert "缺少最终 end 记录" not in correction
             content = llm_jsonl(
                 [
                     {
@@ -523,7 +532,7 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
 
 
 @pytest.mark.asyncio
-async def test_terminology_format_retry_carries_parse_error_details(
+async def test_terminology_format_retry_uses_abstract_guidance(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -537,8 +546,13 @@ async def test_terminology_format_retry_carries_parse_error_details(
             content = '{"type":"type":"end"}'
         else:
             correction = payload["format_correction"]
-            assert "第 1 行" in correction
-            assert "不是合法 JSON 对象" in correction
+            assert "当前待处理内容" in correction
+            assert "JSONL 结构" in correction
+            assert "固定字段" in correction
+            assert "完整" in correction
+            assert "上次" not in correction
+            assert "第 1 行" not in correction
+            assert "不是合法 JSON 对象" not in correction
             content = llm_jsonl(
                 [
                     {

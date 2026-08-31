@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import keyring
 import pytest
 
 from app.config import ConfigError, dump_config, load_config, load_project_config
@@ -32,8 +33,18 @@ def make_app_root(tmp_path: Path) -> Path:
     (root / "llm_adapters").mkdir()
     (root / "llm_presets").mkdir()
     source_root = Path(__file__).parents[1]
+    config_text = (source_root / "config" / "config.toml").read_text(
+        encoding="utf-8"
+    )
+    config_text = config_text.replace(
+        "base_delay_seconds = 2.0", "base_delay_seconds = 0"
+    )
+    config_text = config_text.replace(
+        "max_delay_seconds = 60.0", "max_delay_seconds = 0"
+    )
+    config_text = config_text.replace("jitter_seconds = 1.0", "jitter_seconds = 0")
     (root / "config" / "config.toml").write_text(
-        (source_root / "config" / "config.toml").read_text(encoding="utf-8"),
+        config_text,
         encoding="utf-8",
     )
     for source in (source_root / "prompts").glob("*.middle.txt"):
@@ -128,6 +139,23 @@ def test_project_parent_rejects_relative_and_unwritable_paths(
     monkeypatch.setattr("app.project.os.access", lambda *_: False)
     with pytest.raises(UsageError, match="不可写"):
         resolve_project_parent(tmp_path)
+
+
+def test_cli_help_does_not_access_keyring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    monkeypatch.setattr("app.main.migrate_llm_resources", lambda: 0)
+
+    def fail_get_password(*args: object, **kwargs: object) -> None:
+        raise AssertionError("CLI help must not access the keyring")
+
+    monkeypatch.setattr(keyring, "get_password", fail_get_password)
+    with pytest.raises(SystemExit) as exc_info:
+        run(["--help"])
+
+    assert exc_info.value.code == 0
 
 
 CONFIG_TEMPLATE = Path(__file__).parents[1] / "config" / "config.toml"

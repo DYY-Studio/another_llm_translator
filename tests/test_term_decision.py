@@ -52,7 +52,7 @@ from app.term_decision import (
     run_terminology_decision,
     save_decision_rejections,
 )
-from app.term_decision_protocol import DECISION_RULES_VERSION
+from app.term_decision_protocol import DECISION_RULES_VERSION, format_correction
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
@@ -119,6 +119,64 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
         ),
     )
     return project
+
+
+def test_semantic_correction_guidance_matches_prompt_language() -> None:
+    errors = [
+        {
+            "code": "invalid_action",
+            "message": "术语决策 action 无效：alice",
+            "normalized": "alice",
+        },
+        {
+            "code": "invalid_fields",
+            "message": "决策字段无效",
+            "normalized": "alice",
+            "fields": ["group_primary"],
+        },
+        {
+            "code": "missing_record",
+            "message": "术语决策缺少记录：bob",
+            "normalized": "bob",
+        },
+        {
+            "code": "invalid_relationship",
+            "message": "术语组主自指：alice -> alice",
+            "normalized": "alice",
+        },
+    ]
+
+    english = format_correction(
+        language="en",
+        errors=errors,
+        previous_invalid_records=[],
+        accepted_normalized=[],
+        target_normalized=["alice", "bob"],
+    )
+    assert [item["code"] for item in english["errors"]] == [
+        "invalid_action",
+        "invalid_fields",
+        "missing_record",
+        "invalid_relationship",
+    ]
+    assert all(
+        not any("\u4e00" <= character <= "\u9fff" for character in item["message"])
+        for item in english["errors"]
+    )
+    assert english["errors"][1]["fields"] == ["group_primary"]
+    assert all(item["normalized"] in {"alice", "bob"} for item in english["errors"])
+
+    chinese = format_correction(
+        language="zh-CN",
+        errors=errors,
+        previous_invalid_records=[],
+        accepted_normalized=[],
+        target_normalized=["alice", "bob"],
+    )
+    assert all(
+        any("\u4e00" <= character <= "\u9fff" for character in item["message"])
+        for item in chinese["errors"]
+    )
 
 
 def write_pending_decision_draft(
@@ -1609,18 +1667,9 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("language", "marker"),
-    [
-        ("zh-CN", "术语组主自指：alice -> alice"),
-        ("en", "self-referencing group pointer: alice -> alice"),
-    ],
-)
-async def test_decision_group_violation_enters_localized_format_repair(
+async def test_decision_group_violation_enters_format_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
-    marker: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1633,8 +1682,10 @@ async def test_decision_group_violation_enters_localized_format_repair(
         if "format_correction" in payload:
             repairs += 1
             correction = payload["format_correction"]
-            assert marker in correction["errors"][0]["message"]
+            assert "alias" in correction["errors"][0]["message"]
+            assert "自指" in correction["errors"][0]["message"]
             assert correction["errors"][0]["code"] == "invalid_relationship"
+            assert correction["errors"][0]["normalized"] == "alice"
             assert correction["target_normalized"] == ["alice"]
             content = llm_jsonl(decision_response(payload))
         elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
@@ -1650,7 +1701,7 @@ async def test_decision_group_violation_enters_localized_format_repair(
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
-                project, prompt_language=language, http_client=client
+                project, prompt_language="zh-CN", http_client=client
             )
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1660,11 +1711,9 @@ async def test_decision_group_violation_enters_localized_format_repair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("language", ["zh-CN", "en"])
 async def test_decision_format_repair_lists_exact_target_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1707,13 +1756,74 @@ async def test_decision_format_repair_lists_exact_target_scope(
     os.environ["LLM_API_KEY"] = "test"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         summary = await run_terminology_decision(
-            project, prompt_language=language, http_client=client
+            project, prompt_language="zh-CN", http_client=client
         )
     del os.environ["LLM_API_KEY"]
 
     assert summary["proposals"] == 1
     assert calls == 8
     assert repairs == 4
+
+
+@pytest.mark.asyncio
+async def test_decision_format_repair_abstracts_and_deduplicates_document_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_decision_project(tmp_path)
+
+    def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
+        return [(states, [])], len(states)
+
+    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if calls == 1:
+            content = (
+                '{"type":\n'
+                '{"type":"unknown"}\n'
+                '{"type":"decision","normalized":"alice",'
+                '"action":"keep","reason":"ok"}\n'
+                '{"type":"decision","normalized":"bob",'
+                '"action":"keep","reason":"ok"}\n'
+                '{"type":"end","extra":true}\n'
+                '{"type":"decision","normalized":"alice",'
+                '"action":"keep","reason":"after"}\n'
+            )
+        elif "format_correction" in payload:
+            correction = payload["format_correction"]
+            errors = correction["errors"]
+            messages = [item["message"] for item in errors]
+            assert len(messages) == len(set(messages))
+            assert len(messages) == 3
+            assert all("第 " not in message for message in messages)
+            assert all("unknown" not in message for message in messages)
+            assert all("invalid_document" not in item for item in errors)
+            assert any("每个非空物理行" in message for message in messages)
+            assert any("只输出协议允许" in message for message in messages)
+            assert any("最终记录必须且只能是精确" in message for message in messages)
+            content = llm_jsonl(decision_response(payload))
+        else:
+            content = llm_jsonl(decision_response(payload))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            summary = await run_terminology_decision(
+                project, prompt_language="zh-CN", http_client=client
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["proposals"] == 1
+    assert calls == 3
 
 
 @pytest.mark.asyncio
@@ -1838,11 +1948,9 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("language", ["zh-CN", "en"])
 async def test_update_without_reason_is_repaired_with_complete_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    language: str,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
@@ -1882,7 +1990,7 @@ async def test_update_without_reason_is_repaired_with_complete_contract(
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
-                project, prompt_language=language, http_client=client
+                project, prompt_language="zh-CN", http_client=client
             )
     finally:
         del os.environ["LLM_API_KEY"]

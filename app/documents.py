@@ -276,6 +276,9 @@ class DocumentChoiceOption:
     label: str
     default: str
     choices: tuple[tuple[str, str], ...]
+    # Values retained only for controlled replacement of readable historical
+    # Adapter states. They are intentionally not accepted for new imports.
+    replacement_choices: tuple[tuple[str, str], ...] = ()
 
 
 class DocumentAdapter(Protocol):
@@ -294,6 +297,12 @@ class DocumentAdapter(Protocol):
         language: str,
         opaque_state: dict[str, Any] | None,
     ) -> str | None: ...
+
+    def replacement_options(
+        self,
+        *,
+        opaque_state: dict[str, Any] | None,
+    ) -> dict[str, str]: ...
 
     def import_sources(
         self,

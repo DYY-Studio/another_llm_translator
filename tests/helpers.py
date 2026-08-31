@@ -16,23 +16,12 @@ def llm_jsonl(records: Iterable[dict[str, Any]]) -> str:
 
 def use_llm_preset(
     tmp_path: Path,
-    monkeypatch: Any,
     **changes: Any,
 ) -> None:
     root = tmp_path / "runtime-global"
-    presets = root / "llm_presets"
-    presets.mkdir(parents=True, exist_ok=True)
-    adapters = root / "llm_adapters"
-    adapters.mkdir(parents=True, exist_ok=True)
-    source_root = Path(__file__).parents[1]
-    for source in (source_root / "llm_adapters").glob("*.json"):
-        (adapters / source.name).write_text(
-            source.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-    source = source_root / "llm_presets" / "default.json"
-    definition = json.loads(source.read_text(encoding="utf-8"))
+    preset_path = root / "llm_presets" / "default.json"
+    definition = json.loads(preset_path.read_text(encoding="utf-8"))
     definition.update(changes)
-    (presets / "default.json").write_text(
+    preset_path.write_text(
         json.dumps(definition, ensure_ascii=False), encoding="utf-8"
     )
-    monkeypatch.setattr("app.config.APP_ROOT", root)

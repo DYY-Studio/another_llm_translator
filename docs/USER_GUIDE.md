@@ -35,8 +35,8 @@ python -m pip install another-llm-translator-term-validation
 从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`。官方桌面构建会在
 构建时装配这两个示例插件；已发布桌面应用暂不提供运行时插件安装。
 
-Another LLM Translator 不再提供旧开发名称对应的命令、环境变量或插件入口。首次启动时，
-若新的默认数据目录不存在，程序会一次性迁移旧默认目录；新目录已存在时保留两者并以新目录为准。
+Another LLM Translator 只识别当前包名、命令、环境变量、插件入口和默认数据目录。旧版本位置中的
+数据不会自动发现、迁移或删除；如需保留，请用户自行处理。
 
 打开 `http://127.0.0.1:8765`。使用 `python -m app.web --port PORT` 可以更换端口。
 前端构建完成后，日常启动只需激活虚拟环境并运行 `python -m app.web`。
@@ -261,8 +261,8 @@ Web 会记住上次选中的项目 ID。外部项目先按已保存路径重新�
 - 文件范围：全部文件或指定 File。
 - 单语或双语对照。
 
-TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会保留导航、元数据、图片、
-CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
+TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会翻译已纳入 Segment 的目录文本，
+并保留导航链接、元数据、图片、CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直接写入文档。
 
 > [!IMPORTANT]
 > 部分 Adapter（如 EPUB）要求项目设置目标语言标签，否则无法导出。
@@ -281,10 +281,12 @@ CSS、字体和其他未翻译资源；模型输出不会作为任意 HTML 直�
 
 ### EPUB
 
-- 支持 OPF 2.0/3.0 和 spine XHTML。
-- 保留文档 part 边界及未翻译资源。
-- EPUB Adapter 0.4 可直接使用既有 0.3 File，无需重新导入。
-- 导入选项在文件加入项目时确定；修改新文件的选项仍需重新导入。
+- 支持 OPF 2.0/3.0、spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 NCX；目录资源会作为待翻译内容。
+- 非 spine 目录资源排在正文前，spine 内 nav 保持原位置且不重复；保留文档 part 边界及导航链接、元数据和其他未翻译资源。
+- EPUB Adapter 0.5 可直接使用既有 0.3/0.4 File，无需重新导入；旧 File 需重新导入才会新增目录 Segment。
+- 普通设置修改不会追溯既有 File。替换源文件时，替换对话框会按该 File 的当前
+  Adapter 选项初始化，用户仍可编辑任意选项；预览会显示旧值、新值和受影响的
+  Segment，确认后新选项随 File 状态保存。
 
 #### Ruby 标签转换
 
@@ -410,7 +412,22 @@ python -m app.main init --empty --name novel --parent-dir /absolute/parent
 python -m app.main files-add novel chapter-1.txt chapter-2.txt
 python -m app.main files-add novel appendix.epub
 python -m app.main files-remove novel F0001
+python -m app.main files-replace novel F0001 chapter-1-revised.txt --dry-run
+python -m app.main files-replace novel F0001 chapter-1-revised.txt --yes
 ```
+
+`files-replace` 保留目标 File 的 ID、顺序和导出文件名，并更新新内容的编码信息、
+Adapter 版本、Adapter 状态和 Segment 计数。命令先按同一 `part_id` 内
+的源文与模型源文做保守精确对齐，预览会报告保留、新增、移除和歧义 Segment，以及
+受影响的阶段进度。可确认一致的 Segment 会继续使用原译文；新增、修改、缺失或
+无法唯一确认的重复 Segment 从零开始。`--dry-run` 只预览；交互终端默认显示预览
+后询问确认，脚本需显式使用 `--yes`。
+
+替换时 `--adapter-option ADAPTER.OPTION=VALUE` 只覆盖指定选项；未指定选项沿用
+目标 File 的当前值。Web 替换对话框具有相同语义，并在确认前展示选项变化。
+
+项目存在运行中的任务或未发布的术语扫描候选时，必须先结束该任务或发布/丢弃候选。
+历史阶段结果和既有输出不会被自动删除，已发布术语也不会因源文件替换而自动移除。
 
 EPUB 可以显式指定 Adapter 和导入选项：
 

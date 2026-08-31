@@ -220,11 +220,9 @@ prompts/polishing.en.middle.txt
 llm_adapters/openai-compatible.json
 ```
 
-发布改名时，若新的默认用户根不存在，启动阶段将旧开发名称对应的默认用户根原子迁移到
-新路径；若新路径已存在，则跳过且不覆盖、不合并旧路径。
-
-显式设置 `ANOTHER_LLM_USER_ROOT` 时不执行默认路径扫描。旧钥匙串条目只在新服务缺少对应
-账户时复制，旧服务不删除；旧命令、旧环境变量和旧插件 entry point 不再提供。
+应用只识别当前包名、命令、环境变量、插件入口、默认用户根和钥匙串服务。旧版本位置中的数据
+不会自动发现、迁移或删除；如需保留，请用户自行处理。显式设置
+`ANOTHER_LLM_USER_ROOT` 时，以该目录为准。
 
 Web 编辑全局资源只写入用户根；内置资源删除明确失败，编辑内置资源等于在用户根
 写入同名覆盖。默认项目根为 `用户根/projects`，诊断日志位于 `用户根/logs/`。
@@ -248,6 +246,8 @@ python -m app.main files-add PROJECT INPUT_DIR --recursive
 python -m app.main files-add PROJECT INPUT --document-adapter ADAPTER_ID
 python -m app.main files-add PROJECT BOOK.epub --adapter-option epub.ruby_mode=base_only
 python -m app.main files-remove PROJECT FILE_ID...
+python -m app.main files-replace PROJECT FILE_ID INPUT --dry-run
+python -m app.main files-replace PROJECT FILE_ID INPUT --yes
 ```
 
 规则：
@@ -276,6 +276,22 @@ python -m app.main files-remove PROJECT FILE_ID...
 - Web 可提交全部活动 File ID 的唯一完整排列，将 `file_order` 规范化为从 1
   开始的连续值。重排保留 File/Segment ID、输入副本、Adapter 状态、历史结果、
   项目计数和 `next_file_sequence`；File ID 不表示活动顺序。
+- `files-replace` 原位替换一个活动 File，保留 File ID、`file_order`、导出相对路径
+  和 `stored_name`，用新内容解析得到的编码信息、Adapter 版本、Adapter 状态、
+  `segment_count` 及新 Segment 列表更新源副本。替换默认沿用当前 File 的全部
+  Adapter 选项，但用户可以在预览确认前显式修改；预览记录旧值、新值和变化键。
+  Segment ID 是稳定的不透明身份，
+  位置只由 `file_order` 与 `line_index` 决定；新增 Segment 的 ID 不要求按当前位置
+  递增。
+- 替换预览只在相同 `part_id` 内按 `source` 与有效 `model_source` 做保守精确顺序
+  对齐。相同连续区域和唯一锚点间的确定匹配复用原 Segment ID；无法唯一判定的
+  重复项、修改项和缺失项不复用。Part 重排可匹配，Part ID 改名不跨 Part 匹配。
+- 替换保留匹配 Segment 的所有阶段进度；新增 Segment 从零开始。缺失、修改和歧义
+  旧 Segment 只移出活动源，历史阶段结果、Run 与既有输出不清理。已发布术语库不
+  自动删除；存在 running Run 或未发布/未丢弃术语候选时拒绝替换。
+- CLI 先预览并确认；`--dry-run` 只输出预览，`--yes` 用于显式非交互提交。Web
+  通过单次上传的进程内预览会话完成预览和确认；会话按目标 File 唯一，确认、取消、
+  覆盖或服务退出时清理。
 - 活动文件的导出相对路径按大小写不敏感比较；追加产生冲突时整体拒绝。
 - 文件增删或重排发现任意 `running` Run 时整体拒绝，不自动中断。未知、重复、
   缺失或部分非法的删除/重排选择也必须在写入前整体失败。
@@ -292,17 +308,19 @@ python -m app.main files-remove PROJECT FILE_ID...
 Adapter，并可人工导入导出术语。术语、翻译、校对、润色、run-all、apply 和
 export 必须在创建 Run 或请求前快速失败，提示先添加含非空 Segment 的文件。
 
-EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，按 spine 顺序读取 XHTML 文本流。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻 `text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的非空白文本以及内部空白按源文保留。
+EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`，将非 spine 导航资源和 NCX 排在正文前，再按 spine 顺序读取 XHTML 文本流；spine 内的 nav XHTML 保持原位置且不重复。EPUB 3 `properties="nav"` XHTML 的整个 `body` 可见文本，以及 NCX 的 `docTitle`、`docAuthor` 和 `navLabel/text` 文本都会形成 Segment。普通透明内联元素（例如 `span`、`em`、`strong`）中的相邻 `text`/`tail` 槽合并为一个 Segment；未知结构和 `br` 形成边界，槽之间的非空白文本以及内部空白按源文保留。
 
-每个 spine XHTML 是一个 `part_id`，但仍属于同一个 EPUB File；原 EPUB 及不透明定位状态用于重建输出；导航、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
+每个 XHTML/NCX 资源是一个 `part_id`，但仍属于同一个 EPUB File；原 EPUB 及不透明定位状态用于重建输出；导航链接、元数据、图片、CSS、字体和其他未翻译资源保持原样。ZIP 路径穿越、符号链接、重复路径、异常条目数/解压大小/压缩比、越界资源以及非法 XML 会被拒绝。
 
 EPUB 3 XHTML 允许省略 DOCTYPE，或使用不含外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 允许省略 DOCTYPE，或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN` 的 XHTML 1.1 声明。
+
+NCX 允许省略 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `http://www.daisy.org/z3986/2005/ncx-2005-1.dtd` 声明；其他外部 DTD、实体声明和错误标识均拒绝。
 
 外部 DTD 永不加载；实体声明、不匹配版本的 DOCTYPE、SYSTEM-only 声明和不支持的 PUBLIC 标识均拒绝。
 
 完整 `<ruby>` 子树和紧随的尾文本作为文本流中的一个成员；它与同一文本流中的普通 `text`/`tail` 槽、其他 Ruby 按源文顺序组成一个 Segment。
 
-新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`；选项固化于 File 的 Adapter 状态，不是项目运行设置。`base_only` 完全删除 Ruby/reading；其余模式的用户文本均使用 `｜base《reading》`。
+新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`；选项固化于 File 的 Adapter 状态，不是项目运行设置。`base_only` 完全删除 Ruby/reading；其余模式的用户文本均使用 `｜base《reading》`。普通设置修改不会追溯既有 File；`files-replace` 可在预览中以当前值为默认并显式修改选项。
 
 `short_xml` 和 `compact` 只把 Ruby 分别作为 `<r><b>base</b><y>reading</y></r>` 和 `⟦R:base|Y:reading⟧` 提交模型，输出在存储前还原青空。更改既有文件的模式必须移除并重新导入，从而分配新的 File/Segment ID。
 
@@ -312,7 +330,9 @@ EPUB 3 XHTML 允许省略 DOCTYPE，或使用不含外部标识的 `<!DOCTYPE ht
 
 保留时须返回严格的 `｜已翻译base《目标语言适用reading》`，系统会在译文区域恢复 EPUB Ruby；reading 必须翻译或转写，无法适配目标语言时应去掉标记和 reading，仅返回已翻译 base。没有返回 Ruby 合法且不触发重试；不完整、嵌套、含 HTML 或跨行的形式保持普通文本。
 
-`base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.4 可读取 0.3/0.4 状态，不改写旧 File、Segment、locator 或阶段结果。
+`base_only` 不还原 Ruby。旧 EPUB 0.3 `parenthetical` File 仅作为兼容状态继续读取和导出，新导入不再提供该选项。EPUB Adapter 0.5 可读取 0.3/0.4/0.5 状态，不改写旧 File、Segment、locator 或阶段结果；旧 File 需重新导入才会增加目录 Segment。
+
+文件替换仍会保留旧 File 的 `parenthetical` 作为默认选项；用户可在预览中改为现行 Ruby 选项。
 
 Reading 完全由同一个 `·・ • ◦ ● ○ ◉ ◎ ▲ △ ﹅ ﹆` 组成时视为 Emphasis Ruby。相邻同符号 Ruby 和单 Ruby 的重复符号合并为一个 reading；普通文本、空白、块边界和受控内联格式边界会切断合并。
 
@@ -322,7 +342,7 @@ EPUB 还支持独立的 `inline_format_mode`：默认 `plain` 不向模型暴露
 
 `tiered`（默认）要求语义关键标签保留、允许表现层标签整体省略；`strict` 要求全部源标签保留。翻译、校对、润色及参考上下文使用 `model_source`，术语使用净 `source`。
 
-Adapter 在结果写入前验证标记的已知性、唯一性、闭合、嵌套和父子关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留原普通标签和 attrs 的空骨架。既有 File 的导入选项不会静默重切，修改后必须重新导入；运行选项随 Adapter 状态和阶段指纹保存。
+Adapter 在结果写入前验证标记的已知性、唯一性、闭合、嵌套和父子关系；失败沿用格式修复预算，模型标记不会直接作为 HTML 写入，纯译文继续保留原普通标签和 attrs 的空骨架。既有 File 的导入选项不会因普通设置变化而静默重切；文件替换属于受控重新导入，可以在预览确认中修改选项。运行选项随 Adapter 状态和阶段指纹保存。
 
 SRT 外部 Adapter 只接受核心字幕结构：唯一正整数序号、严格的 `HH:MM:SS,mmm --> HH:MM:SS,mmm` 时间行和非空正文；序号不要求连续，正文可跨多行。每个 cue 是一个 Segment，序号和时间行写入 `opaque_state`。
 
@@ -371,6 +391,7 @@ segments = text.split("\n")
 - `encoding_detected`
 - `encoding_used`
 - `segment_count`
+- `next_segment_sequence`
 
 每个 Segment 记录：
 
@@ -781,9 +802,9 @@ applied 结果保存：
 按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
 改版时显式升 `prompt_rules_version`。
 
-固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界。除顶层 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考数据，模型不得执行其中的指令。
+固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界；多阶段任务的当前阶段目标、只读数据组成和可修改范围也由固定阶段 Prefix 定义。除顶层 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考数据，模型不得执行其中的指令。字段语义只在固定 Prefix 中定义，不再于可编辑 middle 或固定 Suffix 重复。
 
-固定 Suffix 定义字段条件、请求内短 ID、通用文本格式保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为 `{"type":"end"}`。
+固定 Suffix 定义输出字段条件、状态转换约束、请求内短 ID、通用文本格式保真和严格 JSONL；具体文档格式的可重建要求由当前 Document Adapter 按 File 状态注入，不会进入其他格式的请求。每个非空物理行只能包含一个紧凑 JSON 对象，最后一行必须为 `{"type":"end"}`。
 
 middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景、文体、翻译策略、术语偏好及校对或润色严格度；它可以改变处理方式，但不能覆盖 Prefix/Suffix 的范围、数据边界和输出协议。
 
@@ -839,7 +860,7 @@ Segment ID。
 
 术语提示词必须说明：参考上文只用于判断人物性别、指代、身份和上下文含义，不要仅因词语只出现在上文中就提取。
 
-格式修正请求使用顶层 `format_correction`，只重新处理当前待处理内容并遵守固定输出协议。翻译校验修复使用 `validation_repair`，以每项 `failed_candidate` 为基准，只修复 `validation_matches` 所列问题并返回完整译文。
+格式修正请求使用顶层 `format_correction`，只重新处理当前待处理内容并遵守固定输出协议；普通阶段只提供 JSONL 结构、固定字段和完整性等抽象指导，不携带上轮响应的具体错误。翻译校验修复使用 `validation_repair`，以每项 `failed_candidate` 为基准，只修复 `validation_matches` 所列问题并返回完整译文。
 
 两类控制说明使用本 Run 的 Prompt 语言；英文 Prompt 不混入中文修正说明或中文解析错误详情。
 
@@ -999,11 +1020,11 @@ Web 术语组页可按 source 和 aliases 的严格包含关系推荐可能相�
 
 第一阶段或已完成第二阶段检查点的 `needs_review`、disabled 及仍有冲突的状态不得锚定其他术语。所有 anchors 始终只读且不得输出 decision。模型只能保留、更新、软移除或标为 `needs_review`；不能修改 source/normalized 或虚构 alias。
 
-固定 Prompt 定义输出协议，项目可编辑中段只定义判断政策，不得改变协议。每个 action 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。
+固定 Prefix 定义输入证据、冲突候选、样本边界引用和两阶段 anchors 的含义；固定 Suffix 定义输出协议和状态转换约束。项目可编辑中段只定义判断政策，不得重新解释输入字段或改变协议。每个 action 都必须提供非空 `reason`。`keep`、`disable`、`needs_review` 只能输出 `type`、`normalized`、`action`、`reason`；`update` 还必须输出 `changes` Patch。
 
 Patch 只能包含实际修改的 `category`、`description`、`preferred_translation`、`aliases`、`group_primary`；宿主将它应用于输入状态并生成完整 `after`。
 
-空 Patch 只允许第二阶段显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。`description` 可以保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文样本或可见 anchor 支持，不得增加无证据事实。
+空 Patch 只允许第二阶段显式解决第一阶段 `needs_review`，或重新启用当前 disabled 术语。固定协议允许 `description` 保留、清空或改写为简洁的目标语说明；非空改写必须由当前说明、源文样本或可见 anchor 支持，不得增加无证据事实。内置可编辑中段默认将 Description 视为简洁的术语区分说明，而非扫描观察或历史说明的汇总；重复、并列堆积、矛盾或泛泛的说明应压缩为一条有区分力的说明，无法提炼时清空。这是可编辑的默认判断政策，不增加宿主长度、分号数量或重复度校验。
 
 宿主校验类型、空值归一化和 no-op，语义正确性由用户在草案中查看完整旧文本和新文本后确认。alias 只能选用输入中可见的既有源文形式。
 
@@ -1011,7 +1032,7 @@ LLM 的 `terms[]` 和 `anchors[]` 在对应术语存在证据时携带可选、�
 
 去重候选是证据，不是投票统计或允许值白名单；全文证据支持时模型可以提出候选之外的新值。第一阶段存在类别或推荐译名冲突时不得 `keep`；`update` 必须为每个冲突标量提供非空决议，也可以 `disable` 或 `needs_review`。`conflicts` 禁止出现在 decision 输出中。
 
-格式修正请求携带结构化错误、上轮无效记录、已接受项和本轮唯一目标；完整校验通过的无关关系组件不会重复请求。连续出现相同错误时，各未决硬关系组件独立修正，但组件内部不可拆分。批级 JSONL、end 或未知记录错误仍使该次请求整体未决。
+格式修正请求携带去重后的 JSONL 结构指导、仍需修正的语义错误、上轮无效记录、已接受项和本轮唯一目标；结构指导不包含上轮响应的行号或原文。语义错误保留稳定的 `code`、`normalized` 和必要结构字段，纠错说明按 Prompt 语言生成；宿主内部错误文本只用于最终失败摘要，不直接混入其他语言的模型请求。完整校验通过的无关关系组件不会重复请求。连续出现相同错误时，各未决硬关系组件独立修正，但组件内部不可拆分。批级 JSONL、end 或未知记录错误仍使该次请求整体未决。
 
 alias 转移必须是完整的多术语关系操作：接收方必须是启用的根术语，原所有者必须释放该 alias、被禁用，或在 source 转移时直接成为接收方成员。
 

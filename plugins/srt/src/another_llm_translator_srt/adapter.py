@@ -242,6 +242,12 @@ class SRTDocumentAdapter:
     import_options: tuple[DocumentChoiceOption, ...] = ()
     run_options: tuple[DocumentChoiceOption, ...] = ()
 
+    def replacement_options(
+        self, *, opaque_state: dict[str, Any] | None
+    ) -> dict[str, str]:
+        del opaque_state
+        return {}
+
     def model_prompt_requirements(
         self,
         *,

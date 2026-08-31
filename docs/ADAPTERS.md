@@ -257,13 +257,17 @@ class DocumentAdapter(Protocol):
         *, stage: str, language: str, opaque_state: dict | None
     ) -> str | None: ...
 
+    def replacement_options(
+        *, opaque_state: dict | None
+    ) -> dict[str, str]: ...
+
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
 ```
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `10`；旧协议插件会快速失败。
+宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `11`；旧协议插件会快速失败。
 
 `model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
@@ -315,7 +319,11 @@ ID、版本和状态位置；宿主只校验归属、版本和完整性，不解
 
 Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项由 Adapter 固化在 File 的 `opaque_state`。
 
-Adapter ID 与版本进入阶段指纹 （内置 EPUB 的既有运行选项值也纳入）。修改选项不会改写既有 Segment，必须移除并重新导入文件。不支持自由键值或嵌套选项。
+`replacement_options()` 用 File 的 `opaque_state` 恢复当前 File 的全部导入和运行选项。它必须返回与声明完全一致的字符串键值，并由宿主再次校验取值；缺失、额外、类型错误或非法值都直接失败，不静默使用声明默认值。Adapter 可以在读取旧的、仍可读状态时按该版本既有语义提供默认值。
+
+仅供受控替换使用的历史选项可以声明为 `replacement_choices`；它们不会出现在新导入选项中，但会在逐 File 替换对话框中作为当前值保留并允许用户改为现行选项。
+
+普通设置修改不会追溯既有 File。`files-replace` 是受控重新导入：替换预览通过逐 File 的 `replacement-options` API 显示当前值，用户可以修改任意已声明选项；未覆盖的选项沿用当前 File 值，确认前会展示旧值、新值和变化键。新选项随后固化到新的 `opaque_state`，不需要迁移既有项目。
 
 CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。
 
@@ -346,7 +354,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 10。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 11。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -367,15 +375,17 @@ HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.4
+### EPUB 0.5
 
-EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序以及 Segment 到 XHTML 文本流和 `text`/`tail` 槽位的定位。
+EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序、导航资源以及 Segment 到 XHTML/NCX 文本流和 `text`/`tail` 槽位的定位。
 
-每个 spine XHTML 的归档路径作为 Segment 的 `part_id`；普通透明内联元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写被翻译的 XHTML，原样复制导航、元数据、图片、CSS、字体和其他资源。
+每个 spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 `spine toc` 指向的 NCX 的归档路径作为 Segment 的 `part_id`。非 spine 导航资源排在正文前；spine 内导航保持原位置且不会重复。普通透明内联元素中的相邻槽合并为一个复合 Segment；未知结构和 `br` 形成边界。导出只重写包含翻译 Segment 的 XHTML/NCX，保留导航链接、元数据、图片、CSS、字体和其他资源。
+
+EPUB 3 导航 XHTML 的整个 `body` 可见文本会进入翻译；NCX 的 `docTitle`、`docAuthor` 和所有 `navLabel` 下的 `text` 会进入翻译。NCX 的 `content src` 等定位属性不会翻译。
 
 导出时宿主提供 `target_language` 和可选的 `target_language_tag`。EPUB Adapter 要求语言标签为非空 BCP 47 标签，并要求目标语言名称非空。单语输出的 OPF `dc:language` 设为该标签；双语输出把该标签放在第一项，随后保留源语言。
 
-已重写的 spine XHTML 同时更新根元素的 `lang` 和 `xml:lang`。中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
+已重写的 XHTML 同时更新根元素的 `lang` 和 `xml:lang`；NCX 更新根元素的 `xml:lang`。中文应使用 `zh-Hans` 或 `zh-Hant`，以便 Apple Books 识别正确的语言和字体。
 
 译文和双语输出会生成基于项目、File、目标语言标签和输出模式的稳定独立出版标识，并将 OPF 主标题分别后缀为 `（目标语言）` 和 `（目标语言·双语）`。
 
@@ -389,6 +399,8 @@ EPUB Adapter 只接受 OPF `package` 版本 `2.0` 或 `3.0`。
 
 EPUB 3 XHTML 可无 DOCTYPE，或使用无外部标识的 `<!DOCTYPE html>`；EPUB 2 XHTML 可无 DOCTYPE，或使用 PUBLIC `-//W3C//DTD XHTML 1.1//EN`，SYSTEM 地址只作为声明数据而不会被加载。
 
+NCX 可无 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `ncx-2005-1.dtd` SYSTEM 地址；其他 NCX 外部 DTD、实体声明和错误声明都会快速失败。
+
 所有外部 DTD、实体声明、版本不匹配的声明、SYSTEM-only 和错误 PUBLIC 标识都会快速失败。
 
 普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出保留源槽并在末槽后写入译文。
@@ -397,7 +409,7 @@ Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以
 
 除 `base_only` 完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。
 
-新导入不再提供 `parenthetical`；EPUB 0.4 可直接读取和导出既有 0.3 File，包括旧 `parenthetical` 状态，但不迁移或改写。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
+新导入不再提供 `parenthetical`；EPUB 0.5 可直接读取和导出既有 0.3/0.4 File，包括旧 `parenthetical` 状态，但不迁移或改写。旧 File 需重新导入才会生成目录 Segment。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
 
 纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个 Segment 末尾追加普通译文。
 
@@ -453,7 +465,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=10,
+        protocol_version=11,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -462,7 +474,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `10`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `11`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
 
 上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 

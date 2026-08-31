@@ -48,9 +48,9 @@ python -m pip install -e plugins/term_validation
 术语使用校验插件同样在官方桌面构建时装配，但默认关闭；它只提供一次建议级修复，
 仍未采用推荐译名时保留译文并记录 warning。
 
-本发行版使用 Another LLM Translator 的新包名、命令、环境变量和数据目录。首次启动时，
-若默认的新数据目录不存在，会将旧版本的默认数据目录一次性迁移；新目录已存在时不会覆盖或合并旧目录。
-显式设置 `ANOTHER_LLM_USER_ROOT` 时，以该目录为准。
+本发行版只识别 Another LLM Translator 的包名、命令、环境变量和数据目录。旧版本位置中的
+数据不会自动发现、迁移或删除；如需保留，请用户自行处理。显式设置
+`ANOTHER_LLM_USER_ROOT` 时，以该目录为准。
 
 Windows PowerShell 使用：
 

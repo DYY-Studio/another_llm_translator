@@ -4,24 +4,24 @@ import asyncio
 import json
 import os
 import sqlite3
+import zipfile
 from pathlib import Path
 
 import pytest
 
+import app.main as main_module
+import app.project as project_module
 from app.errors import ProjectError, StorageError, UsageError
 from app.execution import Scope, select_scope, stage_result_path
+from app.file_replacement import align_segments
 from app.main import build_parser, parse_adapter_option_args, run
 from app.project import (
     add_project_files,
+    apply_file_replacement,
     init_project,
+    prepare_file_replacement,
     remove_project_files,
     reorder_project_files,
-)
-from app.stages import (
-    export_project,
-    inspect_full,
-    run_apply,
-    run_terminology,
 )
 from app.sqlite_storage import (
     append_jsonl,
@@ -30,10 +30,865 @@ from app.sqlite_storage import (
     read_jsonl,
     read_segments,
     record_header,
+    replace_source,
     write_json,
 )
-from tests.test_documents import make_epub
+from app.stages import (
+    export_project,
+    inspect_full,
+    run_apply,
+    run_terminology,
+)
+from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_foundation import make_app_root
+
+
+def replacement_segment(
+    segment_id: str,
+    source: str,
+    *,
+    part_id: str = "document",
+    model_source: str | None = None,
+) -> dict[str, object]:
+    return {
+        "segment_id": segment_id,
+        "file_id": "F0001",
+        "line_index": 0,
+        "part_id": part_id,
+        "source": source,
+        "model_source": model_source,
+        "is_empty": source == "",
+    }
+
+
+def test_segment_alignment_preserves_ordered_matches_across_insertions() -> None:
+    old = [
+        replacement_segment("old-a", "A"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-b", "B"),
+    ]
+    new = [
+        replacement_segment("new-a", "A"),
+        replacement_segment("new-extra", "EXTRA"),
+        replacement_segment("new-anchor", "ANCHOR"),
+        replacement_segment("new-b", "B"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 0, 2: 1, 3: 2}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_segment_alignment_reuses_multiple_anchors_and_each_gap() -> None:
+    old = [
+        replacement_segment("old-prefix", "PREFIX"),
+        replacement_segment("old-one", "ONE"),
+        replacement_segment("old-two", "TWO"),
+        replacement_segment("old-three", "THREE"),
+        replacement_segment("old-suffix", "SUFFIX"),
+    ]
+    new = [
+        replacement_segment("new-prefix", "PREFIX"),
+        replacement_segment("new-insert-one", "INSERT-ONE"),
+        replacement_segment("new-one", "ONE"),
+        replacement_segment("new-insert-two", "INSERT-TWO"),
+        replacement_segment("new-two", "TWO"),
+        replacement_segment("new-three", "THREE"),
+        replacement_segment("new-suffix", "SUFFIX"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {
+        0: 0,
+        2: 1,
+        4: 2,
+        5: 3,
+        6: 4,
+    }
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_segment_alignment_does_not_reuse_ambiguous_duplicate_text() -> None:
+    old = [
+        replacement_segment("old-dup-1", "DUP"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-dup-2", "DUP"),
+    ]
+    new = [
+        replacement_segment("new-dup-1", "DUP"),
+        replacement_segment("new-anchor", "ANCHOR"),
+        replacement_segment("new-dup-2", "DUP"),
+        replacement_segment("new-dup-3", "DUP"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {1: 1}
+    assert result.ambiguous_old_indices == (0, 2)
+    assert result.ambiguous_new_indices == (0, 2, 3)
+
+
+def test_segment_alignment_marks_reordered_duplicate_occurrences_ambiguous() -> None:
+    old = [
+        replacement_segment("old-dup-before", "DUP"),
+        replacement_segment("old-anchor", "ANCHOR"),
+        replacement_segment("old-dup-after", "DUP"),
+    ]
+    new = [
+        replacement_segment("new-dup-before", "DUP"),
+        replacement_segment("new-dup-after", "DUP"),
+        replacement_segment("new-anchor", "ANCHOR"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {2: 1}
+    assert result.ambiguous_old_indices == (0, 2)
+    assert result.ambiguous_new_indices == (0, 1)
+
+
+def test_segment_alignment_reuses_exact_duplicate_run_around_change() -> None:
+    old = [
+        replacement_segment("old-dup-1", "DUP"),
+        replacement_segment("old-dup-2", "DUP"),
+        replacement_segment("old-change", "OLD"),
+    ]
+    new = [
+        replacement_segment("new-dup-1", "DUP"),
+        replacement_segment("new-dup-2", "DUP"),
+        replacement_segment("new-change", "NEW"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 0, 1: 1}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_segment_alignment_matches_reordered_parts_independently() -> None:
+    old = [
+        replacement_segment("old-a", "A", part_id="a"),
+        replacement_segment("old-b", "B", part_id="a"),
+        replacement_segment("old-c", "C", part_id="b"),
+    ]
+    new = [
+        replacement_segment("new-c", "C", part_id="b"),
+        replacement_segment("new-a", "A", part_id="a"),
+        replacement_segment("new-b", "B", part_id="a"),
+    ]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {0: 2, 1: 0, 2: 1}
+
+
+def test_segment_alignment_requires_effective_model_source_match() -> None:
+    old = [replacement_segment("old", "A", model_source="model A")]
+    new = [replacement_segment("new", "A", model_source="model B")]
+
+    result = align_segments(old, new)
+
+    assert result.preserved_new_to_old == {}
+    assert result.ambiguous_old_indices == ()
+    assert result.ambiguous_new_indices == ()
+
+
+def test_file_replacement_preserves_ids_and_progress_when_inserting_segment(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A\nANCHOR\nB", encoding="utf-8")
+    replacement.write_text("A\nEXTRA\nANCHOR\nB", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    append_jsonl(
+        project,
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=str(old_segments[2]["segment_id"]),
+            status="completed",
+            text="B译文",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=None,
+            run_id="RUN-OLD",
+            request_id="REQ-OLD",
+        ),
+    )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+
+    assert plan.impact["preserved_segment_count"] == 3
+    assert plan.impact["added_segment_count"] == 1
+    assert plan.impact["removed_segment_count"] == 0
+    apply_file_replacement(project, plan)
+
+    segments = read_segments(project)
+    assert [item["source"] for item in segments] == ["A", "EXTRA", "ANCHOR", "B"]
+    assert [item["segment_id"] for item in segments] == [
+        old_segments[0]["segment_id"],
+        "F0001-S000004",
+        old_segments[1]["segment_id"],
+        old_segments[2]["segment_id"],
+    ]
+    assert [item["line_index"] for item in segments] == [0, 1, 2, 3]
+    assert read_files(project)[0]["next_segment_sequence"] == 5
+    assert read_jsonl(project, stage_result_path(project, "translation"))[-1][
+        "segment_id"
+    ] == old_segments[2]["segment_id"]
+
+
+def test_file_replacement_removes_changed_segments_but_keeps_history(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("KEEP\nCHANGE\nREMOVE", encoding="utf-8")
+    replacement.write_text("KEEP\nCHANGED", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    history_path = stage_result_path(project, "translation")
+    for segment in old_segments:
+        append_jsonl(
+            project,
+            history_path,
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=str(segment["segment_id"]),
+                status="completed",
+                text=f"译:{segment['source']}",
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=None,
+                run_id="RUN-OLD",
+                request_id=f"REQ-{segment['line_index']}",
+            ),
+        )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    assert plan.impact["preserved_segment_count"] == 1
+    assert plan.impact["added_segment_count"] == 1
+    assert plan.impact["removed_segment_count"] == 2
+    apply_file_replacement(project, plan)
+
+    active_ids = {str(item["segment_id"]) for item in read_segments(project)}
+    assert active_ids == {str(old_segments[0]["segment_id"]), "F0001-S000004"}
+    assert {str(item["segment_id"]) for item in read_jsonl(project, history_path)} == {
+        str(item["segment_id"]) for item in old_segments
+    }
+
+
+def test_file_replacement_does_not_reuse_ids_across_replacements(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    first = tmp_path / "book-1.txt"
+    second = tmp_path / "book-2.txt"
+    original.write_text("A", encoding="utf-8")
+    first.write_text("B", encoding="utf-8")
+    second.write_text("C", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    apply_file_replacement(
+        project, prepare_file_replacement(project, "F0001", first)
+    )
+    first_id = str(read_segments(project)[0]["segment_id"])
+    apply_file_replacement(
+        project, prepare_file_replacement(project, "F0001", second)
+    )
+
+    assert first_id == "F0001-S000002"
+    assert read_segments(project)[0]["segment_id"] == "F0001-S000003"
+
+
+def test_file_replacement_uses_staged_input_after_external_change(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    assert plan.staged_input.read_text(encoding="utf-8") == "two"
+    replacement.write_text("three", encoding="utf-8")
+
+    try:
+        apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "two"
+    assert not plan.temporary_root.exists()
+
+
+def test_file_replacement_rejects_staged_input_changed_during_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    imported = project_module._import_project_inputs
+    roots: list[Path] = []
+    original_mkdtemp = project_module.tempfile.mkdtemp
+
+    def capture_root(*args: object, **kwargs: object) -> str:
+        root = original_mkdtemp(*args, **kwargs)
+        roots.append(Path(root))
+        return root
+
+    def mutate_during_parse(*args: object, **kwargs: object) -> object:
+        inputs = args[0]
+        assert isinstance(inputs, list)
+        Path(str(inputs[0])).write_text("tampered", encoding="utf-8")
+        return imported(*args, **kwargs)
+
+    monkeypatch.setattr(project_module, "_import_project_inputs", mutate_during_parse)
+    monkeypatch.setattr(project_module.tempfile, "mkdtemp", capture_root)
+    with pytest.raises(UsageError, match="解析期间变化"):
+        prepare_file_replacement(project, "F0001", replacement)
+    assert roots and not roots[0].exists()
+
+
+def test_file_replacement_cleans_staging_on_parse_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    roots: list[Path] = []
+    original_mkdtemp = project_module.tempfile.mkdtemp
+
+    def capture_root(*args: object, **kwargs: object) -> str:
+        root = original_mkdtemp(*args, **kwargs)
+        roots.append(Path(root))
+        return root
+
+    def interrupt_parse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(project_module.tempfile, "mkdtemp", capture_root)
+    monkeypatch.setattr(project_module, "_import_project_inputs", interrupt_parse)
+    with pytest.raises(KeyboardInterrupt):
+        prepare_file_replacement(project, "F0001", replacement)
+    assert roots and not roots[0].exists()
+
+
+def test_file_replacement_rejects_staged_input_changed_before_apply(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    plan.staged_input.write_text("tampered", encoding="utf-8")
+
+    try:
+        with pytest.raises(UsageError, match="替换输入已变化"):
+            apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+
+def test_file_replacement_rejects_project_staging_digest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    copy2 = project_module.shutil.copy2
+
+    def copy_and_tamper(source: str | Path, target: str | Path) -> object:
+        result = copy2(source, target)
+        if Path(target).name == "new-input":
+            Path(target).write_text("tampered", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(project_module.shutil, "copy2", copy_and_tamper)
+    try:
+        with pytest.raises(UsageError, match="复制结果"):
+            apply_file_replacement(project, plan)
+    finally:
+        plan.cleanup()
+
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "one"
+
+
+def test_files_replace_cli_cleans_plan_after_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plans = []
+    prepare = main_module.prepare_file_replacement
+
+    def capture_plan(*args: object, **kwargs: object) -> object:
+        plan = prepare(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(main_module, "prepare_file_replacement", capture_plan)
+    assert (
+        run(
+            [
+                "files-replace",
+                str(project),
+                "F0001",
+                str(replacement),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert len(plans) == 1
+    assert not plans[0].temporary_root.exists()
+
+
+def test_file_replacement_rejects_directory_input(tmp_path: Path) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    original.write_text("A", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    (replacement_dir / "one.txt").write_text("B", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="单个文件"):
+        prepare_file_replacement(project, "F0001", replacement_dir)
+
+
+def test_file_replacement_requires_publishing_pending_term_candidates(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    metadata = read_json(project, project / "project.json")
+    task_id = "TERM-TASK-REPLACE"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            terms=[{"source": "A", "category": "name"}],
+        ),
+    )
+
+    with pytest.raises(UsageError, match="未发布的术语候选"):
+        prepare_file_replacement(project, "F0001", replacement)
+
+
+def test_file_replacement_allows_completed_published_term_candidates(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    metadata = read_json(project, project / "project.json")
+    task_id = "TERM-TASK-PUBLISHED-REPLACE"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="completed",
+            terms_revision=1,
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            str(metadata["project_id"]),
+            active_task_id=task_id,
+            terms=[{"source": "A", "category": "name"}],
+        ),
+    )
+
+    plan = prepare_file_replacement(project, "F0001", replacement)
+
+    assert plan.impact["added_segment_count"] == 1
+
+
+def test_file_replacement_rejects_invalid_persisted_segment_sequence(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    files = read_files(project)
+    files[0]["next_segment_sequence"] = 0
+    metadata = read_json(project, project / "project.json")
+    replace_source(
+        project,
+        files,
+        read_segments(project),
+        metadata,
+    )
+
+    with pytest.raises(ProjectError, match="next_segment_sequence"):
+        prepare_file_replacement(project, "F0001", replacement)
+
+
+def test_file_replacement_initializes_missing_segment_sequence_from_existing_ids(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    files = read_files(project)
+    segments = read_segments(project)
+    files[0].pop("next_segment_sequence")
+    segments[0]["segment_id"] = "F0001-S000009"
+    metadata = read_json(project, project / "project.json")
+    replace_source(project, files, segments, metadata)
+
+    apply_file_replacement(
+        project,
+        prepare_file_replacement(project, "F0001", replacement),
+    )
+
+    assert read_segments(project)[0]["segment_id"] == "F0001-S000010"
+    assert read_files(project)[0]["next_segment_sequence"] == 11
+
+
+def test_epub_file_replacement_reuses_part_progress_and_new_locators(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A</p><p>ANCHOR</p></body></html>"
+        ),
+    )
+    make_epub(
+        replacement,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A</p><p>EXTRA</p><p>ANCHOR</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="book",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    old_segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    for segment in old_segments:
+        append_jsonl(
+            project,
+            stage_result_path(project, "translation"),
+            record_header(
+                "stage_result",
+                str(metadata["project_id"]),
+                stage="translation",
+                segment_id=str(segment["segment_id"]),
+                status="completed",
+                text=f"译:{segment['source']}",
+                validation_status="passed",
+                validation_findings=[],
+                stage_fingerprint="sha256:test",
+                terms_revision=None,
+                run_id="RUN-OLD",
+                request_id=f"REQ-{segment['line_index']}",
+            ),
+        )
+
+    apply_file_replacement(
+        project,
+        prepare_file_replacement(project, "F0001", replacement),
+    )
+
+    segments = read_segments(project)
+    assert [item["source"] for item in segments] == ["A", "EXTRA", "ANCHOR"]
+    assert [item["segment_id"] for item in segments] == [
+        old_segments[0]["segment_id"],
+        "F0001-S000003",
+        old_segments[1]["segment_id"],
+    ]
+    file_record = read_files(project)[0]
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
+    assert len(state["state"]["locators"]) == 3
+    exported = export_project(
+        project,
+        "translated",
+        bilingual=False,
+        allow_missing=True,
+        output_format="original",
+    )
+    with zipfile.ZipFile(project / exported["written"][0]) as archive:
+        chapter = archive.read("OEBPS/text/ch1.xhtml")
+    assert b"\xe8\xaf\x91:A" in chapter
+    assert b"EXTRA" in chapter
+
+
+def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "ruby_mode": "base_only",
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    preserved = prepare_file_replacement(project, "F0001", replacement)
+    assert preserved.impact["previous_adapter_options"] == {
+        "ruby_mode": "base_only",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert preserved.impact["replacement_adapter_options"] == preserved.impact[
+        "previous_adapter_options"
+    ]
+    assert preserved.impact["changed_adapter_options"] == []
+
+    overridden = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+    )
+    assert overridden.impact["replacement_adapter_options"] == {
+        "ruby_mode": "short_xml",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert overridden.impact["changed_adapter_options"] == ["ruby_mode"]
+
+
+def test_file_replacement_supports_legacy_epub_parenthetical_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-legacy-options",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    file_record["document_adapter_version"] = "0.3"
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    state_record["adapter_version"] = "0.3"
+    state_record["state"]["ruby_mode"] = "parenthetical"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
+        )
+    write_json(project, state_path, state_record)
+
+    preserved = prepare_file_replacement(project, "F0001", replacement)
+    overridden = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"ruby_mode": "aozora"}},
+    )
+    try:
+        assert preserved.impact["previous_adapter_options"]["ruby_mode"] == (
+            "parenthetical"
+        )
+        assert preserved.impact["replacement_adapter_options"]["ruby_mode"] == (
+            "parenthetical"
+        )
+        assert overridden.impact["replacement_adapter_options"]["ruby_mode"] == (
+            "aozora"
+        )
+    finally:
+        preserved.cleanup()
+        overridden.cleanup()
+
+
+def test_file_replacement_rejects_stale_adapter_state_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    replacement = tmp_path / "book-revised.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    make_epub(replacement, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="book-stale-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "ruby_mode": "aozora",
+                "inline_format_mode": "markers",
+                "inline_format_policy": "tiered",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    first = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"inline_format_policy": "strict"}},
+    )
+    second = prepare_file_replacement(
+        project,
+        "F0001",
+        replacement,
+        adapter_options={"epub": {"inline_format_policy": "tiered"}},
+    )
+    try:
+        apply_file_replacement(project, first)
+        with pytest.raises(UsageError, match="项目源文件已变化"):
+            apply_file_replacement(project, second)
+    finally:
+        first.cleanup()
+        second.cleanup()
+    state = read_json(project, project / "source/adapters/epub/F0001.json")
+    assert state["state"]["inline_format_policy"] == "strict"
+
+
+def test_file_replacement_restores_source_when_publish_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored_path = project / "input" / str(read_files(project)[0]["stored_name"])
+    original_replace = os.replace
+
+    def fail_new_publish(source: str | Path, target: str | Path) -> None:
+        if str(source).endswith("/new-input"):
+            raise OSError("replacement publish failed")
+        original_replace(source, target)
+
+    monkeypatch.setattr("app.project.os.replace", fail_new_publish)
+    with pytest.raises(OSError, match="replacement publish failed"):
+        apply_file_replacement(project, plan)
+
+    assert stored_path.read_text(encoding="utf-8") == "A"
+    assert [item["source"] for item in read_segments(project)] == ["A"]
+
+
+def test_file_replacement_restores_source_when_database_update_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "book.txt"
+    replacement = tmp_path / "book-revised.txt"
+    original.write_text("A", encoding="utf-8")
+    replacement.write_text("B", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored_path = project / "input" / str(read_files(project)[0]["stored_name"])
+
+    def fail_database_update(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise StorageError("database update failed")
+
+    monkeypatch.setattr("app.project.replace_source", fail_database_update)
+    with pytest.raises(StorageError, match="database update failed"):
+        apply_file_replacement(project, plan)
+
+    assert stored_path.read_text(encoding="utf-8") == "A"
+    assert [item["source"] for item in read_segments(project)] == ["A"]
 
 
 def init_empty(
@@ -131,6 +986,82 @@ def test_parse_adapter_option_args_builds_adapter_dict() -> None:
     for value in ("a.b", "=x", "a=x", ".b=x", "a.=x", "a.b.c=x"):
         with pytest.raises(UsageError, match="格式无效"):
             parse_adapter_option_args([value])
+
+
+def test_files_replace_cli_parser_accepts_preview_and_confirmation_flags() -> None:
+    parser = build_parser()
+    preview = parser.parse_args(
+        ["files-replace", "sample", "F0001", "revised.txt", "--dry-run"]
+    )
+    assert preview.command == "files-replace"
+    assert preview.file_id == "F0001"
+    assert preview.dry_run is True
+    assert preview.yes is False
+
+    confirmed = parser.parse_args(
+        ["files-replace", "sample", "F0001", "revised.txt", "--yes"]
+    )
+    assert confirmed.yes is True
+    assert confirmed.dry_run is False
+
+
+def test_files_replace_cli_dry_run_and_yes_apply(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one\ntwo", encoding="utf-8")
+    replacement.write_text("one\ninserted\ntwo", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    assert run(["files-replace", str(project), "F0001", str(replacement), "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["preserved_segment_count"] == 2
+    assert "preview_token" not in preview
+    assert [item["source"] for item in read_segments(project)] == ["one", "two"]
+
+    assert run(["files-replace", str(project), "F0001", str(replacement), "--yes"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["added_segment_count"] == 1
+    assert "replaced_file_id" not in result
+    assert "file_count" not in result
+    assert "segment_count" not in result
+    assert "preview_token" not in result
+    assert [item["source"] for item in read_segments(project)] == [
+        "one",
+        "inserted",
+        "two",
+    ]
+
+
+def test_files_replace_cli_requires_confirmation_in_non_tty(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+
+    with pytest.raises(UsageError, match="--dry-run 或 --yes"):
+        run(["files-replace", str(project), "F0001", str(replacement)])
+
+
+def test_file_replacement_rejects_changed_stored_source_after_preview(
+    tmp_path: Path,
+) -> None:
+    project = init_empty(tmp_path)
+    original = tmp_path / "original.txt"
+    replacement = tmp_path / "replacement.txt"
+    original.write_text("one", encoding="utf-8")
+    replacement.write_text("two", encoding="utf-8")
+    add_project_files(project, [str(original)])
+    plan = prepare_file_replacement(project, "F0001", replacement)
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    stored.write_text("changed outside preview", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="源文件已变化"):
+        apply_file_replacement(project, plan)
 
 
 def test_empty_project_can_open_inspect_and_add_txt_files(

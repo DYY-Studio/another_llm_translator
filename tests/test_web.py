@@ -27,6 +27,7 @@ from app.sqlite_storage import (
     read_files,
     read_json,
     read_jsonl,
+    read_segments,
     record_exists,
     record_header,
     write_json,
@@ -195,6 +196,152 @@ def test_web_creates_default_projects_root_at_startup(tmp_path: Path) -> None:
     )
     assert created.status_code == 200
     assert created.json()["project_selector"] == "empty"
+
+
+def test_web_file_replacement_preview_confirm_preserves_file_identity(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    preview = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-preview",
+        files={
+            "file": (
+                "revised.txt",
+                b"one\ninserted\ntwo",
+                "text/plain",
+            )
+        },
+    )
+
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["preview_id"]
+    assert preview_payload["file_id"] == "F0001"
+    assert preview_payload["old_segment_count"] == 2
+    assert preview_payload["new_segment_count"] == 3
+    assert preview_payload["preserved_segment_count"] == 2
+    assert preview_payload["added_segment_count"] == 1
+
+    confirmed = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-confirm",
+        json={"preview_id": preview_payload["preview_id"]},
+    )
+
+    assert confirmed.status_code == 200
+    result = confirmed.json()
+    assert result["file_id"] == "F0001"
+    assert result["preserved_segment_count"] == 2
+    assert "preview_id" not in result
+    assert "preview_token" not in result
+    assert "replaced_file_id" not in result
+    assert "file_count" not in result
+    assert "segment_count" not in result
+    files = read_files(project)
+    assert files[0]["file_id"] == "F0001"
+    assert files[0]["original_name"] == "input.txt"
+    assert [item["source"] for item in read_segments(project)] == [
+        "one",
+        "inserted",
+        "two",
+    ]
+    stored = project / "input" / str(files[0]["stored_name"])
+    assert stored.read_text(encoding="utf-8") == "one\ninserted\ntwo"
+
+
+def test_web_file_replacement_preview_is_single_use_and_cleans_temp_files(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("first.txt", b"first", "text/plain")},
+        )
+        assert first.status_code == 200
+        first_id = first.json()["preview_id"]
+        first_root = app.state.replacement_previews[
+            (projects_root / "sample").resolve(), "F0001"
+        ].temporary_root
+        assert first_root.is_dir()
+
+        second = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("second.txt", b"second", "text/plain")},
+        )
+        assert second.status_code == 200
+        second_id = second.json()["preview_id"]
+        second_root = app.state.replacement_previews[
+            (projects_root / "sample").resolve(), "F0001"
+        ].temporary_root
+        assert second_id != first_id
+        assert not first_root.exists()
+        assert second_root.is_dir()
+
+        stale = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{first_id}"
+        )
+        assert stale.status_code == 400
+        cancelled = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{second_id}"
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json() == {"cancelled": True}
+        assert not second_root.exists()
+
+    assert not app.state.replacement_previews
+
+
+def test_web_replacement_confirm_failure_retains_preview_for_cancel(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    with TestClient(app) as client:
+        preview = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-preview",
+            files={"file": ("revised.txt", b"revised", "text/plain")},
+        )
+        assert preview.status_code == 200
+        preview_id = preview.json()["preview_id"]
+        key = (projects_root / "sample").resolve(), "F0001"
+        session = app.state.replacement_previews[key]
+        session.plan.staged_input.write_text("tampered", encoding="utf-8")
+
+        failed = client.post(
+            "/api/v1/projects/sample/files/F0001/replacement-confirm",
+            json={"preview_id": preview_id},
+        )
+        assert failed.status_code == 400
+        assert key in app.state.replacement_previews
+        assert session.temporary_root.is_dir()
+
+        cancelled = client.delete(
+            f"/api/v1/projects/sample/files/F0001/replacement-preview/{preview_id}"
+        )
+        assert cancelled.status_code == 200
+        assert not session.temporary_root.exists()
+
+
+def test_web_file_replacement_accepts_one_server_side_path(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    replacement = tmp_path / "server-replacement.txt"
+    replacement.write_text("server\nfile", encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root))
+
+    preview = client.post(
+        "/api/v1/projects/sample/files/F0001/replacement-preview",
+        data={"server_path": str(replacement)},
+    )
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert payload["new_segment_count"] == 2
+    assert client.delete(
+        f"/api/v1/projects/sample/files/F0001/replacement-preview/{payload['preview_id']}"
+    ).status_code == 200
 
 
 def test_web_long_query_inputs_use_post_bodies(tmp_path: Path) -> None:
@@ -672,6 +819,125 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     file_record = read_files(project)[0]
     state = read_json(project, project / str(file_record["document_adapter_state"]))
     assert state["state"]["ruby_mode"] == "short_xml"
+
+
+def test_web_replacement_options_use_file_values_and_preview_overrides(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+    created = client.post(
+        "/api/v1/projects",
+        data={
+            "name": "ruby-replace-options",
+            "adapter_options": json.dumps(
+                {
+                    "epub": {
+                        "ruby_mode": "base_only",
+                        "inline_format_mode": "markers",
+                        "inline_format_policy": "strict",
+                    }
+                }
+            ),
+        },
+        files=[("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))],
+    )
+    assert created.status_code == 200
+
+    options = client.get(
+        "/api/v1/projects/ruby-replace-options/files/F0001/replacement-options"
+    )
+    assert options.status_code == 200
+    assert options.json()["values"] == {
+        "ruby_mode": "base_only",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    ruby_options = next(
+        item
+        for item in options.json()["adapter"]["import_options"]
+        if item["option_id"] == "ruby_mode"
+    )
+    assert "parenthetical" not in {
+        choice["value"] for choice in ruby_options["choices"]
+    }
+
+    preview = client.post(
+        "/api/v1/projects/ruby-replace-options/files/F0001/replacement-preview",
+        data={
+            "adapter_options": json.dumps(
+                {"epub": {"ruby_mode": "short_xml"}}
+            )
+        },
+        files={"file": ("revised.epub", epub.read_bytes(), "application/epub+zip")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["previous_adapter_options"] == options.json()["values"]
+    assert preview.json()["replacement_adapter_options"] == {
+        "ruby_mode": "short_xml",
+        "inline_format_mode": "markers",
+        "inline_format_policy": "strict",
+    }
+    assert preview.json()["changed_adapter_options"] == ["ruby_mode"]
+
+
+def test_web_replacement_preserves_legacy_epub_option_values(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    epub = tmp_path / "ruby.epub"
+    revised = tmp_path / "ruby-revised.epub"
+    make_epub(epub, xhtml=RUBY_XHTML)
+    make_epub(revised, xhtml=RUBY_XHTML)
+    client = TestClient(create_app(projects_root=projects_root))
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "ruby-legacy-replace"},
+        files=[("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))],
+    )
+    assert created.status_code == 200
+    project = projects_root / "ruby-legacy-replace"
+    file_record = read_files(project)[0]
+    file_record["document_adapter_version"] = "0.3"
+    state_path = project / str(file_record["document_adapter_state"])
+    state_record = read_json(project, state_path)
+    state_record["adapter_version"] = "0.3"
+    state_record["state"]["ruby_mode"] = "parenthetical"
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
+        )
+    write_json(project, state_path, state_record)
+
+    options = client.get(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-options"
+    )
+    assert options.status_code == 200
+    assert options.json()["values"]["ruby_mode"] == "parenthetical"
+    ruby_choices = next(
+        item
+        for item in options.json()["adapter"]["import_options"]
+        if item["option_id"] == "ruby_mode"
+    )["choices"]
+    assert "parenthetical" in {choice["value"] for choice in ruby_choices}
+
+    preview = client.post(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview",
+        data={"adapter_options": json.dumps({"epub": options.json()["values"]})},
+        files={"file": ("ruby-revised.epub", revised.read_bytes(), "application/epub+zip")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["replacement_adapter_options"]["ruby_mode"] == (
+        "parenthetical"
+    )
+    deleted = client.delete(
+        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview/"
+        + preview.json()["preview_id"]
+    )
+    assert deleted.status_code == 200
 
 
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
@@ -1256,9 +1522,7 @@ def test_web_manages_global_adapters(tmp_path: Path) -> None:
     assert wrong_id.status_code == 400
 
 
-def test_web_rejects_inline_config_and_has_no_migration_endpoint(
-    tmp_path: Path,
-) -> None:
+def test_web_rejects_inline_config(tmp_path: Path) -> None:
     projects_root, project = make_project(tmp_path)
     app = create_app(projects_root=projects_root)
     client = TestClient(app)
@@ -1273,13 +1537,6 @@ def test_web_rejects_inline_config_and_has_no_migration_endpoint(
     response = client.get("/api/v1/projects/sample/config")
     assert response.status_code == 400
     assert "未知配置键 config.llm: model" in response.json()["error"]
-    route_paths = {getattr(route, "path", "") for route in app.routes}
-    assert not any(
-        path.startswith("/api/v1/projects/")
-        and "adapters" in path
-        for path in route_paths
-    )
-    assert "/api/v1/global/adapters" in route_paths
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:

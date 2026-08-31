@@ -8,12 +8,14 @@ import ipaddress
 import json
 import os
 import secrets
+import shutil
 import socket
 import sys
 import tempfile
 import time
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -36,7 +38,6 @@ from .config import (
 from .credentials import (
     credential_summaries,
     delete_credential,
-    migrate_legacy_credentials,
     read_credential,
     read_lan_password,
     resolve_api_key,
@@ -60,7 +61,9 @@ from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
 from .logging_utils import get_logger
 from .plugins import (
+    document_adapter_replacement_options,
     document_adapter_summaries,
+    get_document_adapter,
     get_document_adapter_for_extension,
     resolve_translation_validators,
 )
@@ -70,16 +73,20 @@ from .project import (
 from .project import (
     PROJECTS_ROOT,
     PROMPT_LANGUAGES,
+    FileReplacementPlan,
     add_project_files,
+    apply_file_replacement,
     delete_project,
     init_project,
     natural_path_key,
+    prepare_file_replacement,
     prompt_file,
     remove_project_files,
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
+    load_source_files,
 )
 from .prompt_library import (
     delete_prompt_library,
@@ -94,6 +101,7 @@ from .sqlite_storage import (
     compact_project_database,
     database_path,
     read_json,
+    read_adapter_state,
 )
 from .stages import (
     export_project,
@@ -130,6 +138,19 @@ _WINDOWS_DRIVE_TYPES = {
     5: "cdrom",
     6: "ramdisk",
 }
+
+
+@dataclass
+class ReplacementPreviewSession:
+    preview_id: str
+    plan: FileReplacementPlan
+
+    @property
+    def temporary_root(self) -> Path:
+        return self.plan.temporary_root
+
+    def cleanup(self) -> None:
+        self.plan.cleanup()
 
 
 def _windows_drive_entries() -> list[dict[str, Any]]:
@@ -250,7 +271,6 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
-    migrate_legacy_credentials()
     migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
@@ -264,6 +284,14 @@ def create_app(
     app.state.external_projects = set()
     app.state.server_config = server_config or load_server_config()
     app.state.sessions: dict[str, float] = {}
+    app.state.replacement_previews: dict[tuple[Path, str], ReplacementPreviewSession] = {}
+
+    async def cleanup_replacement_previews() -> None:
+        for session in app.state.replacement_previews.values():
+            session.cleanup()
+        app.state.replacement_previews.clear()
+
+    app.router.add_event_handler("shutdown", cleanup_replacement_previews)
 
     async def stage_uploads(
         upload_root: Path,
@@ -583,6 +611,9 @@ def create_app(
                 raise ProjectError(f"项目不存在或标识冲突：{name}")
             return matches[0]
 
+    def replacement_key(root: Path, file_id: str) -> tuple[Path, str]:
+        return root.resolve(), file_id
+
     @app.get("/api/v1/projects")
     async def list_projects() -> dict[str, Any]:
         values = []
@@ -677,6 +708,42 @@ def create_app(
     @app.get("/api/v1/document-adapters")
     async def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
+
+    @app.get(
+        "/api/v1/projects/{name}/files/{file_id}/replacement-options"
+    )
+    async def replacement_options(name: str, file_id: str) -> dict[str, Any]:
+        root = project(name)
+        file_record = next(
+            (
+                item
+                for item in load_source_files(root)
+                if str(item.get("file_id")) == file_id
+            ),
+            None,
+        )
+        if file_record is None:
+            raise UsageError(f"未知文件 ID：{file_id}")
+        adapter_id = str(file_record["document_adapter_id"])
+        adapter = get_document_adapter(adapter_id)
+        state = read_adapter_state(root, file_id)
+        opaque_state = (
+            state.get("state")
+            if isinstance(state, dict) and isinstance(state.get("state"), dict)
+            else state
+        )
+        values = document_adapter_replacement_options(
+            adapter,
+            opaque_state=opaque_state,
+        )
+        summary = next(
+            item
+            for item in document_adapter_summaries(
+                replacement_values=values
+            )
+            if item["adapter_id"] == adapter_id
+        )
+        return {"adapter": summary, "values": values}
 
     @app.get("/api/v1/translation-validators")
     async def translation_validators() -> dict[str, Any]:
@@ -1377,6 +1444,97 @@ def create_app(
                 *list(summary["warnings"]),
             ]
             return summary
+
+    @app.post("/api/v1/projects/{name}/files/{file_id}/replacement-preview")
+    async def replacement_preview(
+        name: str,
+        file_id: str,
+        file: UploadFile | None = File(None),
+        server_path: str | None = Form(None),
+        adapter_options: str = Form("{}"),
+    ) -> dict[str, Any]:
+        root = project(name)
+        normalized_server_path = server_path.strip() if server_path else ""
+        if file is None and not normalized_server_path:
+            raise UsageError("必须上传一个替换文件或提供服务端文件路径")
+        if file is not None and normalized_server_path:
+            raise UsageError("替换只能提供一个文件来源")
+        upload_root = Path(tempfile.mkdtemp(prefix="translator-replacement-upload-"))
+        plan: FileReplacementPlan | None = None
+        try:
+            inputs, _, upload_warnings = await stage_uploads(
+                upload_root,
+                [file] if file is not None else [],
+                None,
+                None,
+                [normalized_server_path] if normalized_server_path else None,
+                ["file"] if normalized_server_path else None,
+            )
+            if len(inputs) != 1:
+                raise UsageError("替换只能接受一个文件")
+            with project_write_lock(root):
+                plan = prepare_file_replacement(
+                    root,
+                    file_id,
+                    Path(inputs[0]),
+                    adapter_options=parse_adapter_options(adapter_options),
+                )
+            shutil.rmtree(upload_root, ignore_errors=True)
+            preview_id = secrets.token_urlsafe(24)
+            session = ReplacementPreviewSession(
+                preview_id=preview_id,
+                plan=plan,
+            )
+            key = replacement_key(root, file_id)
+            previous = app.state.replacement_previews.pop(key, None)
+            if previous is not None:
+                previous.cleanup()
+            app.state.replacement_previews[key] = session
+            result = dict(plan.impact)
+            result["warnings"] = [
+                *upload_warnings,
+                *plan.impact["warnings"],
+            ]
+            result["preview_id"] = preview_id
+            return result
+        except BaseException:
+            if plan is not None:
+                plan.cleanup()
+            shutil.rmtree(upload_root, ignore_errors=True)
+            raise
+
+    @app.post("/api/v1/projects/{name}/files/{file_id}/replacement-confirm")
+    async def replacement_confirm(
+        name: str, file_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        preview_id = payload.get("preview_id")
+        if not isinstance(preview_id, str) or not preview_id:
+            raise UsageError("preview_id 必须是非空字符串")
+        root = project(name)
+        key = replacement_key(root, file_id)
+        session = app.state.replacement_previews.get(key)
+        if session is None or session.preview_id != preview_id:
+            raise UsageError("替换预览不存在或已失效")
+        with project_write_lock(root):
+            result = apply_file_replacement(root, session.plan)
+        app.state.replacement_previews.pop(key, None)
+        session.cleanup()
+        return result
+
+    @app.delete(
+        "/api/v1/projects/{name}/files/{file_id}/replacement-preview/{preview_id}"
+    )
+    async def replacement_cancel(
+        name: str, file_id: str, preview_id: str
+    ) -> dict[str, Any]:
+        root = project(name)
+        key = replacement_key(root, file_id)
+        session = app.state.replacement_previews.get(key)
+        if session is None or session.preview_id != preview_id:
+            raise UsageError("替换预览不存在或已失效")
+        app.state.replacement_previews.pop(key, None)
+        session.cleanup()
+        return {"cancelled": True}
 
     @app.post("/api/v1/projects/{name}/files/remove")
     async def remove_files(
