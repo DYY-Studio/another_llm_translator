@@ -233,6 +233,11 @@ def test_web_file_replacement_preview_confirm_preserves_file_identity(
     result = confirmed.json()
     assert result["file_id"] == "F0001"
     assert result["preserved_segment_count"] == 2
+    assert "preview_id" not in result
+    assert "preview_token" not in result
+    assert "replaced_file_id" not in result
+    assert "file_count" not in result
+    assert "segment_count" not in result
     files = read_files(project)
     assert files[0]["file_id"] == "F0001"
     assert files[0]["original_name"] == "input.txt"
@@ -283,6 +288,7 @@ def test_web_file_replacement_preview_is_single_use_and_cleans_temp_files(
             f"/api/v1/projects/sample/files/F0001/replacement-preview/{second_id}"
         )
         assert cancelled.status_code == 200
+        assert cancelled.json() == {"cancelled": True}
         assert not second_root.exists()
 
     assert not app.state.replacement_previews

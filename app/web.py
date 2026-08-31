@@ -139,9 +139,6 @@ _WINDOWS_DRIVE_TYPES = {
 
 @dataclass
 class ReplacementPreviewSession:
-    project_id: str
-    project: Path
-    file_id: str
     preview_id: str
     temporary_root: Path
     plan: FileReplacementPlan
@@ -1440,12 +1437,8 @@ def create_app(
                     Path(inputs[0]),
                     adapter_options=parse_adapter_options(adapter_options),
                 )
-            metadata = read_json(root, root / "project.json")
             preview_id = secrets.token_urlsafe(24)
             session = ReplacementPreviewSession(
-                project_id=str(metadata["project_id"]),
-                project=root.resolve(),
-                file_id=file_id,
                 preview_id=preview_id,
                 temporary_root=temporary_root,
                 plan=plan,
@@ -1458,7 +1451,7 @@ def create_app(
             result = dict(plan.impact)
             result["warnings"] = [
                 *upload_warnings,
-                *list(plan.warnings),
+                *plan.impact["warnings"],
             ]
             result["preview_id"] = preview_id
             return result
@@ -1478,14 +1471,10 @@ def create_app(
         session = app.state.replacement_previews.get(key)
         if session is None or session.preview_id != preview_id:
             raise UsageError("替换预览不存在或已失效")
-        metadata = read_json(root, root / "project.json")
-        if str(metadata.get("project_id")) != session.project_id:
-            raise UsageError("替换预览不属于当前项目")
         with project_write_lock(root):
             result = apply_file_replacement(root, session.plan)
         app.state.replacement_previews.pop(key, None)
         session.cleanup()
-        result["preview_id"] = preview_id
         return result
 
     @app.delete(
@@ -1501,7 +1490,7 @@ def create_app(
             raise UsageError("替换预览不存在或已失效")
         app.state.replacement_previews.pop(key, None)
         session.cleanup()
-        return {"cancelled": True, "preview_id": preview_id}
+        return {"cancelled": True}
 
     @app.post("/api/v1/projects/{name}/files/remove")
     async def remove_files(
