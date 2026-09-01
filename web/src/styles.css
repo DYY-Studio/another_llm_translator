@@ -1047,9 +1047,10 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 }
 
 @media (max-width: 780px), (pointer: coarse) {
-  .overview-file-list .file-row { grid-template-columns: minmax(0, 1fr); }
+  .overview-file-list .file-row { position: relative; grid-template-columns: minmax(0, 1fr); }
   .overview-file-list .file-row-drag { display: none; }
   .overview-file-list .file-row-select { padding-left: 10px; }
+  .overview-file-list .file-row-meta { position: absolute; left: 100px; bottom: 18px; justify-content: flex-start; }
   .overview-file-list .file-row-replace { justify-self: end; margin: 0 10px 8px; }
   .overview-file-list .file-row-select.reorder-select { grid-template-columns: 22px 64px minmax(0, 1fr) auto; gap: 8px; }
 }
