@@ -3358,6 +3358,67 @@ async def test_web_run_all_reports_progress_and_usage(
 
 
 @pytest.mark.asyncio
+async def test_web_run_all_initial_total_excludes_completed_terminology_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-RUN-ALL",
+                "source": "one",
+                "normalized": "one",
+                "category": "普通",
+                "description": None,
+                "preferred_translation": "一",
+                "aliases": [],
+                "group_primary": None,
+                "disabled": False,
+            }
+        ],
+    )
+    entered = asyncio.Event()
+
+    async def fake_run_all(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 6
+    await entered.wait()
+    await manager.cancel(started["task_id"])
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+def test_web_selection_snapshot_includes_document_adapter_state(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    before = web_tasks_module._selection_snapshot(project, Scope())
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["state"]["ruby_mode"] = "base_only"
+    write_json(project, state_path, state)
+
+    after = web_tasks_module._selection_snapshot(project, Scope())
+
+    assert before != after
+
+
+@pytest.mark.asyncio
 async def test_web_task_manager_rejects_changed_fingerprint_before_promotion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

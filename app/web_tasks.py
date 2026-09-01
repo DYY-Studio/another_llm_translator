@@ -333,7 +333,7 @@ def _selection_snapshot(
     scope: Scope,
     *,
     force_all: bool = False,
-) -> tuple[tuple[str, str, int, int, str, str, str], ...]:
+) -> tuple[tuple[str, str, int, int, str, str, str, str], ...]:
     files = load_source_files(project)
     segments = load_segments(project)
     selected = (
@@ -344,6 +344,23 @@ def _selection_snapshot(
     file_order = {
         str(item["file_id"]): int(item["file_order"]) for item in files
     }
+    adapter_snapshots: dict[str, str] = {}
+    for file_record in files:
+        state_path = file_record.get("document_adapter_state")
+        state_record = (
+            read_json(project, project / state_path)
+            if isinstance(state_path, str)
+            and record_exists(project, project / state_path)
+            else None
+        )
+        adapter_snapshots[str(file_record["file_id"])] = _stable_digest(
+            {
+                "adapter_id": file_record.get("document_adapter_id"),
+                "adapter_version": file_record.get("document_adapter_version"),
+                "state_path": state_path,
+                "state": state_record,
+            }
+        )
     return tuple(
         (
             str(segment["segment_id"]),
@@ -353,6 +370,7 @@ def _selection_snapshot(
             str(segment["part_id"]),
             str(segment["source"]),
             str(segment.get("model_source") or ""),
+            adapter_snapshots[str(segment["file_id"])],
         )
         for segment in selected
     )
@@ -403,13 +421,48 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
     )
 
 
+def _run_all_includes_terminology(
+    project: Path,
+    selection_snapshots: tuple[
+        tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
+    ],
+    *,
+    force: bool,
+) -> bool:
+    terms = load_terms(project)
+    active_path = project / "terminology" / "active_task.json"
+    active = (
+        read_json(project, active_path)
+        if record_exists(project, active_path)
+        else None
+    )
+    include = force or terms is None
+    if active and active.get("status") == "active":
+        return True
+    if not active or active.get("status") != "completed":
+        return include
+    selected = dict(selection_snapshots).get("terminology", ())
+    selected_ids = {item[0] for item in selected}
+    scans = read_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        task_id=str(active.get("active_task_id", "")),
+    )
+    completed_ids = {
+        str(item["segment_id"])
+        for item in scans
+        if item.get("status") == "completed"
+    }
+    return bool(selected_ids - completed_ids)
+
+
 @dataclass(frozen=True)
 class _StartDecision:
     selected_count: int
     running_run_id: str | None
     fingerprints: tuple[tuple[str, str], ...]
     selection_snapshots: tuple[
-        tuple[str, tuple[tuple[str, str, int, int, str, str, str], ...]], ...
+        tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
     ]
     running_runs: tuple[tuple[str, str, str, str], ...]
     decision_inputs: str | None = None
@@ -631,7 +684,7 @@ class WebTaskManager:
         running_run_id: str | None = None
         decision_plan_snapshot: dict[str, Any] | None = None
         selection_snapshots: tuple[
-            tuple[str, tuple[tuple[str, str, int, int, str, str, str], ...]], ...
+            tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
         ] = ()
         options_selected_count: int | None = None
         if stage == TERMINOLOGY_DECISION_STAGE:
@@ -713,8 +766,15 @@ class WebTaskManager:
                 )
                 for item in LLM_STAGES
             )
+            include_terminology = _run_all_includes_terminology(
+                project,
+                selection_snapshots,
+                force=scope.force,
+            )
             selected_count = sum(
-                len(selection) for _, selection in selection_snapshots
+                len(selection)
+                for item, selection in selection_snapshots
+                if item != "terminology" or include_terminology
             )
             fingerprints = tuple(
                 (item, _stage_fingerprint_snapshot(project, item))

@@ -4961,11 +4961,20 @@ async def run_all(
     }
     if limiters is None:
         local_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+        local_limits: dict[tuple[str, str], tuple[int, int]] = {}
         for stage, key in resource_keys.items():
+            limits = (
+                int(configs[stage]["execution"]["requests_per_minute"]),
+                int(configs[stage]["execution"]["input_tokens_per_minute"]),
+            )
+            previous_limits = local_limits.get(key)
+            if previous_limits is not None and previous_limits != limits:
+                raise ConfigError("相同 Preset 身份的共享限流配置不一致")
+            local_limits[key] = limits
             if key not in local_limiters:
                 local_limiters[key] = SlidingWindowLimiter(
-                    configs[stage]["execution"]["requests_per_minute"],
-                    configs[stage]["execution"]["input_tokens_per_minute"],
+                    limits[0],
+                    limits[1],
                 )
         limiters = local_limiters
     missing_limiters = set(resource_keys.values()) - set(limiters)

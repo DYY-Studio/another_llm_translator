@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from app.config import load_project_config
-from app.errors import IncompleteError, UsageError
+from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
 from app.project import add_project_files
@@ -563,6 +563,35 @@ async def test_run_all_separates_clients_and_limiters_by_preset(
     assert len({id(client) for _, client, _ in calls}) == 2
     assert len({id(limiter) for _, _, limiter in calls}) == 2
     assert calls[1][1:] == calls[2][1:]
+
+
+@pytest.mark.asyncio
+async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    default = load_project_config(project)
+    alternate = deepcopy(default)
+
+    def changed_config(
+        _project: Path, *, stage: str | None = None
+    ) -> dict[str, object]:
+        config = alternate if stage == "proofreading" else default
+        if stage in {"translation", "proofreading"}:
+            config = deepcopy(config)
+            config["_llm_preset_id"] = "shared"
+            config["_llm_preset_hash"] = "same"
+            config["execution"] = {
+                **config["execution"],
+                "requests_per_minute": 1 if stage == "translation" else 2,
+            }
+        return config
+
+    monkeypatch.setattr("app.stages.load_project_config", changed_config)
+
+    with pytest.raises(ConfigError, match="共享限流配置不一致"):
+        await run_all(project, Scope(dry_run=True))
 
 
 @pytest.mark.asyncio
