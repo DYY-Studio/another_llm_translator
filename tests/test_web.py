@@ -84,6 +84,25 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_overview_exposes_storage_and_file_sizes(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path, source="one\ntwo")
+    client = TestClient(create_app(projects_root=projects_root))
+
+    overview = client.get("/api/v1/projects/sample").json()
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+    total_bytes = sum(
+        path.stat().st_size
+        for path in project.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+    assert overview["storage"] == {
+        "total_bytes": total_bytes,
+        "sqlite_bytes": (project / "project.sqlite").stat().st_size,
+    }
+    assert overview["files"][0]["size_bytes"] == stored.stat().st_size
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -71,6 +71,10 @@ export interface StageError {
 export interface ProjectOverview {
   name: string;
   path: string;
+  storage: {
+    total_bytes: number;
+    sqlite_bytes: number;
+  };
   nonempty_segment_count: number;
   completed_segments: number;
   total_segments: number;
@@ -83,6 +87,7 @@ export interface ProjectOverview {
     name: string;
     document_adapter_id: string;
     part_ids: string[];
+    size_bytes: number;
   }>;
   segments: Segment[];
 }

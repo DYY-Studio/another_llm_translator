@@ -1185,13 +1185,19 @@ export function Overview({
     setError("");
     setStorageMessage("");
     try {
-      const result = await api<{ reclaimed_bytes: number }>(
+      const result = await api<{
+        before_bytes: number;
+        after_bytes: number;
+        reclaimed_bytes: number;
+      }>(
         `/api/v1/projects/${project}/storage/compact`,
         { method: "POST" },
       );
+      await onFilesChanged();
       setStorageMessage(
         translate("overview.compactDone", language, {
-          size: formatSize(result.reclaimed_bytes),
+          reclaimed: formatSize(result.reclaimed_bytes),
+          after: formatSize(result.after_bytes),
         }),
       );
     } catch (reason) {
@@ -1211,11 +1217,23 @@ export function Overview({
           <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
           <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
         </div>
-        <div className="overview-project-actions">
-          <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
-            {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
-          </button>
-          <button className="danger-button" disabled={busy || compacting} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+        <div className="overview-heading-controls">
+          <dl className="overview-storage" aria-label={translate("overview.storage", language)}>
+            <div>
+              <dt>{translate("overview.storageTotal", language)}</dt>
+              <dd>{formatSize(value.storage.total_bytes)}</dd>
+            </div>
+            <div>
+              <dt>{translate("overview.storageSqlite", language)}</dt>
+              <dd>{formatSize(value.storage.sqlite_bytes)}</dd>
+            </div>
+          </dl>
+          <div className="overview-project-actions">
+            <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
+              {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
+            </button>
+            <button className="danger-button" disabled={busy || compacting} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
+          </div>
         </div>
       </div>
       <div className="overview-file-section">
@@ -1310,7 +1328,12 @@ export function Overview({
                     {selection.selectedKeys.has(item.file_id) ? "✓" : ""}
                   </span>
                 )}
-                <span>{item.file_id}</span><strong>{item.name}</strong><small>{item.document_adapter_id.toUpperCase()}</small>
+                <span>{item.file_id}</span>
+                <strong>{item.name}</strong>
+                <span className="file-row-meta">
+                  <small>{item.document_adapter_id.toUpperCase()}</small>
+                  <small className="file-row-size">{formatSize(item.size_bytes)}</small>
+                </span>
               </button>
               <button
                 type="button"
@@ -1395,7 +1418,8 @@ export function Overview({
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function formatTime(seconds: number): string {
