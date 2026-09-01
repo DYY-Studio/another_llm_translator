@@ -133,8 +133,9 @@ button { cursor: pointer; }
 .run-terminal-count { color: var(--muted); white-space: nowrap; }
 .global-run-status.terminal .run-tokens { flex: 0 1 auto; }
 .global-run-status.terminal .run-error { flex: 1 1 180px; min-width: 0; max-width: 320px; }
-.run-dismiss { flex: none; width: 32px; min-height: 32px; padding: 0; border-color: var(--border); color: var(--muted); font-size: 20px; line-height: 1; }
-.run-dismiss:hover { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.global-run-status.terminal .run-dismiss { flex: 0 0 auto; width: 30px; height: 30px; min-height: 30px; margin-inline-start: auto; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 50%; color: var(--muted); background: transparent; font-size: 18px; font-weight: 500; line-height: 1; transition: border-color .15s ease, color .15s ease, background .15s ease; }
+.global-run-status.terminal .run-dismiss:hover { border-color: var(--border); color: var(--text); background: var(--hover); }
+.global-run-status.terminal .run-dismiss:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent-text); background: var(--accent-soft); }
 .sidebar { grid-row: 2 / -1; grid-column: 1; display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--sidebar); padding: 18px 12px; }
 .sidebar nav { display: grid; gap: 5px; }
 .nav-item { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; font-size: 15px; text-align: left; }
@@ -876,7 +877,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .global-run-status.terminal .run-tokens { grid-column: 1 / -1; grid-row: 3; min-width: 0; }
   .global-run-status.terminal .run-failure-link { grid-column: 1; grid-row: 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .global-run-status.terminal .run-error { grid-column: 2; grid-row: 4; width: 100%; max-width: none; }
-  .global-run-status.terminal .run-dismiss { grid-column: 2; grid-row: 1; justify-self: end; }
+  .global-run-status.terminal .run-dismiss { grid-column: 2; grid-row: 1; justify-self: end; margin-inline-start: 0; }
   .warning-banner-sticky { top: calc(58px + var(--mobile-run-status-height)); z-index: 2; }
   .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }
