@@ -1319,7 +1319,7 @@ def test_term_match_cache_unions_aliases_across_segments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_translation_partial_response_retries_only_missing(
+async def test_translation_truncated_response_saves_prefix_and_retries_only_missing(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, " one\n\ttwo")
@@ -1329,18 +1329,36 @@ async def test_translation_partial_response_retries_only_missing(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         ids = [item["id"] for item in payload["segments"]]
         calls.append(ids)
-        returned = ids[:1]
-        records = [
-            {
-                "type": "segment",
-                "id": segment_id,
-                "translation": f"ok:{segment_id}",
-            }
-            for segment_id in returned
-        ]
+        if len(calls) == 1:
+            returned = ids[:1]
+            content = "\n".join(
+                json.dumps(
+                    {
+                        "type": "segment",
+                        "id": segment_id,
+                        "translation": f"ok:{segment_id}",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                for segment_id in returned
+            )
+            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
+            assert not [item for item in saved if item["status"] == "completed"]
+        else:
+            returned = ids
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "segment",
+                        "id": segment_id,
+                        "translation": f"ok:{segment_id}",
+                    }
+                    for segment_id in returned
+                ]
+            )
         return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+            200, json={"choices": [{"message": {"content": content}}]}
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -1363,22 +1381,29 @@ async def test_translation_partial_response_retries_only_missing(
 
 
 @pytest.mark.asyncio
-async def test_partial_response_context_split_does_not_retry_completed_segment(
+@pytest.mark.parametrize("mismatch", ["missing", "duplicate", "unknown"])
+async def test_complete_id_mismatch_retries_original_translation_batch(
     tmp_path: Path,
+    mismatch: str,
 ) -> None:
-    project = await create_project(tmp_path, "one\ntwo")
+    project = await create_project(tmp_path, "one\ntwo\nthree")
     calls: list[list[str]] = []
+    persisted_completed: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         ids = [item["id"] for item in payload["segments"]]
         calls.append(ids)
         if len(calls) == 1:
-            returned = ids[:1]
-        elif len(calls) == 2:
-            return httpx.Response(
-                400,
-                text="context_length_exceeded: maximum context tokens",
+            if mismatch == "missing":
+                returned = ids[:-1]
+            elif mismatch == "duplicate":
+                returned = [ids[0], ids[0], *ids[1:]]
+            else:
+                returned = [*ids, "unknown"]
+            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
+            persisted_completed.append(
+                sum(item["status"] == "completed" for item in saved)
             )
         else:
             returned = ids
@@ -1393,6 +1418,161 @@ async def test_partial_response_context_split_does_not_retry_completed_segment(
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["completed"] == 3
+    assert calls == [["1", "2", "3"], ["1", "2", "3"]]
+    assert persisted_completed == [0]
+
+
+@pytest.mark.asyncio
+async def test_complete_missing_id_retries_full_132_segment_batch(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(
+        tmp_path, "\n".join(f"line-{index}" for index in range(132))
+    )
+    calls: list[list[str]] = []
+    persisted_completed: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        ids = [item["id"] for item in payload["segments"]]
+        calls.append(ids)
+        if len(calls) == 1:
+            returned = ids[:-1]
+            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
+            persisted_completed.append(
+                sum(item["status"] == "completed" for item in saved)
+            )
+        else:
+            returned = ids
+        records = [
+            {
+                "type": "segment",
+                "id": segment_id,
+                "translation": f"ok:{segment_id}",
+            }
+            for segment_id in returned
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    expected_ids = [str(index) for index in range(1, 133)]
+    assert summary["completed"] == 132
+    assert calls == [expected_ids, expected_ids]
+    assert persisted_completed == [0]
+
+
+@pytest.mark.asyncio
+async def test_complete_id_mismatch_exhaustion_fails_entire_translation_batch(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "format_max_attempts = 2", "format_max_attempts = 0"
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        ids = [item["id"] for item in payload["segments"]]
+        calls.append(ids)
+        records = [
+            {
+                "type": "segment",
+                "id": segment_id,
+                "translation": f"ok:{segment_id}",
+            }
+            for segment_id in ids[:-1]
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert summary["completed"] == 0
+    assert summary["failed"] == 3
+    assert calls == [["1", "2", "3"]]
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert [record["error_class"] for record in records] == [
+        "format_error",
+        "format_error",
+        "format_error",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_partial_response_context_split_does_not_retry_completed_segment(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo")
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        ids = [item["id"] for item in payload["segments"]]
+        calls.append(ids)
+        if len(calls) == 1:
+            returned = ids[:1]
+            content = "\n".join(
+                json.dumps(
+                    {
+                        "type": "segment",
+                        "id": segment_id,
+                        "translation": f"ok:{segment_id}",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                for segment_id in returned
+            )
+        elif len(calls) == 2:
+            return httpx.Response(
+                400,
+                text="context_length_exceeded: maximum context tokens",
+            )
+        else:
+            returned = ids
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "segment",
+                        "id": segment_id,
+                        "translation": f"ok:{segment_id}",
+                    }
+                    for segment_id in returned
+                ]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

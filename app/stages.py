@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -738,7 +738,7 @@ async def _localized_request_loop(
     save_error: Callable[[list[str], str, str], Awaitable[None]],
     parse: Callable[
         [str, dict[str, str]],
-        tuple[dict[str, Any], list[str], list[str], bool],
+        _SegmentParseResult,
     ],
     format_correction: str,
     prompt_language: str,
@@ -799,9 +799,11 @@ async def _localized_request_loop(
                 parent_request_id=parent_request_id,
                 segment_id_map=id_map,
             )
-            valid, unresolved, parse_errors, response_complete = parse(
-                response.content, id_map
-            )
+            parsed = parse(response.content, id_map)
+            valid = parsed.valid
+            unresolved = parsed.unresolved
+            parse_errors = parsed.errors
+            response_complete = parsed.complete
         except FatalExternalError:
             raise
         except ContextLengthError as exc:
@@ -811,6 +813,11 @@ async def _localized_request_loop(
         except ExternalError as exc:
             await save_error(expected, request_id, str(exc))
             continue
+        complete_id_mismatch = parsed.has_valid_end and not parsed.ids_complete
+        if complete_id_mismatch:
+            valid = {}
+            unresolved = expected.copy()
+            parse_errors.append("合法 end 响应的 Segment ID 与请求不一致")
         for segment_id, value in valid.items():
             try:
                 await accept(segment_id, request_id, value)
@@ -3166,9 +3173,18 @@ def _replace_with_runtime_parts(
     return parts
 
 
+class _SegmentParseResult(NamedTuple):
+    valid: dict[str, Any]
+    unresolved: list[str]
+    errors: list[str]
+    complete: bool
+    has_valid_end: bool
+    ids_complete: bool
+
+
 def _parse_translation_items(
     content: str, expected_ids: list[str]
-) -> tuple[dict[str, str], list[str], list[str], bool]:
+) -> _SegmentParseResult:
     document = parse_jsonl_document(content, record_type="segment")
     counts = Counter(
         item.get("id")
@@ -3189,21 +3205,28 @@ def _parse_translation_items(
             continue
         valid[segment_id] = translation
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
-    return valid, unresolved, errors, document.complete and not errors
+    return _SegmentParseResult(
+        valid,
+        unresolved,
+        errors,
+        document.complete and not errors,
+        document.has_valid_end,
+        counts == Counter(expected_ids),
+    )
 
 
 def _map_local_translation_response(
     content: str,
     id_map: dict[str, str],
-) -> tuple[dict[str, str], list[str], list[str], bool]:
-    valid, unresolved, errors, complete = _parse_translation_items(
-        content, list(id_map)
-    )
-    return (
-        {id_map[local_id]: text for local_id, text in valid.items()},
-        [id_map[local_id] for local_id in unresolved],
-        errors,
-        complete,
+) -> _SegmentParseResult:
+    result = _parse_translation_items(content, list(id_map))
+    return _SegmentParseResult(
+        {id_map[local_id]: text for local_id, text in result.valid.items()},
+        [id_map[local_id] for local_id in result.unresolved],
+        result.errors,
+        result.complete,
+        result.has_valid_end,
+        result.ids_complete,
     )
 
 
@@ -3967,7 +3990,7 @@ def _base_results(
 
 def _parse_review_items(
     content: str, expected_ids: list[str]
-) -> tuple[dict[str, dict[str, Any]], list[str], list[str], bool]:
+) -> _SegmentParseResult:
     document = parse_jsonl_document(content, record_type="segment")
     counts = Counter(
         item.get("id")
@@ -4007,21 +4030,28 @@ def _parse_review_items(
             "reason": reason,
         }
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
-    return valid, unresolved, errors, document.complete and not errors
+    return _SegmentParseResult(
+        valid,
+        unresolved,
+        errors,
+        document.complete and not errors,
+        document.has_valid_end,
+        counts == Counter(expected_ids),
+    )
 
 
 def _map_local_review_response(
     content: str,
     id_map: dict[str, str],
-) -> tuple[dict[str, dict[str, Any]], list[str], list[str], bool]:
-    valid, unresolved, errors, complete = _parse_review_items(
-        content, list(id_map)
-    )
-    return (
-        {id_map[local_id]: parsed for local_id, parsed in valid.items()},
-        [id_map[local_id] for local_id in unresolved],
-        errors,
-        complete,
+) -> _SegmentParseResult:
+    result = _parse_review_items(content, list(id_map))
+    return _SegmentParseResult(
+        {id_map[local_id]: parsed for local_id, parsed in result.valid.items()},
+        [id_map[local_id] for local_id in result.unresolved],
+        result.errors,
+        result.complete,
+        result.has_valid_end,
+        result.ids_complete,
     )
 
 

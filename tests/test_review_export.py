@@ -595,7 +595,7 @@ async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
 
 
 @pytest.mark.asyncio
-async def test_review_format_retry_regroups_around_valid_nonempty_segment(
+async def test_review_complete_id_mismatch_retries_original_batch(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
@@ -622,7 +622,7 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
                 assert "遵守固定字段" in correction
                 assert "accepted 仅含 type、id、status" in system
                 assert '"suggested_text":"完整建议"' in system
-            returned = [ids[1]] if len(ids) == 3 else ids
+            returned = ids[1:2] if len(review_calls) == 1 else ids
             records = [
                 {
                     "type": "segment",
@@ -650,9 +650,88 @@ async def test_review_format_retry_regroups_around_valid_nonempty_segment(
     assert summary["completed"] == 3
     assert review_calls == [
         ["1", "2", "3"],
-        ["1"],
-        ["1"],
+        ["1", "2", "3"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_complete_id_mismatch_retries_original_batch_for_all_segment_stages(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree")
+    stage_calls: dict[str, list[list[str]]] = {
+        "translation": [],
+        "proofreading": [],
+        "polishing": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        if "完整 translation" in system:
+            stage = "translation"
+        elif "改善译文表达" in system:
+            stage = "polishing"
+        else:
+            stage = "proofreading"
+        ids = [item["id"] for item in payload["segments"]]
+        stage_calls[stage].append(ids)
+        if stage != "translation" and len(stage_calls[stage]) == 1:
+            returned = ids[:-1]
+        else:
+            returned = ids
+        if stage == "translation":
+            records = [
+                {
+                    "type": "segment",
+                    "id": segment_id,
+                    "translation": f"译:{segment_id}",
+                }
+                for segment_id in returned
+            ]
+        else:
+            records = [
+                {
+                    "type": "segment",
+                    "id": segment_id,
+                    "status": "accepted",
+                }
+                for segment_id in returned
+            ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        translation = await run_translation(project, Scope(), http_client=client)
+        proofreading = await run_review(
+            project, "proofreading", Scope(), http_client=client
+        )
+        run_apply(
+            project,
+            "proofreading",
+            Scope(),
+            allow_outdated_base=False,
+            confirmed_all=True,
+        )
+        polishing = await run_review(
+            project, "polishing", Scope(), http_client=client
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert translation["completed"] == 3
+    assert proofreading["completed"] == 3
+    assert polishing["completed"] == 3
+    assert stage_calls == {
+        "translation": [["1", "2", "3"]],
+        "proofreading": [["1", "2", "3"], ["1", "2", "3"]],
+        "polishing": [["1", "2", "3"], ["1", "2", "3"]],
+    }
 
 
 @pytest.mark.asyncio
