@@ -11,7 +11,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -48,6 +48,7 @@ from .execution import (
     build_chunk_plans,
     classify_stage,
     classify_stage_states,
+    combine_usage,
     contiguous_groups,
     continue_run,
     create_run,
@@ -70,6 +71,7 @@ from .execution import (
     select_scope,
     stage_fingerprint,
     stage_result_path,
+    unavailable_usage,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
 from .logging_utils import get_logger
@@ -4939,6 +4941,9 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
+    limiters: Mapping[tuple[str, str], SlidingWindowLimiter] | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     segments = load_segments(project)
     _require_nonempty_segments(segments)
@@ -4954,13 +4959,27 @@ async def run_all(
         )
         for stage in stages
     }
-    limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
-    for stage, key in resource_keys.items():
-        if key not in limiters:
-            limiters[key] = SlidingWindowLimiter(
-                configs[stage]["execution"]["requests_per_minute"],
-                configs[stage]["execution"]["input_tokens_per_minute"],
+    if limiters is None:
+        local_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+        local_limits: dict[tuple[str, str], tuple[int, int]] = {}
+        for stage, key in resource_keys.items():
+            limits = (
+                int(configs[stage]["execution"]["requests_per_minute"]),
+                int(configs[stage]["execution"]["input_tokens_per_minute"]),
             )
+            previous_limits = local_limits.get(key)
+            if previous_limits is not None and previous_limits != limits:
+                raise ConfigError("相同 Preset 身份的共享限流配置不一致")
+            local_limits[key] = limits
+            if key not in local_limiters:
+                local_limiters[key] = SlidingWindowLimiter(
+                    limits[0],
+                    limits[1],
+                )
+        limiters = local_limiters
+    missing_limiters = set(resource_keys.values()) - set(limiters)
+    if missing_limiters:
+        raise ConfigError("run-all 缺少阶段共享限流器")
 
     async def execute(
         clients: dict[tuple[str, str], httpx.AsyncClient] | None,
@@ -4971,6 +4990,72 @@ async def run_all(
             return clients[resource_keys[stage]] if clients is not None else None
 
         summaries: list[dict[str, Any]] = []
+        progress_by_stage: dict[str, tuple[int, int, int]] = {}
+        usage_by_stage: dict[str, dict[str, Any] | None] = {}
+
+        def report_progress(
+            stage: str,
+            completed: int,
+            failed: int,
+            total: int,
+        ) -> None:
+            progress_by_stage[stage] = (completed, failed, total)
+            if on_progress is not None:
+                on_progress(
+                    sum(value[0] for value in progress_by_stage.values()),
+                    sum(value[1] for value in progress_by_stage.values()),
+                    sum(value[2] for value in progress_by_stage.values()),
+                )
+
+        def report_usage(
+            stage: str,
+            current: dict[str, Any] | None,
+        ) -> None:
+            usage_by_stage[stage] = current
+            if on_usage is None:
+                return
+            aggregate: dict[str, Any] | None = None
+            for value in usage_by_stage.values():
+                aggregate = combine_usage(aggregate, value)
+            on_usage(aggregate or unavailable_usage())
+
+        def record_summary(stage: str, summary: dict[str, Any]) -> dict[str, Any]:
+            selected = int(summary.get("selected", 0))
+            reused = int(summary.get("reused", 0))
+            completed = int(summary.get("completed", 0))
+            failed = int(summary.get("failed", 0))
+            pending_value = summary.get("pending")
+            pending = (
+                int(pending_value)
+                if isinstance(pending_value, int) and not isinstance(pending_value, bool)
+                else max(0, selected - reused - completed - failed)
+            )
+            if summary.get("dry_run") is True:
+                pending = 0
+            report_progress(
+                stage,
+                completed + reused,
+                failed,
+                selected,
+            )
+            if "usage" in summary:
+                report_usage(stage, summary.get("usage"))
+            elif stage not in usage_by_stage:
+                report_usage(stage, None)
+            normalized = {**summary, "pending": pending}
+            summaries.append(normalized)
+            return normalized
+
+        def progress_for(stage: str) -> Callable[[int, int, int], None]:
+            return lambda completed, failed, total: report_progress(
+                stage, completed, failed, total
+            )
+
+        def usage_for(
+            stage: str,
+        ) -> Callable[[dict[str, Any] | None], None]:
+            return lambda current: report_usage(stage, current)
+
         terms = load_terms(project)
         active_path = project / "terminology" / "active_task.json"
         active = read_json(project, active_path) if record_exists(project, active_path) else None
@@ -4999,8 +5084,10 @@ async def run_all(
                 limiter=limiters[resource_keys["terminology"]],
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                 prompt_language=prompt_language,
+                on_progress=progress_for("terminology"),
+                on_usage=usage_for("terminology"),
             )
-            summaries.append(term_summary)
+            term_summary = record_summary("terminology", term_summary)
             require_success(term_summary)
         translation = await run_translation(
             project,
@@ -5009,8 +5096,10 @@ async def run_all(
             limiter=limiters[resource_keys["translation"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             prompt_language=prompt_language,
+            on_progress=progress_for("translation"),
+            on_usage=usage_for("translation"),
         )
-        summaries.append(translation)
+        translation = record_summary("translation", translation)
         require_success(translation)
         proofreading = await run_review(
             project,
@@ -5020,8 +5109,10 @@ async def run_all(
             limiter=limiters[resource_keys["proofreading"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             prompt_language=prompt_language,
+            on_progress=progress_for("proofreading"),
+            on_usage=usage_for("proofreading"),
         )
-        summaries.append(proofreading)
+        proofreading = record_summary("proofreading", proofreading)
         require_success(proofreading)
         polishing = await run_review(
             project,
@@ -5031,14 +5122,33 @@ async def run_all(
             limiter=limiters[resource_keys["polishing"]],
             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
             prompt_language=prompt_language,
+            on_progress=progress_for("polishing"),
+            on_usage=usage_for("polishing"),
         )
-        summaries.append(polishing)
+        polishing = record_summary("polishing", polishing)
         require_success(polishing)
+        failure_counts: Counter[str] = Counter()
+        for summary in summaries:
+            failure_counts.update(
+                {
+                    str(key): int(value)
+                    for key, value in (summary.get("failure_counts") or {}).items()
+                }
+            )
+        usage: dict[str, Any] | None = None
+        for value in usage_by_stage.values():
+            usage = combine_usage(usage, value)
         return {
             "stage": "run-all",
             "steps": summaries,
-            "failed": 0,
-            "pending": 0,
+            "selected": sum(int(summary.get("selected", 0)) for summary in summaries),
+            "requested": sum(int(summary.get("requested", 0)) for summary in summaries),
+            "reused": sum(int(summary.get("reused", 0)) for summary in summaries),
+            "completed": sum(int(summary.get("completed", 0)) for summary in summaries),
+            "failed": sum(int(summary.get("failed", 0)) for summary in summaries),
+            "pending": sum(int(summary.get("pending", 0)) for summary in summaries),
+            "failure_counts": dict(failure_counts),
+            "usage": usage or unavailable_usage(),
         }
 
     if http_client is not None or scope.dry_run:

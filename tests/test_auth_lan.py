@@ -4,7 +4,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.credentials import save_lan_password
-from app.server_config import load_server_config, save_server_config
+from app.errors import ConfigError
+from app.server_config import (
+    default_server_config,
+    load_server_config,
+    save_server_config,
+    server_config_path,
+)
 from app.user_config import user_root
 from app.web import create_app
 from tests.conftest import FakeKeyring
@@ -59,6 +65,65 @@ def test_lan_blocked_by_default(tmp_path) -> None:
     response = client.get("/api/v1/server/status")
     assert response.status_code == 403
     assert response.json()["code"] == "local_only"
+
+
+def test_server_config_defaults_to_two_active_projects() -> None:
+    config = default_server_config()
+    assert config["tasks"]["max_active_projects"] == 2
+
+
+def test_server_status_reports_and_updates_project_limit() -> None:
+    client = make_client()
+    status = client.get("/api/v1/server/status")
+    assert status.status_code == 200
+    assert status.json()["tasks"]["max_active_projects"] == 2
+
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 4},
+        },
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 4
+    )
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 1},
+        },
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/v1/server/status").json()["tasks"]["max_active_projects"] == 1
+    )
+    missing_tasks = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+        },
+    )
+    assert missing_tasks.status_code == 400
+
+
+@pytest.mark.parametrize("value", [True, 0, -1])
+def test_server_config_rejects_invalid_project_limits(value: object) -> None:
+    client = make_client()
+    response = client.put(
+        "/api/v1/server/config",
+        json={
+            "lan": {"enabled": False, "bind_address": ""},
+            "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": value},
+        },
+    )
+    assert response.status_code == 400
 
 
 def test_lan_open_without_auth_but_status_warns() -> None:
@@ -145,6 +210,7 @@ def test_disabling_sharing_clears_sessions_and_blocks_lan(
         json={
             "lan": {"enabled": False, "bind_address": ""},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert saved.status_code == 200
@@ -166,6 +232,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "10.0.0.99"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert bad_address.status_code == 400
@@ -175,6 +242,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": True, "username": "me"},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert no_password.status_code == 400
@@ -184,6 +252,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "0.0.0.0"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert all_interfaces.status_code == 200
@@ -193,6 +262,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": True, "username": "me", "password": "s3cret"},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert saved.status_code == 200
@@ -204,6 +274,7 @@ def test_server_config_validation_and_password_flow(
         json={
             "lan": {"enabled": True, "bind_address": "192.168.1.5"},
             "auth": {"required": False, "username": ""},
+            "tasks": {"max_active_projects": 2},
         },
     )
     assert warning.status_code == 200
@@ -257,3 +328,35 @@ def test_server_config_toml_round_trip_preserves_bools() -> None:
     assert loaded["lan"]["bind_address"] == "192.168.1.5"
     assert loaded["auth"]["required"] is True
     assert loaded["auth"]["username"] == "me"
+
+
+def test_legacy_server_config_loads_default_and_save_writes_tasks_section() -> None:
+    path = server_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[lan]\nenabled = false\nbind_address = ""\n\n'
+        '[auth]\nrequired = false\nusername = ""\n',
+        encoding="utf-8",
+    )
+
+    loaded = load_server_config()
+    assert loaded["tasks"]["max_active_projects"] == 2
+    save_server_config(loaded)
+    saved = path.read_text(encoding="utf-8")
+    assert "[tasks]" in saved
+    assert "max_active_projects = 2" in saved
+
+
+@pytest.mark.parametrize("literal", ["true", "0", "-1"])
+def test_server_config_toml_rejects_invalid_project_limit_literals(
+    literal: str,
+) -> None:
+    path = server_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"[tasks]\nmax_active_projects = {literal}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="max_active_projects"):
+        load_server_config()

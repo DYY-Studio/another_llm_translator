@@ -15,10 +15,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.web as web_module
+import app.web_tasks as web_tasks_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
-from app.errors import UsageError
+from app.errors import ConfigError, UsageError
 from app.execution import Scope, create_run
 from app.locking import project_write_lock
 from app.project import init_project
@@ -30,11 +31,12 @@ from app.sqlite_storage import (
     read_segments,
     record_exists,
     record_header,
+    replace_source,
     write_json,
 )
 from app.web import create_app
 from app.web_store import WebStore
-from app.web_tasks import WebTaskManager
+from app.web_tasks import SharedLimiterPool, WebTaskManager
 from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
@@ -2908,6 +2910,955 @@ async def test_web_task_manager_active_tasks_excludes_terminal_states(
     await manager.cancel(started["task_id"])
     await manager.tasks[started["task_id"]].asyncio_task
     assert manager.active_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_queues_projects_fifo_until_slot_is_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered: list[Path] = []
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered.append(project)
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.sleep(0)
+    assert entered == [first_project, second_project]
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert manager.tasks[third["task_id"]].asyncio_task is not None
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert entered == [first_project, second_project, third_project]
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_can_cancel_queued_task_without_using_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    cancelled = await manager.cancel(second["task_id"])
+    assert cancelled["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.active_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_raising_limit_promotes_fifo_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    assert manager.get(second["task_id"])["status"] == "queued"
+    await manager.set_max_active_projects(2)
+    for _ in range(20):
+        if manager.get(second["task_id"])["status"] == "running":
+            break
+        await asyncio.sleep(0)
+    assert manager.get(second["task_id"])["status"] == "running"
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_revalidates_queued_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_module.task_options
+    second_calls = 0
+
+    def changed_options(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+        if project == second_project and second_calls == 2:
+            raise UsageError("排队期间项目设置已变化")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.tasks[second["task_id"]].asyncio_task is not None
+    await manager.tasks[second["task_id"]].asyncio_task
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_selection_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_module.task_options
+    second_calls = 0
+
+    def changed_options(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        options = original_options(project, stage)
+        if project == second_project:
+            second_calls += 1
+            if second_calls == 1:
+                options["selected"] = int(options["selected"]) - 1
+        return options
+
+    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_scope_counts_actual_selected_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    selected_id = str(read_segments(project)[1]["segment_id"])
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        await release.wait()
+        return {"selected": 1, "completed": 1, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(only_segment=selected_id),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 1
+    release.set()
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+@pytest.mark.asyncio
+async def test_web_task_rejects_same_count_source_change_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_rejects_changed_input_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run_all(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {
+            "stage": "run-all",
+            "selected": 8,
+            "completed": 8,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_reports_progress_and_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def fake_run_all(*_: object, **kwargs: object) -> dict[str, object]:
+        progress = kwargs["on_progress"]
+        usage = kwargs["on_usage"]
+        assert callable(progress)
+        assert callable(usage)
+        progress(1, 0, 4)
+        usage(
+            {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            }
+        )
+        return {
+            "stage": "run-all",
+            "selected": 4,
+            "requested": 4,
+            "reused": 0,
+            "completed": 1,
+            "failed": 0,
+            "pending": 3,
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            },
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["completed_segments"] == 1
+    assert state["total_segments"] == 4
+    assert state["usage"]["total_tokens"] == 17
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_initial_total_excludes_completed_terminology_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-RUN-ALL",
+                "source": "one",
+                "normalized": "one",
+                "category": "普通",
+                "description": None,
+                "preferred_translation": "一",
+                "aliases": [],
+                "group_primary": None,
+                "disabled": False,
+            }
+        ],
+    )
+    entered = asyncio.Event()
+
+    async def fake_run_all(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 6
+    await entered.wait()
+    await manager.cancel(started["task_id"])
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+def test_web_selection_snapshot_includes_document_adapter_state(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    before = web_tasks_module._selection_snapshot(project, Scope())
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["state"]["ruby_mode"] = "base_only"
+    write_json(project, state_path, state)
+
+    after = web_tasks_module._selection_snapshot(project, Scope())
+
+    assert before != after
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_fingerprint_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    prompt_path = second_project / "prompts" / "translation.zh-CN.middle.txt"
+    prompt_path.write_text(
+        prompt_path.read_text(encoding="utf-8") + "\nchanged while queued",
+        encoding="utf-8",
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_rejects_inconsistent_duplicate_limiter_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    original_load = web_tasks_module.load_project_config
+    run_all_called = False
+
+    def changed_config(project_path: Path, *, stage: str | None = None) -> dict[str, object]:
+        config = original_load(project_path, stage=stage)
+        if stage in {"translation", "proofreading"}:
+            config["_llm_preset_id"] = "shared"
+            config["_llm_preset_hash"] = "same"
+            config["execution"] = {
+                **config["execution"],
+                "requests_per_minute": 1 if stage == "translation" else 2,
+            }
+        return config
+
+    async def fake_run_all(*_: object, **__: object) -> dict[str, object]:
+        nonlocal run_all_called
+        run_all_called = True
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.load_project_config", changed_config)
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["status"] == "failed"
+    assert "共享限流配置不一致" in str(state["error"])
+    assert not run_all_called
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_cancels_before_coroutine_start_without_leaking_slot(
+    tmp_path: Path,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.cancel(started["task_id"])
+    await asyncio.gather(
+        manager.tasks[started["task_id"]].asyncio_task,
+        return_exceptions=True,
+    )
+
+    assert manager.get(started["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_shutdown_cancels_queued_and_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.shutdown()
+
+    assert manager.get(first["task_id"])["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert not manager.queued_task_ids
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+    with pytest.raises(UsageError, match="任务管理器正在关闭"):
+        await manager.start(
+            first_project,
+            "translation",
+            scope=Scope(),
+            reuse_mixed_fingerprints=False,
+            run_action=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_lowering_limit_does_not_preempt_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = {project: asyncio.Event() for project in (first_project, second_project)}
+    releases = {project: asyncio.Event() for project in (first_project, second_project)}
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project in entered:
+            entered[project].set()
+            await releases[project].wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(*(event.wait() for event in entered.values()))
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.set_max_active_projects(1)
+    assert manager.get(first["task_id"])["status"] == "running"
+    assert manager.get(second["task_id"])["status"] == "running"
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[first_project].set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[second_project].set()
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    entered_projects: list[Path] = []
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered_projects.append(project)
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_module.task_options
+    second_calls = 0
+
+    def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+            if second_calls == 2:
+                raise UsageError("promotion validation failed")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", fail_second_promotion)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    with project_write_lock(third_project):
+        pass
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "promotion validation failed" in str(manager.get(second["task_id"])["error"])
+    assert manager.get(third["task_id"])["status"] == "completed"
+    assert entered_projects == [first_project, third_project]
+
+
+def test_shared_limiter_pool_reuses_only_identical_preset_hashes() -> None:
+    now = [0.0]
+    pool = SharedLimiterPool(clock=lambda: now[0])
+    first_config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    same_config = {**first_config}
+    different_config = {
+        **first_config,
+        "_llm_preset_hash": "hash-b",
+    }
+    first, release_first = pool.acquire(first_config)
+    same, release_same = pool.acquire(same_config)
+    different, release_different = pool.acquire(different_config)
+    assert same is first
+    assert different is not first
+    release_first()
+    release_same()
+    release_different()
+    now[0] = 59.0
+    retained, release_retained = pool.acquire(first_config)
+    assert retained is first
+    release_retained()
+    now[0] = 119.0
+    expired, release_expired = pool.acquire(first_config)
+    assert expired is not first
+    release_expired()
+
+
+def test_shared_limiter_pool_rejects_inconsistent_limits_for_same_preset() -> None:
+    pool = SharedLimiterPool()
+    config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    pool.acquire(config)
+    changed = {
+        **config,
+        "execution": {"requests_per_minute": 4, "input_tokens_per_minute": 40},
+    }
+    with pytest.raises(ConfigError, match="共享限流配置不一致"):
+        pool.acquire(changed)
+
+
+@pytest.mark.asyncio
+async def test_shared_limiter_pool_merges_rpm_and_itpm_across_projects() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    itpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-itpm",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    first, release_first = pool.acquire(itpm_config)
+    second, release_second = pool.acquire({**itpm_config})
+    assert first is second
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == [60.0]
+    release_first()
+    release_second()
+
+    now[0] = 0.0
+    sleeps.clear()
+    rpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-rpm",
+        "execution": {"requests_per_minute": 2, "input_tokens_per_minute": 0},
+    }
+    first, release_first = pool.acquire(rpm_config)
+    second, release_second = pool.acquire({**rpm_config})
+    await first.acquire(1)
+    await second.acquire(1)
+    assert sleeps == [30.0]
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
+async def test_shared_limiter_pool_isolates_different_hash_counters() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    first_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    second_config = {**first_config, "_llm_preset_hash": "hash-b"}
+    first, release_first = pool.acquire(first_config)
+    second, release_second = pool.acquire(second_config)
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == []
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
+async def test_web_tasks_pass_shared_limiter_to_same_preset_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    limiters: list[object] = []
+
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        limiters.append(kwargs["limiter"])
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert len(limiters) == 2
+    assert limiters[0] is limiters[1]
 
 
 def test_web_task_options_include_completed_terminology_scans(

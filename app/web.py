@@ -44,7 +44,7 @@ from .credentials import (
     save_credential,
     save_lan_password,
 )
-from .diagnostics import Diagnostics
+from .diagnostics import DiagnosticsHub
 from .errors import (
     AppError,
     ExternalError,
@@ -279,10 +279,16 @@ def create_app(
     app = FastAPI(title="Another LLM Translator", version="1")
     app.state.projects_root = projects_root
     app.state.app_root = app_root
-    app.state.diagnostics = Diagnostics(log_path or user_root() / "logs" / "app.log")
-    app.state.tasks = WebTaskManager(app.state.diagnostics)
+    app.state.diagnostics = DiagnosticsHub(
+        log_path or user_root() / "logs" / "app.log"
+    )
     app.state.external_projects = set()
     app.state.server_config = server_config or load_server_config()
+    tasks_config = app.state.server_config.get("tasks", {})
+    app.state.tasks = WebTaskManager(
+        app.state.diagnostics,
+        max_active_projects=tasks_config.get("max_active_projects", 2),
+    )
     app.state.sessions: dict[str, float] = {}
     app.state.replacement_previews: dict[tuple[Path, str], ReplacementPreviewSession] = {}
 
@@ -292,6 +298,7 @@ def create_app(
         app.state.replacement_previews.clear()
 
     app.router.add_event_handler("shutdown", cleanup_replacement_previews)
+    app.router.add_event_handler("shutdown", app.state.tasks.shutdown)
 
     async def stage_uploads(
         upload_root: Path,
@@ -1146,6 +1153,9 @@ def create_app(
                 "required": config["auth"]["required"],
                 "username": config["auth"]["username"],
             },
+            "tasks": {
+                "max_active_projects": app.state.tasks.max_active_projects,
+            },
             "authed": loopback
             or not config["auth"]["required"]
             or valid_session(request.cookies.get(SESSION_COOKIE)),
@@ -1163,6 +1173,16 @@ def create_app(
         auth = payload.get("auth")
         if not isinstance(lan, dict) or not isinstance(auth, dict):
             raise UsageError("lan 和 auth 必须是对象")
+        tasks = payload.get("tasks")
+        if not isinstance(tasks, dict):
+            raise UsageError("tasks 必须是对象")
+        max_active_projects = tasks.get("max_active_projects")
+        if (
+            not isinstance(max_active_projects, int)
+            or isinstance(max_active_projects, bool)
+            or max_active_projects < 1
+        ):
+            raise UsageError("tasks.max_active_projects 必须是正整数")
         enabled = lan.get("enabled")
         bind_address = lan.get("bind_address")
         if not isinstance(enabled, bool) or not isinstance(bind_address, str):
@@ -1186,11 +1206,26 @@ def create_app(
             save_lan_password(password)
         if not enabled:
             app.state.sessions.clear()
-        config["lan"]["enabled"] = enabled
-        config["lan"]["bind_address"] = bind_address
-        config["auth"]["required"] = required
-        config["auth"]["username"] = username.strip()
-        save_server_config(config)
+        next_config = {
+            **config,
+            "lan": {
+                **config["lan"],
+                "enabled": enabled,
+                "bind_address": bind_address,
+            },
+            "auth": {
+                **config["auth"],
+                "required": required,
+                "username": username.strip(),
+            },
+            "tasks": {
+                **config.get("tasks", {}),
+                "max_active_projects": max_active_projects,
+            },
+        }
+        save_server_config(next_config)
+        app.state.server_config = next_config
+        await app.state.tasks.set_max_active_projects(max_active_projects)
         warning = (
             "同网段设备拥有完整项目和 LLM 操作权限" if enabled and not required else ""
         )

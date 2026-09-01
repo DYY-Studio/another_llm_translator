@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from app.config import load_project_config
-from app.errors import IncompleteError, UsageError
+from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
 from app.project import add_project_files
@@ -420,6 +420,93 @@ async def test_run_all_shares_production_client_and_limiter(
 
 
 @pytest.mark.asyncio
+async def test_run_all_aggregates_progress_and_latest_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    progress: list[tuple[int, int, int]] = []
+    usage: list[dict[str, object] | None] = []
+
+    def exact(value: int) -> dict[str, object]:
+        return {
+            "input_tokens": value,
+            "output_tokens": value,
+            "total_tokens": value * 2,
+            "available": True,
+            "partial": False,
+        }
+
+    async def fake_terminology(
+        _project: Path,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        kwargs["on_progress"](0, 0, 1)
+        kwargs["on_usage"](exact(1))
+        kwargs["on_usage"](exact(3))
+        kwargs["on_progress"](1, 0, 1)
+        return {"stage": "terminology", "selected": 1, "requested": 1, "reused": 0,
+                "completed": 1, "failed": 0, "pending": 0, "usage": exact(3)}
+
+    async def fake_translation(
+        _project: Path,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        kwargs["on_progress"](0, 0, 1)
+        kwargs["on_usage"](exact(5))
+        kwargs["on_progress"](1, 0, 1)
+        return {"stage": "translation", "selected": 1, "requested": 1, "reused": 0,
+                "completed": 1, "failed": 0, "pending": 0, "usage": exact(5)}
+
+    async def fake_review(
+        _project: Path,
+        stage: str,
+        _scope: Scope,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        value = 7 if stage == "proofreading" else 9
+        kwargs["on_progress"](0, 0, 1)
+        kwargs["on_usage"](exact(value))
+        kwargs["on_progress"](1, 0, 1)
+        return {"stage": stage, "selected": 1, "requested": 1, "reused": 0,
+                "completed": 1, "failed": 0, "pending": 0, "usage": exact(value)}
+
+    monkeypatch.setattr("app.stages.run_terminology", fake_terminology)
+    monkeypatch.setattr("app.stages.run_translation", fake_translation)
+    monkeypatch.setattr("app.stages.run_review", fake_review)
+    client = httpx.AsyncClient()
+    try:
+        summary = await run_all(
+            project,
+            Scope(),
+            http_client=client,
+            on_progress=lambda completed, failed, total: progress.append(
+                (completed, failed, total)
+            ),
+            on_usage=usage.append,
+        )
+    finally:
+        await client.aclose()
+        del os.environ["LLM_API_KEY"]
+
+    assert progress[0] == (0, 0, 1)
+    assert progress[-1] == (4, 0, 4)
+    assert summary["selected"] == summary["requested"] == 4
+    assert summary["completed"] == 4
+    assert summary["failed"] == summary["pending"] == 0
+    assert summary["usage"] == {
+        "input_tokens": 24,
+        "output_tokens": 24,
+        "total_tokens": 48,
+        "available": True,
+        "partial": False,
+    }
+    assert usage[-1] == summary["usage"]
+
+
+@pytest.mark.asyncio
 async def test_run_all_separates_clients_and_limiters_by_preset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,6 +563,35 @@ async def test_run_all_separates_clients_and_limiters_by_preset(
     assert len({id(client) for _, client, _ in calls}) == 2
     assert len({id(limiter) for _, _, limiter in calls}) == 2
     assert calls[1][1:] == calls[2][1:]
+
+
+@pytest.mark.asyncio
+async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "one")
+    default = load_project_config(project)
+    alternate = deepcopy(default)
+
+    def changed_config(
+        _project: Path, *, stage: str | None = None
+    ) -> dict[str, object]:
+        config = alternate if stage == "proofreading" else default
+        if stage in {"translation", "proofreading"}:
+            config = deepcopy(config)
+            config["_llm_preset_id"] = "shared"
+            config["_llm_preset_hash"] = "same"
+            config["execution"] = {
+                **config["execution"],
+                "requests_per_minute": 1 if stage == "translation" else 2,
+            }
+        return config
+
+    monkeypatch.setattr("app.stages.load_project_config", changed_config)
+
+    with pytest.raises(ConfigError, match="共享限流配置不一致"):
+        await run_all(project, Scope(dry_run=True))
 
 
 @pytest.mark.asyncio

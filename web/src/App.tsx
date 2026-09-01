@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
@@ -22,6 +22,7 @@ import type {
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { STORAGE_KEYS } from "./storageKeys";
+import { isActiveTaskStatus, reconcileTaskCollection } from "./taskState";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
@@ -101,14 +102,20 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
+  const tasksRef = useRef<Record<string, TaskState>>({});
+  const syncingTasksRef = useRef(false);
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const selectedProject = projects.find((item) => item.selector === project) ?? null;
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
     Object.values(tasks)
-      .filter((item) => ["queued", "running", "cancelling"].includes(item.status))
+      .filter((item) => isActiveTaskStatus(item.status))
       .map((item) => item.project_id),
   );
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   const updateTask = useCallback((next: TaskState | null) => {
     setTasks((current) => {
@@ -122,13 +129,30 @@ export default function App() {
     });
   }, [selectedProject]);
 
-  const loadActiveTasks = useCallback(async () => {
-    const value = await api<{ tasks: TaskState[] }>("/api/v1/tasks/active");
-    setTasks((current) => {
-      const updated = { ...current };
-      for (const next of value.tasks) updated[next.project_id] = next;
-      return updated;
-    });
+  const syncActiveTasks = useCallback(async () => {
+    if (syncingTasksRef.current) return;
+    syncingTasksRef.current = true;
+    try {
+      const value = await api<{ tasks: TaskState[] }>("/api/v1/tasks/active");
+      const missing = Object.values(tasksRef.current).filter(
+        (item) => isActiveTaskStatus(item.status)
+          && !value.tasks.some((next) => next.task_id === item.task_id),
+      );
+      const terminalResults = await Promise.allSettled(
+        missing.map((item) => api<TaskState>(`/api/v1/tasks/${item.task_id}`)),
+      );
+      setTasks((current) => {
+        const terminal = Object.fromEntries(missing.map((item, index) => {
+          const result = terminalResults[index];
+          return [item.task_id, result.status === "fulfilled" ? result.value : null];
+        }));
+        const updated = reconcileTaskCollection(current, value.tasks, missing, terminal);
+        tasksRef.current = updated;
+        return updated;
+      });
+    } finally {
+      syncingTasksRef.current = false;
+    }
   }, []);
 
   useEffect(() => {
@@ -194,16 +218,9 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
-    const [value, active] = await Promise.all([
-      api<{ projects: ProjectSummary[] }>("/api/v1/projects"),
-      api<{ tasks: TaskState[] }>("/api/v1/tasks/active"),
-    ]);
+    const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
     setProjects(value.projects);
-    setTasks((current) => {
-      const updated = { ...current };
-      for (const next of active.tasks) updated[next.project_id] = next;
-      return updated;
-    });
+    await syncActiveTasks();
     const storedProjectId = readSelectedProjectId();
     setProject((current) => {
       if (current && value.projects.some((item) => item.selector === current)) return current;
@@ -211,7 +228,8 @@ export default function App() {
         ?? value.projects[0]?.selector
         ?? "";
     });
-  }, []);
+    return value.projects;
+  }, [syncActiveTasks]);
 
   const refresh = useCallback(async () => {
     if (!project) { setOverview(null); return; }
@@ -250,19 +268,23 @@ export default function App() {
     prefetchWorkspace(project);
   }, [project]);
   useEffect(() => {
-    if (!project) return;
-    void loadActiveTasks().catch((value) => setError(value));
-  }, [project, loadActiveTasks]);
-  useEffect(() => {
-    if (!task || !["queued", "running", "cancelling"].includes(task.status)) return;
-    const timer = window.setInterval(() => {
-      void api<TaskState>(`/api/v1/tasks/${task.task_id}`).then((value) => {
-        updateTask(value);
-        if (!["queued", "running", "cancelling"].includes(value.status)) void refresh();
+    let active = true;
+    const poll = () => {
+      void syncActiveTasks().catch((value) => {
+        if (active) setError(value);
       });
-    }, 800);
-    return () => window.clearInterval(timer);
-  }, [task, refresh, updateTask]);
+    };
+    poll();
+    const timer = window.setInterval(poll, 800);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [syncActiveTasks]);
+  useEffect(() => {
+    if (!task || isActiveTaskStatus(task.status)) return;
+    void refresh().catch((value) => setError(value));
+  }, [task?.task_id, task?.status, refresh]);
 
   async function openRunDialog() {
     const taskStage = runnable[stage];
@@ -305,6 +327,39 @@ export default function App() {
   async function cancelRun() {
     if (!task) return;
     updateTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
+  }
+
+  async function cancelTask(taskId: string) {
+    try {
+      updateTask(await api<TaskState>(`/api/v1/tasks/${taskId}/cancel`, { method: "POST" }));
+    } catch (value) {
+      setError(value);
+    }
+  }
+
+  async function openTaskProject(next: TaskState) {
+    let summary = projects.find((item) => item.project_id === next.project_id);
+    if (!summary) {
+      try {
+        const available = await loadProjects();
+        summary = available.find((item) => item.project_id === next.project_id);
+      } catch (value) {
+        setError(value);
+        return;
+      }
+    }
+    if (!summary) {
+      setError(translate("run.projectUnavailable", language));
+      return;
+    }
+    setProject(summary.selector);
+    const destination = next.stage === "terminology_decision"
+      ? "terminology"
+      : ["terminology", "translation", "proofreading", "polishing"].includes(next.stage)
+        ? next.stage as Stage
+        : "overview";
+    setStage(destination);
+    setFailureFocus(null);
   }
 
   async function handleProjectDeleted(path: string) {
@@ -393,6 +448,9 @@ export default function App() {
         project={project}
         stage={stage}
         task={task}
+        tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}
+        onOpenTaskProject={(next) => { void openTaskProject(next); }}
+        onCancelTask={cancelTask}
         onStage={navigateStage}
         onShowFailures={showFailures}
         onRun={openRunDialog}

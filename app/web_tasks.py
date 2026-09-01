@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import time
 import uuid
+from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,22 +16,25 @@ from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
 from .errors import (
     AppError,
+    ConfigError,
     UsageError,
     app_error_payload,
     internal_error_payload,
 )
 from .execution import (
     Scope,
+    SlidingWindowLimiter,
     choose_running_run,
     combine_usage,
     find_running_runs,
+    select_scope,
     stage_fingerprint,
     unavailable_usage,
 )
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .logging_utils import get_logger
-from .project import load_segments
+from .project import load_segments, load_source_files
 from .sqlite_storage import (
     latest_stage_summary,
     read_json,
@@ -46,6 +54,7 @@ from .term_decision import (
     STAGE as TERMINOLOGY_DECISION_STAGE,
 )
 from .term_decision import (
+    _decision_fingerprint,
     current_decision_draft,
     decision_checkpoint_progress,
     decision_plan,
@@ -286,6 +295,180 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
     }
 
 
+def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
+    config = load_project_config(project, stage=stage)
+    library = load_terms(project)
+    terms_revision = (
+        int(library["terms_revision"])
+        if stage != "terminology" and library is not None
+        else None
+    )
+    return stage_fingerprint(
+        config,
+        stage,
+        prompt_middle_digests(project, stage),
+        terms_revision=terms_revision,
+    )
+
+
+def _decision_fingerprint_snapshot(
+    project: Path, prompt_language: str | None
+) -> str:
+    plan = decision_plan(project, prompt_language)
+    return _decision_fingerprint(plan["config"], plan["prompts"], plan["library"])
+
+
+def _stable_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _selection_snapshot(
+    project: Path,
+    scope: Scope,
+    *,
+    force_all: bool = False,
+) -> tuple[tuple[str, str, int, int, str, str, str, str], ...]:
+    files = load_source_files(project)
+    segments = load_segments(project)
+    selected = (
+        [segment for segment in segments if not segment["is_empty"]]
+        if force_all
+        else select_scope(segments, files, scope)
+    )
+    file_order = {
+        str(item["file_id"]): int(item["file_order"]) for item in files
+    }
+    adapter_snapshots: dict[str, str] = {}
+    for file_record in files:
+        state_path = file_record.get("document_adapter_state")
+        state_record = (
+            read_json(project, project / state_path)
+            if isinstance(state_path, str)
+            and record_exists(project, project / state_path)
+            else None
+        )
+        adapter_snapshots[str(file_record["file_id"])] = _stable_digest(
+            {
+                "adapter_id": file_record.get("document_adapter_id"),
+                "adapter_version": file_record.get("document_adapter_version"),
+                "state_path": state_path,
+                "state": state_record,
+            }
+        )
+    return tuple(
+        (
+            str(segment["segment_id"]),
+            str(segment["file_id"]),
+            file_order[str(segment["file_id"])],
+            int(segment["line_index"]),
+            str(segment["part_id"]),
+            str(segment["source"]),
+            str(segment.get("model_source") or ""),
+            adapter_snapshots[str(segment["file_id"])],
+        )
+        for segment in selected
+    )
+
+
+def _running_runs_snapshot(
+    project: Path,
+    stages: tuple[str, ...],
+) -> tuple[tuple[str, str, str, str], ...]:
+    snapshots: list[tuple[str, str, str, str]] = []
+    for stage in stages:
+        for manifest in find_running_runs(project, stage):
+            run_id = str(manifest["run_id"])
+            stable = {
+                "stage": stage,
+                "run_id": run_id,
+                "status": manifest.get("status"),
+                "started_at": manifest.get("started_at"),
+                "stage_fingerprint": manifest.get("stage_fingerprint"),
+                "scope": manifest.get("scope"),
+                "selected_segment_count": manifest.get("selected_segment_count"),
+                "requested_segment_count": manifest.get("requested_segment_count"),
+                "reused_segment_count": manifest.get("reused_segment_count"),
+            }
+            snapshots.append(
+                (
+                    stage,
+                    run_id,
+                    str(manifest.get("status", "")),
+                    _stable_digest(stable),
+                )
+            )
+    return tuple(snapshots)
+
+
+def _decision_input_snapshot(plan: dict[str, Any]) -> str:
+    return _stable_digest(
+        {
+            "terms_revision": plan["library"]["terms_revision"],
+            "overrides": plan["overrides_document"],
+            "protected": sorted(str(value) for value in plan["protected"]),
+            "eligible": plan["eligible"],
+            "states": plan["states"],
+            "source_conflicts": plan["source_conflicts"],
+            "evidence": plan["evidence"],
+            "language": plan["language"],
+        }
+    )
+
+
+def _run_all_includes_terminology(
+    project: Path,
+    selection_snapshots: tuple[
+        tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
+    ],
+    *,
+    force: bool,
+) -> bool:
+    terms = load_terms(project)
+    active_path = project / "terminology" / "active_task.json"
+    active = (
+        read_json(project, active_path)
+        if record_exists(project, active_path)
+        else None
+    )
+    include = force or terms is None
+    if active and active.get("status") == "active":
+        return True
+    if not active or active.get("status") != "completed":
+        return include
+    selected = dict(selection_snapshots).get("terminology", ())
+    selected_ids = {item[0] for item in selected}
+    scans = read_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        task_id=str(active.get("active_task_id", "")),
+    )
+    completed_ids = {
+        str(item["segment_id"])
+        for item in scans
+        if item.get("status") == "completed"
+    }
+    return bool(selected_ids - completed_ids)
+
+
+@dataclass(frozen=True)
+class _StartDecision:
+    selected_count: int
+    running_run_id: str | None
+    fingerprints: tuple[tuple[str, str], ...]
+    selection_snapshots: tuple[
+        tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
+    ]
+    running_runs: tuple[tuple[str, str, str, str], ...]
+    decision_inputs: str | None = None
+    options_selected_count: int | None = None
+
+
 @dataclass
 class WebTask:
     task_id: str
@@ -312,6 +495,13 @@ class WebTask:
         }
     )
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _scope: Scope = field(default_factory=Scope, repr=False)
+    _reuse_mixed_fingerprints: bool = field(default=False, repr=False)
+    _run_action: str | None = field(default=None, repr=False)
+    _prompt_language: str | None = field(default=None, repr=False)
+    _replace_draft: bool = field(default=False, repr=False)
+    _acknowledge_manual_review: bool = field(default=False, repr=False)
+    _start_decision: _StartDecision | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -339,12 +529,319 @@ class WebTask:
         }
 
 
+@dataclass
+class _LimiterEntry:
+    limiter: SlidingWindowLimiter
+    requests_per_minute: int
+    input_tokens_per_minute: int
+    leases: int = 0
+    released_at: float | None = None
+
+
+class SharedLimiterPool:
+    """Share provider rate-limit windows among Web tasks in one process."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        retention_seconds: float = 60.0,
+    ) -> None:
+        self.clock = clock
+        self.sleeper = sleeper
+        self.retention_seconds = retention_seconds
+        self.entries: dict[tuple[str, str], _LimiterEntry] = {}
+
+    @staticmethod
+    def _key(config: dict[str, Any]) -> tuple[str, str]:
+        try:
+            return (
+                str(config["_llm_preset_id"]),
+                str(config["_llm_preset_hash"]),
+            )
+        except KeyError as exc:
+            raise UsageError("LLM Preset 缺少共享限流身份") from exc
+
+    def _prune(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self.entries.items()
+            if entry.leases == 0
+            and entry.released_at is not None
+            and now - entry.released_at >= self.retention_seconds
+        ]
+        for key in expired:
+            self.entries.pop(key, None)
+
+    def acquire(
+        self, config: dict[str, Any]
+    ) -> tuple[SlidingWindowLimiter, Callable[[], None]]:
+        now = self.clock()
+        self._prune(now)
+        key = self._key(config)
+        execution = config["execution"]
+        requests_per_minute = int(execution["requests_per_minute"])
+        input_tokens_per_minute = int(execution["input_tokens_per_minute"])
+        entry = self.entries.get(key)
+        if entry is None:
+            entry = _LimiterEntry(
+                limiter=SlidingWindowLimiter(
+                    requests_per_minute,
+                    input_tokens_per_minute,
+                    clock=self.clock,
+                    sleeper=self.sleeper,
+                ),
+                requests_per_minute=requests_per_minute,
+                input_tokens_per_minute=input_tokens_per_minute,
+            )
+            self.entries[key] = entry
+        elif (
+            entry.requests_per_minute != requests_per_minute
+            or entry.input_tokens_per_minute != input_tokens_per_minute
+        ):
+            raise ConfigError("相同 Preset 身份的共享限流配置不一致")
+        entry.leases += 1
+        entry.released_at = None
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            current = self.entries.get(key)
+            if current is None:
+                return
+            current.leases = max(0, current.leases - 1)
+            if current.leases == 0:
+                current.released_at = self.clock()
+
+        return entry.limiter, release
+
+
 class WebTaskManager:
-    def __init__(self, diagnostics: Diagnostics | None = None) -> None:
+    def __init__(
+        self,
+        diagnostics: Diagnostics | None = None,
+        *,
+        max_active_projects: int = 2,
+        limiter_pool: SharedLimiterPool | None = None,
+    ) -> None:
+        if (
+            not isinstance(max_active_projects, int)
+            or isinstance(max_active_projects, bool)
+            or max_active_projects < 1
+        ):
+            raise UsageError("max_active_projects 必须是正整数")
         self.tasks: dict[str, WebTask] = {}
         self.active_by_project: dict[Path, str] = {}
+        self.queued_task_ids: deque[str] = deque()
+        self.running_task_ids: set[str] = set()
+        self.max_active_projects = max_active_projects
         self.guard = asyncio.Lock()
         self.diagnostics = diagnostics
+        self.limiter_pool = limiter_pool or SharedLimiterPool()
+        self._shutting_down = False
+
+    def _validate_start(
+        self,
+        project: Path,
+        stage: str,
+        *,
+        scope: Scope,
+        reuse_mixed_fingerprints: bool,
+        run_action: str | None,
+        acknowledge_manual_review: bool,
+        ensure_unique: bool,
+        prompt_language: str | None,
+    ) -> _StartDecision:
+        if stage not in {
+            "terminology",
+            "translation",
+            "proofreading",
+            "polishing",
+            TERMINOLOGY_DECISION_STAGE,
+            "run-all",
+        }:
+            raise UsageError(f"未知后台阶段：{stage}")
+        force = scope.force
+        if force and reuse_mixed_fingerprints:
+            raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
+        if run_action not in {None, "resume", "decline"}:
+            raise UsageError("run_action 必须是 resume、decline 或 null")
+        if stage == "run-all" and run_action is not None:
+            raise UsageError("run-all 不支持 run_action")
+        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
+            raise UsageError("自动术语决策不支持复用已发布结果")
+        if ensure_unique:
+            active_id = self.active_by_project.get(project)
+            if active_id is not None:
+                active = self.tasks[active_id]
+                if active.status in {"queued", "running", "cancelling"}:
+                    raise UsageError(f"项目已有后台任务：{active.task_id}")
+        selected_count = 0
+        running_run_id: str | None = None
+        decision_plan_snapshot: dict[str, Any] | None = None
+        selection_snapshots: tuple[
+            tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
+        ] = ()
+        options_selected_count: int | None = None
+        if stage == TERMINOLOGY_DECISION_STAGE:
+            decision_plan_snapshot = decision_plan(project, prompt_language)
+            library = decision_plan_snapshot["library"]
+            selected_count = len(decision_plan_snapshot["eligible"]) * 2
+            current_terms_revision = int(library["terms_revision"])
+            if (
+                run_action != "resume"
+                and not acknowledge_manual_review
+                and manual_review_state(project)["remaining"] > 0
+            ):
+                raise UsageError(
+                    "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
+                )
+            running = find_running_runs(project, stage)
+            if running:
+                running_run_id = str(running[0]["run_id"])
+            if run_action == "resume":
+                if not running:
+                    raise UsageError(f"{stage} 没有可续用的 running Run")
+                if force:
+                    raise UsageError("续用 Run 时不能同时指定 force")
+                compatible, reason = decision_resume_compatibility(
+                    project,
+                    str(running[0]["run_id"]),
+                    source_terms_revision=current_terms_revision,
+                )
+                if not compatible:
+                    raise UsageError(f"{reason}；请结束旧 Run 并强制新建")
+            elif running:
+                if run_action != "decline" or not force:
+                    raise UsageError("发现未完成 Run，必须选择续用或强制重做全部")
+            elif run_action == "decline" and not force:
+                raise UsageError("结束自动决策 Run 时必须同时指定 force")
+        elif stage != "run-all":
+            options = task_options(project, stage)
+            options_selected_count = int(options["selected"])
+            selection = _selection_snapshot(
+                project,
+                scope,
+                force_all=stage == "terminology" and scope.force,
+            )
+            selected_count = len(selection)
+            selection_snapshots = ((stage, selection),)
+            running_run = options["running_run"]
+            if running_run is not None:
+                running_run_id = str(running_run["run_id"])
+            if run_action == "resume":
+                if running_run is None:
+                    raise UsageError(f"{stage} 没有可续用的 running Run")
+                if force or reuse_mixed_fingerprints:
+                    raise UsageError("续用 Run 时不能同时指定 force 或复用结果")
+            else:
+                if running_run is not None and run_action != "decline":
+                    raise UsageError("发现未完成 Run，必须选择续用或结束并新建")
+                if (
+                    options["mismatched_fingerprint_completed"]
+                    and not force
+                    and not reuse_mixed_fingerprints
+                ):
+                    raise UsageError(
+                        "存在不同设置指纹的已完成结果，必须明确选择复用或 force"
+                    )
+        if stage == TERMINOLOGY_DECISION_STAGE:
+            fingerprints = (
+                (stage, _decision_fingerprint_snapshot(project, prompt_language)),
+            )
+            decision_inputs = _decision_input_snapshot(decision_plan_snapshot)
+        elif stage == "run-all":
+            selection_snapshots = tuple(
+                (
+                    item,
+                    _selection_snapshot(
+                        project,
+                        scope,
+                        force_all=item == "terminology" and scope.force,
+                    ),
+                )
+                for item in LLM_STAGES
+            )
+            include_terminology = _run_all_includes_terminology(
+                project,
+                selection_snapshots,
+                force=scope.force,
+            )
+            selected_count = sum(
+                len(selection)
+                for item, selection in selection_snapshots
+                if item != "terminology" or include_terminology
+            )
+            fingerprints = tuple(
+                (item, _stage_fingerprint_snapshot(project, item))
+                for item in LLM_STAGES
+            )
+            decision_inputs = None
+        else:
+            fingerprints = ((stage, _stage_fingerprint_snapshot(project, stage)),)
+            decision_inputs = None
+        relevant_stages = (
+            LLM_STAGES
+            if stage == "run-all"
+            else (stage,)
+        )
+        return _StartDecision(
+            selected_count=selected_count,
+            running_run_id=running_run_id,
+            fingerprints=fingerprints,
+            selection_snapshots=selection_snapshots,
+            running_runs=_running_runs_snapshot(project, relevant_stages),
+            decision_inputs=decision_inputs,
+            options_selected_count=options_selected_count,
+        )
+
+    def _dispatch_locked(self) -> None:
+        if self._shutting_down:
+            return
+        while (
+            len(self.running_task_ids) < self.max_active_projects
+            and self.queued_task_ids
+        ):
+            task_id = self.queued_task_ids.popleft()
+            state = self.tasks[task_id]
+            if state.status != "queued":
+                continue
+            state.status = "running"
+            self.running_task_ids.add(task_id)
+            state.asyncio_task = asyncio.create_task(
+                self._run(
+                    state,
+                    scope=state._scope,
+                    reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
+                    run_action=state._run_action,
+                    prompt_language=state._prompt_language,
+                    replace_draft=state._replace_draft,
+                    acknowledge_manual_review=state._acknowledge_manual_review,
+                )
+            )
+            state.asyncio_task.add_done_callback(
+                lambda task, state=state: self._task_done(state, task)
+            )
+
+    def _task_done(self, state: WebTask, task: asyncio.Task[None]) -> None:
+        if task.cancelled() and state.status in {"running", "cancelling"}:
+            state.status = "cancelled"
+            state.completed_at = state.completed_at or utc_now()
+        self.running_task_ids.discard(state.task_id)
+        if self.active_by_project.get(state.project) == state.task_id:
+            self.active_by_project.pop(state.project, None)
+        self._dispatch_locked()
+
+    async def set_max_active_projects(self, value: int) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise UsageError("max_active_projects 必须是正整数")
+        async with self.guard:
+            self.max_active_projects = value
+            self._dispatch_locked()
 
     async def start(
         self,
@@ -358,93 +855,19 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
     ) -> dict[str, Any]:
-        if stage not in {
-            "terminology",
-            "translation",
-            "proofreading",
-            "polishing",
-            TERMINOLOGY_DECISION_STAGE,
-            "run-all",
-        }:
-            raise UsageError(f"未知后台阶段：{stage}")
-        force = scope.force
-        if force and reuse_mixed_fingerprints:
-            raise UsageError(
-                "force 与 reuse_mixed_fingerprints 不能同时使用"
-            )
-        if run_action not in {None, "resume", "decline"}:
-            raise UsageError("run_action 必须是 resume、decline 或 null")
-        if stage == "run-all" and run_action is not None:
-            raise UsageError("run-all 不支持 run_action")
-        if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
-            raise UsageError("自动术语决策不支持复用已发布结果")
         async with self.guard:
-            active_id = self.active_by_project.get(project)
-            if active_id is not None:
-                active = self.tasks[active_id]
-                if active.status in {"queued", "running", "cancelling"}:
-                    raise UsageError(
-                        f"项目已有后台任务：{active.task_id}"
-                    )
-            selected_count = 0
-            if stage == TERMINOLOGY_DECISION_STAGE:
-                library = _require_decision_library(project)
-                current_terms_revision = int(library["terms_revision"])
-                if (
-                    run_action != "resume"
-                    and not acknowledge_manual_review
-                    and manual_review_state(project)["remaining"] > 0
-                ):
-                    raise UsageError(
-                        "存在未处理人工待办；请先确认新一轮决策会在成功应用后取代旧队列"
-                    )
-                running = find_running_runs(project, stage)
-                if run_action == "resume":
-                    if not running:
-                        raise UsageError(f"{stage} 没有可续用的 running Run")
-                    if force:
-                        raise UsageError("续用 Run 时不能同时指定 force")
-                    compatible, reason = decision_resume_compatibility(
-                        project,
-                        str(running[0]["run_id"]),
-                        source_terms_revision=current_terms_revision,
-                    )
-                    if not compatible:
-                        raise UsageError(
-                            f"{reason}；请结束旧 Run 并强制新建"
-                        )
-                elif running:
-                    if run_action != "decline" or not force:
-                        raise UsageError(
-                            "发现未完成 Run，必须选择续用或强制重做全部"
-                        )
-                elif run_action == "decline" and not force:
-                    raise UsageError("结束自动决策 Run 时必须同时指定 force")
-            elif stage != "run-all":
-                options = task_options(project, stage)
-                selected_count = int(options["selected"])
-                running_run = options["running_run"]
-                if run_action == "resume":
-                    if running_run is None:
-                        raise UsageError(f"{stage} 没有可续用的 running Run")
-                    if force or reuse_mixed_fingerprints:
-                        raise UsageError(
-                            "续用 Run 时不能同时指定 force 或复用结果"
-                        )
-                else:
-                    if running_run is not None and run_action != "decline":
-                        raise UsageError(
-                            "发现未完成 Run，必须选择续用或结束并新建"
-                        )
-                    if (
-                        options["mismatched_fingerprint_completed"]
-                        and not force
-                        and not reuse_mixed_fingerprints
-                    ):
-                        raise UsageError(
-                            "存在不同设置指纹的已完成结果，"
-                            "必须明确选择复用或 force"
-                        )
+            if self._shutting_down:
+                raise UsageError("任务管理器正在关闭")
+            decision = self._validate_start(
+                project,
+                stage,
+                scope=scope,
+                reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                run_action=run_action,
+                acknowledge_manual_review=acknowledge_manual_review,
+                ensure_unique=True,
+                prompt_language=prompt_language,
+            )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,
@@ -453,20 +876,19 @@ class WebTaskManager:
                     read_json(project, project / "project.json")["project_id"]
                 ),
                 stage=stage,
-                total_segments=selected_count,
+                total_segments=decision.selected_count,
             )
+            state._scope = scope
+            state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
+            state._run_action = run_action
+            state._prompt_language = prompt_language
+            state._replace_draft = replace_draft
+            state._acknowledge_manual_review = acknowledge_manual_review
+            state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
-            state.asyncio_task = asyncio.create_task(
-                self._run(
-                    state,
-                    scope=scope,
-                    reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-                    run_action=run_action,
-                    prompt_language=prompt_language,
-                    replace_draft=replace_draft,
-                )
-            )
+            self.queued_task_ids.append(task_id)
+            self._dispatch_locked()
             return state.view()
 
     async def _run(
@@ -478,11 +900,12 @@ class WebTaskManager:
         run_action: str | None,
         prompt_language: str | None = None,
         replace_draft: bool = False,
+        acknowledge_manual_review: bool = False,
     ) -> None:
-        state.status = "running"
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
         resuming = False
+        limiter_releases: list[Callable[[], None]] = []
 
         def progress(completed: int, failed: int, total: int) -> None:
             state.completed_segments = completed
@@ -496,11 +919,52 @@ class WebTaskManager:
 
         try:
             diagnostics_context = (
-                self.diagnostics.activate(state.project.name, state.stage)
+                self.diagnostics.activate(
+                    state.project.name, state.stage, task_id=state.task_id
+                )
                 if self.diagnostics is not None
                 else nullcontext()
             )
             with diagnostics_context, project_write_lock(state.project):
+                decision = self._validate_start(
+                    state.project,
+                    state.stage,
+                    scope=scope,
+                    reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                    run_action=run_action,
+                    acknowledge_manual_review=acknowledge_manual_review,
+                    ensure_unique=False,
+                    prompt_language=prompt_language,
+                )
+                if (
+                    state._start_decision is not None
+                    and decision != state._start_decision
+                ):
+                    raise UsageError("排队期间项目选择或设置已变化")
+                shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
+                if state.stage == "run-all":
+                    for stage in LLM_STAGES:
+                        config = load_project_config(state.project, stage=stage)
+                        key = (
+                            str(config["_llm_preset_id"]),
+                            str(config["_llm_preset_hash"]),
+                        )
+                        limiter, release = self.limiter_pool.acquire(config)
+                        if key in shared_limiters:
+                            release()
+                            continue
+                        shared_limiters[key] = limiter
+                        limiter_releases.append(release)
+                else:
+                    config = load_project_config(state.project, stage=state.stage)
+                    limiter, release = self.limiter_pool.acquire(config)
+                    shared_limiters[
+                        (
+                            str(config["_llm_preset_id"]),
+                            str(config["_llm_preset_hash"]),
+                        )
+                    ] = limiter
+                    limiter_releases.append(release)
                 resume_run_id = None
                 if state.stage != "run-all":
                     resume_run_id, _ = choose_running_run(
@@ -531,6 +995,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(
@@ -541,6 +1006,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage == "translation":
                     summary = await run_translation(
@@ -551,6 +1017,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 elif state.stage in {"proofreading", "polishing"}:
                     summary = await run_review(
@@ -562,6 +1029,7 @@ class WebTaskManager:
                         prompt_language=prompt_language,
                         on_progress=progress,
                         on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())),
                     )
                 else:
                     summary = await run_all(
@@ -569,6 +1037,9 @@ class WebTaskManager:
                         scope,
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                         prompt_language=prompt_language,
+                        limiters=shared_limiters,
+                        on_progress=progress,
+                        on_usage=usage_changed,
                     )
             state.summary = summary
             state.completed_segments = int(summary.get("completed", 0)) + int(
@@ -605,9 +1076,8 @@ class WebTaskManager:
             )
         finally:
             state.completed_at = utc_now()
-            async with self.guard:
-                if self.active_by_project.get(state.project) == state.task_id:
-                    self.active_by_project.pop(state.project, None)
+            for release in limiter_releases:
+                release()
 
     def get(self, task_id: str) -> dict[str, Any]:
         try:
@@ -647,15 +1117,58 @@ class WebTaskManager:
         )
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
-        try:
-            state = self.tasks[task_id]
-        except KeyError as exc:
-            raise UsageError(f"未知后台任务：{task_id}") from exc
-        if state.status not in {"queued", "running"} or state.asyncio_task is None:
-            raise UsageError("后台任务当前不可取消")
-        state.status = "cancelling"
-        state.asyncio_task.cancel()
-        return state.view()
+        async with self.guard:
+            try:
+                state = self.tasks[task_id]
+            except KeyError as exc:
+                raise UsageError(f"未知后台任务：{task_id}") from exc
+            if state.status == "queued":
+                self.queued_task_ids = deque(
+                    value for value in self.queued_task_ids if value != task_id
+                )
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                if self.active_by_project.get(state.project) == task_id:
+                    self.active_by_project.pop(state.project, None)
+                return state.view()
+            if state.status != "running" or state.asyncio_task is None:
+                raise UsageError("后台任务当前不可取消")
+            state.status = "cancelling"
+            state.asyncio_task.cancel()
+            return state.view()
+
+    async def shutdown(self) -> None:
+        async with self.guard:
+            self._shutting_down = True
+            queued = [
+                self.tasks[task_id]
+                for task_id in self.queued_task_ids
+                if self.tasks[task_id].status == "queued"
+            ]
+            self.queued_task_ids.clear()
+            for state in queued:
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                if self.active_by_project.get(state.project) == state.task_id:
+                    self.active_by_project.pop(state.project, None)
+            running = [
+                self.tasks[task_id]
+                for task_id in self.running_task_ids
+                if self.tasks[task_id].asyncio_task is not None
+            ]
+            for state in running:
+                if state.status == "running":
+                    state.status = "cancelling"
+                state.asyncio_task.cancel()
+        if running:
+            await asyncio.gather(
+                *(
+                    state.asyncio_task
+                    for state in running
+                    if state.asyncio_task is not None
+                ),
+                return_exceptions=True,
+            )
 
 
 def _task_usage(
