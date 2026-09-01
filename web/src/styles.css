@@ -230,11 +230,12 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .summary-strip div:first-child { padding-left: 0; border-left: 0; }
 .summary-strip strong { font-size: 28px; }
 .summary-strip span { color: var(--muted); font-size: 13px; }
-.overview-storage { flex: 0 1 auto; display: grid; grid-template-columns: repeat(2, minmax(132px, auto)); margin: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-soft); }
-.overview-storage div { display: grid; gap: 3px; min-width: 0; padding: 8px 12px; }
+.overview-storage { display: flex; align-items: center; gap: 14px; margin: 12px 0 0; }
+.overview-storage div { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 0; }
 .overview-storage div + div { border-left: 1px solid var(--border); }
-.overview-storage dt { color: var(--muted); font-size: 11px; }
-.overview-storage dd { margin: 0; color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+.overview-storage div + div { padding-left: 14px; }
+.overview-storage dt { color: var(--muted); font-size: 12px; }
+.overview-storage dd { margin: 0; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
 .overview-file-section { min-height: 0; flex: 1 1 0; display: flex; flex-direction: column; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .section-heading h2 { margin: 0; }
@@ -898,10 +899,14 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .project-picker-popover { width: min(100%, calc(100vw - 32px)); }
   .project-options { max-height: min(320px, 48svh); }
   .overview-page .overview-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-bottom: 24px; }
-  .overview-heading-controls { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-left: 0; }
+  .overview-heading-controls { display: grid; width: 100%; flex: none; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-left: 0; }
   .overview-project-actions { justify-self: start; }
   .overview-heading .summary-strip { width: 100%; }
-  .overview-storage { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-identity .overview-storage { width: 100%; display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; }
+  .overview-identity .overview-storage div { display: flex; align-items: baseline; gap: 6px; padding: 0; }
+  .overview-identity .overview-storage div + div { padding-left: 14px; }
+  .overview-identity .overview-storage dt { font-size: 12px; }
+  .overview-identity .overview-storage dd { font-size: 13px; }
   .summary-strip div { min-width: 0; flex: 1 1 0; padding: 12px 8px; }
   .summary-strip div:first-child { padding-left: 0; }
   .summary-strip strong { font-size: 23px; }

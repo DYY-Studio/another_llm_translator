@@ -931,6 +931,12 @@ export function Overview({
     if (buttonReorder && buttonReorder.project !== project) setButtonReorder(null);
   }, [buttonReorder, project]);
 
+  useEffect(() => {
+    if (!storageMessage) return;
+    const timer = window.setTimeout(() => setStorageMessage(""), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [storageMessage]);
+
   function closeAddFiles() {
     if (busy) return;
     setAddFilesOpen(false);
@@ -1211,13 +1217,9 @@ export function Overview({
     <div className="page overview-page">
       <ProjectBar projects={projects} project={project} runningProjectIds={runningProjectIds} onProject={changeProject} onCreate={onCreate} language={language} />
       <div className="page-heading overview-heading">
-        <div className="overview-identity"><h1>{value.name}</h1><p>{value.path}</p></div>
-        <div className="summary-strip">
-          <div><strong>{value.files.length}</strong><span>{translate("overview.files", language)}</span></div>
-          <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
-          <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
-        </div>
-        <div className="overview-heading-controls">
+        <div className="overview-identity">
+          <h1>{value.name}</h1>
+          <p>{value.path}</p>
           <dl className="overview-storage" aria-label={translate("overview.storage", language)}>
             <div>
               <dt>{translate("overview.storageTotal", language)}</dt>
@@ -1228,6 +1230,13 @@ export function Overview({
               <dd>{formatSize(value.storage.sqlite_bytes)}</dd>
             </div>
           </dl>
+        </div>
+        <div className="summary-strip">
+          <div><strong>{value.files.length}</strong><span>{translate("overview.files", language)}</span></div>
+          <div><strong>{value.nonempty_segment_count}</strong><span>{translate("overview.nonempty", language)}</span></div>
+          <div><strong>{completed}</strong><span>{translate("overview.translated", language)}</span></div>
+        </div>
+        <div className="overview-heading-controls">
           <div className="overview-project-actions">
             <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
               {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
