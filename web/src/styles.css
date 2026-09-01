@@ -877,6 +877,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 @media (max-width: 780px) {
   body { min-width: 0; }
   .app { display: block; height: auto; min-height: 100vh; overflow: visible; padding-bottom: 62px; }
+  .app select, .app input, .app textarea { font-size: 16px; }
   .main { overflow: visible; }
   .topbar { position: sticky; top: 0; z-index: 4; min-height: 58px; padding: 0 12px; }
   .brand { font-size: 19px; }
