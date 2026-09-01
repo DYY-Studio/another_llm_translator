@@ -199,34 +199,32 @@ export function AppShell({
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
           </div>
-          {terminal ? (
-            <span className="run-terminal-count">
-              {translate("run.completedCount", language, { completed, failed, pending, total })}
-            </span>
-          ) : (
-            <div className="run-progress">
-              <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
-              <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
-                <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
-                <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
-              </div>
+          <div className="run-progress">
+            <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
+            <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+              <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
+              <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
             </div>
-          )}
+          </div>
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>
             ) : task.usage.partial ? <span>{translate("run.tokensPartial", language, { input: task.usage.input_tokens, output: task.usage.output_tokens })}</span>
               : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
-          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
-          {task.error && (
-            <span
-              className="error-text run-error"
-              role="alert"
-              title={errorMessage(task.error, language)}
-            >
-              {errorMessage(task.error, language)}
-            </span>
+          {(failed > 0 || task.error) && (
+            <div className="run-tokens run-task-details">
+              {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
+              {task.error && (
+                <span
+                  className="error-text run-error"
+                  role="alert"
+                  title={errorMessage(task.error, language)}
+                >
+                  {errorMessage(task.error, language)}
+                </span>
+              )}
+            </div>
           )}
           {canCancelTaskStatus(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
           {terminal && (
