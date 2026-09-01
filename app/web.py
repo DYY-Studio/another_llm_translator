@@ -1406,7 +1406,7 @@ def create_app(
             raise UsageError("q 必须是字符串")
         if not isinstance(stage, str):
             raise UsageError("stage 必须是字符串")
-        return WebStore(project(name)).overview(
+        return WebStore(project(name)).segment_query(
             offset=offset,
             limit=limit,
             file_id=file_id or None,

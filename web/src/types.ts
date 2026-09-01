@@ -92,6 +92,15 @@ export interface ProjectOverview {
   segments: Segment[];
 }
 
+export interface SegmentQueryResponse {
+  completed_segments: number;
+  total_segments: number;
+  offset: number;
+  limit: number;
+  stage: LLMStage;
+  segments: Segment[];
+}
+
 export interface ProjectSummary {
   selector: string;
   name: string;

@@ -336,7 +336,7 @@ class WebStore:
         )
         return base
 
-    def overview(
+    def segment_query(
         self,
         *,
         offset: int = 0,
@@ -380,30 +380,6 @@ class WebStore:
             }
             for target in ("translation", "proofreading", "polishing")
         }
-        part_ids_by_file = segment_part_ids(self.project)
-        try:
-            sqlite_bytes = database_path(self.project).stat().st_size
-        except OSError as exc:
-            raise ProjectError(
-                f"无法读取项目 SQLite 大小：{database_path(self.project)}: {exc}"
-            ) from exc
-        storage = {
-            "total_bytes": _project_storage_size(self.project),
-            "sqlite_bytes": sqlite_bytes,
-        }
-        files = [
-            {
-                "file_id": item["file_id"],
-                "file_order": item["file_order"],
-                "name": item["original_name"],
-                "document_adapter_id": item["document_adapter_id"],
-                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
-                "size_bytes": _stored_source_size(
-                    self.project, item.get("stored_name")
-                ),
-            }
-            for item in sorted(self.files, key=lambda value: int(value["file_order"]))
-        ]
         segments = []
         for item in window:
             segment_id = str(item["segment_id"])
@@ -440,9 +416,6 @@ class WebStore:
                 }
             )
         return {
-            "name": self.metadata["name"],
-            "path": str(self.project),
-            "nonempty_segment_count": segment_count(self.project),
             "completed_segments": segment_count(
                 self.project,
                 file_id=file_id,
@@ -462,9 +435,60 @@ class WebStore:
             "offset": offset,
             "limit": limit,
             "stage": stage,
+            "segments": segments,
+        }
+
+    def overview(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        file_id: str | None = None,
+        part_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        stage: str = "translation",
+    ) -> dict[str, Any]:
+        page = self.segment_query(
+            offset=offset,
+            limit=limit,
+            file_id=file_id,
+            part_id=part_id,
+            status=status,
+            search=search,
+            stage=stage,
+        )
+        part_ids_by_file = segment_part_ids(self.project)
+        try:
+            sqlite_bytes = database_path(self.project).stat().st_size
+        except OSError as exc:
+            raise ProjectError(
+                f"无法读取项目 SQLite 大小：{database_path(self.project)}: {exc}"
+            ) from exc
+        storage = {
+            "total_bytes": _project_storage_size(self.project),
+            "sqlite_bytes": sqlite_bytes,
+        }
+        files = [
+            {
+                "file_id": item["file_id"],
+                "file_order": item["file_order"],
+                "name": item["original_name"],
+                "document_adapter_id": item["document_adapter_id"],
+                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
+                "size_bytes": _stored_source_size(
+                    self.project, item.get("stored_name")
+                ),
+            }
+            for item in sorted(self.files, key=lambda value: int(value["file_order"]))
+        ]
+        return {
+            "name": self.metadata["name"],
+            "path": str(self.project),
+            "nonempty_segment_count": segment_count(self.project),
+            **page,
             "storage": storage,
             "files": files,
-            "segments": segments,
         }
 
     def segment_index(
