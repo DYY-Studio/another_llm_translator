@@ -105,19 +105,37 @@ def test_jsonl_document_exposes_stable_error_codes_alongside_diagnostics() -> No
     assert all("第 " in message for message in document.errors)
 
 
+def test_jsonl_document_separates_terminal_end_from_other_errors() -> None:
+    document = parse_jsonl_document(
+        '{"type":"unknown"}\n{"type":"end"}',
+        record_type="segment",
+    )
+    assert document.complete is False
+    assert document.has_valid_end is True
+
+    truncated = parse_jsonl_document(
+        '{"type":"segment","id":"S1","translation":"x"}',
+        record_type="segment",
+    )
+    assert truncated.complete is False
+    assert truncated.has_valid_end is False
+
+
 def test_jsonl_extraction_preserves_thought_tags_inside_translation() -> None:
     translation = (
         "保留 <think>文本</think>、<thinking>文本</thinking>、"
         "<thought>文本</thought> 和 <analysis>文本</analysis>"
     )
-    valid, unresolved, errors, complete = _parse_translation_items(
+    result = _parse_translation_items(
         llm_jsonl([{"type": "segment", "id": "S1", "translation": translation}]),
         ["S1"],
     )
-    assert valid == {"S1": translation}
-    assert unresolved == []
-    assert errors == []
-    assert complete is True
+    assert result.valid == {"S1": translation}
+    assert result.unresolved == []
+    assert result.errors == []
+    assert result.complete is True
+    assert result.has_valid_end is True
+    assert result.ids_complete is True
 
 
 def test_stage_jsonl_validators_reject_duplicates_and_keep_other_valid_rows() -> None:
@@ -128,13 +146,13 @@ def test_stage_jsonl_validators_reject_duplicates_and_keep_other_valid_rows() ->
             {"type": "segment", "id": "S2", "translation": "second"},
         ]
     )
-    valid, unresolved, errors, complete = _parse_translation_items(
-        translation, ["S1", "S2"]
-    )
-    assert valid == {"S2": "second"}
-    assert unresolved == ["S1"]
-    assert errors
-    assert complete is False
+    result = _parse_translation_items(translation, ["S1", "S2"])
+    assert result.valid == {"S2": "second"}
+    assert result.unresolved == ["S1"]
+    assert result.errors
+    assert result.complete is False
+    assert result.has_valid_end is True
+    assert result.ids_complete is False
 
     review = llm_jsonl(
         [
@@ -147,13 +165,13 @@ def test_stage_jsonl_validators_reject_duplicates_and_keep_other_valid_rows() ->
             }
         ]
     )
-    review_valid, review_unresolved, review_errors, review_complete = (
-        _parse_review_items(review, ["S1"])
-    )
-    assert review_valid["S1"]["suggested_text"] == "new"
-    assert review_unresolved == []
-    assert review_errors == []
-    assert review_complete is True
+    review_result = _parse_review_items(review, ["S1"])
+    assert review_result.valid["S1"]["suggested_text"] == "new"
+    assert review_result.unresolved == []
+    assert review_result.errors == []
+    assert review_result.complete is True
+    assert review_result.has_valid_end is True
+    assert review_result.ids_complete is True
 
 
 @pytest.mark.parametrize(
@@ -175,20 +193,22 @@ def test_review_parser_ignores_accepted_optional_fields(
         "status": "accepted",
         **extra_fields,
     }
-    valid, unresolved, errors, complete = _parse_review_items(
+    result = _parse_review_items(
         llm_jsonl([record]),
         ["S1"],
     )
-    assert valid == {
+    assert result.valid == {
         "S1": {
             "review_status": "accepted",
             "suggested_text": None,
             "reason": None,
         }
     }
-    assert unresolved == []
-    assert errors == []
-    assert complete is True
+    assert result.unresolved == []
+    assert result.errors == []
+    assert result.complete is True
+    assert result.has_valid_end is True
+    assert result.ids_complete is True
 
 
 @pytest.mark.parametrize(
@@ -209,14 +229,16 @@ def test_review_parser_keeps_suggested_fields_strict(
         "status": "suggested",
         **fields,
     }
-    valid, unresolved, errors, complete = _parse_review_items(
+    result = _parse_review_items(
         llm_jsonl([record]),
         ["S1"],
     )
-    assert valid == {}
-    assert unresolved == ["S1"]
-    assert errors
-    assert complete is False
+    assert result.valid == {}
+    assert result.unresolved == ["S1"]
+    assert result.errors
+    assert result.complete is False
+    assert result.has_valid_end is True
+    assert result.ids_complete is True
 
 
 def test_terminology_jsonl_allows_empty_response_and_validates_fields() -> None:
@@ -360,7 +382,7 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
 
 
 @pytest.mark.asyncio
-async def test_translation_format_retry_regroups_around_valid_nonempty_segment(
+async def test_translation_complete_id_mismatch_retries_original_batch(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
@@ -370,7 +392,7 @@ async def test_translation_format_retry_regroups_around_valid_nonempty_segment(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         ids = [item["id"] for item in payload["segments"]]
         calls.append(ids)
-        returned = [ids[1]] if len(ids) == 3 else ids
+        returned = ids[1:2] if len(calls) == 1 else ids
         content = llm_jsonl(
             [
                 {
@@ -394,8 +416,7 @@ async def test_translation_format_retry_regroups_around_valid_nonempty_segment(
     assert summary["completed"] == 3
     assert calls == [
         ["1", "2", "3"],
-        ["1"],
-        ["1"],
+        ["1", "2", "3"],
     ]
 
 

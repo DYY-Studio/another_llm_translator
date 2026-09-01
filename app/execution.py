@@ -221,6 +221,7 @@ class JSONLDocument:
     errors: tuple[str, ...]
     error_codes: tuple[str, ...]
     complete: bool
+    has_valid_end: bool
 
 
 def select_scope(
@@ -2830,4 +2831,6 @@ def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
         errors=tuple(errors),
         error_codes=tuple(error_codes),
         complete=seen_end and not errors,
+        has_valid_end=seen_end
+        and not any(code in {"invalid_end", "after_end"} for code in error_codes),
     )
