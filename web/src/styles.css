@@ -860,6 +860,10 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .run-tokens { grid-column: 1 / -1; }
 }
 
+@media (min-width: 781px) and (max-width: 1500px) {
+  .overview-heading-controls { flex-basis: 100%; margin-left: 0; }
+}
+
 @media (max-width: 1240px) {
   .run-error { grid-column: 1 / -1; max-width: none; }
 }
