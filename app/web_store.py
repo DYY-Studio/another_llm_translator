@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
 from .documents import compact_emphasis_aozora
-from .errors import TermGroupError, UsageError
+from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
 from .plugins import normalize_model_text
@@ -15,6 +16,7 @@ from .sqlite_storage import (
     append_jsonl,
     append_stage_results,
     clear_terminology_state,
+    database_path,
     get_segment,
     latest_stage_results,
     list_runs,
@@ -47,6 +49,50 @@ from .translation_validation import (
 )
 
 REVIEW_STAGES = {"proofreading", "polishing"}
+
+
+def _project_storage_size(project: Path) -> int:
+    total = 0
+    pending = [project]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError as exc:
+                        raise ProjectError(
+                            f"无法读取项目存储大小：{entry.path}: {exc}"
+                        ) from exc
+        except OSError as exc:
+            raise ProjectError(f"无法读取项目存储目录：{current}: {exc}") from exc
+    return total
+
+
+def _stored_source_size(project: Path, stored_name: object) -> int:
+    if not isinstance(stored_name, str) or not stored_name:
+        raise ProjectError("项目 File 缺少有效 stored_name")
+    candidate = project / "input" / stored_name
+    try:
+        input_root = (project / "input").resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        if (
+            candidate.is_symlink()
+            or not resolved.is_relative_to(input_root)
+            or not resolved.is_file()
+        ):
+            raise ProjectError(f"项目源文件无效：{stored_name}")
+        return resolved.stat().st_size
+    except ProjectError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ProjectError(f"无法读取项目源文件大小：{stored_name}: {exc}") from exc
 
 
 class WebStore:
@@ -290,7 +336,7 @@ class WebStore:
         )
         return base
 
-    def overview(
+    def segment_query(
         self,
         *,
         offset: int = 0,
@@ -334,17 +380,6 @@ class WebStore:
             }
             for target in ("translation", "proofreading", "polishing")
         }
-        part_ids_by_file = segment_part_ids(self.project)
-        files = [
-            {
-                "file_id": item["file_id"],
-                "file_order": item["file_order"],
-                "name": item["original_name"],
-                "document_adapter_id": item["document_adapter_id"],
-                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
-            }
-            for item in sorted(self.files, key=lambda value: int(value["file_order"]))
-        ]
         segments = []
         for item in window:
             segment_id = str(item["segment_id"])
@@ -381,9 +416,6 @@ class WebStore:
                 }
             )
         return {
-            "name": self.metadata["name"],
-            "path": str(self.project),
-            "nonempty_segment_count": segment_count(self.project),
             "completed_segments": segment_count(
                 self.project,
                 file_id=file_id,
@@ -403,8 +435,60 @@ class WebStore:
             "offset": offset,
             "limit": limit,
             "stage": stage,
-            "files": files,
             "segments": segments,
+        }
+
+    def overview(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        file_id: str | None = None,
+        part_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        stage: str = "translation",
+    ) -> dict[str, Any]:
+        page = self.segment_query(
+            offset=offset,
+            limit=limit,
+            file_id=file_id,
+            part_id=part_id,
+            status=status,
+            search=search,
+            stage=stage,
+        )
+        part_ids_by_file = segment_part_ids(self.project)
+        try:
+            sqlite_bytes = database_path(self.project).stat().st_size
+        except OSError as exc:
+            raise ProjectError(
+                f"无法读取项目 SQLite 大小：{database_path(self.project)}: {exc}"
+            ) from exc
+        storage = {
+            "total_bytes": _project_storage_size(self.project),
+            "sqlite_bytes": sqlite_bytes,
+        }
+        files = [
+            {
+                "file_id": item["file_id"],
+                "file_order": item["file_order"],
+                "name": item["original_name"],
+                "document_adapter_id": item["document_adapter_id"],
+                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
+                "size_bytes": _stored_source_size(
+                    self.project, item.get("stored_name")
+                ),
+            }
+            for item in sorted(self.files, key=lambda value: int(value["file_order"]))
+        ]
+        return {
+            "name": self.metadata["name"],
+            "path": str(self.project),
+            "nonempty_segment_count": segment_count(self.project),
+            **page,
+            "storage": storage,
+            "files": files,
         }
 
     def segment_index(

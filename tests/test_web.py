@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.web as web_module
+import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
@@ -82,6 +83,38 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
         ).status_code
         == 403
     )
+
+
+def test_web_segment_query_does_not_collect_project_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path, source="one\ntwo")
+    client = TestClient(create_app(projects_root=projects_root))
+
+    def fail_storage_scan(_: Path) -> int:
+        raise AssertionError("Segment query must not scan project storage")
+
+    monkeypatch.setattr(web_store_module, "_project_storage_size", fail_storage_scan)
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"stage": "translation", "offset": 0, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {
+        "offset",
+        "limit",
+        "stage",
+        "completed_segments",
+        "total_segments",
+        "segments",
+    }
+    monkeypatch.undo()
+    overview = client.get("/api/v1/projects/sample")
+    assert overview.status_code == 200
+    assert "storage" in overview.json()
+    assert "files" in overview.json()
 
 
 def test_web_compacts_project_storage_and_blocks_running_tasks(

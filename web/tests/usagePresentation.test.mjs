@@ -14,3 +14,16 @@ test("localizes partial token usage separately from complete and unavailable sta
     );
   }
 });
+
+test("labels SQLite storage as the main database file", () => {
+  assert.equal(translate("overview.storageSqlite", "zh-CN"), "SQLite 主文件");
+  assert.equal(translate("overview.storageSqlite", "en"), "SQLite main file");
+  assert.match(
+    translate("overview.compactConfirm", "zh-CN"),
+    /SQLite 主文件/,
+  );
+  assert.match(
+    translate("overview.compactConfirm", "en"),
+    /SQLite main file/,
+  );
+});

@@ -10,7 +10,14 @@ from app.web_store import WebStore
 from app.errors import TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
-from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
+from app.sqlite_storage import (
+    query_segments,
+    read_files,
+    read_json,
+    record_header,
+    segment_ids,
+    write_json,
+)
 from app.stages import TermNormalization, export_project, load_terms, match_terms
 from tests.test_foundation import make_app_root
 
@@ -794,6 +801,26 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "outdated": False,
         "applied_current": False,
     }
+
+
+def test_web_store_overview_reports_storage_and_source_file_sizes(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "source text")
+    overview = WebStore(project).overview()
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+
+    total_bytes = sum(
+        path.stat().st_size
+        for path in project.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+    assert overview["storage"] == {
+        "total_bytes": total_bytes,
+        "sqlite_bytes": (project / "project.sqlite").stat().st_size,
+    }
+    assert overview["files"][0]["size_bytes"] == stored.stat().st_size
 
 
 def test_web_store_filters_segments_by_file_and_part(tmp_path: Path) -> None:

@@ -2,7 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { ProjectOverview, Segment, SegmentDetail } from "../types";
+import type {
+  ProjectOverview,
+  Segment,
+  SegmentDetail,
+  SegmentQueryResponse,
+} from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 
@@ -47,7 +52,7 @@ export function prefetchWorkspace(project: string) {
         `/api/v1/projects/${project}/segments/ids`,
         { method: "POST", body: JSON.stringify({ stage }) },
       ),
-      api<ProjectOverview>(
+      api<SegmentQueryResponse>(
         `/api/v1/projects/${project}/segments/query`,
         { method: "POST", body: JSON.stringify({ stage, offset: 0, limit: pageSize }) },
       ),
@@ -368,7 +373,7 @@ export function SegmentWorkspace({
         || pageRequestsRef.current.has(requestToken)
       ) continue;
       pageRequestsRef.current.add(requestToken);
-      void api<ProjectOverview>(`/api/v1/projects/${project}/segments/query`, {
+      void api<SegmentQueryResponse>(`/api/v1/projects/${project}/segments/query`, {
         method: "POST",
         body: JSON.stringify({ ...filterPayload, offset, limit: pageSize }),
       })
