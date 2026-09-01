@@ -3,7 +3,7 @@ import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
-import { canCancelTaskStatus } from "../taskState";
+import { canCancelTaskStatus, isTerminalTaskStatus } from "../taskState";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -22,6 +22,7 @@ export function AppShell({
   tasks,
   onOpenTaskProject,
   onCancelTask,
+  onDismissTask,
   onStage,
   onShowFailures,
   onRun,
@@ -41,6 +42,7 @@ export function AppShell({
   tasks: TaskState[];
   onOpenTaskProject: (task: TaskState) => void | Promise<void>;
   onCancelTask: (taskId: string) => void;
+  onDismissTask: (taskId: string) => void;
   onStage: (value: Stage) => void;
   onShowFailures: () => void;
   onRun: () => void;
@@ -60,6 +62,7 @@ export function AppShell({
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
+  const terminal = Boolean(task && isTerminalTaskStatus(task.status));
   const completed = task?.completed_segments ?? 0;
   const failed = task?.failed_segments ?? 0;
   const pending = task?.pending_segments ?? 0;
@@ -191,18 +194,24 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
+        <section className={`global-run-status${terminal ? " terminal" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {task.stage}</span>
           </div>
-          <div className="run-progress">
-            <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
-            <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
-              <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
-              <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
+          {terminal ? (
+            <span className="run-terminal-count">
+              {translate("run.completedCount", language, { completed, failed, pending, total })}
+            </span>
+          ) : (
+            <div className="run-progress">
+              <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
+              <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+                <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
+                <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
+              </div>
             </div>
-          </div>
+          )}
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>
@@ -220,6 +229,16 @@ export function AppShell({
             </span>
           )}
           {canCancelTaskStatus(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
+          {terminal && (
+            <button
+              className="quiet-button run-dismiss"
+              aria-label={translate("run.dismiss", language)}
+              title={translate("run.dismiss", language)}
+              onClick={() => onDismissTask(task.task_id)}
+            >
+              ×
+            </button>
+          )}
         </section>
       )}
       <aside className="sidebar">

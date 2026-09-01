@@ -1,9 +1,14 @@
 import type { TaskState } from "./types";
 
 const activeStatuses = new Set(["queued", "running", "cancelling"]);
+const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
 
 export function isActiveTaskStatus(status: string): boolean {
   return activeStatuses.has(status);
+}
+
+export function isTerminalTaskStatus(status: string): boolean {
+  return terminalStatuses.has(status);
 }
 
 export function canCancelTaskStatus(status: string): boolean {

@@ -128,6 +128,13 @@ button { cursor: pointer; }
 .run-error { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .global-run-status > .danger-link { white-space: nowrap; }
 .run-failure-link { padding: 0; border: 0; color: var(--danger); background: transparent; white-space: nowrap; }
+.global-run-status.terminal { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 0; }
+.global-run-status.terminal .run-identity { flex: 0 1 auto; }
+.run-terminal-count { color: var(--muted); white-space: nowrap; }
+.global-run-status.terminal .run-tokens { flex: 0 1 auto; }
+.global-run-status.terminal .run-error { flex: 1 1 180px; min-width: 0; max-width: 320px; }
+.run-dismiss { flex: none; width: 32px; min-height: 32px; padding: 0; border-color: var(--border); color: var(--muted); font-size: 20px; line-height: 1; }
+.run-dismiss:hover { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
 .sidebar { grid-row: 2 / -1; grid-column: 1; display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--sidebar); padding: 18px 12px; }
 .sidebar nav { display: grid; gap: 5px; }
 .nav-item { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; font-size: 15px; text-align: left; }
@@ -863,6 +870,13 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .task-panel-popover { position: fixed; top: 66px; right: 10px; width: min(390px, calc(100vw - 20px)); max-height: calc(100dvh - 78px); }
   .main-overview { display: block; }
   .global-run-status { position: sticky; top: 58px; z-index: 3; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 8px 12px; }
+  .global-run-status.terminal { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 10px; padding-block: 6px; }
+  .global-run-status.terminal .run-identity { grid-column: 1; grid-row: 1; max-width: none; }
+  .global-run-status.terminal .run-terminal-count { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+  .global-run-status.terminal .run-tokens { grid-column: 1 / -1; grid-row: 3; min-width: 0; }
+  .global-run-status.terminal .run-failure-link { grid-column: 1; grid-row: 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .global-run-status.terminal .run-error { grid-column: 2; grid-row: 4; width: 100%; max-width: none; }
+  .global-run-status.terminal .run-dismiss { grid-column: 2; grid-row: 1; justify-self: end; }
   .warning-banner-sticky { top: calc(58px + var(--mobile-run-status-height)); z-index: 2; }
   .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }

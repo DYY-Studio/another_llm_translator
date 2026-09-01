@@ -22,7 +22,7 @@ import type {
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { STORAGE_KEYS } from "./storageKeys";
-import { isActiveTaskStatus, reconcileTaskCollection } from "./taskState";
+import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
@@ -337,6 +337,16 @@ export default function App() {
     }
   }
 
+  function dismissTask(taskId: string) {
+    setTasks((current) => {
+      const entry = Object.entries(current).find(([, item]) => item.task_id === taskId);
+      if (!entry || !isTerminalTaskStatus(entry[1].status)) return current;
+      const updated = { ...current };
+      delete updated[entry[0]];
+      return updated;
+    });
+  }
+
   async function openTaskProject(next: TaskState) {
     let summary = projects.find((item) => item.project_id === next.project_id);
     if (!summary) {
@@ -451,6 +461,7 @@ export default function App() {
         tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}
         onOpenTaskProject={(next) => { void openTaskProject(next); }}
         onCancelTask={cancelTask}
+        onDismissTask={dismissTask}
         onStage={navigateStage}
         onShowFailures={showFailures}
         onRun={openRunDialog}

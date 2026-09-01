@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canCancelTaskStatus,
   isActiveTaskStatus,
+  isTerminalTaskStatus,
   mergeTaskCollection,
   reconcileTaskCollection,
 } from "../src/taskState.ts";
@@ -51,6 +52,14 @@ test("recognizes only queued, running, and cancelling tasks as active", () => {
   assert.equal(isActiveTaskStatus("completed"), false);
   assert.equal(isActiveTaskStatus("failed"), false);
   assert.equal(isActiveTaskStatus("cancelled"), false);
+});
+
+test("recognizes completed, failed, and cancelled tasks as terminal", () => {
+  assert.equal(isTerminalTaskStatus("completed"), true);
+  assert.equal(isTerminalTaskStatus("failed"), true);
+  assert.equal(isTerminalTaskStatus("cancelled"), true);
+  assert.equal(isTerminalTaskStatus("running"), false);
+  assert.equal(isTerminalTaskStatus("unknown"), false);
 });
 
 test("only queued and running tasks expose a cancellation action", () => {
