@@ -1390,11 +1390,16 @@ def create_app(
         except (TypeError, ValueError) as exc:
             raise UsageError("Segment 窗口参数必须是整数") from exc
         file_id = payload.get("file_id")
+        part_id = payload.get("part_id")
         status = payload.get("status")
         search = payload.get("q")
         stage = payload.get("stage", "translation")
         if file_id is not None and not isinstance(file_id, str):
             raise UsageError("file_id 必须是字符串")
+        if part_id is not None and not isinstance(part_id, str):
+            raise UsageError("part_id 必须是字符串")
+        if bool(file_id) != bool(part_id):
+            raise UsageError("file_id 与 part_id 必须同时提供")
         if status is not None and not isinstance(status, str):
             raise UsageError("status 必须是字符串")
         if search is not None and not isinstance(search, str):
@@ -1405,6 +1410,7 @@ def create_app(
             offset=offset,
             limit=limit,
             file_id=file_id or None,
+            part_id=part_id or None,
             status=status or None,
             search=search or None,
             stage=stage,
@@ -1423,11 +1429,16 @@ def create_app(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         file_id = payload.get("file_id")
+        part_id = payload.get("part_id")
         status = payload.get("status")
         search = payload.get("q")
         stage = payload.get("stage", "translation")
         if file_id is not None and not isinstance(file_id, str):
             raise UsageError("file_id 必须是字符串")
+        if part_id is not None and not isinstance(part_id, str):
+            raise UsageError("part_id 必须是字符串")
+        if bool(file_id) != bool(part_id):
+            raise UsageError("file_id 与 part_id 必须同时提供")
         if status is not None and not isinstance(status, str):
             raise UsageError("status 必须是字符串")
         if search is not None and not isinstance(search, str):
@@ -1436,6 +1447,7 @@ def create_app(
             raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).segment_index(
             file_id=file_id or None,
+            part_id=part_id or None,
             status=status or None,
             search=search or None,
             stage=stage,

@@ -21,6 +21,8 @@ from app.sqlite_storage import (
     read_segments,
     read_segment_sources,
     record_header,
+    segment_count,
+    segment_ids,
     write_json,
 )
 from tests.test_foundation import make_app_root
@@ -550,8 +552,40 @@ def test_v1_project_migrates_file_order_and_drops_dead_indexes(
         "F0001-S000001",
     ]
     assert [
-        item["segment_id"] for item in query_segments(project, file_id="F0002")
+        item["segment_id"]
+        for item in query_segments(
+            project, file_id="F0002", part_id="document"
+        )
     ] == ["F0002-S000001"]
+
+
+def test_segment_queries_filter_by_file_and_part_pair(tmp_path: Path) -> None:
+    project = create_project(tmp_path, "first\nsecond\nthird")
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("chapter-1", "F0001-S000001"),
+                ("chapter-2", "F0001-S000002"),
+                ("chapter-1", "F0001-S000003"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert segment_count(project, file_id="F0001", part_id="chapter-1") == 2
+    assert [
+        item["segment_id"]
+        for item in query_segments(
+            project, file_id="F0001", part_id="chapter-2"
+        )
+    ] == ["F0001-S000002"]
+    assert segment_ids(project, file_id="F0001", part_id="chapter-1") == [
+        "F0001-S000001",
+        "F0001-S000003",
+    ]
 
 
 def test_latest_stage_summary_preserves_completed_after_failed_and_reset_voids(

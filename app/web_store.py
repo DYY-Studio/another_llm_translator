@@ -28,6 +28,7 @@ from .sqlite_storage import (
     record_header,
     segment_count,
     segment_ids,
+    segment_part_ids,
     utc_now,
     write_json,
 )
@@ -295,6 +296,7 @@ class WebStore:
         offset: int = 0,
         limit: int = 100,
         file_id: str | None = None,
+        part_id: str | None = None,
         status: str | None = None,
         search: str | None = None,
         stage: str = "translation",
@@ -308,6 +310,7 @@ class WebStore:
             offset=offset,
             limit=limit,
             file_id=file_id,
+            part_id=part_id,
             status=status,
             search=search,
             stage=stage,
@@ -331,12 +334,14 @@ class WebStore:
             }
             for target in ("translation", "proofreading", "polishing")
         }
+        part_ids_by_file = segment_part_ids(self.project)
         files = [
             {
                 "file_id": item["file_id"],
                 "file_order": item["file_order"],
                 "name": item["original_name"],
                 "document_adapter_id": item["document_adapter_id"],
+                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
             }
             for item in sorted(self.files, key=lambda value: int(value["file_order"]))
         ]
@@ -382,6 +387,7 @@ class WebStore:
             "completed_segments": segment_count(
                 self.project,
                 file_id=file_id,
+                part_id=part_id,
                 status="completed",
                 search=search,
                 stage=stage,
@@ -389,6 +395,7 @@ class WebStore:
             "total_segments": segment_count(
                 self.project,
                 file_id=file_id,
+                part_id=part_id,
                 status=status,
                 search=search,
                 stage=stage,
@@ -404,6 +411,7 @@ class WebStore:
         self,
         *,
         file_id: str | None = None,
+        part_id: str | None = None,
         status: str | None = None,
         search: str | None = None,
         stage: str = "translation",
@@ -415,6 +423,7 @@ class WebStore:
         values = segment_ids(
             self.project,
             file_id=file_id,
+            part_id=part_id,
             status=status,
             search=search,
             stage=stage,

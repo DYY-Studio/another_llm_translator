@@ -1637,10 +1637,32 @@ def _append_stage_status_filter(
         params.append(status)
 
 
+def segment_part_ids(project: Path) -> dict[str, list[str]]:
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            """
+            SELECT segments.file_id, segments.part_id,
+                   MIN(segments.line_index) AS first_line_index
+            FROM files CROSS JOIN segments ON segments.file_id = files.file_id
+            WHERE segments.is_empty = 0
+            GROUP BY segments.file_id, segments.part_id
+            ORDER BY files.file_order, first_line_index
+            """
+        ).fetchall()
+        result: dict[str, list[str]] = {}
+        for row in rows:
+            result.setdefault(str(row[0]), []).append(str(row[1]))
+        return result
+    finally:
+        connection.close()
+
+
 def segment_count(
     project: Path,
     *,
     file_id: str | None = None,
+    part_id: str | None = None,
     status: str | None = None,
     search: str | None = None,
     stage: str | None = None,
@@ -1651,9 +1673,11 @@ def segment_count(
             status=status, search=search, stage=stage
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if file_id:
-            clauses.append("segments.file_id = ?")
-            params.append(file_id)
+        if bool(file_id) != bool(part_id):
+            raise ProjectError("file_id 与 part_id 必须同时提供")
+        if file_id and part_id:
+            clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
+            params.extend([file_id, part_id])
         query = f"SELECT COUNT(*) FROM segments {join} WHERE {' AND '.join(clauses)}"
         return int(connection.execute(query, params).fetchone()[0])
     finally:
@@ -1666,6 +1690,7 @@ def query_segments(
     offset: int = 0,
     limit: int = 100,
     file_id: str | None = None,
+    part_id: str | None = None,
     status: str | None = None,
     search: str | None = None,
     stage: str | None = None,
@@ -1678,9 +1703,11 @@ def query_segments(
             status=status, search=search, stage=stage
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if file_id:
-            clauses.append("segments.file_id = ?")
-            params.append(file_id)
+        if bool(file_id) != bool(part_id):
+            raise ProjectError("file_id 与 part_id 必须同时提供")
+        if file_id and part_id:
+            clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
+            params.extend([file_id, part_id])
         params.extend([limit, offset])
         query = f"""
             SELECT segments.segment_id, segments.file_id, segments.line_index,
@@ -1750,6 +1777,7 @@ def segment_ids(
     project: Path,
     *,
     file_id: str | None = None,
+    part_id: str | None = None,
     status: str | None = None,
     search: str | None = None,
     stage: str | None = None,
@@ -1760,9 +1788,11 @@ def segment_ids(
             status=status, search=search, stage=stage
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if file_id:
-            clauses.append("segments.file_id = ?")
-            params.append(file_id)
+        if bool(file_id) != bool(part_id):
+            raise ProjectError("file_id 与 part_id 必须同时提供")
+        if file_id and part_id:
+            clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
+            params.extend([file_id, part_id])
         query = f"""
             SELECT segments.segment_id
             FROM files CROSS JOIN segments ON segments.file_id = files.file_id

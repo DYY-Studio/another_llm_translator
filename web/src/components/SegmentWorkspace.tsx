@@ -21,6 +21,17 @@ const workspaceCache = new Map<string, WorkspaceCacheEntry>();
 const workspaceProjectRef = { current: "" };
 const pageSize = 100;
 
+interface SegmentBoundaryOption {
+  file_id: string;
+  part_id: string;
+  key: string;
+  label: string;
+}
+
+function boundaryKey(fileId: string, partId: string): string {
+  return JSON.stringify([fileId, partId]);
+}
+
 // Warms each stage's head window when a project is opened so the first visit
 // to a stage renders instantly. Best-effort: failures are left to the
 // workspace, which fetches and surfaces them on visit; the write guard keeps
@@ -103,7 +114,7 @@ export function SegmentWorkspace({
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
-  const [file, setFile] = useState("all");
+  const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
@@ -154,20 +165,33 @@ export function SegmentWorkspace({
       if (key.startsWith(prefix)) workspaceCache.delete(key);
     }
     preserveFocusRef.current = pendingJump.segmentId;
-    setFile("all");
+    setBoundary("all");
     setStatus("all");
     setSearch(pendingJump.search);
     selection.reset(pendingJump.segmentId);
     onJumpConsumed?.();
   }, [pendingJump]);
   const normalizedSearch = search.trim();
+  const boundaryOptions: SegmentBoundaryOption[] = overview.files.flatMap((fileItem) => (
+    fileItem.part_ids.map((part_id) => ({
+      file_id: fileItem.file_id,
+      part_id,
+      key: boundaryKey(fileItem.file_id, part_id),
+      label: `${fileItem.name} · ${part_id}`,
+    }))
+  ));
+  const selectedBoundary = boundaryOptions.find((item) => item.key === boundary);
+  const selectedFileId = selectedBoundary?.file_id;
+  const selectedPartId = selectedBoundary?.part_id;
   const filterPayload = {
     stage,
-    ...(file !== "all" ? { file_id: file } : {}),
+    ...(selectedBoundary
+      ? { file_id: selectedBoundary.file_id, part_id: selectedBoundary.part_id }
+      : {}),
     ...(status !== "all" ? { status: status === "error" ? "failed" : status } : {}),
     ...(normalizedSearch ? { q: normalizedSearch } : {}),
   };
-  const pageQueryKey = JSON.stringify([project, stage, file, status, normalizedSearch]);
+  const pageQueryKey = JSON.stringify([project, stage, selectedBoundary?.key ?? "all", status, normalizedSearch]);
   const showContext = status !== "all" || normalizedSearch !== "";
   const resetPageCache = useCallback(() => {
     pageGenerationRef.current += 1;
@@ -286,7 +310,7 @@ export function SegmentWorkspace({
         setLoading(false);
       }
     }
-  }, [project, stage, file, status, normalizedSearch, resetPageCache]);
+  }, [project, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
 
   useEffect(() => { void reloadIndex(preserveFocusRef.current, true); }, [reloadIndex]);
 
@@ -373,7 +397,8 @@ export function SegmentWorkspace({
   }, [
     project,
     stage,
-    file,
+    selectedFileId,
+    selectedPartId,
     status,
     normalizedSearch,
     pageQueryKey,
@@ -516,12 +541,12 @@ export function SegmentWorkspace({
     <div className="workspace">
       <section className="segment-browser">
         <div className="filters">
-          <select value={file} onChange={(event) => {
-            setFile(event.target.value);
+          <select value={boundary} onChange={(event) => {
+            setBoundary(event.target.value);
             setBatchMessage("");
           }}>
             <option value="all">{translate("workspace.allFiles", language)}</option>
-            {overview.files.map((item) => <option value={item.file_id} key={item.file_id}>{item.name}</option>)}
+            {boundaryOptions.map((item) => <option value={item.key} key={item.key}>{item.label}</option>)}
           </select>
           <div className="filter-row">
             <select value={status} onChange={(event) => {

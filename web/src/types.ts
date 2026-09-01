@@ -82,6 +82,7 @@ export interface ProjectOverview {
     file_order: number;
     name: string;
     document_adapter_id: string;
+    part_ids: string[];
   }>;
   segments: Segment[];
 }

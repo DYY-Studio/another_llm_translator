@@ -982,6 +982,33 @@ def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
     assert detail.json()["part_id"] == "OEBPS/text/ch2.xhtml"
     assert detail.json()["context"] == {"before": [], "after": []}
 
+    filtered = client.post(
+        "/api/v1/projects/chapter-parts/segments/query",
+        json={
+            "stage": "translation",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch2.xhtml",
+        },
+    )
+    assert filtered.status_code == 200
+    assert [item["source"] for item in filtered.json()["segments"]] == [
+        "第二章"
+    ]
+    assert overview["files"][0]["part_ids"] == [
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch2.xhtml",
+    ]
+    for incomplete in (
+        {"stage": "translation", "file_id": "F0001"},
+        {"stage": "translation", "part_id": "OEBPS/text/ch2.xhtml"},
+    ):
+        response = client.post(
+            "/api/v1/projects/chapter-parts/segments/ids",
+            json=incomplete,
+        )
+        assert response.status_code == 400
+        assert "file_id 与 part_id 必须同时提供" in response.json()["error"]
+
 
 def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None:
     projects_root = tmp_path / "projects"

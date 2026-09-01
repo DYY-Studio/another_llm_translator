@@ -796,6 +796,46 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
     }
 
 
+def test_web_store_filters_segments_by_file_and_part(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "chapter one\nchapter two\nchapter one again")
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("chapter-1.xhtml", "F0001-S000001"),
+                ("chapter-2.xhtml", "F0001-S000002"),
+                ("chapter-1.xhtml", "F0001-S000003"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = WebStore(project)
+    store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "translated chapter one"}
+    )
+    overview = store.overview(file_id="F0001", part_id="chapter-1.xhtml")
+
+    assert overview["files"][0]["part_ids"] == [
+        "chapter-1.xhtml",
+        "chapter-2.xhtml",
+    ]
+    assert [item["part_id"] for item in overview["segments"]] == [
+        "chapter-1.xhtml",
+        "chapter-1.xhtml",
+    ]
+    assert overview["total_segments"] == 2
+    assert overview["completed_segments"] == 1
+    other = store.overview(file_id="F0001", part_id="chapter-2.xhtml")
+    assert other["total_segments"] == 1
+    assert other["completed_segments"] == 0
+    assert store.segment_index(
+        file_id="F0001", part_id="chapter-2.xhtml"
+    )["segment_ids"] == ["F0001-S000002"]
+
+
 def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:
     project = create_web_store_project(tmp_path, "first")
     second = tmp_path / "second.txt"
