@@ -10,3 +10,9 @@ test("mobile overview file rows keep metadata beside the replacement action", ()
   assert.match(mobileRule, /\.overview-file-list \.file-row \{[^}]*position:\s*relative;/);
   assert.match(mobileRule, /\.overview-file-list \.file-row-meta \{ position: absolute; /);
 });
+
+test("mobile term more-actions summary fills its grid cell", () => {
+  const mobileRule = styles.match(/@media \(max-width: 780px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+  assert.match(mobileRule, /\.term-actions-toolbar \.term-actions-menu > summary \{ width: 100%; \}/);
+});

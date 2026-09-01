@@ -973,6 +973,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .term-actions-toolbar .term-actions-menu { width: 100%; }
   .term-actions-toolbar .segment-batch-actions > button,
   .term-actions-menu > summary { min-height: 36px; }
+  .term-actions-toolbar .term-actions-menu > summary { width: 100%; }
   .term-actions-menu { grid-column: span 1; }
   .term-actions-popover { right: 0; min-width: min(220px, calc(100vw - 36px)); }
   .editor-pane { padding: 18px 14px 50px; }
