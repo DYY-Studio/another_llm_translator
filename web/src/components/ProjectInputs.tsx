@@ -2,22 +2,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { api } from "../api";
 import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder } from "../native";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { SettingsField, Stage } from "../types";
-
-
 export type InputKind = "file" | "folder";
 
-export interface ExportFile { path: string; size: number; mtime: number; }
-export const EXPORT_SETTINGS_FIELDS: Partial<Record<string, SettingsField>> = {
-  missing_target_language_tag: "target_language_tag",
-  missing_target_language: "target_language",
-  unrepresentable_output_encoding: "output_encoding",
-};
-export const EXPORT_RESULT_STAGES: Partial<Record<string, Stage>> = {
-  translated: "translation",
-  proofread: "proofreading",
-  polished: "polishing",
-};
 export interface AdapterSummary {
   adapter_id: string; capabilities: string[]; extensions: string[];
   import_options: Array<{ option_id: string; label: string; default: string; choices: Array<{ value: string; label: string }> }>;
@@ -25,24 +11,11 @@ export interface AdapterSummary {
 }
 export type AdapterOptions = Record<string, Record<string, string>>;
 export interface PendingInput { file?: File; serverPath?: string; path: string; kind: InputKind; adapterId: string; }
-export interface DirectoryEntry { name: string; path: string; is_project: boolean; }
-export interface DriveEntry { name: string; path: string; type: string; available: boolean; }
-export interface DirectoryListing { path: string; parent: string | null; is_project: boolean; directories: DirectoryEntry[]; drives: DriveEntry[]; }
-export type DirectoryPickerMode = "parent" | "project";
-export type ProjectFile = import("../types").ProjectOverview["files"][number];
-export interface OptimisticFileOrder { project: string; before: string[]; after: string[]; }
-export interface ButtonReorderState { project: string; }
-export interface ReplacementImpact { file_id: string; old_segment_count: number; new_segment_count: number; preserved_segment_count: number; added_segment_count: number; removed_segment_count: number; ambiguous_old_segment_count: number; ambiguous_new_segment_count: number; preserved_completed_by_stage: Record<string, number>; removed_completed_by_stage: Record<string, number>; warnings: string[]; previous_adapter_options: Record<string, string>; replacement_adapter_options: Record<string, string>; changed_adapter_options: string[]; }
-export interface ReplacementOptionsResponse { adapter: AdapterSummary; values: Record<string, string>; }
-export interface ReplacementSource { file?: File; serverPath?: string; label: string; }
 export const NATURAL_NUMBER = /^[0-9]+$/;
 export const NATURAL_PARTS = /([0-9]+)/;
 export function extensionOf(path: string) { const dot = path.lastIndexOf("."); return dot < 0 ? "" : path.slice(dot).toLocaleLowerCase(); }
 export function compareText(left: string, right: string) { const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0); const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0); const length = Math.min(leftPoints.length, rightPoints.length); for (let index = 0; index < length; index += 1) { if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index]; } return leftPoints.length - rightPoints.length; }
 export function compareNaturalPaths(left: string, right: string) { const leftFolded = left.toLowerCase(); const rightFolded = right.toLowerCase(); const leftParts = leftFolded.split(NATURAL_PARTS); const rightParts = rightFolded.split(NATURAL_PARTS); const length = Math.min(leftParts.length, rightParts.length); for (let index = 0; index < length; index += 1) { const leftPart = leftParts[index]; const rightPart = rightParts[index]; const leftIsNumber = NATURAL_NUMBER.test(leftPart); const rightIsNumber = NATURAL_NUMBER.test(rightPart); if (leftIsNumber && rightIsNumber) { const difference = BigInt(leftPart) - BigInt(rightPart); if (difference !== 0n) return difference < 0n ? -1 : 1; continue; } if (leftIsNumber !== rightIsNumber) return leftIsNumber ? -1 : 1; const comparison = compareText(leftPart, rightPart); if (comparison) return comparison; } if (leftParts.length !== rightParts.length) return leftParts.length - rightParts.length; return compareText(left, right); }
-export function sameOrder(left: string[], right: string[]) { return left.length === right.length && left.every((fileId, index) => fileId === right[index]); }
-export function filesInOrder(files: ProjectFile[], fileIds: string[]) { const byId = new Map(files.map((item) => [item.file_id, item])); return fileIds.map((fileId) => byId.get(fileId)!); }
-export function driveTypeLabel(type: string, language: Language) { const labels: Record<string, string> = { unknown: "drive.unknown", unavailable: "drive.unavailable", removable: "drive.removable", fixed: "drive.fixed", network: "drive.network", cdrom: "drive.cdrom", ramdisk: "drive.ramdisk" }; return translate(labels[type] ?? type, language); }
 
 export function InputQueue({
   value,

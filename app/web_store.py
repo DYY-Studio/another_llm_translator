@@ -41,7 +41,7 @@ from .term_library import (
     term_normalization,
 )
 from .term_matching import match_term_validation, match_terms
-from .stages import prompt_middle_digests
+from .stage_runtime import prompt_middle_digests
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,

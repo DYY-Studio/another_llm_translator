@@ -28,29 +28,24 @@ from app.term_library import build_term_library_rows, term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
-    _alias_violations,
-    _analyze_decisions,
     _apply_tentative,
     _automatic_phase_two_anchors,
-    _compact_anchor_evidence,
     _consistency_states,
-    _effective_conflicts,
-    _group_violations,
-    _hard_components,
-    _make_payload,
     _merge_phase_decisions,
-    _pack_batches,
-    _recover_invalid_relationship_components,
-    _related_anchors,
-    apply_decision_draft,
-    collect_term_evidence,
-    current_decision_draft,
     decision_plan,
-    discard_decision_draft,
-    manual_review_state,
-    rollback_decision,
     run_terminology_decision,
-    save_decision_rejections,
+)
+from app.term_decision_rules import (
+    _alias_violations, _analyze_decisions, _effective_conflicts,
+    _group_violations, _hard_components, _recover_invalid_relationship_components,
+)
+from app.term_decision_batches import (
+    _compact_anchor_evidence, _make_payload, _pack_batches, _related_anchors,
+    collect_term_evidence,
+)
+from app.term_decision_drafts import (
+    apply_decision_draft, current_decision_draft, discard_decision_draft,
+    manual_review_state, rollback_decision, save_decision_rejections,
 )
 from app.term_decision_protocol import DECISION_RULES_VERSION, format_correction
 from app.web import create_app
@@ -858,7 +853,7 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
         observed.append((phase, len(anchors)))
         return ([(states, anchors)], 10 if phase == "adjudication" else 25)
 
-    monkeypatch.setattr("app.term_decision._pack_batches", planned)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", planned)
     plan = decision_plan(project)
 
     assert observed == [("adjudication", 0), ("consistency", 2)]
@@ -1630,7 +1625,7 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
     def cross_referenced_batches(states: list[dict], **_: object) -> tuple[list, int]:
         return [([state], [other]) for state, other in zip(states, reversed(states))], 2
 
-    monkeypatch.setattr("app.term_decision._pack_batches", cross_referenced_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", cross_referenced_batches)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1678,7 +1673,7 @@ async def test_decision_group_violation_enters_format_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     sent_invalid = False
     repairs = 0
 
@@ -1722,7 +1717,7 @@ async def test_decision_format_repair_lists_exact_target_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
     repairs = 0
 
@@ -1781,7 +1776,7 @@ async def test_decision_format_repair_abstracts_and_deduplicates_document_errors
     def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
         return [(states, [])], len(states)
 
-    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1842,7 +1837,7 @@ async def test_format_repair_preserves_valid_records_and_retries_only_unresolved
     def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
         return [(states, [])], 1
 
-    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
     adjudication_scopes: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1894,7 +1889,7 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
     corrections = 0
 
@@ -1959,7 +1954,7 @@ async def test_update_without_reason_is_repaired_with_complete_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     sent_invalid = False
     repairs = 0
 
@@ -2258,7 +2253,7 @@ async def test_decision_ignores_extra_read_only_anchor_records(
             batches.append(([state], references))
         return batches, len(batches)
 
-    monkeypatch.setattr("app.term_decision._pack_batches", scoped_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", scoped_batches)
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2320,7 +2315,7 @@ async def test_decision_runs_batches_concurrently_with_phase_barrier(
     preset = json.loads(preset_path.read_text(encoding="utf-8"))
     preset["max_parallel"] = 2
     preset_path.write_text(json.dumps(preset), encoding="utf-8")
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     phase_one_started = asyncio.Event()
     release_phase_one = asyncio.Event()
     active = 0
@@ -2346,7 +2341,7 @@ async def test_decision_runs_batches_concurrently_with_phase_barrier(
             phase_one_finished += 1
         return {normalized: {"action": "keep", "reason": "保持"}}
 
-    monkeypatch.setattr("app.term_decision._request_batch", request_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
     async with httpx.AsyncClient() as client:
         task = asyncio.create_task(
             run_terminology_decision(project, http_client=client)
@@ -2384,9 +2379,9 @@ async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
 
     monkeypatch.setenv("LLM_API_KEY", "test")
     monkeypatch.setattr(
-        "app.term_decision._pack_batches", single_term_batches_with_anchors
+        "app.term_decision_batches._pack_batches", single_term_batches_with_anchors
     )
-    monkeypatch.setattr("app.term_decision._request_batch", request_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
     async with httpx.AsyncClient() as client:
         await run_terminology_decision(project, http_client=client)
 
@@ -2421,7 +2416,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     alice_done = asyncio.Event()
     hold_bob = asyncio.Event()
     calls: list[tuple[str, str]] = []
@@ -2436,7 +2431,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
             alice_done.set()
         return {normalized: {"action": "keep", "reason": "保持"}}
 
-    monkeypatch.setattr("app.term_decision._request_batch", interrupted_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted_batch)
     async with httpx.AsyncClient() as client:
         task = asyncio.create_task(
             run_terminology_decision(project, http_client=client)
@@ -2484,7 +2479,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
             resumed_calls.append((phase, normalized))
             return {normalized: {"action": "keep", "reason": "保持"}}
 
-        monkeypatch.setattr("app.term_decision._request_batch", resumed_batch)
+        monkeypatch.setattr("app.term_decision_batches._request_batch", resumed_batch)
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
         )
@@ -2506,7 +2501,7 @@ async def test_decision_error_keeps_completed_batches_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
-    monkeypatch.setattr("app.term_decision._pack_batches", single_term_batches)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     alice_done = asyncio.Event()
 
     async def failing_batch(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -2520,7 +2515,7 @@ async def test_decision_error_keeps_completed_batches_resumable(
             raise UsageError("模型协议错误")
         return {normalized: {"action": "keep", "reason": "保持"}}
 
-    monkeypatch.setattr("app.term_decision._request_batch", failing_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", failing_batch)
     async with httpx.AsyncClient() as client:
         with pytest.raises(UsageError, match="模型协议错误"):
             await run_terminology_decision(project, http_client=client)
@@ -2548,7 +2543,7 @@ async def test_decision_error_keeps_completed_batches_resumable(
             resumed_calls.append((phase, normalized))
             return {normalized: {"action": "keep", "reason": "保持"}}
 
-        monkeypatch.setattr("app.term_decision._request_batch", resumed_batch)
+        monkeypatch.setattr("app.term_decision_batches._request_batch", resumed_batch)
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
         )
@@ -2572,7 +2567,7 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
     project = create_decision_project(tmp_path)
 
     monkeypatch.setattr(
-        "app.term_decision._pack_batches", single_term_batches_with_anchors
+        "app.term_decision_batches._pack_batches", single_term_batches_with_anchors
     )
     alice_reviewed = asyncio.Event()
 
@@ -2603,7 +2598,7 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
             raise UsageError("一致性协议错误")
         return {normalized: {"action": "keep", "reason": "保持"}}
 
-    monkeypatch.setattr("app.term_decision._request_batch", failing_review)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", failing_review)
     async with httpx.AsyncClient() as client:
         with pytest.raises(UsageError, match="一致性协议错误"):
             await run_terminology_decision(project, http_client=client)
@@ -2631,7 +2626,7 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
             assert ("alice" in anchor_ids) is expected_anchor
             return {normalized: {"action": "keep", "reason": "保持"}}
 
-        monkeypatch.setattr("app.term_decision._request_batch", resumed_review)
+        monkeypatch.setattr("app.term_decision_batches._request_batch", resumed_review)
         await run_terminology_decision(
             project, resume_run_id=run_dir.name, http_client=client
         )
@@ -2651,7 +2646,7 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
             for item in kwargs["focus"]
         }
 
-    monkeypatch.setattr("app.term_decision._request_batch", keep_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
     original_atomic_write = atomic_write_json
 
     def fail_draft_write(path: Path, value: object) -> None:
@@ -2680,7 +2675,7 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
         monkeypatch.setattr(
             "app.term_decision.atomic_write_json", original_atomic_write
         )
-        monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+        monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
         )
@@ -2701,7 +2696,7 @@ async def test_complete_legacy_checkpoint_recovers_invalid_group_without_request
     async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
         raise AssertionError("完整检查点恢复不得重新请求模型")
 
-    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
     async with httpx.AsyncClient() as client:
         summary = await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
@@ -2750,7 +2745,7 @@ async def test_legacy_group_recovery_draft_failure_preserves_complete_run(
         raise AssertionError("完整检查点恢复不得重新请求模型")
 
     monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
-    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
     async with httpx.AsyncClient() as client:
         with pytest.raises(StorageError, match="恢复草案写入失败"):
             await run_terminology_decision(
@@ -2996,7 +2991,7 @@ def test_web_resumes_complete_legacy_group_checkpoint_into_review(
     async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
         raise AssertionError("Web 恢复完整检查点不得重新请求模型")
 
-    monkeypatch.setattr("app.term_decision._request_batch", unexpected_request)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
     client = TestClient(create_app(projects_root=project.parent))
     options = client.get(
         "/api/v1/projects/decision-demo/task-options/terminology_decision"
@@ -3203,7 +3198,7 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
     async def fail_batch(*_: object, **__: object) -> dict[str, dict]:
         raise UsageError("模型协议错误")
 
-    monkeypatch.setattr("app.term_decision._request_batch", fail_batch)
+    monkeypatch.setattr("app.term_decision_batches._request_batch", fail_batch)
     client = TestClient(create_app(projects_root=project.parent))
     started = client.post(
         "/api/v1/projects/decision-demo/tasks",
@@ -3241,7 +3236,7 @@ async def test_format_exhaustion_records_only_safe_request_diagnostics(
     def one_batch(states: list[dict], **_: object) -> tuple[list, int]:
         return [(states, [])], 1
 
-    monkeypatch.setattr("app.term_decision._pack_batches", one_batch)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])

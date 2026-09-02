@@ -1,103 +1,19 @@
 from __future__ import annotations
-import asyncio
-import csv
-import hashlib
-import io
-import json
-import shlex
-import sys
-import time
 import unicodedata
-import uuid
-from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
-import httpx
+from typing import Any
 from .config import load_project_config
-from .documents import (
-    DocumentExportJob,
-    aozora_match_views,
-    aozora_safe_split_positions,
-    compact_emphasis_aozora,
-    document_adapter_reads_version,
-    publish_document_exports,
-)
 from .errors import (
-    ConfigError,
-    ContextLengthError,
-    ExportError,
-    ExternalError,
-    FatalExternalError,
-    IncompleteError,
-    RequestSizeError,
-    StorageError,
     UsageError,
 )
-from .execution import (
-    ChunkPlan,
-    LLMClient,
-    PreviousContextIndex,
-    Scope,
-    SlidingWindowLimiter,
-    build_chunk_plans,
-    classify_stage,
-    classify_stage_states,
-    combine_usage,
-    contiguous_groups,
-    continue_run,
-    create_run,
-    dispatch_chunks,
-    estimate_messages,
-    estimate_single_segment_preflight,
-    finalize_run,
-    find_running_runs,
-    full_prompt,
-    iter_chunk_plans,
-    load_stage_history,
-    localize_request_ids,
-    materialize_chunk_stream,
-    parse_jsonl_document,
-    render_messages,
-    save_debug_chunks,
-    scope_from_run,
-    segment_model_source,
-    segment_model_text,
-    select_scope,
-    stage_fingerprint,
-    stage_result_path,
-    unavailable_usage,
-)
-from .i18n import SUPPORTED_LANGUAGES, resolve_language
-from .llm_keys import KeyPool
-from .logging_utils import get_logger
-from .plugins import (
-    get_document_adapter,
-    normalize_model_text,
-)
-from .project import (
-    PROMPT_LANGUAGES,
-    load_segments,
-    load_source_files,
-    prompt_file,
-)
 from .sqlite_storage import (
-    append_jsonl,
-    atomic_write_text,
-    latest_stage_states,
+    list_runs,
     read_json,
     read_jsonl,
     record_exists,
     record_header,
-    terminology_scan_state,
     write_json,
-)
-from .translation_validation import (
-    TranslationTermMatch,
-    TranslationValidationContext,
-    validate_translation_text,
 )
 
 @dataclass(frozen=True)
@@ -403,7 +319,7 @@ def _merge_and_publish_terms(
 
 def publish_partial_terms(project: Path) -> dict[str, Any]:
     """Publish current candidates without closing or deleting scan history."""
-    if find_running_runs(project, "terminology"):
+    if list_runs(project, stage="terminology", status="running"):
         raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
     active_path = project / "terminology" / "active_task.json"
     if not record_exists(project, active_path):

@@ -4,8 +4,19 @@ import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } f
 import { moveFileBlock, moveFilesByCommand, type DropPosition, type FileMoveCommand } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
-import { EXPORT_RESULT_STAGES, EXPORT_SETTINGS_FIELDS, type ExportFile } from "./ProjectInputs";
 import type { ErrorPayload, ProjectOverview, SettingsField, Stage } from "../types";
+
+interface ExportFile { path: string; size: number; mtime: number; }
+const EXPORT_SETTINGS_FIELDS: Partial<Record<string, SettingsField>> = {
+  missing_target_language_tag: "target_language_tag",
+  missing_target_language: "target_language",
+  unrepresentable_output_encoding: "output_encoding",
+};
+const EXPORT_RESULT_STAGES: Partial<Record<string, Stage>> = {
+  translated: "translation",
+  proofread: "proofreading",
+  polished: "polishing",
+};
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

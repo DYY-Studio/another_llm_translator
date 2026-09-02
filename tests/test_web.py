@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 import app.web as web_module
 import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
+import app.web_resource_routes as web_resource_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
@@ -198,7 +199,7 @@ def test_web_unexpected_error_returns_safe_payload(
     def unexpected(*_: object, **__: object) -> None:
         raise RuntimeError("secret diagnostic detail")
 
-    monkeypatch.setattr("app.web_project_routes.resolve_project", unexpected)
+    monkeypatch.setattr("app.web.resolve_project", unexpected)
     client = TestClient(
         create_app(projects_root=projects_root),
         raise_server_exceptions=False,
@@ -664,15 +665,15 @@ def test_windows_drive_probe_keeps_unavailable_drive_visible(
     class FakeWindll:
         kernel32 = FakeKernel32()
 
-    monkeypatch.setattr(web_module.os, "name", "nt")
-    monkeypatch.setattr(web_module.ctypes, "windll", FakeWindll(), raising=False)
+    monkeypatch.setattr(web_resource_module.os, "name", "nt")
+    monkeypatch.setattr(web_resource_module.ctypes, "windll", FakeWindll(), raising=False)
     monkeypatch.setattr(
-        web_module.os.path,
+        web_resource_module.os.path,
         "isdir",
         lambda path: path == "C:\\",
     )
 
-    assert web_module._windows_drive_entries() == [
+    assert web_resource_module._windows_drive_entries() == [
         {
             "name": "C:",
             "path": "C:\\",
@@ -3146,7 +3147,7 @@ async def test_web_task_manager_revalidates_queued_start(
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    original_options = web_module.task_options
+    original_options = web_tasks_module.task_options
     second_calls = 0
 
     def changed_options(project: Path, stage: str) -> dict[str, object]:
@@ -3199,7 +3200,7 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    original_options = web_module.task_options
+    original_options = web_tasks_module.task_options
     second_calls = 0
 
     def changed_options(project: Path, stage: str) -> dict[str, object]:
@@ -3740,7 +3741,7 @@ async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    original_options = web_module.task_options
+    original_options = web_tasks_module.task_options
     second_calls = 0
 
     def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
@@ -4092,7 +4093,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         fake.kwargs = kwargs
         return fake
 
-    monkeypatch.setattr("app.web.httpx.AsyncClient", fake_client)
+    monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     preset = client.get("/api/v1/global/presets/default").json()
     saved_definition = dict(preset)
@@ -4188,7 +4189,7 @@ def test_web_preset_models_discovery_fails_fast(
     try:
         fake = FakeModelsClient()
         fake.raise_error = httpx.ConnectError("no route")
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         network = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4197,7 +4198,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(status_code=500)
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         http_error = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4206,7 +4207,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(json_error=True)
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         bad_json = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4215,7 +4216,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         bad_shape = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )

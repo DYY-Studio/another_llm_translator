@@ -8,13 +8,11 @@ import json
 
 import re
 
-import uuid
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 
 from copy import deepcopy
 
-from itertools import pairwise
 
 from pathlib import Path
 
@@ -24,25 +22,20 @@ import httpx
 
 from .config import load_project_config
 
-from .documents import aozora_match_views
 
-from .errors import RequestSizeError, StorageError, UsageError
+from .errors import StorageError, UsageError
 
 from .execution import (
-    LLMClient,
     Scope,
-    SlidingWindowLimiter,
     combine_usage,
     continue_run,
     create_run,
-    estimate_messages,
     finalize_run,
     full_prompt,
-    parse_jsonl_document,
-    render_messages,
     run_bounded,
     unavailable_usage,
 )
+from .llm_client import LLMClient, SlidingWindowLimiter
 
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
 
@@ -52,33 +45,29 @@ from .project import prompt_file
 
 from .sqlite_storage import (
     atomic_write_json,
-    list_runs,
     read_json,
-    read_segment_sources,
     record_header,
     utc_now,
     write_json,
-    write_terminology_decision_state,
 )
 
 from .term_library import (
-    build_term_library_rows,
     load_terms,
-    normalize_term,
     term_normalization,
 )
 
-from .term_decision_rules import *
-from .term_decision_batches import *
-from .term_decision_drafts import *
+from .term_decision_rules import (
+    _conflicts_by_term,
+    _decision_dependency_graph, _dependency_components, _effective_conflicts,
+    _empty_conflicts, _group_violations,
+    _has_conflicts, _recover_invalid_relationship_components, _term_state,
+    _validate_final_states,
+)
+from . import term_decision_batches as _batches
+from . import term_decision_drafts as _drafts
 
 from .term_decision_protocol import (
-    DECISION_ACTIONS,
     DECISION_RULES_VERSION,
-    PATCH_FIELDS,
-    SIMPLE_ACTION_KEYS,
-    UPDATE_ACTION_KEYS,
-    format_correction,
 )
 
 STAGE = "terminology_decision"
@@ -464,12 +453,12 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
     ]
     if not eligible:
         raise UsageError("已发布术语全部受到人工 override 保护")
-    evidence = collect_term_evidence(project, list(library.get("terms", [])), config)
+    evidence = _batches.collect_term_evidence(project, list(library.get("terms", [])), config)
     language = _prompt_language(project, prompt_language)
     prompts = _prompt(project, language)
     spec = term_normalization(config)
     protected_states = [states[key] for key in sorted(protected & set(states))]
-    phase_one, phase_one_tokens = _pack_batches(
+    phase_one, phase_one_tokens = _batches._pack_batches(
         eligible,
         phase="adjudication",
         target_language=str(config["project"]["target_language"]),
@@ -487,7 +476,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         }
         for state in eligible
     ]
-    phase_two, phase_two_tokens = _pack_batches(
+    phase_two, phase_two_tokens = _batches._pack_batches(
         simulated_focus,
         phase="consistency",
         target_language=str(config["project"]["target_language"]),
@@ -528,7 +517,7 @@ async def run_terminology_decision(
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
-    existing = current_decision_draft(project)
+    existing = _drafts.current_decision_draft(project)
     if existing is not None and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     plan = decision_plan(project, prompt_language)
@@ -731,7 +720,7 @@ async def run_terminology_decision(
             remaining_phase_one = [
                 item for item in eligible if str(item["normalized"]) not in decisions
             ]
-            phase_one, _ = _pack_batches(
+            phase_one, _ = _batches._pack_batches(
                 remaining_phase_one,
                 phase="adjudication",
                 target_language=str(config["project"]["target_language"]),
@@ -748,7 +737,7 @@ async def run_terminology_decision(
             ) -> None:
                 focus, anchors = batch
                 nonlocal completed
-                result = await _request_batch(
+                result = await _batches._request_batch(
                     llm,
                     focus=focus,
                     anchors=anchors,
@@ -818,7 +807,7 @@ async def run_terminology_decision(
                 for item in phase_two_focus
                 if str(item["normalized"]) not in final_decisions
             ]
-            phase_two, _ = _pack_batches(
+            phase_two, _ = _batches._pack_batches(
                 remaining_phase_two,
                 phase="consistency",
                 target_language=str(config["project"]["target_language"]),
@@ -835,7 +824,7 @@ async def run_terminology_decision(
             ) -> None:
                 focus, anchors = batch
                 nonlocal completed
-                result = await _request_batch(
+                result = await _batches._request_batch(
                     llm,
                     focus=focus,
                     anchors=anchors,
@@ -901,7 +890,7 @@ async def run_terminology_decision(
             phase_two_conflicts,
             final_conflicts,
         )
-        draft = _build_draft(
+        draft = _drafts._build_draft(
             project_id=str(metadata["project_id"]),
             run_id=run_id,
             revision=int(library["terms_revision"]),
@@ -918,7 +907,7 @@ async def run_terminology_decision(
             prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
             spec=spec,
         )
-        atomic_write_json(_draft_path(project, run_id), draft)
+        atomic_write_json(_drafts._draft_path(project, run_id), draft)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.update(
             decision_status="pending",

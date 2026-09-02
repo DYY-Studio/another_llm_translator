@@ -4,8 +4,17 @@ import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } f
 import { moveFileBlock, moveFilesByCommand, type DropPosition, type FileMoveCommand } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
-import type { AdapterOptions, PendingInput, DirectoryPickerMode, DirectoryListing } from "./ProjectInputs";
-import { driveTypeLabel, InputQueue } from "./ProjectInputs";
+import type { AdapterOptions, PendingInput } from "./ProjectInputs";
+import { InputQueue } from "./ProjectInputs";
+
+type DirectoryPickerMode = "parent" | "project";
+interface DirectoryEntry { name: string; path: string; is_project: boolean; }
+interface DriveEntry { name: string; path: string; type: string; available: boolean; }
+interface DirectoryListing { path: string; parent: string | null; is_project: boolean; directories: DirectoryEntry[]; drives: DriveEntry[]; }
+function driveTypeLabel(type: string, language: Language) {
+  const labels: Record<string, string> = { unknown: "drive.unknown", unavailable: "drive.unavailable", removable: "drive.removable", fixed: "drive.fixed", network: "drive.network", cdrom: "drive.cdrom", ramdisk: "drive.ramdisk" };
+  return translate(labels[type] ?? type, language);
+}
 
 export function CreateProjectDialog({ onClose, onCreated, language }: { onClose: () => void; onCreated: (selector: string, externalPath?: string) => void; language: Language }) {
   const [mode, setMode] = useState<"create" | "open">("create");

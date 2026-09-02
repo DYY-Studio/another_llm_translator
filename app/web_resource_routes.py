@@ -1,36 +1,25 @@
 from __future__ import annotations
-import argparse
 import ctypes
 import hmac
-import io
 import ipaddress
 import json
 import os
 import secrets
-import shutil
 import socket
-import sys
 import tempfile
 import time
-import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 import httpx
 import psutil
-import uvicorn
-from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from .config import (
     LLM_MODEL_STAGES,
     dump_config,
     load_config,
     resolve_global_config,
-    resolve_project_config,
 )
 from .credentials import (
     credential_summaries,
@@ -42,49 +31,23 @@ from .credentials import (
     save_credential,
     save_lan_password,
 )
-from .diagnostics import DiagnosticsHub
 from .errors import (
     AppError,
+    ConfigError,
     ExternalError,
     InvalidCredentialsError,
-    ProjectError,
     UsageError,
-    app_error_payload,
-    internal_error_payload,
 )
-from .execution import Scope, full_prompt
+from .execution import full_prompt
 from .llm_adapter import load_json_adapter
-from .llm_migration import migrate_llm_resources
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
-from .locking import project_write_lock
-from .logging_utils import get_logger
 from .plugins import (
-    document_adapter_replacement_options,
     document_adapter_summaries,
-    get_document_adapter,
-    get_document_adapter_for_extension,
     resolve_translation_validators,
 )
 from .project import (
-    APP_ROOT as DEFAULT_APP_ROOT,
-)
-from .project import (
-    PROJECTS_ROOT,
     PROMPT_LANGUAGES,
-    FileReplacementPlan,
-    add_project_files,
-    apply_file_replacement,
-    delete_project,
-    init_project,
-    natural_path_key,
-    prepare_file_replacement,
     prompt_file,
-    remove_project_files,
-    reorder_project_files,
-    resolve_project,
-    resolve_project_parent,
-    sync_global_templates,
-    load_source_files,
 )
 from .prompt_library import (
     delete_prompt_library,
@@ -92,30 +55,44 @@ from .prompt_library import (
     read_prompt_library,
     save_prompt_library,
 )
-from .server_config import load_server_config, save_server_config
+from .server_config import save_server_config
 from .sqlite_storage import (
     atomic_write_json,
     atomic_write_text,
-    compact_project_database,
     database_path,
-    read_json,
-    read_adapter_state,
-)
-from .project_export import export_project
-from .stage_review import run_apply
-from .term_exchange import export_terms, import_terms
-from .term_library import publish_partial_terms
-from .term_decision import (
-    apply_decision_draft,
-    decision_review_state,
-    discard_decision_draft,
-    rollback_decision,
-    save_decision_rejections,
-    set_manual_review_resolved,
 )
 from .user_config import effective_path, user_root, write_user
-from .web_store import WebStore
-from .web_tasks import WebTaskManager, task_options
+
+_WINDOWS_DRIVE_TYPES = {
+    0: "unknown",
+    1: "unavailable",
+    2: "removable",
+    3: "fixed",
+    4: "network",
+    5: "cdrom",
+    6: "ramdisk",
+}
+
+def _windows_drive_entries() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+    logical_drives = int(ctypes.windll.kernel32.GetLogicalDrives())
+    entries: list[dict[str, Any]] = []
+    for index in range(26):
+        if not logical_drives & (1 << index):
+            continue
+        letter = chr(ord("A") + index)
+        root = f"{letter}:\\"
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(root))
+        entries.append(
+            {
+                "name": f"{letter}:",
+                "path": root,
+                "type": _WINDOWS_DRIVE_TYPES.get(drive_type, "unknown"),
+                "available": os.path.isdir(root),
+            }
+        )
+    return entries
 
 def _is_loopback(request: Request) -> bool:
     client = request.client.host if request.client else ""
@@ -150,51 +127,12 @@ def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
             return False
     return False
 
-def _resolve_export_file(root: Path, raw: str) -> Path:
-    """Resolve a project-relative output file, rejecting escape and symlinks."""
-    if "\0" in raw:
-        raise UsageError("导出文件路径无效")
-    relative = Path(raw)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise UsageError("导出文件路径必须位于项目 output 目录内")
-    resolved = (root / "output" / relative).resolve()
-    output_root = (root / "output").resolve()
-    if not resolved.is_relative_to(output_root) or not resolved.is_file():
-        raise UsageError("导出文件路径必须位于项目 output 目录内")
-    return resolved
 
-def _export_files(root: Path) -> list[Path]:
-    """Return sorted regular files that are eligible for export downloads."""
-    output_root = (root / "output").resolve()
-    if not output_root.is_dir():
-        return []
-    files: list[Path] = []
-    for path in sorted(output_root.rglob("*")):
-        try:
-            is_symlink = path.is_symlink()
-            is_file = path.is_file()
-        except OSError:
-            continue
-        if is_symlink or not is_file:
-            continue
-        relative = path.relative_to(output_root)
-        if any(part == ".staging" for part in relative.parts):
-            continue
-        if path.name == ".DS_Store":
-            continue
-        files.append(path)
-    return files
 
-def _attachment_header(filename: str) -> str:
-    encoded = quote(filename)
-    if encoded == filename:
-        return f'attachment; filename="{filename}"'
-    return f"attachment; filename*=utf-8''{encoded}"
 
 def register_resource_routes(*, app: FastAPI, projects_root: Path, app_root: Path) -> None:
     SESSION_COOKIE = "another_llm_session"
     _SESSION_TTL_SECONDS = 30 * 24 * 3600
-    _WINDOWS_DRIVE_TYPES = {0: "unknown", 1: "unavailable", 2: "removable", 3: "fixed", 4: "network", 5: "cdrom", 6: "ramdisk"}
     def valid_session(token: str | None) -> bool:
         if not token:
             return False

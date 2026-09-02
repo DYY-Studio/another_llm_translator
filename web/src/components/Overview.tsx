@@ -4,7 +4,7 @@ import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } f
 import { moveFileBlock, moveFilesByCommand, type DropPosition, type FileMoveCommand } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
-import { sameOrder, filesInOrder, type ButtonReorderState, type OptimisticFileOrder, type ProjectFile, type AdapterOptions, type PendingInput } from "./ProjectInputs";
+import type { AdapterOptions, PendingInput } from "./ProjectInputs";
 import type { ProjectOverview, ProjectSummary } from "../types";
 import { ProjectBar } from "./ProjectPicker";
 import { InputQueue, AddFilesDialog } from "./ProjectInputs";
@@ -15,6 +15,17 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+type ProjectFile = ProjectOverview["files"][number];
+interface OptimisticFileOrder { project: string; before: string[]; after: string[]; }
+interface ButtonReorderState { project: string; }
+function sameOrder(left: string[], right: string[]) {
+  return left.length === right.length && left.every((fileId, index) => fileId === right[index]);
+}
+function filesInOrder(files: ProjectFile[], fileIds: string[]) {
+  const byId = new Map(files.map((item) => [item.file_id, item]));
+  return fileIds.map((fileId) => byId.get(fileId)!);
 }
 
 export function Overview({

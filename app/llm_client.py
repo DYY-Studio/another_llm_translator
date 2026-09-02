@@ -4,47 +4,30 @@ import hashlib
 import json
 import math
 import random
-import re
-import shutil
-import sys
 import time
 import uuid
-from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
-from copy import deepcopy
-from dataclasses import dataclass, replace
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 import httpx
-from .config import load_project_config, load_run_config
 from .credentials import resolve_api_keys
 from .diagnostics import current_diagnostics
-from .documents import aozora_to_model_ruby
 from .errors import (
     ConfigError,
     ContextLengthError,
     ExternalError,
     FatalExternalError,
-    RequestSizeError,
-    StorageError,
-    UsageError,
 )
-from .i18n import SUPPORTED_LANGUAGES
 from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
 from .llm_keys import KeyPool, NoAvailableKey
 from .llm_preset import endpoint_url
 from .logging_utils import get_logger
 from .sqlite_storage import (
-    append_jsonl,
     append_jsonl_file,
     atomic_write_json,
-    read_json,
-    read_jsonl,
     record_header,
-    utc_now,
-    write_json,
 )
-from .term_decision_protocol import terminology_decision_protocol
 
 from .llm_response import extract_jsonl_content, normalize_llm_response
 

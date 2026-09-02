@@ -4,7 +4,12 @@ import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } f
 import { moveFileBlock, moveFilesByCommand, type DropPosition, type FileMoveCommand } from "../fileOrder";
 import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
-import type { ProjectFile, AdapterSummary, ReplacementImpact, ReplacementSource, ReplacementOptionsResponse } from "./ProjectInputs";
+import type { AdapterSummary } from "./ProjectInputs";
+
+type ProjectFile = import("../types").ProjectOverview["files"][number];
+interface ReplacementImpact { file_id: string; old_segment_count: number; new_segment_count: number; preserved_segment_count: number; added_segment_count: number; removed_segment_count: number; ambiguous_old_segment_count: number; ambiguous_new_segment_count: number; preserved_completed_by_stage: Record<string, number>; removed_completed_by_stage: Record<string, number>; warnings: string[]; previous_adapter_options: Record<string, string>; replacement_adapter_options: Record<string, string>; changed_adapter_options: string[]; }
+interface ReplacementSource { file?: File; serverPath?: string; label: string; }
+interface ReplacementOptionsResponse { adapter: AdapterSummary; values: Record<string, string>; }
 
 export function ReplacementDialog({
   project,
