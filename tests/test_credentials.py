@@ -45,6 +45,8 @@ def test_credential_rejects_invalid_ids_and_empty_secret() -> None:
         save_credential("../bad", "x")
     with pytest.raises(ConfigError, match="非空字符串"):
         save_credential("openai-main", "")
+    with pytest.raises(ConfigError, match="空行"):
+        save_credential("openai-main", "first\n\nsecond")
 
 
 def test_resolve_environment_credential(
