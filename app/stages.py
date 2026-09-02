@@ -3509,12 +3509,6 @@ async def run_translation(
         completed_ids.add(segment_id)
         report_progress()
         latest_text[segment_id] = text
-        logger.info(
-            "segment complete segment=%s completed=%d failed=%d",
-            segment_id,
-            len(completed_ids),
-            len(failed_ids),
-        )
 
     async def save_failed(
         segment_id: str,
@@ -4405,12 +4399,6 @@ async def run_review(
                 )
                 completed_ids.add(segment_id)
                 report_progress()
-                logger.info(
-                    "segment complete segment=%s completed=%d failed=%d",
-                    segment_id,
-                    len(completed_ids),
-                    len(failed_ids),
-                )
             else:
                 failure_counts["stage_error"] += 1
                 append_jsonl(

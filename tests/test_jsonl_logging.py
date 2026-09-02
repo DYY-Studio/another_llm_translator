@@ -16,6 +16,7 @@ from app.stages import (
     _parse_review_items,
     _parse_translation_items,
     _validate_term_items,
+    run_review,
     run_terminology,
     run_translation,
 )
@@ -610,7 +611,7 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
 ) -> None:
     source_marker = "PRIVATE_SOURCE_MARKER"
     secret_marker = "PRIVATE_API_KEY_MARKER"
-    project = await create_project(tmp_path, source_marker)
+    project = await create_project(tmp_path, f"{source_marker}\nsecond")
     os.environ["LLM_API_KEY"] = secret_marker
     config_path = project / "config.toml"
     text = config_path.read_text(encoding="utf-8")
@@ -622,16 +623,30 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
     config_path.write_text(text, encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        content = llm_jsonl(
-            [
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        if "完整 translation" in system:
+            records = [
                 {
                     "type": "segment",
-                    "id": payload["segments"][0]["id"],
+                    "id": item["id"],
                     "translation": "PRIVATE_TRANSLATION_MARKER",
                 }
+                for item in payload["segments"]
             ]
-        )
+        else:
+            records = [
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "status": "accepted",
+                    "suggested_text": None,
+                    "reason": None,
+                }
+                for item in payload["segments"]
+            ]
+        content = llm_jsonl(records)
         return httpx.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
@@ -641,17 +656,23 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         summary = await run_translation(project, Scope(), http_client=client)
+        review_summary = await run_review(
+            project, "proofreading", Scope(), http_client=client
+        )
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
     captured = capsys.readouterr()
-    assert summary["completed"] == 1
+    assert summary["completed"] == 2
+    assert review_summary["completed"] == 2
     assert "run start run=" in captured.err
     assert "request start request=" in captured.err
     assert "request complete request=" in captured.err
-    assert "segment complete segment=" in captured.err
+    assert "run complete run=" in captured.err
+    assert "segment complete segment=" not in captured.err
     assert captured.out == ""
     file_log = (project / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "segment complete segment=" not in file_log
     for log_text in (captured.err, file_log):
         assert source_marker not in log_text
         assert secret_marker not in log_text
