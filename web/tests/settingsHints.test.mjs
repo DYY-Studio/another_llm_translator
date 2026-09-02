@@ -33,6 +33,10 @@ const hintKeys = [
   "preset.maxOutputTokensHint",
   "preset.contextSafetyMarginHint",
   "preset.tokenSafetyFactorHint",
+  "preset.keyIndexHint",
+  "preset.rpmHint",
+  "preset.itpmHint",
+  "preset.maxConcurrencyPerKeyHint",
   "preset.timeoutSecondsHint",
 ];
 

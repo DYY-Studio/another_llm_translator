@@ -503,10 +503,14 @@ inject_missing_segment_every = 0
 已发布术语库中的 `normalized` 键是持久化标识，配置变更后不做迁移：旧术语与 override 继续按原键生效，新配置只影响之后的扫描、导入与匹配。术语阶段指纹包含全部术语配置，变更后重新扫描会自然产生新 revision；翻译、校对、润色阶段不记录术语配置到指纹，复用旧 Run 的翻译结果不会重新匹配。
 
 Preset 中的 `requests_per_minute = 0` 和 `input_tokens_per_minute = 0` 分别表示
-禁用 RPM 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与 Chunk 目标
-及单请求 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效。
+对每个 API Key 禁用 RPM 和 ITPM 限速。两者可以独立禁用；ITPM 为 0 时也不参与
+Chunk 目标及单请求 Token 上限判断。模型上下文窗口和 `max_parallel` 始终生效，
+`max_parallel_per_key` 为每个 Key 的并发上限，必须是正整数。
 
-API Key 只从环境变量读取，不写入项目、Run、日志或 Payload。
+单个 `credential` 引用中的秘密值按行解析为 API Key 列表；接受 LF、CRLF 及一个末尾
+换行符，拒绝空行、重复 Key 和 Key 内空白。每次执行或续作只在内存中严格解析一次并
+冻结列表，缺失或格式错误在首个网络请求前失败。Key 原文、摘要和运行时健康状态不写入
+项目、Run、日志或 Payload。
 
 `llm.preset` 选择全局默认的 `llm_presets/<id>.json`；四个 `llm.preset_<stage>` 可用非空 Preset ID 覆盖对应阶段，空字符串继承全局值。Preset 再选择全局 `llm_adapters/<id>.json`；项目不保存 Adapter 副本。
 
@@ -710,7 +714,7 @@ interrupted
 
 Run 创建时复制项目配置；LLM 阶段另保存本阶段实际完整 Prompt、解析后的 `llm_preset.json` 和项目 `llm_adapter.json`。
 
-续作不覆盖原快照，而是在 `continuations/0001/` 等顺序目录保存本次当前项目配置、Prompt、Preset 和 Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复用数量。续作结果仍引用原 `run_id`。快照只记录 API Key 环境变量名，不读取或保存密钥值。
+续作不覆盖原快照，而是在 `continuations/0001/` 等顺序目录保存本次当前项目配置、Prompt、Preset 和 Adapter 快照，并在 manifest 追加本次指纹、原始范围和请求/复用数量。续作结果仍引用原 `run_id`。快照只记录 Preset 的 credential 引用，不读取或保存密钥值。
 
 `terminology`、`translate`、`proofread`、`polish` 独立命令发现同阶段 `running` Run 时，最新一个是续作候选，更旧者标记为 `interrupted` 和 `superseded`。交互终端明确询问 `resume` 或 `new`；拒绝后候选标记为 `interrupted`，不再参与续作候选。
 
@@ -1395,15 +1399,21 @@ Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 
 
 模型 ID 始终允许手工输入；发现结果只在当前列表中搜索，选择后仍需显式保存。
 
-`usage` 把端点响应中的消耗换算为 input/output/ total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run `manifest.json`；任一成功响应未返回完整 usage 时，任务标记为 partial，保留已观测计数但吞吐量不可用；完全没有可观测 usage 时才显示 unavailable，不使用本地估算。
+`usage` 把端点响应中的消耗换算为 input/output/ total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run `manifest.json`；任一成功或失败尝试未返回完整 usage 时，任务标记为 partial，保留已观测计数但吞吐量不可用；完全没有可观测 usage 时才显示 unavailable，不使用本地估算。
 
 同一 Run 的续作累加各次精确回报；缺少累计版本标记的旧 Run 或任一次回报不完整时，Run usage 标记为 partial；完全没有可观测 usage 时才显示 unavailable。
 
-项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、模型、API Key 环境变量名、代理、Token 能力、限速、并发、超时和 `extra_body`。
+项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、模型、credential 引用、代理、Token 能力、每 Key 限速、两级并发、超时和 `extra_body`。
 
 `extra_body` 必须是 JSON 对象，可以包含嵌套对象和数组；宿主在 Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失 Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
 
-`run-all` 在同一项目内按阶段逻辑顺序执行，并可在该次调用内按资源键复用 HTTP Client 和限速窗口；Run 快照与阶段指纹始终记录当前阶段实际使用的 Preset 和 Adapter。Web 的不同任务不共享 HTTP Client 或连接池，只按 `(preset_id, preset_hash)` 共享 RPM/ITPM 滑动窗口；相同 ID 但不同内容 Hash 的 Preset 相互隔离。Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。
+`run-all` 在同一项目内按阶段逻辑顺序执行，并可在该次调用内按资源键复用 HTTP Client 和
+Key 调度状态；Run 快照与阶段指纹始终记录当前阶段实际使用的 Preset 和 Adapter。Web 的
+不同任务不共享 HTTP Client 或连接池，只按 `(preset_id, preset_hash)` 共享每个 Key 的
+RPM/ITPM 窗口、冷却和两级并发；相同 ID 但不同内容 Hash 的 Preset 相互隔离。Key 选择
+按最早可发送者并在平局时轮转；等待额度、冷却或退避时不占 HTTP 并发槽。401/403 仅在
+本次执行中隔离当前 Key，429 冷却当前 Key 并轮换，400/404 和协议/配置错误直接失败；
+不同 CLI 进程不协调。Web 请求预览显示最终 body，并以 `***` 脱敏认证 Header。
 
 Preset 内容进入 Run 快照和阶段指纹，因此其中不得保存密钥。项目配置、全局配置和 Run 快照都必须包含 `llm.preset`；内联连接字段和缺失 `llm_preset.json` 的 Run 续作直接失败。
 
@@ -1417,21 +1427,24 @@ Preset 内容进入 Run 快照和阶段指纹，因此其中不得保存密钥�
 - `asyncio.Semaphore` 控制并发。
 - 显式代理使用 `proxy=proxy_url`；空值不关闭 HTTPX 的标准环境代理。
 
-RPM 和 ITPM 使用单进程 60 秒滑动窗口。检查与预约由同一个异步锁保护。每次实际 HTTP
-尝试都重新预约额度，失败后不返还。
+RPM 和 ITPM 对每个 Key 使用独立的单进程 60 秒滑动窗口。相同 `(preset_id, preset_hash)`
+的任务共享窗口、冷却及两级并发，检查与预约由同一个异步锁保护；释放后至少保留 60 秒，
+且不得早于未到期冷却清理。每次实际 HTTP 尝试都重新预约额度，失败后不返还。
 
-RPM 大于 0 时，实际尝试还会按 `60 / RPM` 的最小间隔串行预约发起许可。首个尝试立即
-预约，HTTP 请求发出后释放该许可，避免启动时突发。RPM 为 0 时不启用该节奏；ITPM 为 0
-时不参与 Token 窗口；两者都为 0 时仍受 `max_parallel` 限制。
+RPM 大于 0 时，每个 Key 的实际尝试还会按 `60 / RPM` 的最小间隔串行预约发起许可。首个
+尝试立即预约，HTTP 请求发出后释放该许可，避免启动时突发。RPM 为 0 时不启用该节奏；
+ITPM 为 0 时不参与 Token 窗口；两者都为 0 时仍受总 `max_parallel` 与单 Key
+`max_parallel_per_key` 限制。
 
 ## 5.3 重试与部分响应
 
 HTTP 重试：
 
-- 408、429、5xx、连接错误和读取超时可重试。
-- 429 优先使用 `Retry-After`。
-- 400、401、403、404 和其他不可恢复 4xx 不重试。
-- 401、403 或明显错误端点停止当前阶段尚未发送的任务。
+- 408、5xx、连接错误、读取超时和普通流中断沿现有退避消耗一轮重试。
+- 429 优先使用数值型 `Retry-After`；本轮健康 Key 全部限流时消耗一轮并等待最早冷却，
+  否则在同一轮换用尚未尝试的健康 Key。
+- 401、403 在本次执行中隔离当前 Key 并立即换 Key；全部 Key 隔离则失败。
+- 400、404、协议或配置错误直接失败，不通过换 Key 掩盖。
 - 所有 HTTP 错误共享 `http_max_attempts` 总上限。
 - 退避使用有上限的指数退避和 jitter。
 
@@ -1530,6 +1543,15 @@ Prompt、API Key 或完整 Payload。
 
 - Chunk Manifest。
 - 逐 Attempt 结构化日志。
+
+每次执行或续作收尾时，Run manifest 追加一条 `key_audits`：包含凭据引用、执行序号、Key
+数量，以及每个 `Key #N` 的逻辑请求数、实际尝试数、鉴权错误数、429 次数和该 Key 实际
+收到的 usage。跨 Key 的同一逻辑请求分别计数，不把它们伪装成一个全局请求；缺失 usage
+标记为 `partial` 或 `unavailable`，不使用本地估算。审计不保存 Key 原文、摘要或跨执行
+健康状态；正常成功、失败和取消均收尾写入，强制杀进程前不承诺保留。
+
+诊断请求详情和 Debug Attempt 使用独立的实际发送序号，并同时显示 Key 编号与重试轮数；
+同一逻辑请求重试时序号不重复。
 - 完整请求、响应和错误 Payload。
 - 未校验的流式增量正文或原始 SSE 事件。
 - 中间校验候选。
@@ -1825,7 +1847,7 @@ queued/running/cancelling 任务的项目、阶段、状态、完成/失败/待�
 
 Web 仪表盘不依赖当前项目，可查看当前进程活跃任务聚合后的请求并发数、平均请求延迟、P95 请求延迟、HTTP 错误、重试、当前限流等待请求数、累计输入/输出 Tokens 与总吞吐量；筛选项目或阶段时同步缩小日志、请求和指标范围。筛选中的活跃会话全部返回完整 usage 时，Token 求和且吞吐量可用；存在 partial usage 时显示已观测 Token、吞吐量不可用；完全没有可观测 usage 时，Token 与吞吐量均显示 unavailable。已结束会话不计入当前指标。
 
-当前等待数包含本地 RPM/ITPM 额度、RPM 发起许可排队以及 HTTP 429 的 Retry-After 或退避；网络错误、408 和 5xx 的普通重试退避不计入。日志支持级别、项目、阶段和文本过滤，并可暂停自动滚动。
+当前等待数包含本地每 Key RPM/ITPM 额度、单 Key/总并发排队以及 HTTP 429 的 Retry-After 或退避；网络错误、408 和 5xx 的普通重试退避不计入。日志支持级别、项目、阶段和文本过滤，并可暂停自动滚动。
 
 吞吐量只使用完整端点 usage 除以当前运行耗时；partial usage 保留已观测 Token，但吞吐量显示不可用；没有任何可观测 usage 时，Token 与吞吐量均显示 unavailable。右侧请求/ 响应列表只轮询轻量摘要；双击请求或选择“查看”后，按需显示请求、Content、Reasoning 和尝试详情，运行中的已打开详情随仪表盘刷新。所有活跃请求详情持续可读；已结束请求详情在所有会话间仅保留最近 200 条，活跃请求不计入该上限。
 
@@ -1851,14 +1873,14 @@ force 与复用互斥，续用 Run 时不接受会被忽略的 force 或复用�
 
 ### 凭据与 Preset 引用
 
-LLM Preset schema v4 使用显式单凭据引用 `credential: {kind, name}`，并以 `stream` 与 `stream_endpoint` 控制可选 SSE：`environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，不隐式 fallback。
+LLM Preset schema v5 使用显式单凭据引用 `credential: {kind, name}`，并以 `stream` 与 `stream_endpoint` 控制可选 SSE：`environment` 读取指定环境变量，`keychain` 读取系统钥匙串；两者二选一，不隐式 fallback。`max_parallel_per_key` 为每个 Key 的正整数并发上限，`max_parallel` 仍为 Preset 总并发上限。
 
-schema 2/3 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子迁移，分别默认关闭流式、启用 SSE 读取超时；Run 内历史 v2/v3 快照只在内存中补齐默认值，不改写审计文件。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用 `credential`。
+schema 2/3/4 用户 Preset 在启动 CLI、Web 或桌面 sidecar 时原子迁移到 v5，新增字段取旧的 `max_parallel`；Run 内历史快照只在内存中补齐默认值，不改写审计文件。v1 的 `api_key_env` 字段已移除，加载时明确拒绝并提示改用 `credential`。
 
-密钥只在请求时经 `resolve_api_key` 解析，不进入 URL、请求正文、Run 快照或阶段指纹。
+密钥只在执行开始经 `resolve_api_keys` 解析，不进入 URL、请求正文、Run 快照或阶段指纹。
 
 凭据以用户根 `credentials/index.json` 保存摘要（ID 与更新时间），密钥只存系统钥匙串。
-凭据 API 支持创建、更新、删除和测试，永不回传密钥；Run 和日志只保存引用 ID。
+凭据 API 支持创建、更新、删除和测试，创建/更新输入使用多行文本框且永不回传秘密；Run 和日志只保存引用 ID。模型发现请求必须携带从 1 开始的 `key_index`，只测试选中的 Key，越界直接失败，不自动切换。
 
 索引原子写入，损坏时明确报错，不静默回退。测试环境通过 autouse 的 FakeKeyring 隔离，
 绝不触碰真实钥匙串。
@@ -1960,8 +1982,11 @@ CLI 与桌面模式统一监听 `0.0.0.0`，由中间件按请求守卫：非回
 - 无合法末尾 `end` 的格式修正和校验修复只请求连续分组后的未决 Segment；合法末尾 `end`
   但 ID 不完整时，格式修正请求原批次全部 Segment。
 - HTTP、格式和校验重试均不会超过各自总上限。
+- 单 Preset 多 API Key 按每 Key 独立 RPM/ITPM 和单 Key 并发调度，并受 Preset 总并发
+  上限约束；401/403 隔离、429 冷却轮换、普通退避和错误分类符合第 5.2 节，收尾
+  manifest 含逐 Key `key_audits` 且不泄露秘密。
 - 显式 HTTP/HTTPS 代理传给 HTTPX；空代理保留标准环境代理行为，非法协议拒绝。
-- 401/403 停止尚未发送的任务。
+- 401/403 只隔离当前执行中的失败 Key；全部 Key 失效时停止尚未发送的任务。
 - JSONL 尾行损坏可恢复，中间行损坏明确停止。
 - debug 开关两种状态下 stderr 和 `app.log` 都有基本运行日志，stdout 仍是可独立解析的最终 JSON。
 
@@ -2000,8 +2025,9 @@ CLI 与桌面模式统一监听 `0.0.0.0`，由中间件按请求守卫：非回
 - Adapter 定义副本与 Run 快照不包含 API Key，定义 Hash 进入阶段指纹。
 - LLM Preset 的实时解析、嵌套 `extra_body`、顶层冲突和占位符拒绝生效；实际
   Preset 快照与内容 Hash 进入 Run 和阶段指纹，请求预览不泄露认证 Header。
-- 四阶段可分别覆盖全局 Preset；同一项目 `run-all` 按资源键复用 HTTP Client 和限速窗口，
-  不同 Web 任务仅共享相同 `(preset_id, preset_hash)` 的 RPM/ITPM 窗口，不共享 HTTP Client；
+- 四阶段可分别覆盖全局 Preset；同一项目 `run-all` 按资源键复用 HTTP Client 和 Key 调度状态，
+  不同 Web 任务仅共享相同 `(preset_id, preset_hash)` 的每 Key RPM/ITPM、冷却和并发状态，
+  不共享 HTTP Client；
   不同 Preset 内容使用独立资源，Run 与指纹记录实际阶段 Preset。
 - TXT 旧项目没有 Document Adapter 字段时仍按 `txt` 导出。
 - EPUB 保持 spine 顺序、跨节点 Segment 定位、导航、元数据和非翻译资源；

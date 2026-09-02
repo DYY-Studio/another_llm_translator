@@ -73,6 +73,22 @@ def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
     assert preset.definition["max_output_tokens"] == 0
 
 
+def test_preset_v5_requires_per_key_concurrency(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 5
+    value["max_parallel_per_key"] = 2
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["max_parallel_per_key"] == 2
+
+
+def test_preset_v5_rejects_invalid_per_key_concurrency(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 5
+    value["max_parallel_per_key"] = 0
+    with pytest.raises(ConfigError, match="max_parallel_per_key"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -119,10 +135,11 @@ def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> N
     value.pop("stream")
     value.pop("stream_endpoint")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 4
+    assert preset.definition["schema_version"] == 5
     assert preset.definition["stream"] is False
     assert preset.definition["stream_endpoint"] == ""
     assert preset.definition["stream_read_timeout_enabled"] is True
+    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
 
 
 def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None:
@@ -130,8 +147,9 @@ def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None
     value["schema_version"] = 3
     value.pop("stream_read_timeout_enabled")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 4
+    assert preset.definition["schema_version"] == 5
     assert preset.definition["stream_read_timeout_enabled"] is True
+    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
 
 
 @pytest.mark.parametrize(
@@ -195,7 +213,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 4"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 5"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -244,6 +262,7 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     assert "model" not in raw["llm"]
 
     first = load_project_config(project, presets_root=app_root)
+    assert first["execution"]["max_parallel_per_key"] == 4
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))

@@ -273,9 +273,12 @@ class Diagnostics:
         *,
         request_id: str,
         attempt: int,
+        retry_round: int | None = None,
+        key_index: int | None = None,
         latency_seconds: float,
         status: int | None,
         error: bool,
+        retrying: bool = False,
         stream_event_count: int | None = None,
         stream_received_bytes: int | None = None,
         stream_first_event_latency_ms: float | None = None,
@@ -301,6 +304,8 @@ class Diagnostics:
         request["attempts"].append(
             {
                 "attempt": attempt,
+                "retry_round": retry_round,
+                "key_index": key_index,
                 "transport": request["transport"],
                 "http_status": status,
                 "latency_ms": round(latency_seconds * 1000, 1),
@@ -324,9 +329,8 @@ class Diagnostics:
             }
         )
         if error:
-            if (
-                request["status"] not in _TERMINAL_REQUEST_STATUSES
-                and attempt < request["max_attempts"]
+            if request["status"] not in _TERMINAL_REQUEST_STATUSES and (
+                retrying or attempt < request["max_attempts"]
             ):
                 request["status"] = "retrying"
                 self._touch_request(request)

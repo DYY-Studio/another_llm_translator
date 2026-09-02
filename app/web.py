@@ -38,9 +38,10 @@ from .config import (
 from .credentials import (
     credential_summaries,
     delete_credential,
+    parse_api_keys,
     read_credential,
     read_lan_password,
-    resolve_api_key,
+    resolve_api_keys,
     save_credential,
     save_lan_password,
 )
@@ -1010,8 +1011,10 @@ def create_app(
         preset_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
-        atomic_write_json(write_user(f"llm_presets/{preset_id}.json"), payload)
-        return {"saved": True, "digest": preset.digest}
+        path = write_user(f"llm_presets/{preset_id}.json")
+        atomic_write_json(path, preset.definition)
+        saved = load_llm_preset(path)
+        return {"saved": True, "digest": saved.digest}
 
     @app.delete("/api/v1/global/presets/{preset_id}")
     async def delete_global_preset(preset_id: str) -> dict[str, bool]:
@@ -1073,8 +1076,10 @@ def create_app(
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
     async def discover_preset_models(
-        preset_id: str, payload: dict[str, Any]
+        preset_id: str, payload: dict[str, Any], key_index: int
     ) -> dict[str, Any]:
+        if key_index < 1:
+            raise UsageError("key_index 必须从 1 开始")
         preset = validate_preset_payload(preset_id, payload)
         adapter = load_json_adapter(
             effective_path(
@@ -1083,7 +1088,10 @@ def create_app(
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_key = resolve_api_key(preset.definition["credential"])
+        api_keys = resolve_api_keys(preset.definition["credential"])
+        if key_index > len(api_keys):
+            raise UsageError("key_index 超出 API Key 范围")
+        api_key = api_keys[key_index - 1]
         endpoint, headers = adapter.build_models_request(api_key=api_key)
         url = endpoint_url(
             preset.definition["base_url"], endpoint, model=preset.definition["model"]
@@ -1139,8 +1147,13 @@ def create_app(
 
     @app.post("/api/v1/credentials/{credential_id}/test")
     async def test_credential_route(credential_id: str) -> dict[str, Any]:
-        if read_credential(credential_id) is None:
+        secret = read_credential(credential_id)
+        if secret is None:
             raise UsageError(f"凭据不存在：{credential_id}")
+        try:
+            parse_api_keys(secret)
+        except ConfigError as exc:
+            raise UsageError(str(exc)) from exc
         return {"ok": True}
 
     @app.get("/api/v1/server/status")

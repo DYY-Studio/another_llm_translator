@@ -32,6 +32,7 @@ from .execution import (
     unavailable_usage,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
+from .llm_keys import KeyPool
 from .project import prompt_file
 from .sqlite_storage import (
     atomic_write_json,
@@ -2220,7 +2221,7 @@ async def run_terminology_decision(
     resume_run_id: str | None = None,
     prompt_language: str | None = None,
     http_client: httpx.AsyncClient | None = None,
-    limiter: SlidingWindowLimiter | None = None,
+    limiter: SlidingWindowLimiter | KeyPool | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -2283,6 +2284,7 @@ async def run_terminology_decision(
             "resume_run_id": resume_run_id,
             "completed_steps": resumed_steps,
         }
+    continuation_index = 0
     if resume_run_id is None:
         run_id, run_dir = create_run(
             project,
@@ -2301,7 +2303,7 @@ async def run_terminology_decision(
             },
         )
     else:
-        run_id, run_dir, _continuation_index = continue_run(
+        run_id, run_dir, continuation_index = continue_run(
             project,
             resume_run_id,
             config=config,
@@ -2314,9 +2316,16 @@ async def run_terminology_decision(
             reused_count=0,
         )
     if limiter is None:
-        limiter = SlidingWindowLimiter(
-            int(config["execution"]["requests_per_minute"]),
-            int(config["execution"]["input_tokens_per_minute"]),
+        execution = config["execution"]
+        limiter = KeyPool(
+            int(execution["requests_per_minute"]),
+            int(execution["input_tokens_per_minute"]),
+            int(execution["max_parallel"]),
+            int(
+                execution.get(
+                    "max_parallel_per_key", execution["max_parallel"]
+                )
+            ),
         )
     eligible_terms = {str(item["normalized"]) for item in eligible}
     checkpoint = _load_checkpoint(
@@ -2336,6 +2345,14 @@ async def run_terminology_decision(
     total = len(eligible) * 2
     usage_invoked = completed < total
     usage: dict[str, Any] | None = None
+    active_llm: LLMClient | None = None
+
+    def append_llm_warnings(manifest: dict[str, Any]) -> None:
+        if active_llm is None or not active_llm.warnings:
+            return
+        existing = manifest.get("warnings", [])
+        values = existing if isinstance(existing, list) else []
+        manifest["warnings"] = list(dict.fromkeys([*values, *active_llm.warnings]))
 
     def record_resumable_interruption(
         current_usage: dict[str, Any] | None,
@@ -2380,6 +2397,15 @@ async def run_terminology_decision(
                     invocation_count + 1 if type(invocation_count) is int else 1
                 ),
             )
+        if active_llm is not None and active_llm._api_keys is not None:
+            audits = manifest.setdefault("key_audits", [])
+            if not isinstance(audits, list):
+                audits = []
+                manifest["key_audits"] = audits
+            audits.append(
+                active_llm.key_audit_summary(execution_index=continuation_index + 1)
+            )
+        append_llm_warnings(manifest)
         manifest.pop("proposal_count", None)
         manifest.pop("needs_review_count", None)
         write_json(project, run_dir / "manifest.json", manifest)
@@ -2395,6 +2421,8 @@ async def run_terminology_decision(
             client=http_client,
             on_usage=on_usage,
         ) as llm:
+            active_llm = llm
+            llm._prepare_keys()
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
@@ -2596,6 +2624,7 @@ async def run_terminology_decision(
             protected_term_count=len(protected_states),
         )
         manifest.pop("last_interruption", None)
+        append_llm_warnings(manifest)
         write_json(project, run_dir / "manifest.json", manifest)
         usage = finalize_run(
             project,
@@ -2603,8 +2632,14 @@ async def run_terminology_decision(
             status="completed",
             completed=total,
             failed=0,
+            warnings=(active_llm.warnings if active_llm is not None else []),
             usage=usage,
             usage_invoked=usage_invoked,
+            key_audit=(
+                active_llm.key_audit_summary(execution_index=continuation_index + 1)
+                if active_llm is not None and active_llm._api_keys is not None
+                else None
+            ),
         )
         if existing is not None:
             old_run_id = str(existing["run_id"])
@@ -2629,8 +2664,8 @@ async def run_terminology_decision(
             "usage": usage or unavailable_usage(),
         }
     except BaseException as exc:
-        if "llm" in locals():
-            usage = llm.usage_summary()
+        if active_llm is not None:
+            usage = active_llm.usage_summary()
         record_resumable_interruption(usage, exc)
         raise
 

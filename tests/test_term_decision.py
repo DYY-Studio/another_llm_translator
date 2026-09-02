@@ -60,6 +60,12 @@ from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
 
+@pytest.fixture(autouse=True)
+def default_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide the environment credential required at execution start."""
+    monkeypatch.setenv("LLM_API_KEY", "test")
+
+
 def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Path:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "source.txt"
@@ -2716,6 +2722,8 @@ async def test_complete_legacy_checkpoint_recovers_invalid_group_without_request
     assert manifest["completed_segment_count"] == 4
     assert manifest["usage"] == observed_usage
     assert manifest["usage_invocation_count"] == 1
+    assert manifest["key_audits"][-1]["execution_index"] == 2
+    assert manifest["key_audits"][-1]["key_count"] == 1
 
     applied = apply_decision_draft(project, confirm_all=True)
     assert applied["applied"] == 1

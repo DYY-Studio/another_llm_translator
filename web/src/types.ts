@@ -249,10 +249,12 @@ export interface DiagnosticsRequestDetail {
   reasoning_content_truncated: boolean;
   attempts: Array<{
     attempt: number;
+    retry_round?: number | null;
+    key_index?: number | null;
     transport: "non_streaming" | "sse";
     http_status: number | null;
     latency_ms: number;
-    outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "cancelled";
+    outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "authentication_error" | "rate_limit_error" | "cancelled";
     provider_error_status: number | null;
     stream_event_count?: number;
     stream_received_bytes?: number;
@@ -565,7 +567,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 4;
+  schema_version: 5;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -580,6 +582,7 @@ export interface LLMPreset {
   requests_per_minute: number;
   input_tokens_per_minute: number;
   max_parallel: number;
+  max_parallel_per_key: number;
   request_timeout_seconds: number;
   stream: boolean;
   stream_endpoint: string;

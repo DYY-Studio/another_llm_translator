@@ -56,7 +56,9 @@ Windows 和 Linux 桌面版本当前尚未公开提供。其他平台可以使�
 
 1. 打开右上角“设置”。不需要先打开项目也可以编辑全局设置。
 2. 进入全局 Preset 管理，选择一个内置示例或创建同名用户版本。
-3. 填写实际的 API 端点、模型和限流参数，并确认 Adapter 与端点协议匹配。
+3. 填写实际的 API 端点、模型和限流参数，并确认 Adapter 与端点协议匹配。RPM 和
+   ITPM 按每个 Key 独立计算；`max_parallel` 是 Preset 总并发，`max_parallel_per_key`
+   是单 Key 并发上限。
    如果 Adapter 支持 SSE，可在 Preset 中开启“流式请求”；需要独立路径时再填写
    流式 Endpoint，留空表示复用普通 Endpoint。
 4. 在 `credential` 中明确选择一种凭据来源：环境变量或系统钥匙串。两者不会互相回退。
@@ -88,7 +90,7 @@ python -m app.web
 
 ### 使用系统钥匙串
 
-在设置页的凭据管理中保存密钥，再让 Preset 通过 `keychain` 和凭据 ID 引用它。项目配置、
+在设置页的凭据管理中保存密钥（每行一个 API Key），再让 Preset 通过 `keychain` 和凭据 ID 引用它。项目配置、
 Preset、Run 快照和日志只记录引用，不记录密钥正文。
 
 不要把 API Key 写入 TOML、Preset JSON、Prompt、项目源文件或日志。
@@ -490,7 +492,7 @@ python -m app.main terms-decide-rollback novel --confirm
 
 术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。`terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用 `--replace-draft` 才能生成替代草案；替代生成失败时旧草案保持不变。
 
-`terms-decide-apply` 必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次可撤销应用，且要求术语 revision 从应用后未发生变化。自动决策在每个阶段内按当前 Preset 的 `max_parallel` 并发，两个阶段之间仍严格串行。
+`terms-decide-apply` 必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次可撤销应用，且要求术语 revision 从应用后未发生变化。自动决策在每个阶段内按当前 Preset 的 `max_parallel` 总并发和 `max_parallel_per_key` 单 Key 上限执行，两个阶段之间仍严格串行。
 
 取消任务后可用 `--resume-run` 复用已经完成的批次；剩余批次使用当前配置和 Prompt，并按检查点重新计算第二阶段的可信 anchors。规则版本 6 的 running Run 不可续作。`--force` 会结束未完成 Run 并从头重做，但不会隐式替换待审核草案。
 

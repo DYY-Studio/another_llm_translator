@@ -767,7 +767,8 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     assert snapshot["metrics"]["http_errors"] == 1
     assert snapshot["metrics"]["retry_count"] == 1
     assert snapshot["metrics"]["rate_limit_waiting_requests"] == 0
-    assert snapshot["metrics"]["usage_available"] is True
+    assert snapshot["metrics"]["usage_available"] is False
+    assert snapshot["metrics"]["usage_partial"] is True
     assert snapshot["requests"]["total"] == 1
     request_summary = snapshot["requests"]["items"][0]
     assert request_summary["status"] == "completed"

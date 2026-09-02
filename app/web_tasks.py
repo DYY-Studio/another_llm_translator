@@ -31,6 +31,7 @@ from .execution import (
     stage_fingerprint,
     unavailable_usage,
 )
+from .llm_keys import KeyPool
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .logging_utils import get_logger
@@ -619,6 +620,94 @@ class SharedLimiterPool:
 
         return entry.limiter, release
 
+@dataclass
+class _KeyPoolEntry:
+    pool: KeyPool
+    requests_per_minute: int
+    input_tokens_per_minute: int
+    max_parallel: int
+    max_parallel_per_key: int
+    leases: int = 0
+    released_at: float | None = None
+
+
+class SharedKeyPool:
+    """Share per-key windows and both concurrency caps within one process."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        retention_seconds: float = 60.0,
+    ) -> None:
+        self.clock = clock
+        self.sleeper = sleeper
+        self.retention_seconds = retention_seconds
+        self.entries: dict[tuple[str, str], _KeyPoolEntry] = {}
+
+    @staticmethod
+    def _key(config: dict[str, Any]) -> tuple[str, str]:
+        try:
+            return (
+                str(config["_llm_preset_id"]),
+                str(config["_llm_preset_hash"]),
+            )
+        except KeyError as exc:
+            raise UsageError("LLM Preset 缺少共享限流身份") from exc
+
+    def _prune(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self.entries.items()
+            if entry.leases == 0
+            and entry.released_at is not None
+            and now - entry.released_at >= self.retention_seconds
+            and not entry.pool.has_unexpired_cooldown(now)
+        ]
+        for key in expired:
+            self.entries.pop(key, None)
+
+    def acquire(self, config: dict[str, Any]) -> tuple[KeyPool, Callable[[], None]]:
+        now = self.clock()
+        self._prune(now)
+        key = self._key(config)
+        execution = config["execution"]
+        values = {
+            "requests_per_minute": int(execution["requests_per_minute"]),
+            "input_tokens_per_minute": int(execution["input_tokens_per_minute"]),
+            "max_parallel": int(execution["max_parallel"]),
+            "max_parallel_per_key": int(
+                execution.get("max_parallel_per_key", execution["max_parallel"])
+            ),
+        }
+        entry = self.entries.get(key)
+        if entry is None:
+            entry = _KeyPoolEntry(
+                pool=KeyPool(**values, clock=self.clock, sleeper=self.sleeper),
+                **values,
+            )
+            self.entries[key] = entry
+        elif any(getattr(entry, name) != value for name, value in values.items()):
+            raise ConfigError("相同 Preset 身份的共享限流配置不一致")
+        entry.leases += 1
+        entry.released_at = None
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            current = self.entries.get(key)
+            if current is None:
+                return
+            current.leases = max(0, current.leases - 1)
+            if current.leases == 0:
+                current.released_at = self.clock()
+
+        return entry.pool, release
+
 
 class WebTaskManager:
     def __init__(
@@ -626,7 +715,7 @@ class WebTaskManager:
         diagnostics: Diagnostics | None = None,
         *,
         max_active_projects: int = 2,
-        limiter_pool: SharedLimiterPool | None = None,
+        limiter_pool: SharedKeyPool | SharedLimiterPool | None = None,
     ) -> None:
         if (
             not isinstance(max_active_projects, int)
@@ -641,8 +730,13 @@ class WebTaskManager:
         self.max_active_projects = max_active_projects
         self.guard = asyncio.Lock()
         self.diagnostics = diagnostics
-        self.limiter_pool = limiter_pool or SharedLimiterPool()
+        self.limiter_pool = limiter_pool or SharedKeyPool()
         self._shutting_down = False
+
+    def _acquire_limiter(
+        self, config: dict[str, Any]
+    ) -> tuple[KeyPool | SlidingWindowLimiter, Callable[[], None]]:
+        return self.limiter_pool.acquire(config)
 
     def _validate_start(
         self,
@@ -949,7 +1043,7 @@ class WebTaskManager:
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
                         )
-                        limiter, release = self.limiter_pool.acquire(config)
+                        limiter, release = self._acquire_limiter(config)
                         if key in shared_limiters:
                             release()
                             continue
@@ -957,7 +1051,7 @@ class WebTaskManager:
                         limiter_releases.append(release)
                 else:
                     config = load_project_config(state.project, stage=state.stage)
-                    limiter, release = self.limiter_pool.acquire(config)
+                    limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (
                             str(config["_llm_preset_id"]),
