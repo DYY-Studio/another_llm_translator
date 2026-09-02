@@ -73,6 +73,8 @@
 - body 支持 `${model}`、`${system}`、`${messages}`、`${temperature}`、
   `${max_output_tokens}`、`${stream}`。占位符必须独占一个 JSON 字符串值，
   替换后保留数组、数字和布尔类型。
+- 当 Preset 的 `max_output_tokens` 为 `0` 时，值为 `${max_output_tokens}` 的
+  body 对象字段会被省略；自定义常量字段保持原样。
 - Header 可使用上述占位符及 `${api_key}`；嵌入字符串时结果为字符串。
 - 未知字段、未知占位符、混合 body 文本占位符和非法 schema 立即失败。
 

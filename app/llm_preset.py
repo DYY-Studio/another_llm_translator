@@ -147,10 +147,10 @@ def load_llm_preset(path: Path) -> LLMPreset:
             raise ConfigError("LLM Preset proxy_url 必须是有效的 HTTP/HTTPS URL")
     for key in (
         "context_window_tokens",
-        "max_output_tokens",
         "max_parallel",
     ):
         _require_integer(value, key, positive=True)
+    _require_integer(value, "max_output_tokens", positive=False)
     for key in (
         "context_safety_margin_tokens",
         "requests_per_minute",

@@ -69,6 +69,56 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
     assert response.reasoning_content is None
 
 
+def test_json_adapter_omits_zero_output_limit_from_nested_body(
+    tmp_path: Path,
+) -> None:
+    value = definition()
+    value["body"]["sampling"]["fixed_output"] = 42
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model-a",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.25,
+        max_output_tokens=0,
+        stream=False,
+    )
+
+    assert body == {
+        "deployment": "model-a",
+        "input": {
+            "conversation": [{"role": "user", "content": "hello"}]
+        },
+        "sampling": {"temperature": 0.25, "fixed_output": 42},
+        "streaming": False,
+        "reasoning_effort": "high",
+    }
+
+
+def test_json_adapter_omits_zero_output_limit_from_stream_request() -> None:
+    adapter = load_json_adapter(
+        Path(__file__).parents[1] / "llm_adapters" / "openai-compatible.json"
+    )
+
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model-a",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.25,
+        max_output_tokens=0,
+        stream=True,
+    )
+
+    assert body == {
+        "model": "model-a",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.25,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

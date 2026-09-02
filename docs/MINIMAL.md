@@ -1311,6 +1311,8 @@ safe_estimate(rendered_prompt)
 `max_output_tokens` 是提交给 Chat Completions 的输出上限，不作为每次请求必然
 占用的固定预留量。每次请求实际发送：
 
+配置为 `0` 时不发送输出上限字段；配置为正数时，下面的公式决定每次请求实际发送的上限：
+
 ```text
 effective_max_tokens
 = min(

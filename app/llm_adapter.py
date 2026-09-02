@@ -751,7 +751,14 @@ def _render_header(template: str, values: dict[str, Any]) -> str:
 
 def _render_body(value: Any, values: dict[str, Any]) -> Any:
     if isinstance(value, dict):
-        return {key: _render_body(child, values) for key, child in value.items()}
+        return {
+            key: _render_body(child, values)
+            for key, child in value.items()
+            if not (
+                child == "${max_output_tokens}"
+                and values["max_output_tokens"] == 0
+            )
+        }
     if isinstance(value, list):
         return [_render_body(child, values) for child in value]
     if isinstance(value, str):

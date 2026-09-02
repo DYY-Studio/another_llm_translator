@@ -64,12 +64,22 @@ def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
     assert preset.definition["max_output_tokens"] == 65536
 
 
+def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["max_output_tokens"] = 0
+
+    preset = load_llm_preset(write_preset(tmp_path, value))
+
+    assert preset.definition["max_output_tokens"] == 0
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
         ({"extra_body": []}, "extra_body 必须是 JSON 对象"),
         ({"extra_body": {"secret": "${api_key}"}}, "不允许模板占位符"),
         ({"context_window_tokens": 0}, "context_window_tokens 必须是正整数"),
+        ({"max_output_tokens": -1}, "max_output_tokens 必须是非负整数"),
         ({"requests_per_minute": -1}, "requests_per_minute 必须是非负整数"),
         ({"token_safety_factor": 0}, "token_safety_factor 必须大于 0"),
         ({"base_url": "not-a-url"}, "base_url 必须是有效"),
