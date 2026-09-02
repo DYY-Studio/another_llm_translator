@@ -664,6 +664,7 @@ async def _execute_stage_run(
             preparation_started_at=state.preparation_started_at,
         ) as llm:
             state.llm = llm
+            llm._prepare_keys()
             await record_preflight_failure(preflight_failed)
             await dispatch_chunks(
                 chunks,

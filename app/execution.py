@@ -107,6 +107,7 @@ class _StreamProtocolError(ExternalError):
         event_count: int,
         received_bytes: int,
         first_event_latency_ms: float | None,
+        usage_values: dict[str, int] | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -114,6 +115,7 @@ class _StreamProtocolError(ExternalError):
         self.event_count = event_count
         self.received_bytes = received_bytes
         self.first_event_latency_ms = first_event_latency_ms
+        self.usage_values = dict(usage_values or {})
 
 
 async def _iter_sse_data(
@@ -1877,6 +1879,7 @@ class LLMClient:
                     event_count=0,
                     received_bytes=0,
                     first_event_latency_ms=None,
+                    usage_values={},
                 )
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
@@ -1961,6 +1964,7 @@ class LLMClient:
                     event_count=event_count,
                     received_bytes=received_bytes,
                     first_event_latency_ms=first_event_latency_ms,
+                    usage_values=usage_values,
                 ) from exc
             if not terminal and terminal_spec["allow_clean_eof"] and event_count > 0:
                 terminal = True
@@ -1993,6 +1997,7 @@ class LLMClient:
                     event_count=event_count,
                     received_bytes=received_bytes,
                     first_event_latency_ms=first_event_latency_ms,
+                    usage_values=usage_values,
                 ) from exc
             return (
                 status,
@@ -2279,6 +2284,7 @@ class LLMClient:
             attempt_stream_event_count: int | None = None
             attempt_stream_received_bytes: int | None = None
             attempt_stream_first_event_latency_ms: float | None = None
+            request_retry_round = attempt
             if diagnostics is not None:
                 diagnostics.request_started(request_id)
             self._audit_attempt(key_index)
@@ -2357,7 +2363,7 @@ class LLMClient:
                     self._record_stream_usage(
                         exc.usage_values,
                         key_index,
-                        affects_global=bool(exc.usage_values),
+                        affects_global=True,
                     )
                 elapsed = time.monotonic() - started
                 await self._debug_attempt(
@@ -2481,6 +2487,12 @@ class LLMClient:
                 attempt_stream_event_count = exc.event_count
                 attempt_stream_received_bytes = exc.received_bytes
                 attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
+                if self.adapter.usage_pointers is not None:
+                    self._record_stream_usage(
+                        exc.usage_values,
+                        key_index,
+                        affects_global=True,
+                    )
                 await self._debug_attempt(
                     request_id,
                     send_attempt,
@@ -2543,7 +2555,7 @@ class LLMClient:
                     diagnostics.request_finished(
                         request_id=request_id,
                         attempt=send_attempt,
-                        retry_round=attempt,
+                        retry_round=request_retry_round,
                         key_index=key_index + 1,
                         latency_seconds=time.monotonic() - started,
                         status=response_status,
@@ -2654,9 +2666,7 @@ class LLMClient:
             if extracted is not None:
                 self._record_usage(extracted, key_index)
             else:
-                self._audit_usage_missing(
-                    key_index, affects_global=200 <= response.status_code < 300
-                )
+                self._audit_usage_missing(key_index, affects_global=True)
             if 200 <= response.status_code < 300:
                 debug = self.config["debug"]
                 if (

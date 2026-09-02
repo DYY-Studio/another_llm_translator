@@ -676,6 +676,56 @@ async def test_malformed_stream_fails_immediately_with_http_status(
 
 
 @pytest.mark.asyncio
+async def test_stream_protocol_error_keeps_usage_seen_before_error(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 1
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return stream_response(
+            {
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10,
+                }
+            },
+            "not-json",
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "test-key"
+    try:
+        llm = LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path / "run",
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        )
+        with pytest.raises(ExternalError, match="不是合法 JSON"):
+            async with llm:
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+        assert llm.usage_summary() == {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "available": True,
+            "partial": False,
+        }
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_name", "events", "expected", "usage"),
     [

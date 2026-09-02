@@ -2422,6 +2422,7 @@ async def run_terminology_decision(
             on_usage=on_usage,
         ) as llm:
             active_llm = llm
+            llm._prepare_keys()
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
