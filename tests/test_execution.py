@@ -1183,6 +1183,266 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
+    tmp_path: Path,
+) -> None:
+    current = load_global_config(ROOT)
+    current["retry"]["http_max_attempts"] = 1
+    current["execution"]["max_parallel"] = 1
+    current["execution"]["max_parallel_per_key"] = 1
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers["Authorization"]
+        calls.append(authorization)
+        if authorization == "Bearer bad-key":
+            return httpx.Response(401, text="invalid key")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"type":"end"}'}}],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "bad-key\ngood-key"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+            second_response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert response.content == '{"type":"end"}'
+    assert second_response.content == '{"type":"end"}'
+    assert calls == ["Bearer bad-key", "Bearer good-key", "Bearer good-key"]
+
+
+@pytest.mark.asyncio
+async def test_llm_client_rotates_keys_on_429_without_consuming_round(
+    tmp_path: Path,
+) -> None:
+    current = load_global_config(ROOT)
+    current["retry"]["http_max_attempts"] = 1
+    current["retry"]["base_delay_seconds"] = 0
+    current["retry"]["jitter_seconds"] = 0
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["Authorization"])
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"type":"end"}'}}],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert response.content == '{"type":"end"}'
+    assert calls == ["Bearer first-key", "Bearer second-key"]
+    audit = llm.key_audit_summary(execution_index=0)
+    assert audit["key_count"] == 2
+    assert audit["keys"] == [
+        {
+            "key_index": 1,
+            "request_count": 1,
+            "attempt_count": 1,
+            "authentication_error_count": 0,
+            "rate_limit_count": 1,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "available": False,
+                "partial": False,
+            },
+        },
+        {
+            "key_index": 2,
+            "request_count": 1,
+            "attempt_count": 1,
+            "authentication_error_count": 0,
+            "rate_limit_count": 0,
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "available": True,
+                "partial": False,
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_client_bounds_all_key_429_by_retry_rounds(tmp_path: Path) -> None:
+    current = load_global_config(ROOT)
+    current["retry"]["http_max_attempts"] = 2
+    current["retry"]["base_delay_seconds"] = 0
+    current["retry"]["jitter_seconds"] = 0
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["Authorization"])
+        return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
+    try:
+        with pytest.raises(ExternalError, match="限流"):
+            async with LLMClient(
+                current,
+                SlidingWindowLimiter(0, 0),
+                run_dir=tmp_path,
+                project_id="PRJ",
+                run_id="RUN",
+                stage="translation",
+                client=client,
+            ) as llm:
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert calls == [
+        "Bearer first-key",
+        "Bearer second-key",
+        "Bearer first-key",
+        "Bearer second-key",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_client_does_not_switch_key_for_configuration_error(
+    tmp_path: Path,
+) -> None:
+    current = load_global_config(ROOT)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["Authorization"])
+        return httpx.Response(400, text="invalid request")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
+    try:
+        with pytest.raises(FatalExternalError, match="配置错误"):
+            async with LLMClient(
+                current,
+                SlidingWindowLimiter(0, 0),
+                run_dir=tmp_path,
+                project_id="PRJ",
+                run_id="RUN",
+                stage="translation",
+                client=client,
+            ) as llm:
+                await llm.chat(
+                    messages=render_messages("prompt", {"segments": []}),
+                    temperature=0.2,
+                    estimated_input_tokens=10,
+                )
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert calls == ["Bearer first-key"]
+
+
+@pytest.mark.asyncio
+async def test_llm_client_warns_and_uses_backoff_for_invalid_retry_after(
+    tmp_path: Path,
+) -> None:
+    current = load_global_config(ROOT)
+    current["retry"]["http_max_attempts"] = 1
+    current["retry"]["base_delay_seconds"] = 0
+    current["retry"]["jitter_seconds"] = 0
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["Authorization"])
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "later"}, text="slow")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path,
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+            warnings = list(llm.warnings)
+    finally:
+        del os.environ["LLM_API_KEY"]
+        await client.aclose()
+    assert response.content == '{"type":"end"}'
+    assert calls == ["Bearer first-key", "Bearer second-key"]
+    assert any("Retry-After 无效" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
 async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
     current = config()
     current["debug"]["enabled"] = True
@@ -1742,11 +2002,42 @@ def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
     manifest = read_json(project, run_dir / "manifest.json")
     assert manifest["usage"] == usage
     assert manifest["status"] == "completed"
-
     write_manifest()
     finalize_run(project, run_dir, status="failed", completed=0, failed=1)
     manifest = read_json(project, run_dir / "manifest.json")
     assert "usage" not in manifest
+
+
+def test_finalize_run_appends_key_audit(tmp_path: Path) -> None:
+    project = _finalize_project(tmp_path)
+    current = config()
+    run_id, run_dir = create_run(
+        project,
+        config=current,
+        stage="translation",
+        fingerprint="fingerprint",
+        prompt="prompt",
+        selected_count=0,
+        requested_count=0,
+        reused_count=0,
+    )
+    audit = {
+        "credential": {"kind": "environment", "name": "LLM_API_KEY"},
+        "execution_index": 0,
+        "key_count": 1,
+        "keys": [],
+    }
+    finalize_run(
+        project,
+        run_dir,
+        status="completed",
+        completed=0,
+        failed=0,
+        key_audit=audit,
+    )
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["key_audits"] == [audit]
+    assert manifest["status"] == "completed"
 
 
 def test_combine_usage_accumulates_observed_lower_bounds() -> None:

@@ -535,6 +535,64 @@ async def test_stream_retry_preserves_retry_after_headers(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_stream_provider_rate_limit_rotates_key_without_retry_round(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 1
+    current["retry"]["base_delay_seconds"] = 5
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["Authorization"])
+        if len(calls) == 1:
+            body = event(
+                {
+                    "choices": [
+                        {"delta": {}, "finish_reason": "error"}
+                    ],
+                    "error": {"status": 429, "message": "slow"},
+                }
+            ).encode("utf-8")
+            return httpx.Response(
+                200,
+                headers={
+                    "content-type": "text/event-stream",
+                    "Retry-After": "0",
+                },
+                content=body,
+            )
+        return stream_response(
+            {"choices": [{"delta": {"content": "完成"}}]},
+            "[DONE]",
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
+    try:
+        async with LLMClient(
+            current,
+            SlidingWindowLimiter(0, 0),
+            run_dir=tmp_path / "run",
+            project_id="PRJ",
+            run_id="RUN",
+            stage="translation",
+            client=client,
+        ) as llm:
+            response, _ = await llm.chat(
+                messages=render_messages("prompt", {"segments": []}),
+                temperature=0.2,
+                estimated_input_tokens=10,
+            )
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+        await client.aclose()
+
+    assert response.content == "完成"
+    assert calls == ["Bearer first-key", "Bearer second-key"]
+
+
+@pytest.mark.asyncio
 async def test_stream_exhaustion_is_failed_not_left_retrying(tmp_path: Path) -> None:
     current = streaming_config(tmp_path)
     set_clean_eof(current, tmp_path, False)
