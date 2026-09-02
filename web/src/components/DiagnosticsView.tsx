@@ -542,7 +542,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
                   <div className="exchange-attempts">
                     {detail.attempts.length ? detail.attempts.map((attempt) => (
                       <article key={attempt.attempt}>
-                        <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}</strong>
+                        <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}{attempt.retry_round == null ? "" : ` · ${translate("diagnostics.retryRound", language, { count: attempt.retry_round })}`}{attempt.key_index == null ? "" : ` · ${translate("diagnostics.key", language, { count: attempt.key_index })}`}</strong>
                         <span>{attempt.http_status === null ? translate("diagnostics.networkError", language) : `HTTP ${attempt.http_status}`}</span>
                         {attempt.provider_error_status !== null && <span>{translate("diagnostics.providerErrorStatus", language, { status: attempt.provider_error_status })}</span>}
                         <span>{translate("diagnostics.outcome", language, { outcome: attempt.outcome })}</span>

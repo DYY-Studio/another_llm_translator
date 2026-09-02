@@ -70,6 +70,7 @@ def save_credential(credential_id: str, secret: str) -> None:
     account = _validate_id(credential_id)
     if not isinstance(secret, str) or not secret:
         raise ConfigError("凭据内容必须是非空字符串")
+    parse_api_keys(secret)
     try:
         keyring.set_password(SERVICE, account, secret)
     except keyring.errors.KeyringError as exc:
@@ -98,17 +99,17 @@ def parse_api_keys(secret: str) -> tuple[str, ...]:
     """Parse a newline-delimited API key value without normalizing keys."""
     if not isinstance(secret, str) or not secret:
         raise ConfigError("API Key 内容必须是非空字符串")
-    normalized = secret.replace("\r\n", "\n")
-    if normalized.endswith("\n"):
-        normalized = normalized[:-1]
+    normalized = secret.replace("\r\n", "\n").removesuffix("\n")
     lines = normalized.split("\n")
-    if not lines or any(not line for line in lines):
-        raise ConfigError("API Key 列表不能包含空行")
+    seen: set[str] = set()
     for index, line in enumerate(lines, start=1):
+        if not line:
+            raise ConfigError(f"API Key 第 {index} 行不能包含空行")
         if any(character.isspace() for character in line):
             raise ConfigError(f"API Key 第 {index} 行不能包含空白字符")
-    if len(lines) != len(set(lines)):
-        raise ConfigError("API Key 列表不能包含重复 Key")
+        if line in seen:
+            raise ConfigError(f"API Key 第 {index} 行不能包含重复 Key")
+        seen.add(line)
     return tuple(lines)
 
 

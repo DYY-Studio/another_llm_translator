@@ -20,11 +20,11 @@ def test_web_credentials_crud_and_test(tmp_path: Path, fake_keyring: FakeKeyring
 
     created = client.post(
         "/api/v1/credentials",
-        json={"id": "openai-main", "secret": "s3cret"},
+        json={"id": "openai-main", "secret": "s3cret\nsecond-secret\n"},
     )
     assert created.status_code == 200
     assert created.json() == {"saved": True}
-    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret"
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret\nsecond-secret\n"
 
     listed = client.get("/api/v1/credentials").json()
     assert [item["id"] for item in listed["credentials"]] == ["openai-main"]
@@ -36,10 +36,10 @@ def test_web_credentials_crud_and_test(tmp_path: Path, fake_keyring: FakeKeyring
 
     updated = client.put(
         "/api/v1/credentials/openai-main",
-        json={"secret": "s3cret-2"},
+        json={"secret": "s3cret-2\nnext-secret"},
     )
     assert updated.status_code == 200
-    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret-2"
+    assert fake_keyring.values[("another-llm-translator", "openai-main")] == "s3cret-2\nnext-secret"
 
     missing_test = client.post("/api/v1/credentials/nope/test")
     assert missing_test.status_code == 400
@@ -62,6 +62,12 @@ def test_web_credentials_reject_invalid_payloads(tmp_path: Path) -> None:
     assert client.post("/api/v1/credentials", json={"id": "ok", "secret": ""}).status_code == 400
     assert client.post("/api/v1/credentials", json={"id": "../bad", "secret": "x"}).status_code == 400
     assert client.put("/api/v1/credentials/openai-main", json={"secret": 1}).status_code == 400
+    assert client.post(
+        "/api/v1/credentials", json={"id": "blank", "secret": "one\n\ntwo"}
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/credentials", json={"id": "duplicate", "secret": "one\none"}
+    ).status_code == 400
 
 
 def test_web_preset_with_keychain_credential_validates(

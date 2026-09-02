@@ -321,6 +321,7 @@ function PresetSettings({ language }: { language: Language }) {
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
+  const [keyIndex, setKeyIndex] = useState(1);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [keychainCredentials, setKeychainCredentials] = useState<CredentialSummary[]>([]);
@@ -370,12 +371,16 @@ function PresetSettings({ language }: { language: Language }) {
 
   async function discoverModels() {
     if (!preset) return;
+    if (!Number.isInteger(keyIndex) || keyIndex < 1) {
+      setModelsError(translate("preset.keyIndexInvalid", language));
+      return;
+    }
     setModels(null);
     setModelsLoading(true);
     setModelsError(""); setMessage(""); setError("");
     try {
       const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
-      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST", body: JSON.stringify(definition) });
+      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models?key_index=${encodeURIComponent(String(keyIndex))}`, { method: "POST", body: JSON.stringify(definition) });
       setModels(result.models);
     } catch (reason) { setModelsError(errorMessage(reason, language)); }
     finally { setModelsLoading(false); }
@@ -462,15 +467,17 @@ function PresetSettings({ language }: { language: Language }) {
                   )}
                 </div>
               </Field>
+              <Field label={translate("preset.keyIndex", language)} help={translate("preset.keyIndexHint", language)}><input type="number" min={1} step={1} value={keyIndex} onChange={(event) => setKeyIndex(Number(event.target.value))} /></Field>
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
               <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={1} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
               <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
-              <NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
-              <NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
+              <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
+              <NumberField label={translate("preset.itpm", language)} value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
               <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
+              <NumberField label={translate("preset.maxConcurrencyPerKey", language)} value={preset.max_parallel_per_key} min={1} step={1} help={translate("preset.maxConcurrencyPerKeyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel_per_key = value; })} />
               <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("preset.timeoutSecondsHint", language)} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
               <ToggleField
                 label={translate("preset.streaming", language)}
@@ -575,7 +582,7 @@ function CredentialsSettings({ language }: { language: Language }) {
           <h2>{translate("credentials.new", language)}</h2>
           <div className="config-grid">
             <Field label={translate("credentials.id", language)}><input value={newId} onChange={(event) => setNewId(event.target.value)} /></Field>
-            <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
+            <Field label={translate("credentials.secret", language)} help={translate("credentials.secretHint", language)}><textarea spellCheck={false} rows={4} value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
           </div>
           <div className="button-group"><button className="primary-button" disabled={!newId || !newSecret} onClick={() => void create()}>{translate("common.save", language)}</button><button className="quiet-button" onClick={reset}>{translate("common.cancel", language)}</button></div>
         </section>
@@ -600,9 +607,9 @@ function CredentialsSettings({ language }: { language: Language }) {
           <section className="config-section">
             <h2>{translate("credentials.edit", language, { id: editing.id })}</h2>
             <div className="config-grid">
-              <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
+              <Field label={translate("credentials.secret", language)} help={translate("credentials.secretHint", language)}><textarea spellCheck={false} rows={4} value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
             </div>
-            <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => setEditing(null)}>{translate("common.cancel", language)}</button></div>
+            <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => { setEditing(null); setEditSecret(""); }}>{translate("common.cancel", language)}</button></div>
           </section>
         )}
       </div>

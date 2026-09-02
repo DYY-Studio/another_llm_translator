@@ -22,6 +22,7 @@ from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import ConfigError, UsageError
 from app.execution import Scope, create_run
+from app.llm_keys import KeyPool
 from app.locking import project_write_lock
 from app.project import init_project
 from app.sqlite_storage import (
@@ -1523,6 +1524,22 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert preview["transport"] == "sse"
     assert preview["body"]["stream"] is True
     assert preview["body"]["stream_options"] == {"include_usage": True}
+
+    legacy = {
+        **default,
+        "preset_id": "legacy",
+        "schema_version": 4,
+    }
+    legacy.pop("max_parallel_per_key")
+    migrated = client.put("/api/v1/global/presets/legacy", json=legacy)
+    assert migrated.status_code == 200
+    stored_legacy = json.loads(
+        (tmp_path / "user-root" / "llm_presets" / "legacy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored_legacy["schema_version"] == 5
+    assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
 
     conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
     assert client.put(
@@ -3919,6 +3936,7 @@ async def test_web_tasks_pass_shared_limiter_to_same_preset_runs(
     )
     assert len(limiters) == 2
     assert limiters[0] is limiters[1]
+    assert isinstance(limiters[0], KeyPool)
 
 
 def test_web_task_options_include_completed_terminology_scans(
@@ -4089,10 +4107,10 @@ def test_web_preset_models_discovery_fetches_and_parses(
             "request_timeout_seconds": 45,
         }
     )
-    os.environ["DRAFT_LLM_API_KEY"] = "draft-secret"
+    os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
     try:
         result = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=2", json=preset
         )
     finally:
         del os.environ["DRAFT_LLM_API_KEY"]
@@ -4105,7 +4123,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         "count": 2,
     }
     assert fake.request_url == "https://draft.example/v2/models"
-    assert fake.request_headers["Authorization"] == "Bearer draft-secret"
+    assert fake.request_headers["Authorization"] == "Bearer second-secret"
     assert fake.kwargs == {
         "timeout": 45.0,
         "proxy": "https://proxy.example",
@@ -4114,9 +4132,19 @@ def test_web_preset_models_discovery_fetches_and_parses(
         "/api/v1/global/presets/default"
     ).json() == saved_definition
 
+    os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
+    try:
+        out_of_range = client.post(
+            "/api/v1/global/presets/default/models?key_index=3", json=preset
+        )
+    finally:
+        del os.environ["DRAFT_LLM_API_KEY"]
+    assert out_of_range.status_code == 400
+    assert "超出" in out_of_range.json()["error"]
+
     mismatched = {**preset, "preset_id": "other"}
     rejected = client.post(
-        "/api/v1/global/presets/default/models", json=mismatched
+        "/api/v1/global/presets/default/models?key_index=1", json=mismatched
     )
     assert rejected.status_code == 400
     assert "URL 中的 Preset ID" in rejected.json()["error"]
@@ -4143,7 +4171,7 @@ def test_web_preset_models_discovery_fails_fast(
     preset["adapter_id"] = "minimal"
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     no_spec = client.post(
-        "/api/v1/global/presets/default/models", json=preset
+        "/api/v1/global/presets/default/models?key_index=1", json=preset
     )
     assert no_spec.status_code == 400
     assert "未声明模型发现规格" in no_spec.json()["error"]
@@ -4151,7 +4179,7 @@ def test_web_preset_models_discovery_fails_fast(
     preset["adapter_id"] = "openai-compatible"
     monkeypatch.delenv(preset["credential"]["name"], raising=False)
     missing_key = client.post(
-        "/api/v1/global/presets/default/models", json=preset
+        "/api/v1/global/presets/default/models?key_index=1", json=preset
     )
     assert missing_key.status_code == 400
     assert "缺少环境变量" in missing_key.json()["error"]
@@ -4162,7 +4190,7 @@ def test_web_preset_models_discovery_fails_fast(
         fake.raise_error = httpx.ConnectError("no route")
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
         network = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert network.status_code == 400
         assert "模型列表请求失败" in network.json()["error"]
@@ -4171,7 +4199,7 @@ def test_web_preset_models_discovery_fails_fast(
         fake.response = FakeModelsResponse(status_code=500)
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
         http_error = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert http_error.status_code == 400
         assert "HTTP 500" in http_error.json()["error"]
@@ -4180,7 +4208,7 @@ def test_web_preset_models_discovery_fails_fast(
         fake.response = FakeModelsResponse(json_error=True)
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
         bad_json = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert bad_json.status_code == 400
         assert "不是合法 JSON" in bad_json.json()["error"]
@@ -4189,7 +4217,7 @@ def test_web_preset_models_discovery_fails_fast(
         fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
         monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
         bad_shape = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert bad_shape.status_code == 400
         assert "不是数组" in bad_shape.json()["error"]
