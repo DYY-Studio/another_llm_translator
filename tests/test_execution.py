@@ -18,35 +18,8 @@ from app.errors import (
     RequestSizeError,
     StorageError,
 )
-from app.execution import (
-    CJK_RE,
-    ChunkPlan,
-    LLMClient,
-    PreviousContextIndex,
-    Scope,
-    SlidingWindowLimiter,
-    build_chunk_plans,
-    classify_stage,
-    classify_stage_states,
-    combine_usage,
-    contiguous_groups,
-    continue_run,
-    create_run,
-    dispatch_chunks,
-    estimate_messages,
-    estimate_messages_upper_bound,
-    estimate_single_segment_preflight,
-    estimate_tokens,
-    finalize_run,
-    full_prompt,
-    iter_chunk_plans,
-    localize_request_ids,
-    materialize_chunk_stream,
-    render_messages,
-    save_debug_chunks,
-    select_scope,
-    stage_fingerprint,
-)
+from app.execution import CJK_RE, ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
+from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_adapter import load_json_adapter
 from app.project import init_project
 from app.sqlite_storage import (
@@ -58,7 +31,7 @@ from app.sqlite_storage import (
     terminology_scan_state,
     write_json,
 )
-from app.stages import StageRunState, _execute_stage_run
+from app.stage_runtime import StageRunState, _execute_stage_run
 from tests.test_foundation import make_app_root
 
 ROOT = Path(__file__).parents[1]

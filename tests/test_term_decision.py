@@ -24,7 +24,7 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
-from app.stages import build_term_library_rows, term_normalization
+from app.term_library import build_term_library_rows, term_normalization
 from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,

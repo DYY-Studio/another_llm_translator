@@ -13,7 +13,9 @@ from app.errors import FatalExternalError, RequestSizeError
 from app.execution import Scope, latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
 from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
-from app.stages import _restore_leading_whitespace, run_terminology, run_translation
+from app.stage_runtime import _restore_leading_whitespace
+from app.stage_terminology import run_terminology
+from app.stage_translation import run_translation
 from app.term_library import TermNormalization, load_terms
 from app.term_matching import _TermMatchCache, match_term_validation, match_terms
 from tests.helpers import llm_jsonl, use_llm_preset

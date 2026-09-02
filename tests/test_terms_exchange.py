@@ -11,7 +11,7 @@ from app.errors import UsageError
 from app.execution import Scope
 from app.main import run
 from app.project import init_project
-from app.stages import run_terminology
+from app.stage_terminology import run_terminology
 from app.term_exchange import export_terms, import_terms
 from app.term_library import TermNormalization, load_terms, publish_partial_terms
 from app.term_matching import match_terms

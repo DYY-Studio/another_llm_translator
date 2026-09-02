@@ -11,21 +11,14 @@ import pytest
 from app.config import load_global_config, load_project_config
 from app.llm_preset import load_llm_preset
 from app.errors import ConfigError, UsageError
-from app.execution import (
-    LLMClient,
-    Scope,
-    SlidingWindowLimiter,
-    choose_running_run,
-    create_run,
-)
+from app.llm_client import LLMClient, SlidingWindowLimiter
+from app.execution import Scope, choose_running_run, create_run
 from app.main import build_parser, run as run_cli
 from app.project import init_project
-from app.stages import (
-    _confirm_fingerprint_reuse,
-    run_review,
-    run_terminology,
-    run_translation,
-)
+from app.stage_runtime import _confirm_fingerprint_reuse
+from app.stage_review import run_review
+from app.stage_terminology import run_terminology
+from app.stage_translation import run_translation
 from app.sqlite_storage import (
     append_jsonl,
     read_json,

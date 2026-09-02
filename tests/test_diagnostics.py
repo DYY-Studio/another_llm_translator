@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from app.diagnostics import Diagnostics, DiagnosticsHub
 from app.errors import ExternalError
-from app.execution import LLMClient, SlidingWindowLimiter, render_messages
+from app.llm_client import LLMClient, SlidingWindowLimiter
+from app.execution import render_messages
 from app.logging_utils import get_logger
 from app.web import create_app
 from tests.test_execution import config

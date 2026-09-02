@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from app.execution import full_prompt, stage_fingerprint
 from app.project import init_project
 from app.sqlite_storage import read_json
-from app.stages import _prompt, _prompt_language, prompt_middle_digests, run_translation
+from app.stage_runtime import _prompt, _prompt_language, prompt_middle_digests
+from app.stage_translation import run_translation
 from app.web import create_app
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_foundation import make_app_root
