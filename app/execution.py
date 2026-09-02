@@ -20,7 +20,7 @@ from typing import Any, TypeVar
 import httpx
 
 from .config import load_project_config, load_run_config
-from .credentials import resolve_api_key
+from .credentials import resolve_api_keys
 from .diagnostics import current_diagnostics
 from .documents import aozora_to_model_ruby
 from .errors import (
@@ -1948,7 +1948,8 @@ class LLMClient:
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
-        api_key = resolve_api_key(self.config["llm"]["credential"])
+        api_keys = resolve_api_keys(self.config["llm"]["credential"])
+        api_key = api_keys[0]
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
         configured_output = int(self.config["llm"]["max_output_tokens"])
         available_output = max(

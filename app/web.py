@@ -40,7 +40,7 @@ from .credentials import (
     delete_credential,
     read_credential,
     read_lan_password,
-    resolve_api_key,
+    resolve_api_keys,
     save_credential,
     save_lan_password,
 )
@@ -1083,7 +1083,7 @@ def create_app(
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_key = resolve_api_key(preset.definition["credential"])
+        api_key = resolve_api_keys(preset.definition["credential"])[0]
         endpoint, headers = adapter.build_models_request(api_key=api_key)
         url = endpoint_url(
             preset.definition["base_url"], endpoint, model=preset.definition["model"]

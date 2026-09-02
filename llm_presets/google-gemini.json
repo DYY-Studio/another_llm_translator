@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "preset_id": "google-gemini",
   "adapter_id": "google-gemini",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
@@ -13,6 +13,7 @@
   "requests_per_minute": 30,
   "input_tokens_per_minute": 50000,
   "max_parallel": 4,
+  "max_parallel_per_key": 4,
   "request_timeout_seconds": 120,
   "stream": false,
   "stream_endpoint": "/models/${model}:streamGenerateContent?alt=sse",

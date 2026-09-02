@@ -569,6 +569,7 @@ def _resolve_llm_config(
                 "requests_per_minute",
                 "input_tokens_per_minute",
                 "max_parallel",
+                "max_parallel_per_key",
                 "request_timeout_seconds",
             )
         }

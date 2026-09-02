@@ -15,7 +15,7 @@ def migrate_llm_resources(*, base: Path | None = None) -> int:
     root = default_user_root(base=base) if base is not None else user_root()
     migrated = 0
     migrated += _migrate_directory(
-        root / "llm_presets", kind="preset", legacy_versions={2, 3}
+        root / "llm_presets", kind="preset", legacy_versions={2, 3, 4}
     )
     migrated += _migrate_directory(
         root / "llm_adapters", kind="adapter", legacy_versions={1}

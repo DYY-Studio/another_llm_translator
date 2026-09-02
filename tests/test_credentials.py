@@ -5,8 +5,9 @@ import pytest
 from app.credentials import (
     credential_summaries,
     delete_credential,
+    parse_api_keys,
     read_credential,
-    resolve_api_key,
+    resolve_api_keys,
     save_credential,
 )
 from app.errors import ConfigError, ExternalError
@@ -49,20 +50,33 @@ def test_credential_rejects_invalid_ids_and_empty_secret() -> None:
 def test_resolve_environment_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DRAFT_KEY", "value")
-    assert resolve_api_key({"kind": "environment", "name": "DRAFT_KEY"}) == "value"
+    monkeypatch.setenv("DRAFT_KEY", "value\nvalue-2")
+    assert resolve_api_keys({"kind": "environment", "name": "DRAFT_KEY"}) == (
+        "value",
+        "value-2",
+    )
     monkeypatch.delenv("DRAFT_KEY")
     with pytest.raises(ExternalError, match="缺少环境变量：DRAFT_KEY"):
-        resolve_api_key({"kind": "environment", "name": "DRAFT_KEY"})
+        resolve_api_keys({"kind": "environment", "name": "DRAFT_KEY"})
 
 
 def test_resolve_keychain_credential() -> None:
-    save_credential("keychain-main", "value")
-    assert resolve_api_key({"kind": "keychain", "name": "keychain-main"}) == "value"
+    save_credential("keychain-main", "value\nvalue-2")
+    assert resolve_api_keys({"kind": "keychain", "name": "keychain-main"}) == (
+        "value",
+        "value-2",
+    )
     with pytest.raises(ExternalError, match="缺少钥匙串凭据：missing"):
-        resolve_api_key({"kind": "keychain", "name": "missing"})
+        resolve_api_keys({"kind": "keychain", "name": "missing"})
 
 
 def test_resolve_rejects_unknown_kind() -> None:
     with pytest.raises(ExternalError, match="未知凭据类型"):
-        resolve_api_key({"kind": "file", "name": "x"})
+        resolve_api_keys({"kind": "file", "name": "x"})
+
+
+def test_parse_api_keys_rejects_empty_duplicate_and_whitespace_lines() -> None:
+    assert parse_api_keys("first\r\nsecond\n") == ("first", "second")
+    for value in ("first\n\nsecond", "first\nfirst", "first\n second"):
+        with pytest.raises(ConfigError):
+            parse_api_keys(value)
