@@ -18,7 +18,9 @@ from app.sqlite_storage import (
     segment_ids,
     write_json,
 )
-from app.stages import TermNormalization, export_project, load_terms, match_terms
+from app.project_export import export_project
+from app.term_library import TermNormalization, load_terms
+from app.term_matching import match_terms
 from tests.test_foundation import make_app_root
 
 

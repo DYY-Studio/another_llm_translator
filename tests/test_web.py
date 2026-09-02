@@ -136,7 +136,7 @@ def test_web_compacts_project_storage_and_blocks_running_tasks(
         called.append(project)
         return {"before_bytes": 100, "after_bytes": 64, "reclaimed_bytes": 36}
 
-    monkeypatch.setattr(web_module, "compact_project_database", fake_compact)
+    monkeypatch.setattr("app.web_project_routes.compact_project_database", fake_compact)
     response = client.post("/api/v1/projects/sample/storage/compact")
     assert response.status_code == 200
     assert response.json() == {
@@ -198,7 +198,7 @@ def test_web_unexpected_error_returns_safe_payload(
     def unexpected(*_: object, **__: object) -> None:
         raise RuntimeError("secret diagnostic detail")
 
-    monkeypatch.setattr(web_module, "resolve_project", unexpected)
+    monkeypatch.setattr("app.web_project_routes.resolve_project", unexpected)
     client = TestClient(
         create_app(projects_root=projects_root),
         raise_server_exceptions=False,
