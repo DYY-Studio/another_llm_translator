@@ -1595,9 +1595,9 @@ async def test_dynamic_itpm_failure_finalizes_translation_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo")
-    from app import stages
+    from app import stage_runtime
 
-    original_estimate = stages._request_estimate
+    original_estimate = stage_runtime._request_estimate
     estimate_calls = 0
 
     def fail_second_estimate(
@@ -1638,7 +1638,7 @@ async def test_dynamic_itpm_failure_finalizes_translation_run(
             },
         )
 
-    monkeypatch.setattr(stages, "_request_estimate", fail_second_estimate)
+    monkeypatch.setattr(stage_runtime, "_request_estimate", fail_second_estimate)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(RequestSizeError, match="ITPM"):

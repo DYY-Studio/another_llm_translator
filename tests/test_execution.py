@@ -627,7 +627,7 @@ async def test_stage_storage_error_finalizes_run_without_dispatch(
     def fail_debug(*_: object) -> None:
         raise StorageError("duplicate debug chunk")
 
-    monkeypatch.setattr("app.stages.save_debug_chunks", fail_debug)
+    monkeypatch.setattr("app.stage_runtime.save_debug_chunks", fail_debug)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     async def noop_one(_: object) -> None:

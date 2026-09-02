@@ -104,10 +104,8 @@ from .sqlite_storage import (
     read_json,
     read_adapter_state,
 )
-from .stages import (
-    export_project,
-    run_apply,
-)
+from .project_export import export_project
+from .stage_review import run_apply
 from .term_exchange import export_terms, import_terms
 from .term_library import publish_partial_terms
 from .term_decision import (

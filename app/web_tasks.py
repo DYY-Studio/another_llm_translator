@@ -43,14 +43,12 @@ from .sqlite_storage import (
     record_exists,
     utc_now,
 )
-from .stages import (
-    load_terms,
-    prompt_middle_digests,
-    run_all,
-    run_review,
-    run_terminology,
-    run_translation,
-)
+from .stages import run_all
+from .stage_review import run_review
+from .stage_terminology import run_terminology
+from .stage_translation import run_translation
+from .stage_runtime import prompt_middle_digests
+from .term_library import load_terms
 from .term_decision import (
     STAGE as TERMINOLOGY_DECISION_STAGE,
 )
