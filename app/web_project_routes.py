@@ -9,16 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from .config import (
-    LLM_MODEL_STAGES,
-    dump_config,
-    load_config,
-    resolve_project_config,
-)
 from .errors import (
     UsageError,
 )
-from .execution import full_prompt
 from .locking import project_write_lock
 from .plugins import (
     document_adapter_replacement_options,
@@ -27,7 +20,6 @@ from .plugins import (
     get_document_adapter_for_extension,
 )
 from .project import (
-    PROMPT_LANGUAGES,
     FileReplacementPlan,
     add_project_files,
     apply_file_replacement,
@@ -35,22 +27,15 @@ from .project import (
     init_project,
     natural_path_key,
     prepare_file_replacement,
-    prompt_file,
     remove_project_files,
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
     load_source_files,
 )
-from .sqlite_storage import (
-    atomic_write_text,
-    compact_project_database,
-    read_json,
-    read_adapter_state,
-)
-from .user_config import effective_path, user_root
+from .sqlite_storage import compact_project_database, read_json, read_adapter_state
+from .user_config import user_root
 from .web_store import WebStore
-from .web_tasks import task_options
 
 @dataclass
 class ReplacementPreviewSession:
@@ -226,70 +211,6 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
 
     def replacement_key(root: Path, file_id: str) -> tuple[Path, str]:
         return root.resolve(), file_id
-
-    def prompt_languages_for(root: Path) -> dict[str, list[str]]:
-        """Available prompt languages per stage from an effective view."""
-        return {
-            stage: [
-                language
-                for language in PROMPT_LANGUAGES
-                if (root / "prompts" / prompt_file(stage, language)).is_file()
-            ]
-            for stage in LLM_MODEL_STAGES
-        }
-
-    def validate_language(value: object) -> str:
-        if value not in PROMPT_LANGUAGES:
-            raise UsageError("language 必须是 zh-CN 或 en")
-        return str(value)
-
-    def prompt_view(
-        stage: str,
-        language: str,
-        file_for: Callable[[str], Path],
-        available: list[str],
-        global_file_for: Callable[[str], Path] | None = None,
-    ) -> dict[str, Any]:
-        resolved = (
-            language
-            if language in available and file_for(language).is_file()
-            else "zh-CN"
-        )
-        path = file_for(resolved)
-        content = path.read_text(encoding="utf-8")
-        result: dict[str, Any] = {
-            "content": content,
-            "language": resolved,
-            "assembled": full_prompt(stage, content, resolved),
-            "languages": available,
-        }
-        if stage == "terminology_decision":
-            assembled_phases = {
-                phase: full_prompt(stage, content, resolved, phase=phase)
-                for phase in ("adjudication", "consistency")
-            }
-            result["assembled_phases"] = assembled_phases
-            result["assembled"] = assembled_phases["adjudication"]
-        if global_file_for is not None:
-            global_path = global_file_for(resolved)
-            if global_path.is_file():
-                result["global_sync"] = {
-                    "available": True,
-                    "same": path.read_bytes() == global_path.read_bytes(),
-                    "language": resolved,
-                }
-            else:
-                result["global_sync"] = {
-                    "available": False,
-                    "same": False,
-                    "language": resolved,
-                }
-        return result
-
-    def global_prompt_file(stage: str, language: str) -> Path:
-        return effective_path(
-            f"prompts/{prompt_file(stage, language)}", builtin_root=app_root
-        )
 
     @app.get("/api/v1/projects")
     async def list_projects() -> dict[str, Any]:
@@ -637,58 +558,3 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     @app.post("/api/v1/projects/{name}/results/reset")
     async def reset_results(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).reset_results(payload)
-
-    @app.get("/api/v1/projects/{name}/config")
-    async def get_config(name: str) -> dict[str, Any]:
-        return {"config": load_config(project(name) / "config.toml")}
-
-    @app.put("/api/v1/projects/{name}/config")
-    async def put_config(name: str, payload: dict[str, Any]) -> dict[str, bool]:
-        config = payload.get("config")
-        if not isinstance(config, dict):
-            raise UsageError("config 必须是对象")
-        content = dump_config(config)
-        root = project(name)
-        resolve_project_config(config, presets_root=app_root)
-        for stage in LLM_MODEL_STAGES:
-            resolve_project_config(
-                config, stage=stage, presets_root=app_root
-            )
-        with project_write_lock(root):
-            atomic_write_text(root / "config.toml", content)
-        return {"saved": True}
-
-    @app.get("/api/v1/projects/{name}/prompts/{stage}")
-    async def get_prompt(name: str, stage: str, language: str = "zh-CN") -> dict[str, Any]:
-        if stage not in LLM_MODEL_STAGES:
-            raise UsageError(f"未知 Prompt 阶段：{stage}")
-        validate_language(language)
-        root = project(name)
-        return prompt_view(
-            stage,
-            language,
-            lambda value: root / "prompts" / prompt_file(stage, value),
-            prompt_languages_for(root)[stage],
-            global_file_for=lambda value: global_prompt_file(stage, value),
-        )
-
-    @app.put("/api/v1/projects/{name}/prompts/{stage}")
-    async def put_prompt(
-        name: str, stage: str, payload: dict[str, Any]
-    ) -> dict[str, bool]:
-        if stage not in LLM_MODEL_STAGES:
-            raise UsageError(f"未知 Prompt 阶段：{stage}")
-        language = validate_language(payload.get("language", "zh-CN"))
-        content = payload.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise UsageError("Prompt 不能为空")
-        root = project(name)
-        with project_write_lock(root):
-            atomic_write_text(
-                root / "prompts" / prompt_file(stage, language), content
-            )
-        return {"saved": True}
-
-    @app.get("/api/v1/projects/{name}/task-options/{stage}")
-    async def get_task_options(name: str, stage: str) -> dict[str, Any]:
-        return task_options(project(name), stage)

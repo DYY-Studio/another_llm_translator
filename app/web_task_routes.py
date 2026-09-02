@@ -10,6 +10,7 @@ from .execution import Scope
 from .project import (
     PROMPT_LANGUAGES,
 )
+from .web_tasks import task_options
 
 
 
@@ -68,6 +69,10 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             replace_draft=replace_draft,
             acknowledge_manual_review=acknowledge_manual_review,
         )
+
+    @app.get("/api/v1/projects/{name}/task-options/{stage}")
+    async def get_task_options(name: str, stage: str) -> dict[str, Any]:
+        return task_options(project(name), stage)
 
     @app.get("/api/v1/tasks/active")
     async def active_tasks() -> dict[str, Any]:

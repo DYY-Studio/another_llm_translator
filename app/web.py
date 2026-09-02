@@ -376,7 +376,12 @@ def create_app(
     from .web_term_routes import register_term_routes
     register_term_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_resource_routes import register_resource_routes
-    register_resource_routes(app=app, projects_root=projects_root, app_root=app_root)
+    register_resource_routes(
+        app=app,
+        projects_root=projects_root,
+        app_root=app_root,
+        project=project,
+    )
     from .web_segment_routes import register_segment_routes
     register_segment_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_export_routes import register_export_routes

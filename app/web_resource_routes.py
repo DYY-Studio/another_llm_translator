@@ -19,6 +19,7 @@ from .config import (
     LLM_MODEL_STAGES,
     dump_config,
     load_config,
+    resolve_project_config,
     resolve_global_config,
 )
 from .credentials import (
@@ -38,6 +39,7 @@ from .errors import (
     InvalidCredentialsError,
     UsageError,
 )
+from .locking import project_write_lock
 from .execution import full_prompt
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
@@ -130,7 +132,13 @@ def _client_allowed_on_bind(client_ip: str, bind_address: str) -> bool:
 
 
 
-def register_resource_routes(*, app: FastAPI, projects_root: Path, app_root: Path) -> None:
+def register_resource_routes(
+    *,
+    app: FastAPI,
+    projects_root: Path,
+    app_root: Path,
+    project: Callable[[str], Path],
+) -> None:
     SESSION_COOKIE = "another_llm_session"
     _SESSION_TTL_SECONDS = 30 * 24 * 3600
     def valid_session(token: str | None) -> bool:
@@ -388,6 +396,59 @@ def register_resource_routes(*, app: FastAPI, projects_root: Path, app_root: Pat
         atomic_write_text(
             write_user(f"prompts/{prompt_file(stage, language)}"), content
         )
+        return {"saved": True}
+
+    @app.get("/api/v1/projects/{name}/config")
+    async def get_project_config(name: str) -> dict[str, Any]:
+        return {"config": load_config(project(name) / "config.toml")}
+
+    @app.put("/api/v1/projects/{name}/config")
+    async def put_project_config(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            raise UsageError("config 必须是对象")
+        content = dump_config(config)
+        root = project(name)
+        resolve_project_config(config, presets_root=app_root)
+        for stage in LLM_MODEL_STAGES:
+            resolve_project_config(config, stage=stage, presets_root=app_root)
+        with project_write_lock(root):
+            atomic_write_text(root / "config.toml", content)
+        return {"saved": True}
+
+    @app.get("/api/v1/projects/{name}/prompts/{stage}")
+    async def get_project_prompt(
+        name: str, stage: str, language: str = "zh-CN"
+    ) -> dict[str, Any]:
+        if stage not in LLM_MODEL_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        root = project(name)
+        return prompt_view(
+            stage,
+            language,
+            lambda value: root / "prompts" / prompt_file(stage, value),
+            prompt_languages_for(root)[stage],
+            global_file_for=lambda value: global_prompt_file(stage, value),
+        )
+
+    @app.put("/api/v1/projects/{name}/prompts/{stage}")
+    async def put_project_prompt(
+        name: str, stage: str, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        if stage not in LLM_MODEL_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        language = validate_language(payload.get("language", "zh-CN"))
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise UsageError("Prompt 不能为空")
+        root = project(name)
+        with project_write_lock(root):
+            atomic_write_text(
+                root / "prompts" / prompt_file(stage, language), content
+            )
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")
