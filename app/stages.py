@@ -74,6 +74,7 @@ from .execution import (
     unavailable_usage,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
+from .llm_keys import KeyPool
 from .logging_utils import get_logger
 from .plugins import (
     get_document_adapter,
@@ -503,7 +504,7 @@ async def _execute_stage_run(
     part_original: dict[str, str],
     original_parts: dict[str, list[str]],
     preflight_failed: list[dict[str, Any]],
-    limiter: SlidingWindowLimiter | None,
+    limiter: SlidingWindowLimiter | KeyPool | None,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt_builder: Callable[[list[dict[str, Any]]], str],
     prompt_partition_key: Callable[[dict[str, Any]], object],
@@ -554,9 +555,16 @@ async def _execute_stage_run(
 
         chunks = debug_chunks()
     if limiter is None:
-        limiter = SlidingWindowLimiter(
-            state.config["execution"]["requests_per_minute"],
-            state.config["execution"]["input_tokens_per_minute"],
+        execution = state.config["execution"]
+        limiter = KeyPool(
+            int(execution["requests_per_minute"]),
+            int(execution["input_tokens_per_minute"]),
+            int(execution["max_parallel"]),
+            int(
+                execution.get(
+                    "max_parallel_per_key", execution["max_parallel"]
+                )
+            ),
         )
 
     def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
@@ -635,6 +643,14 @@ async def _execute_stage_run(
                 )
 
     usage: dict[str, Any] | None = None
+
+    def key_audit() -> dict[str, Any] | None:
+        if state.llm is None or state.llm._api_keys is None:
+            return None
+        return state.llm.key_audit_summary(
+            execution_index=state.continuation_index + 1
+        )
+
     try:
         async with LLMClient(
             state.config,
@@ -659,7 +675,9 @@ async def _execute_stage_run(
         _extend_unique(state.warnings, llm.warnings)
         usage = llm.usage_summary()
     except asyncio.CancelledError:
-        usage = llm.usage_summary()
+        if state.llm is not None:
+            _extend_unique(state.warnings, state.llm.warnings)
+        usage = state.llm.usage_summary() if state.llm is not None else None
         finalize_run(
             state.project,
             state.run_dir,
@@ -669,11 +687,14 @@ async def _execute_stage_run(
             warnings=[*state.warnings, "任务已由用户取消"],
             usage=usage,
             failure_counts=dict(failure_counts),
+            key_audit=key_audit(),
         )
         raise
     except (FatalExternalError, ConfigError) as exc:
-        if isinstance(exc, FatalExternalError):
-            usage = llm.usage_summary()
+        if state.llm is not None:
+            _extend_unique(state.warnings, state.llm.warnings)
+        if isinstance(exc, FatalExternalError) and state.llm is not None:
+            usage = state.llm.usage_summary()
         finalize_run(
             state.project,
             state.run_dir,
@@ -683,6 +704,7 @@ async def _execute_stage_run(
             warnings=state.warnings,
             usage=usage,
             failure_counts=dict(failure_counts),
+            key_audit=key_audit(),
         )
         logger.error(
             "run failed run=%s error_type=%s",
@@ -692,6 +714,7 @@ async def _execute_stage_run(
         raise
     except StorageError as exc:
         if state.llm is not None:
+            _extend_unique(state.warnings, state.llm.warnings)
             usage = state.llm.usage_summary()
             usage_invoked = state.llm.send_count > 0
         else:
@@ -706,6 +729,7 @@ async def _execute_stage_run(
             usage=usage,
             failure_counts=dict(failure_counts),
             usage_invoked=usage_invoked,
+            key_audit=key_audit(),
         )
         logger.error(
             "run failed run=%s error_type=%s error=%s",
@@ -723,6 +747,7 @@ async def _execute_stage_run(
         warnings=state.warnings,
         usage=usage,
         failure_counts=dict(failure_counts),
+        key_audit=key_audit(),
     )
 
 
@@ -2068,7 +2093,7 @@ async def run_terminology(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
-    limiter: SlidingWindowLimiter | None = None,
+    limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
@@ -3235,7 +3260,7 @@ async def run_translation(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
-    limiter: SlidingWindowLimiter | None = None,
+    limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
@@ -4055,7 +4080,7 @@ async def run_review(
     scope: Scope,
     *,
     http_client: httpx.AsyncClient | None = None,
-    limiter: SlidingWindowLimiter | None = None,
+    limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
@@ -4959,7 +4984,7 @@ async def run_all(
     http_client: httpx.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
-    limiters: Mapping[tuple[str, str], SlidingWindowLimiter] | None = None,
+    limiters: Mapping[tuple[str, str], SlidingWindowLimiter | KeyPool] | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
@@ -4978,21 +5003,30 @@ async def run_all(
         for stage in stages
     }
     if limiters is None:
-        local_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
-        local_limits: dict[tuple[str, str], tuple[int, int]] = {}
+        local_limiters: dict[tuple[str, str], SlidingWindowLimiter | KeyPool] = {}
+        local_limits: dict[tuple[str, str], tuple[int, int, int, int]] = {}
         for stage, key in resource_keys.items():
+            execution = configs[stage]["execution"]
             limits = (
-                int(configs[stage]["execution"]["requests_per_minute"]),
-                int(configs[stage]["execution"]["input_tokens_per_minute"]),
+                int(execution["requests_per_minute"]),
+                int(execution["input_tokens_per_minute"]),
+                int(execution["max_parallel"]),
+                int(
+                    execution.get(
+                        "max_parallel_per_key", execution["max_parallel"]
+                    )
+                ),
             )
             previous_limits = local_limits.get(key)
             if previous_limits is not None and previous_limits != limits:
                 raise ConfigError("相同 Preset 身份的共享限流配置不一致")
             local_limits[key] = limits
             if key not in local_limiters:
-                local_limiters[key] = SlidingWindowLimiter(
+                local_limiters[key] = KeyPool(
                     limits[0],
                     limits[1],
+                    limits[2],
+                    limits[3],
                 )
         limiters = local_limiters
     missing_limiters = set(resource_keys.values()) - set(limiters)
