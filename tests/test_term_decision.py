@@ -820,7 +820,7 @@ def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
         payload = json.loads(messages[1]["content"])
         return 30 * len(payload["terms"])
 
-    monkeypatch.setattr("app.term_decision.estimate_messages", estimate)
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
     spec = term_normalization(config)
     batches, _ = _pack_batches(
         [root, member],
@@ -887,7 +887,7 @@ def test_decision_batch_overflow_policy_controls_local_planning(
         samples = sum(len(item["evidence"]["samples"]) for item in anchors)
         return 31 + 20 * len(payload["terms"]) + 15 * len(anchors) + 4 * samples
 
-    monkeypatch.setattr("app.term_decision.estimate_messages", estimate)
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
     spec = term_normalization(config)
 
     config["terminology_decision"]["anchor_overflow_mode"] = "error"
@@ -4030,7 +4030,7 @@ def test_atomic_apply_failure_preserves_terms(
     def fail(*_: object, **__: object) -> None:
         raise StorageError("injected")
 
-    monkeypatch.setattr("app.term_decision.write_terminology_decision_state", fail)
+    monkeypatch.setattr("app.term_decision_drafts.write_terminology_decision_state", fail)
     with pytest.raises(StorageError, match="injected"):
         apply_decision_draft(project, confirm_all=True)
     assert read_json(project, project / "terminology" / "terms.json") == before
