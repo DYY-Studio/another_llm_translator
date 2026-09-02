@@ -1397,7 +1397,7 @@ Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 
 
 模型 ID 始终允许手工输入；发现结果只在当前列表中搜索，选择后仍需显式保存。
 
-`usage` 把端点响应中的消耗换算为 input/output/ total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run `manifest.json`；任一成功响应未返回完整 usage 时，任务标记为 partial，保留已观测计数但吞吐量不可用；完全没有可观测 usage 时才显示 unavailable，不使用本地估算。
+`usage` 把端点响应中的消耗换算为 input/output/ total 规范化计数，宿主在任务内累计端点实际返回的消耗，写入任务摘要与 Run `manifest.json`；任一成功或失败尝试未返回完整 usage 时，任务标记为 partial，保留已观测计数但吞吐量不可用；完全没有可观测 usage 时才显示 unavailable，不使用本地估算。
 
 同一 Run 的续作累加各次精确回报；缺少累计版本标记的旧 Run 或任一次回报不完整时，Run usage 标记为 partial；完全没有可观测 usage 时才显示 unavailable。
 
