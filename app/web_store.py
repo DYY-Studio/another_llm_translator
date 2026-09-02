@@ -34,15 +34,14 @@ from .sqlite_storage import (
     utc_now,
     write_json,
 )
-from .stages import (
+from .term_library import (
     build_term_library_rows,
     load_terms,
-    match_term_validation,
-    match_terms,
     normalize_term,
-    prompt_middle_digests,
     term_normalization,
 )
+from .term_matching import match_term_validation, match_terms
+from .stages import prompt_middle_digests
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,

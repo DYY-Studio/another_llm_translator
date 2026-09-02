@@ -106,11 +106,10 @@ from .sqlite_storage import (
 )
 from .stages import (
     export_project,
-    export_terms,
-    import_terms,
-    publish_partial_terms,
     run_apply,
 )
+from .term_exchange import export_terms, import_terms
+from .term_library import publish_partial_terms
 from .term_decision import (
     apply_decision_draft,
     decision_review_state,

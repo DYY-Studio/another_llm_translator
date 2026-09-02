@@ -44,7 +44,7 @@ from .sqlite_storage import (
     write_json,
     write_terminology_decision_state,
 )
-from .stages import (
+from .term_library import (
     build_term_library_rows,
     load_terms,
     normalize_term,

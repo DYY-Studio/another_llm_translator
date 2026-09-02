@@ -11,15 +11,10 @@ from app.errors import UsageError
 from app.execution import Scope
 from app.main import run
 from app.project import init_project
-from app.stages import (
-    TermNormalization,
-    export_terms,
-    import_terms,
-    load_terms,
-    match_terms,
-    publish_partial_terms,
-    run_terminology,
-)
+from app.stages import run_terminology
+from app.term_exchange import export_terms, import_terms
+from app.term_library import TermNormalization, load_terms, publish_partial_terms
+from app.term_matching import match_terms
 from app.sqlite_storage import (
     append_jsonl,
     read_json,

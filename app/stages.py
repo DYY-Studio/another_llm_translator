@@ -1,25 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+
 import csv
+
 import hashlib
+
 import io
+
 import json
+
 import shlex
+
 import sys
+
 import time
+
 import unicodedata
+
 import uuid
+
 from collections import Counter
+
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+
 from contextlib import AsyncExitStack
+
 from dataclasses import dataclass, replace
+
 from pathlib import Path
+
 from typing import Any, NamedTuple
 
 import httpx
 
 from .config import load_project_config
+
 from .documents import (
     DocumentExportJob,
     aozora_match_views,
@@ -28,6 +44,7 @@ from .documents import (
     document_adapter_reads_version,
     publish_document_exports,
 )
+
 from .errors import (
     ConfigError,
     ContextLengthError,
@@ -39,6 +56,11 @@ from .errors import (
     StorageError,
     UsageError,
 )
+
+from .term_library import (_merge_and_publish_terms, build_term_library_rows, load_terms, normalize_term, publish_partial_terms, term_normalization)
+from .term_exchange import export_terms, import_terms
+from .term_matching import _TermMatchCache, match_term_validation, match_terms
+
 from .execution import (
     ChunkPlan,
     LLMClient,
@@ -73,19 +95,25 @@ from .execution import (
     stage_result_path,
     unavailable_usage,
 )
+
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
+
 from .llm_keys import KeyPool
+
 from .logging_utils import get_logger
+
 from .plugins import (
     get_document_adapter,
     normalize_model_text,
 )
+
 from .project import (
     PROMPT_LANGUAGES,
     load_segments,
     load_source_files,
     prompt_file,
 )
+
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_text,
@@ -97,12 +125,12 @@ from .sqlite_storage import (
     terminology_scan_state,
     write_json,
 )
+
 from .translation_validation import (
     TranslationTermMatch,
     TranslationValidationContext,
     validate_translation_text,
 )
-
 
 def _project_context(
     project: Path, *, stage: str | None = None
@@ -177,11 +205,9 @@ def _project_context(
         )
     return config, metadata, files, segments
 
-
 def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
     if not any(not segment["is_empty"] for segment in segments):
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
-
 
 def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
     if isinstance(value, str):
@@ -194,7 +220,6 @@ def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
             for key, item in value.items()
         }
     return value
-
 
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     return {
@@ -212,7 +237,6 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
         "force": scope.force,
     }
 
-
 def _configured_output_warning(config: dict[str, Any]) -> str | None:
     maximum_available = (
         config["llm"]["context_window_tokens"]
@@ -225,7 +249,6 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
         f"max_output_tokens={configured} 超过上下文可用上限 "
         f"{maximum_available}；实际请求将按剩余空间自动收窄"
     )
-
 
 def _finalize_planning_failure(
     project: Path,
@@ -248,10 +271,8 @@ def _finalize_planning_failure(
         usage=None,
     )
 
-
 def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
-
 
 def _resume_scope(
     project: Path, scope: Scope, resume_run_id: str | None
@@ -271,7 +292,6 @@ def _resume_scope(
         resumed_scope.force,
     )
     return resumed_scope, resume_arguments_ignored
-
 
 def _assemble_warnings(
     *,
@@ -310,7 +330,6 @@ def _assemble_warnings(
     if fingerprint_warning:
         warnings.append(fingerprint_warning)
     return warnings
-
 
 def _create_or_continue_run(
     project: Path,
@@ -374,7 +393,6 @@ def _create_or_continue_run(
 
     return run_id, run_dir, continuation_index, fail_planning
 
-
 @dataclass
 class _Preflight:
     request_segments: list[dict[str, Any]]
@@ -383,7 +401,6 @@ class _Preflight:
     preflight_failed: list[dict[str, Any]]
     fast_checked: int
     exact_checked: int
-
 
 def _split_oversized_preflight(
     work: Iterable[dict[str, Any]],
@@ -477,7 +494,6 @@ def _split_oversized_preflight(
         exact_checked=exact_checked,
     )
 
-
 @dataclass
 class StageRunState:
     project: Path
@@ -495,7 +511,6 @@ class StageRunState:
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
-
 
 async def _execute_stage_run(
     state: StageRunState,
@@ -751,7 +766,6 @@ async def _execute_stage_run(
         key_audit=key_audit(),
     )
 
-
 async def _localized_request_loop(
     group: list[dict[str, Any]],
     *,
@@ -884,13 +898,11 @@ async def _localized_request_loop(
         )
     return list(dict.fromkeys(exhausted))
 
-
 def _restore_leading_whitespace(source: str, text: str) -> str:
     prefix_end = 0
     while prefix_end < len(source) and source[prefix_end].isspace():
         prefix_end += 1
     return source[:prefix_end] + text.lstrip()
-
 
 def _confirm_fingerprint_reuse(
     stage: str,
@@ -959,7 +971,6 @@ def _confirm_fingerprint_reuse(
         raise UsageError(f"{message}；已拒绝复用，请使用 --force 重做选定范围")
     raise UsageError("指纹复用选择必须是 reuse 或 new")
 
-
 def _request_estimate(
     messages: list[dict[str, str]],
     config: dict[str, Any],
@@ -988,7 +999,6 @@ def _request_estimate(
         )
     return estimated
 
-
 def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
     """Resolve the run prompt language, falling back to zh-CN."""
     value = requested or resolve_language()
@@ -999,7 +1009,6 @@ def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
         return value
     return "zh-CN"
 
-
 def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
     """Per-language middle content digests; missing languages are omitted."""
     digests: dict[str, str] = {}
@@ -1009,11 +1018,9 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
             digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
     return digests
 
-
 def _prompt(project: Path, stage: str, language: str | None = None) -> str:
     factory = _prompt_factory(project, stage, language)
     return factory(())
-
 
 def _prompt_factory(
     project: Path, stage: str, language: str | None = None
@@ -1034,7 +1041,6 @@ def _prompt_factory(
         )
 
     return build
-
 
 def _document_prompt_requirement_helpers(
     config: dict[str, Any],
@@ -1067,7 +1073,6 @@ def _document_prompt_requirement_helpers(
 
     return requirements_for, partition_key
 
-
 _FORMAT_CORRECTION = {
     "zh-CN": (
         "只处理当前待处理内容，并完整覆盖本次内容，遵守固定字段。"
@@ -1096,838 +1101,10 @@ _VALIDATION_REPAIR = {
     ),
 }
 
-
 def _has_hard_validation_findings(findings: list[dict[str, Any]]) -> bool:
     return any(
         str(item.get("severity", "error")) == "error" for item in findings
     )
-
-
-def load_terms(project: Path) -> dict[str, Any] | None:
-    path = project / "terminology" / "terms.json"
-    return read_json(project, path) if record_exists(project, path) else None
-
-
-@dataclass(frozen=True)
-class TermNormalization:
-    form: str | None
-    casefold: bool
-
-
-def term_normalization(config: dict[str, Any]) -> TermNormalization:
-    terminology = config["terminology"]
-    return TermNormalization(
-        form=terminology["unicode_normalization"] or None,
-        casefold=terminology["case_insensitive"],
-    )
-
-
-def normalize_term(value: str, spec: TermNormalization) -> str:
-    if spec.form:
-        value = unicodedata.normalize(spec.form, value)
-    if spec.casefold:
-        value = value.casefold()
-    return value.strip()
-
-
-def _term_bucket() -> dict[str, Any]:
-    return {
-        "sources": [],
-        "categories": [],
-        "descriptions": [],
-        "translations": [],
-        "aliases": [],
-        "alias_conflicts": [],
-        "group_primary": None,
-        "group_primary_set": False,
-        "group_primary_locked": False,
-        "group_claims": [],
-        "canonical_source": None,
-    }
-
-
-def _add_term_candidate(
-    merged: dict[str, dict[str, Any]],
-    candidate: dict[str, Any],
-    spec: TermNormalization,
-) -> None:
-    normalized = normalize_term(str(candidate["source"]), spec)
-    current = merged.setdefault(normalized, _term_bucket())
-    current["sources"].append(str(candidate["source"]))
-    category = candidate.get("category")
-    if category:
-        current["categories"].append(str(category))
-    current["categories"].extend(
-        str(value)
-        for value in candidate.get("conflicts", {}).get("categories", [])
-        if value
-    )
-    description = candidate.get("description")
-    if description:
-        current["descriptions"].append(str(description))
-    preferred = candidate.get("preferred_translation")
-    if preferred:
-        current["translations"].append(str(preferred))
-    current["translations"].extend(
-        str(value)
-        for value in candidate.get("conflicts", {}).get(
-            "preferred_translations", []
-        )
-        if value
-    )
-    current["aliases"].extend(
-        str(alias) for alias in candidate.get("aliases", []) if alias
-    )
-    if candidate.get("_group_primary_set", "group_primary" in candidate):
-        group_primary = candidate.get("group_primary")
-        if group_primary is not None:
-            group_primary = str(group_primary)
-        if current["group_primary_set"] and current["group_primary"] != group_primary:
-            raise UsageError(f"同一术语存在冲突的组主关系：{candidate['source']}")
-        current["group_primary"] = group_primary
-        current["group_primary_set"] = True
-        current["group_primary_locked"] = current["group_primary_locked"] or bool(
-            candidate.get("_group_primary_locked", False)
-        )
-
-
-def _seed_published_terms(
-    merged: dict[str, dict[str, Any]],
-    library: dict[str, Any] | None,
-    spec: TermNormalization,
-) -> None:
-    for term in (library or {}).get("terms", []):
-        _add_term_candidate(merged, term, spec)
-        description = term.get("description")
-        if description and "；" in str(description):
-            current = merged[normalize_term(str(term["source"]), spec)]
-            current["descriptions"].remove(str(description))
-            current["descriptions"].extend(
-                part for part in str(description).split("；") if part
-            )
-
-
-def _apply_term_overrides(
-    merged: dict[str, dict[str, Any]],
-    overrides: dict[str, dict[str, Any]],
-) -> None:
-    for normalized, override in overrides.items():
-        if override.get("disabled"):
-            merged.pop(normalized, None)
-            continue
-        current = merged.setdefault(normalized, _term_bucket())
-        if override.get("source"):
-            current["sources"] = [override["source"]]
-        for source_key, target_key in (
-            ("category", "categories"),
-            ("description", "descriptions"),
-            ("preferred_translation", "translations"),
-        ):
-            if source_key in override:
-                value = override.get(source_key)
-                current[target_key] = [value] if value else []
-        if "aliases" in override:
-            current["aliases"] = list(override.get("aliases") or [])
-        if "group_primary" in override:
-            group_primary = override.get("group_primary")
-            current["group_primary"] = (
-                str(group_primary) if group_primary is not None else None
-            )
-            current["group_primary_set"] = True
-            current["group_primary_locked"] = True
-
-
-def _alias_primary_collisions(
-    merged: dict[str, dict[str, Any]],
-    *,
-    policy: str,
-    spec: TermNormalization,
-) -> None:
-    def add_claim(
-        entry: str, claimed_by: str, alias: str, reason: str
-    ) -> None:
-        claim = {
-            "entry": entry,
-            "claimed_by": claimed_by,
-            "alias": alias,
-            "reason": reason,
-        }
-        for normalized in {entry, claimed_by}:
-            if normalized in merged and claim not in merged[normalized]["group_claims"]:
-                merged[normalized]["group_claims"].append(claim)
-
-    for normalized, item in merged.items():
-        primary = item["group_primary"]
-        if primary is None:
-            continue
-        if primary == normalized or primary not in merged:
-            raise UsageError(f"术语组主指针无效：{normalized} -> {primary}")
-        if merged[primary]["group_primary"] is not None:
-            raise UsageError(f"术语组主必须直接指向主条目：{normalized} -> {primary}")
-
-    primary_sources = {
-        normalized: sorted(
-            set(item["sources"]), key=lambda text: (len(text), text)
-        )[0]
-        for normalized, item in merged.items()
-        if item["sources"]
-    }
-    claims: dict[str, list[tuple[str, str]]] = {}
-    for owner, item in merged.items():
-        for alias in sorted(set(item["aliases"])):
-            target = normalize_term(alias, spec)
-            if target in merged and target != owner:
-                claims.setdefault(target, []).append((owner, alias))
-    if not claims:
-        return
-
-    parent = {
-        target: owners[0][0]
-        for target, owners in claims.items()
-        if len({owner for owner, _ in owners}) == 1
-    }
-    cycle_nodes: set[str] = set()
-    for node in parent:
-        seen: list[str] = []
-        current = node
-        while current in parent:
-            if current in seen:
-                cycle_nodes.update(seen[seen.index(current) :])
-                break
-            seen.append(current)
-            current = parent[current]
-
-    unsafe_targets = {
-        target for target, owners in claims.items() if len({o for o, _ in owners}) > 1
-    } | cycle_nodes
-    for target, owners in claims.items():
-        for owner, alias in owners:
-            owner_root = merged[owner]["group_primary"] or owner
-            target_root = merged[target]["group_primary"] or target
-            if owner_root == target_root:
-                continue
-            reason = (
-                "multiple_owners"
-                if len({value[0] for value in owners}) > 1
-                else "cycle"
-                if target in cycle_nodes or owner in cycle_nodes
-                else "policy"
-                if policy == "conflict"
-                else "group_collision"
-                if merged[target]["group_primary"] is not None
-                or merged[target]["group_primary_locked"]
-                or any(
-                    value["group_primary"] == target
-                    for value in merged.values()
-                )
-                else ""
-            )
-            if not reason and target not in unsafe_targets:
-                merged[target]["group_primary"] = owner_root
-                continue
-            reason = reason or "group_collision"
-            add_claim(target, owner, alias, reason)
-            merged[owner]["alias_conflicts"].append(
-                {
-                    "alias": alias,
-                    "primary_source": primary_sources.get(target, target),
-                    "reason": reason,
-                }
-            )
-
-    for normalized, item in merged.items():
-        primary = item["group_primary"]
-        if primary is not None and (
-            primary not in merged or merged[primary]["group_primary"] is not None
-        ):
-            raise UsageError(f"术语组关系无法规范化：{normalized} -> {primary}")
-
-
-def _build_term_rows(
-    merged: dict[str, dict[str, Any]],
-    *,
-    alias_policy: str,
-    spec: TermNormalization,
-) -> list[dict[str, Any]]:
-    _alias_primary_collisions(merged, policy=alias_policy, spec=spec)
-    terms: list[dict[str, Any]] = []
-    for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
-        categories = sorted(set(item["categories"]))
-        descriptions = sorted(set(item["descriptions"]))
-        translations = sorted(set(item["translations"]))
-        sources = sorted(set(item["sources"]), key=lambda text: (len(text), text))
-        aliases = sorted(
-            {
-                alias
-                for alias in item["aliases"]
-                if normalize_term(alias, spec) != normalized
-            }
-        )
-        terms.append(
-            {
-                "record_id": f"TERM-{index:06d}",
-                "source": item["canonical_source"]
-                or (sources[0] if sources else normalized),
-                "normalized": normalized,
-                "category": categories[0] if len(categories) == 1 else None,
-                "description": "；".join(descriptions),
-                "preferred_translation": (
-                    translations[0] if len(translations) == 1 else None
-                ),
-                "aliases": aliases,
-                "group_primary": item["group_primary"],
-                "conflicts": {
-                    "categories": categories if len(categories) > 1 else [],
-                    "preferred_translations": (
-                        translations if len(translations) > 1 else []
-                    ),
-                    "alias_primaries": sorted(
-                        item["alias_conflicts"],
-                        key=lambda value: (
-                            value["alias"],
-                            value["primary_source"],
-                            value["reason"],
-                        ),
-                    ),
-                    "group_claims": sorted(
-                        item["group_claims"],
-                        key=lambda value: (
-                            value["entry"],
-                            value["claimed_by"],
-                            value["alias"],
-                            value["reason"],
-                        ),
-                    ),
-                },
-            }
-        )
-    return terms
-
-
-def build_term_library_rows(
-    project: Path,
-    base_terms: list[dict[str, Any]],
-    overrides: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    config = load_project_config(project)
-    spec = term_normalization(config)
-    merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, {"terms": base_terms}, spec)
-    _apply_term_overrides(merged, overrides)
-    return _build_term_rows(
-        merged,
-        alias_policy=str(config["terminology"]["alias_primary_collision"]),
-        spec=spec,
-    )
-
-
-TERM_CSV_FIELDS = (
-    "source",
-    "preferred_translation",
-    "category",
-    "description",
-    "aliases_json",
-    "disabled",
-    "category_conflicts_json",
-    "preferred_translation_conflicts_json",
-    "group_primary",
-)
-
-LEGACY_TERM_CSV_FIELDS = TERM_CSV_FIELDS[:-1]
-
-
-def _exchange_term(
-    value: Any, location: str, spec: TermNormalization
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise UsageError(f"术语必须是对象：{location}")
-    allowed = {
-        "source",
-        "preferred_translation",
-        "category",
-        "description",
-        "aliases",
-        "disabled",
-        "conflicts",
-        "group_primary",
-    }
-    unknown = set(value) - allowed
-    if unknown:
-        raise UsageError(
-            f"术语包含未知字段：{location}: {', '.join(sorted(unknown))}"
-        )
-    source = value.get("source")
-    if not isinstance(source, str) or not source.strip():
-        raise UsageError(f"术语 source 不能为空：{location}")
-    for key in ("preferred_translation", "category", "description"):
-        field = value.get(key)
-        if field is not None and not isinstance(field, str):
-            raise UsageError(f"术语 {key} 必须是字符串或 null：{location}")
-    aliases = value.get("aliases", [])
-    if not isinstance(aliases, list) or not all(
-        isinstance(alias, str) for alias in aliases
-    ):
-        raise UsageError(f"术语 aliases 必须是字符串数组：{location}")
-    disabled = value.get("disabled", False)
-    if not isinstance(disabled, bool):
-        raise UsageError(f"术语 disabled 必须是布尔值：{location}")
-    group_primary = value.get("group_primary")
-    if group_primary is not None and (
-        not isinstance(group_primary, str) or not group_primary.strip()
-    ):
-        raise UsageError(f"术语 group_primary 必须是非空字符串或 null：{location}")
-    conflicts = value.get("conflicts", {})
-    if not isinstance(conflicts, dict):
-        raise UsageError(f"术语 conflicts 必须是对象：{location}")
-    unknown_conflicts = set(conflicts) - {
-        "categories",
-        "preferred_translations",
-    }
-    if unknown_conflicts:
-        raise UsageError(
-            f"术语 conflicts 包含未知字段：{location}: "
-            f"{', '.join(sorted(unknown_conflicts))}"
-        )
-    for key in ("categories", "preferred_translations"):
-        candidates = conflicts.get(key, [])
-        if not isinstance(candidates, list) or not all(
-            isinstance(candidate, str) for candidate in candidates
-        ):
-            raise UsageError(f"术语冲突 {key} 必须是字符串数组：{location}")
-    return {
-        "source": source.strip(),
-        "preferred_translation": (
-            value["preferred_translation"].strip()
-            if value.get("preferred_translation")
-            else None
-        ),
-        "category": value["category"].strip() if value.get("category") else None,
-        "description": (
-            value["description"].strip() if value.get("description") else ""
-        ),
-        "aliases": [
-            alias.strip()
-            for alias in aliases
-            if alias.strip()
-            and normalize_term(alias, spec) != normalize_term(source, spec)
-        ],
-        "disabled": disabled,
-        "group_primary": (
-            normalize_term(group_primary, spec) if group_primary is not None else None
-        ),
-        "_group_primary_set": "group_primary" in value,
-        "_group_primary_locked": "group_primary" in value,
-        "conflicts": {
-            "categories": [
-                candidate.strip()
-                for candidate in conflicts.get("categories", [])
-                if candidate.strip()
-            ],
-            "preferred_translations": [
-                candidate.strip()
-                for candidate in conflicts.get("preferred_translations", [])
-                if candidate.strip()
-            ],
-        },
-    }
-
-
-def _load_term_exchange(
-    path: Path, spec: TermNormalization
-) -> list[dict[str, Any]]:
-    suffix = path.suffix.casefold()
-    try:
-        content = path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
-        raise UsageError(f"无法读取术语文件：{path}: {exc}") from exc
-    if suffix == ".json":
-        try:
-            document = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise UsageError(f"术语 JSON 无效：{path}: {exc}") from exc
-        if not isinstance(document, dict):
-            raise UsageError("术语 JSON 顶层必须是对象")
-        if set(document) != {"schema_version", "record_type", "terms"}:
-            raise UsageError("术语 JSON 必须只包含 schema_version、record_type、terms")
-        if (
-            document.get("schema_version") not in {1, 2}
-            or document.get("record_type") != "terminology_exchange"
-        ):
-            raise UsageError("不支持的术语交换格式版本")
-        values = document.get("terms")
-        if not isinstance(values, list):
-            raise UsageError("术语 JSON 的 terms 必须是数组")
-        rows = [
-            _exchange_term(value, f"terms[{index}]", spec)
-            for index, value in enumerate(values)
-        ]
-        if document.get("schema_version") == 1:
-            for row in rows:
-                row["group_primary"] = None
-                row["_group_primary_set"] = False
-                row["_group_primary_locked"] = False
-        return rows
-    if suffix != ".csv":
-        raise UsageError("术语文件扩展名必须是 .json 或 .csv")
-    try:
-        reader = csv.DictReader(io.StringIO(content))
-        fields = tuple(reader.fieldnames or ())
-        if fields not in {TERM_CSV_FIELDS, LEGACY_TERM_CSV_FIELDS}:
-            raise UsageError(
-                "术语 CSV 表头必须是旧版或新版完整表头"
-            )
-        values = []
-        for index, row in enumerate(reader, start=2):
-            try:
-                aliases = json.loads(row["aliases_json"] or "[]")
-                category_conflicts = json.loads(
-                    row["category_conflicts_json"] or "[]"
-                )
-                preferred_conflicts = json.loads(
-                    row["preferred_translation_conflicts_json"] or "[]"
-                )
-            except json.JSONDecodeError as exc:
-                raise UsageError(f"术语 CSV 数组字段无效：第 {index} 行") from exc
-            disabled_text = (row["disabled"] or "").strip().casefold()
-            if disabled_text not in {"true", "false"}:
-                raise UsageError(f"术语 CSV disabled 必须是 true 或 false：第 {index} 行")
-            values.append(
-                _exchange_term(
-                    {
-                        "source": row["source"],
-                        "preferred_translation": row["preferred_translation"] or None,
-                        "category": row["category"] or None,
-                        "description": row["description"] or "",
-                        "aliases": aliases,
-                        "disabled": disabled_text == "true",
-                        "group_primary": (
-                            row.get("group_primary") or None
-                            if fields == TERM_CSV_FIELDS
-                            else None
-                        ),
-                        "conflicts": {
-                            "categories": category_conflicts,
-                            "preferred_translations": preferred_conflicts,
-                        },
-                    },
-                    f"第 {index} 行",
-                    spec,
-                )
-            )
-            if fields == LEGACY_TERM_CSV_FIELDS:
-                values[-1]["_group_primary_set"] = False
-                values[-1]["_group_primary_locked"] = False
-        return values
-    except csv.Error as exc:
-        raise UsageError(f"术语 CSV 无效：{path}: {exc}") from exc
-
-
-def _term_exchange_rows(
-    project: Path,
-    *,
-    include_disabled: bool,
-    source: str = "published",
-) -> list[dict[str, Any]]:
-    if source not in {"published", "scanned"}:
-        raise UsageError("术语导出 source 必须是 published 或 scanned")
-    if source == "scanned":
-        config = load_project_config(project)
-        spec = term_normalization(config)
-        active_path = project / "terminology" / "active_task.json"
-        active = read_json(project, active_path) if record_exists(project, active_path) else None
-        if not active or active.get("status") != "active":
-            return []
-        task_id = str(active.get("active_task_id", ""))
-        records = [
-            record
-            for record in read_jsonl(
-                project,
-                project / "terminology" / "candidates.jsonl",
-                task_id=task_id,
-            )
-        ]
-        merged: dict[str, dict[str, Any]] = {}
-        for record in records:
-            for candidate in record.get("terms", []):
-                if isinstance(candidate, dict):
-                    _add_term_candidate(merged, candidate, spec)
-        overrides_document = read_json(project, project / "terminology" / "overrides.json")
-        overrides = {
-            str(item["normalized"]): dict(item)
-            for item in overrides_document.get("overrides", [])
-        }
-        _apply_term_overrides(merged, overrides)
-        alias_policy = str(config["terminology"]["alias_primary_collision"])
-        candidates = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
-        source_by_normalized = {
-            str(term["normalized"]): str(term["source"]) for term in candidates
-        }
-        rows: list[dict[str, Any]] = []
-        for term in candidates:
-            normalized = normalize_term(str(term["source"]), spec)
-            override = overrides.get(normalized, {})
-            disabled = bool(override.get("disabled", False))
-            if disabled and not include_disabled:
-                continue
-            rows.append(
-                {
-                    "source": override.get("source", term["source"]),
-                    "preferred_translation": override.get(
-                        "preferred_translation", term.get("preferred_translation")
-                    ),
-                    "category": override.get("category", term.get("category")),
-                    "description": override.get("description", term.get("description", "")),
-                    "aliases": list(override.get("aliases", term.get("aliases", []))),
-                    "disabled": disabled,
-                    "group_primary": (
-                        source_by_normalized.get(str(term.get("group_primary")))
-                        if term.get("group_primary") is not None
-                        else None
-                    ),
-                    "conflicts": {
-                        "categories": list(term.get("conflicts", {}).get("categories", [])),
-                        "preferred_translations": list(
-                            term.get("conflicts", {}).get("preferred_translations", [])
-                        ),
-                    },
-                }
-            )
-        return rows
-    library = load_terms(project)
-    current = {
-        str(item["normalized"]): dict(item)
-        for item in (library or {}).get("terms", [])
-    }
-    overrides_document = read_json(project, project / "terminology" / "overrides.json")
-    overrides = {
-        str(item["normalized"]): dict(item)
-        for item in overrides_document.get("overrides", [])
-    }
-    rows: list[dict[str, Any]] = []
-    source_by_normalized = {
-        normalized: str(
-            overrides.get(normalized, {}).get("source", term.get("source", normalized))
-        )
-        for normalized, term in current.items()
-    }
-    for normalized in sorted(set(current) | set(overrides)):
-        term = current.get(normalized, {})
-        override = overrides.get(normalized, {})
-        disabled = bool(override.get("disabled", False))
-        if disabled and not include_disabled:
-            continue
-        conflicts = term.get("conflicts", {})
-        rows.append(
-            {
-                "source": override.get("source", term.get("source", normalized)),
-                "preferred_translation": override.get(
-                    "preferred_translation", term.get("preferred_translation")
-                ),
-                "category": override.get("category", term.get("category")),
-                "description": override.get(
-                    "description", term.get("description", "")
-                ),
-                "aliases": list(override.get("aliases", term.get("aliases", []))),
-                "disabled": disabled,
-                "group_primary": (
-                    source_by_normalized.get(str(term.get("group_primary")))
-                    if term.get("group_primary") is not None
-                    else None
-                ),
-                "conflicts": {
-                    "categories": list(conflicts.get("categories", [])),
-                    "preferred_translations": list(
-                        conflicts.get("preferred_translations", [])
-                    ),
-                },
-            }
-        )
-    return rows
-
-
-def export_terms(
-    project: Path,
-    output: Path,
-    *,
-    include_disabled: bool,
-    source: str = "published",
-) -> dict[str, Any]:
-    rows = _term_exchange_rows(
-        project,
-        include_disabled=include_disabled,
-        source=source,
-    )
-    if output.suffix.casefold() == ".json":
-        atomic_write_text(
-            output,
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "record_type": "terminology_exchange",
-                    "terms": rows,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-        )
-    elif output.suffix.casefold() == ".csv":
-        buffer = io.StringIO(newline="")
-        writer = csv.DictWriter(buffer, fieldnames=TERM_CSV_FIELDS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    "source": row["source"],
-                    "preferred_translation": row["preferred_translation"] or "",
-                    "category": row["category"] or "",
-                    "description": row["description"] or "",
-                    "aliases_json": json.dumps(
-                        row["aliases"], ensure_ascii=False, separators=(",", ":")
-                    ),
-                    "disabled": "true" if row["disabled"] else "false",
-                    "category_conflicts_json": json.dumps(
-                        row["conflicts"]["categories"],
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    "preferred_translation_conflicts_json": json.dumps(
-                        row["conflicts"]["preferred_translations"],
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    "group_primary": row.get("group_primary") or "",
-                }
-            )
-        atomic_write_text(output, "\ufeff" + buffer.getvalue())
-    else:
-        raise UsageError("术语输出扩展名必须是 .json 或 .csv")
-    return {
-        "output": str(output),
-        "format": output.suffix.casefold().removeprefix("."),
-        "exported": len(rows),
-        "include_disabled": include_disabled,
-        "source": source,
-    }
-
-
-def import_terms(
-    project: Path,
-    input_path: Path,
-    *,
-    dry_run: bool,
-) -> dict[str, Any]:
-    config = load_project_config(project)
-    spec = term_normalization(config)
-    imported = _load_term_exchange(input_path, spec)
-    disabled_by_normalized: dict[str, bool] = {}
-    merged_import: dict[str, dict[str, Any]] = {}
-    for item in imported:
-        normalized = normalize_term(item["source"], spec)
-        previous_disabled = disabled_by_normalized.setdefault(
-            normalized, item["disabled"]
-        )
-        if previous_disabled != item["disabled"]:
-            raise UsageError(f"同一 normalized 术语的 disabled 冲突：{item['source']}")
-        if not item["disabled"]:
-            _add_term_candidate(merged_import, item, spec)
-
-    library = load_terms(project)
-    available = {
-        str(item.get("normalized"))
-        for item in (library or {}).get("terms", [])
-        if item.get("normalized")
-    } | set(merged_import)
-    for normalized, item in merged_import.items():
-        primary = item["group_primary"]
-        if primary is not None and primary not in available:
-            raise UsageError(
-                f"导入术语组主不存在：{normalized} -> {primary}"
-            )
-    merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, library, spec)
-    for normalized, item in merged_import.items():
-        target = merged.setdefault(normalized, _term_bucket())
-        for key in (
-            "sources",
-            "categories",
-            "descriptions",
-            "translations",
-            "aliases",
-        ):
-            target[key].extend(item[key])
-        if item["group_primary_set"]:
-            if (
-                target["group_primary_set"]
-                and target["group_primary"] != item["group_primary"]
-            ):
-                raise UsageError(f"导入术语组关系与现有关系冲突：{normalized}")
-            target["group_primary"] = item["group_primary"]
-            target["group_primary_set"] = True
-            target["group_primary_locked"] = item["group_primary_locked"]
-
-    overrides_path = project / "terminology" / "overrides.json"
-    overrides_document = read_json(project, overrides_path)
-    original_overrides = [
-        dict(item) for item in overrides_document.get("overrides", [])
-    ]
-    overrides = {
-        str(item["normalized"]): dict(item) for item in original_overrides
-    }
-    for item in imported:
-        if not item["disabled"]:
-            continue
-        normalized = normalize_term(item["source"], spec)
-        current = overrides.get(normalized, {"normalized": normalized})
-        overrides[normalized] = {
-            **current,
-            "source": current.get("source", item["source"]),
-            "disabled": True,
-        }
-    _apply_term_overrides(merged, overrides)
-    terms = _build_term_rows(
-        merged,
-        alias_policy=str(config["terminology"]["alias_primary_collision"]),
-        spec=spec,
-    )
-    overrides_list = [overrides[key] for key in sorted(overrides)]
-    existing_terms = list((library or {}).get("terms", []))
-    changed = terms != existing_terms or overrides_list != original_overrides
-    next_revision = int(library["terms_revision"]) + 1 if library else 1
-    summary = {
-        "input": str(input_path),
-        "format": input_path.suffix.casefold().removeprefix("."),
-        "imported": len(imported),
-        "changed": changed,
-        "terms_revision": next_revision if changed else (
-            int(library["terms_revision"]) if library else None
-        ),
-        "dry_run": dry_run,
-        "warnings": [],
-    }
-    if dry_run or not changed:
-        return summary
-    override_record = record_header(
-        "terminology_overrides",
-        str(read_json(project, project / "project.json")["project_id"]),
-        record_id="TERMINOLOGY-OVERRIDES",
-        overrides=overrides_list,
-        origin="terms_import",
-    )
-    library_record = record_header(
-        "terminology_library",
-        str(read_json(project, project / "project.json")["project_id"]),
-        record_id=f"TERMS-{next_revision}",
-        terms_revision=next_revision,
-        published_run_id=library.get("published_run_id") if library else None,
-        active_task_id=library.get("active_task_id") if library else None,
-        terms=terms,
-        origin="terms_import",
-    )
-    write_json(project, overrides_path, override_record)
-    write_json(project, project / "terminology" / "terms.json", library_record)
-    return summary
-
 
 def _validate_term_items(
     content: str,
@@ -1967,105 +1144,6 @@ def _validate_term_items(
         )
     return terms, errors, document.complete and not errors
 
-
-def _merge_and_publish_terms(
-    project: Path,
-    *,
-    task_id: str,
-    project_id: str,
-    published_run_id: str,
-    active_status: str = "completed",
-) -> dict[str, Any]:
-    config = load_project_config(project)
-    spec = term_normalization(config)
-    previous = load_terms(project)
-    candidates = [
-        record
-        for record in read_jsonl(
-            project,
-            project / "terminology" / "candidates.jsonl",
-            task_id=task_id,
-        )
-    ]
-    merged: dict[str, dict[str, Any]] = {}
-    _seed_published_terms(merged, previous, spec)
-    for record in candidates:
-        for candidate in record.get("terms", []):
-            _add_term_candidate(merged, candidate, spec)
-
-    overrides_data = read_json(project, project / "terminology" / "overrides.json")
-    overrides = {
-        str(item["normalized"]): item for item in overrides_data.get("overrides", [])
-    }
-    _apply_term_overrides(merged, overrides)
-    alias_policy = str(config["terminology"]["alias_primary_collision"])
-    terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
-    revision = int(previous["terms_revision"]) + 1 if previous else 1
-    library = record_header(
-        "terminology_library",
-        project_id,
-        record_id=f"TERMS-{revision}",
-        terms_revision=revision,
-        published_run_id=published_run_id,
-        active_task_id=task_id,
-        terms=terms,
-    )
-    write_json(project, project / "terminology" / "terms.json", library)
-    active = read_json(project, project / "terminology" / "active_task.json")
-    active["status"] = active_status
-    active["terms_revision"] = revision
-    write_json(project, project / "terminology" / "active_task.json", active)
-    return library
-
-
-def publish_partial_terms(project: Path) -> dict[str, Any]:
-    """Publish current candidates without closing or deleting scan history."""
-    if find_running_runs(project, "terminology"):
-        raise UsageError("术语扫描仍在运行，结束 Run 后才能发布现有结果")
-    active_path = project / "terminology" / "active_task.json"
-    if not record_exists(project, active_path):
-        raise UsageError("当前没有可发布的活动术语扫描")
-    active = read_json(project, active_path)
-    if active.get("status") != "active":
-        raise UsageError("当前没有可发布的活动术语扫描")
-    task_id = str(active.get("active_task_id", ""))
-    candidates = [
-        record
-        for record in read_jsonl(
-            project,
-            project / "terminology" / "candidates.jsonl",
-            task_id=task_id,
-        )
-        if record.get("terms")
-    ]
-    if not candidates:
-        raise UsageError("当前活动扫描没有可发布的候选术语")
-    config = load_project_config(project)
-    spec = term_normalization(config)
-    candidate_sources = {
-        normalize_term(str(term.get("source")), spec)
-        for record in candidates
-        for term in record.get("terms", [])
-        if isinstance(term, dict) and term.get("source")
-    }
-    metadata = read_json(project, project / "project.json")
-    published_run_id = str(candidates[-1].get("run_id") or task_id)
-    library = _merge_and_publish_terms(
-        project,
-        task_id=task_id,
-        project_id=str(metadata["project_id"]),
-        published_run_id=published_run_id,
-        active_status="partial_published",
-    )
-    return {
-        "published": True,
-        "active_task_id": task_id,
-        "terms_revision": library["terms_revision"],
-        "published_terms": len(library.get("terms", [])),
-        "scanned_terms": len(candidate_sources),
-    }
-
-
 def _terminology_scan_selection(
     project: Path,
     segments: list[dict[str, Any]],
@@ -2087,7 +1165,6 @@ def _terminology_scan_selection(
         selected_ids,
     )
     return selected, selected_ids, completed_ids, fingerprints
-
 
 async def run_terminology(
     project: Path,
@@ -2677,455 +1754,6 @@ async def run_terminology(
         "usage": usage,
     }
 
-
-class _PreparedTermMatcher:
-    """Pre-index a published terminology library for repeated segment matches."""
-
-    def __init__(self, library: dict[str, Any], spec: TermNormalization) -> None:
-        self.spec = spec
-        self.terms = list(library.get("terms", []))
-        self.by_normalized = {
-            str(
-                term.get("normalized")
-                or normalize_term(str(term.get("source", "")), spec)
-            ): term
-            for term in self.terms
-        }
-        self._term_names: list[tuple[str, tuple[str, ...], set[str]]] = []
-        self._name_terms: dict[str, set[int]] = {}
-        self._prefix_names: dict[str, set[str]] = {}
-        self._single_names: set[str] = set()
-        for index, term in enumerate(self.terms):
-            main_name = normalize_term(str(term.get("source", "")), spec)
-            aliases = tuple(
-                normalize_term(str(value), spec)
-                for value in term.get("aliases", [])
-                if value
-            )
-            conflicted_aliases = {
-                normalize_term(str(item.get("alias", "")), spec)
-                for item in term.get("conflicts", {}).get("alias_primaries", [])
-            }
-            self._term_names.append((main_name, aliases, conflicted_aliases))
-            for name in {main_name, *aliases}:
-                if not name:
-                    continue
-                self._name_terms.setdefault(name, set()).add(index)
-                if len(name) == 1:
-                    self._single_names.add(name)
-                else:
-                    self._prefix_names.setdefault(name[:2], set()).add(name)
-
-        claims: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-        for term in self.terms:
-            for claim in term.get("conflicts", {}).get("group_claims", []):
-                key = (
-                    str(claim.get("entry", "")),
-                    str(claim.get("claimed_by", "")),
-                    str(claim.get("alias", "")),
-                    str(claim.get("reason", "")),
-                )
-                claims[key] = dict(claim)
-        self._claims = list(claims.values())
-        self._claim_components = self._build_claim_components()
-        for claim in self._claims:
-            alias_name = normalize_term(str(claim.get("alias", "")), spec)
-            if not alias_name:
-                continue
-            if len(alias_name) == 1:
-                self._single_names.add(alias_name)
-            else:
-                self._prefix_names.setdefault(alias_name[:2], set()).add(alias_name)
-
-    def _build_claim_components(
-        self,
-    ) -> list[tuple[set[str], list[dict[str, Any]]]]:
-        components: list[tuple[set[str], list[dict[str, Any]]]] = []
-        for claim in self._claims:
-            endpoints = {
-                str(claim.get("entry", "")),
-                str(claim.get("claimed_by", "")),
-            }
-            matching: list[int] = []
-            related_keys = set(endpoints)
-            changed = True
-            while changed:
-                changed = False
-                for index, value in enumerate(self._claims):
-                    value_endpoints = {
-                        str(value.get("entry", "")),
-                        str(value.get("claimed_by", "")),
-                    }
-                    if not value_endpoints & related_keys or index in matching:
-                        continue
-                    matching.append(index)
-                    before = len(related_keys)
-                    related_keys.update(value_endpoints)
-                    changed = changed or len(related_keys) != before
-            related_claims = [self._claims[index] for index in matching]
-            if any(existing[0] == related_keys for existing in components):
-                continue
-            components.append((related_keys, related_claims))
-        return components
-
-    def _candidate_names(self, normalized_source: str) -> set[str]:
-        candidates = {
-            name
-            for index in range(len(normalized_source) - 1)
-            for name in self._prefix_names.get(normalized_source[index : index + 2], ())
-        }
-        candidates.update(
-            character
-            for character in normalized_source
-            if character in self._single_names
-        )
-        return {name for name in candidates if name in normalized_source}
-
-    def _candidate_names_for_source(self, source: str) -> set[str]:
-        candidate_names: set[str] = set()
-        for view in aozora_match_views(source):
-            normalized_view = normalize_term(view, self.spec)
-            candidate_names.update(self._candidate_names(normalized_view))
-        return candidate_names
-
-    @staticmethod
-    def _claim_sort_key(value: dict[str, Any]) -> tuple[str, str, str, str]:
-        return (
-            str(value.get("entry", "")),
-            str(value.get("claimed_by", "")),
-            str(value.get("alias", "")),
-            str(value.get("reason", "")),
-        )
-
-    def _matched_aliases(
-        self,
-        term: dict[str, Any],
-        candidate_names: set[str],
-        *,
-        excluded_names: set[str] | frozenset[str] = frozenset(),
-    ) -> list[str]:
-        matched = {
-            str(alias)
-            for alias in term.get("aliases", [])
-            if (normalized := normalize_term(str(alias), self.spec))
-            and normalized in candidate_names
-            and normalized not in excluded_names
-        }
-        return sorted(
-            matched,
-            key=lambda value: (normalize_term(value, self.spec), value),
-        )
-
-    def match(self, source: str, limit: int) -> list[dict]:
-        candidate_names = self._candidate_names_for_source(source)
-        bundles: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
-        disputed: set[str] = set()
-        for related_keys, related_claims in self._claim_components:
-            active_claims = [
-                claim
-                for claim in related_claims
-                if normalize_term(str(claim.get("alias", "")), self.spec)
-                in candidate_names
-            ]
-            if not active_claims:
-                continue
-            disputed.update(related_keys)
-            related_terms = [
-                self.by_normalized[key]
-                for key in sorted(related_keys)
-                if key in self.by_normalized
-            ]
-            payload = []
-            for term in related_terms:
-                term_normalized = str(
-                    term.get("normalized")
-                    or normalize_term(str(term.get("source", "")), self.spec)
-                )
-                disputed_names = {
-                    normalize_term(str(value.get("alias", "")), self.spec)
-                    for value in related_claims
-                    if term_normalized
-                    in {str(value.get("entry")), str(value.get("claimed_by"))}
-                }
-                safe_names = [
-                    normalize_term(str(term.get("source", "")), self.spec),
-                    *(
-                        normalize_term(str(value), self.spec)
-                        for value in term.get("aliases", [])
-                    ),
-                ]
-                safe_hit = any(
-                    name and name not in disputed_names and name in candidate_names
-                    for name in safe_names
-                )
-                item = {
-                    key: term.get(key)
-                    for key in ("source", "category", "description")
-                }
-                item["aliases"] = self._matched_aliases(term, candidate_names)
-                item["preferred_translation"] = (
-                    term.get("preferred_translation") if safe_hit else None
-                )
-                item["group_claims"] = sorted(
-                    related_claims, key=self._claim_sort_key
-                )
-                payload.append(item)
-            bundle_key = "claim:" + ",".join(sorted(related_keys))
-            if payload:
-                alias_name = normalize_term(
-                    str(active_claims[0].get("alias", "")), self.spec
-                )
-                bundles.append((1, len(alias_name), 0, bundle_key, payload))
-
-        grouped: dict[
-            str, list[tuple[bool, int, dict[str, Any], list[str]]]
-        ] = {}
-        candidate_term_indexes = {
-            index
-            for name in candidate_names
-            for index in self._name_terms.get(name, ())
-        }
-        for index in sorted(candidate_term_indexes):
-            term = self.terms[index]
-            normalized = str(
-                term.get("normalized")
-                or normalize_term(str(term.get("source", "")), self.spec)
-            )
-            if normalized in disputed:
-                continue
-            main_name, aliases, conflicted_aliases = self._term_names[index]
-            alias_names = [
-                name for name in aliases if name not in conflicted_aliases
-            ]
-            matched_alias_names = {
-                name for name in alias_names if name in candidate_names
-            }
-            matched_aliases = self._matched_aliases(
-                term,
-                candidate_names,
-                excluded_names=conflicted_aliases,
-            )
-            main_hit = bool(main_name and main_name in candidate_names)
-            hits = [
-                name
-                for name in ([main_name] if main_hit else matched_alias_names)
-                if name and name in candidate_names
-            ]
-            if not hits:
-                continue
-            primary = str(term.get("group_primary") or normalized)
-            grouped.setdefault(primary, []).append(
-                (main_hit, max(len(name) for name in hits), term, matched_aliases)
-            )
-
-        for primary, hits in grouped.items():
-            primary_term = self.by_normalized.get(primary)
-            if primary_term is None:
-                raise UsageError(f"术语组主不存在：{primary}")
-            matched_terms = [value[2] for value in hits]
-            matched_aliases_by_normalized = {
-                str(
-                    value[2].get("normalized")
-                    or normalize_term(str(value[2].get("source", "")), self.spec)
-                ): value[3]
-                for value in hits
-            }
-            ordered = [primary_term]
-            ordered.extend(
-                sorted(
-                    (
-                        term
-                        for term in matched_terms
-                        if str(
-                            term.get("normalized")
-                            or normalize_term(str(term.get("source", "")), self.spec)
-                        )
-                        != primary
-                    ),
-                    key=lambda term: str(term.get("source", "")),
-                )
-            )
-            payload = []
-            for term in ordered:
-                item = {
-                    key: term.get(key)
-                    for key in (
-                        "source",
-                        "category",
-                        "description",
-                        "preferred_translation",
-                    )
-                }
-                term_normalized = str(
-                    term.get("normalized")
-                    or normalize_term(str(term.get("source", "")), self.spec)
-                )
-                item["aliases"] = matched_aliases_by_normalized.get(
-                    term_normalized, []
-                )
-                if term is not primary_term:
-                    item["primary_source"] = primary_term.get("source")
-                payload.append(item)
-            bundles.append(
-                (
-                    max(int(value[0]) for value in hits),
-                    max(value[1] for value in hits),
-                    max(
-                        int(bool(value[2].get("preferred_translation")))
-                        for value in hits
-                    ),
-                    str(primary_term.get("source", "")),
-                    payload,
-                )
-            )
-
-        bundles.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
-        return [term for bundle in bundles[:limit] for term in bundle[4]]
-
-    def validation_matches(
-        self, source: str, payload_terms: list[dict[str, Any]]
-    ) -> tuple[TranslationTermMatch, ...]:
-        """Return only actual, non-disputed matches represented in the payload."""
-        candidate_names = self._candidate_names_for_source(source)
-        matches: list[TranslationTermMatch] = []
-        seen: set[tuple[str, str, str]] = set()
-        for term in payload_terms:
-            preferred = term.get("preferred_translation")
-            if not isinstance(preferred, str) or not preferred.strip():
-                continue
-            term_source = str(term.get("source", ""))
-            normalized_source = normalize_term(term_source, self.spec)
-            if normalized_source and normalized_source in candidate_names:
-                key = (term_source, term_source, "source")
-                if key not in seen:
-                    seen.add(key)
-                    matches.append(
-                        TranslationTermMatch(
-                            source=term_source,
-                            matched_text=term_source,
-                            match_type="source",
-                            preferred_translation=preferred,
-                        )
-                    )
-                continue
-            aliases = [
-                str(alias)
-                for alias in term.get("aliases", [])
-                if normalize_term(str(alias), self.spec) in candidate_names
-            ]
-            for alias in sorted(
-                aliases,
-                key=lambda value: (normalize_term(value, self.spec), value),
-            ):
-                key = (term_source, alias, "alias")
-                if key in seen:
-                    continue
-                seen.add(key)
-                matches.append(
-                    TranslationTermMatch(
-                        source=term_source,
-                        matched_text=alias,
-                        match_type="alias",
-                        preferred_translation=preferred,
-                    )
-                )
-        return tuple(matches)
-
-
-class _TermMatchCache:
-    def __init__(
-        self,
-        library: dict[str, Any] | None,
-        spec: TermNormalization,
-        limit: int,
-    ) -> None:
-        self.matcher = _PreparedTermMatcher(library, spec) if library else None
-        self.spec = spec
-        self.limit = limit
-        self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
-
-    def _matches_for_item(self, item: dict[str, Any]) -> tuple[dict, ...]:
-        key = (str(item["segment_id"]), str(item["source"]))
-        matches = self._cache.get(key)
-        if matches is None:
-            matches = tuple(
-                self.matcher.match(str(item["source"]), self.limit)
-                if self.matcher is not None
-                else []
-            )
-            self._cache[key] = matches
-        return matches
-
-    def validation_matches_for_item(
-        self, item: dict[str, Any]
-    ) -> tuple[TranslationTermMatch, ...]:
-        if self.matcher is None:
-            return ()
-        return self.matcher.validation_matches(
-            str(item["source"]), list(self._matches_for_item(item))
-        )
-
-    def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
-        by_source: dict[str, dict] = {}
-        for item in items:
-            matches = self._matches_for_item(item)
-            for term in matches:
-                source = str(term["source"])
-                current = by_source.get(source)
-                if current is None:
-                    current = dict(term)
-                    aliases = {
-                        str(alias)
-                        for alias in term.get("aliases", [])
-                        if alias
-                    }
-                    current["aliases"] = sorted(
-                        aliases,
-                        key=lambda value: (normalize_term(value, self.spec), value),
-                    )
-                    by_source[source] = current
-                    continue
-                aliases = {
-                    str(alias)
-                    for alias in current.get("aliases", [])
-                    if alias
-                }
-                aliases.update(
-                    str(alias)
-                    for alias in term.get("aliases", [])
-                    if alias
-                )
-                current["aliases"] = sorted(
-                    aliases,
-                    key=lambda value: (normalize_term(value, self.spec), value),
-                )
-        return list(by_source.values())
-
-
-def match_terms(
-    source: str,
-    library: dict[str, Any] | None,
-    limit: int,
-    spec: TermNormalization,
-) -> list[dict]:
-    if library is None:
-        return []
-    return _PreparedTermMatcher(library, spec).match(source, limit)
-
-
-def match_term_validation(
-    source: str,
-    library: dict[str, Any] | None,
-    limit: int,
-    spec: TermNormalization,
-) -> tuple[TranslationTermMatch, ...]:
-    if library is None:
-        return ()
-    matcher = _PreparedTermMatcher(library, spec)
-    payload_terms = matcher.match(source, limit)
-    return matcher.validation_matches(source, payload_terms)
-
-
 def _split_source_once(source: str) -> tuple[str, str]:
     if len(source) < 2:
         raise ConfigError("固定 Prompt 与单字符输入仍超过模型硬限制")
@@ -3145,7 +1773,6 @@ def _split_source_once(source: str) -> tuple[str, str]:
         raise ConfigError("单个 Aozora Ruby 超过模型硬限制，无法安全拆分")
     return source[:split_at], source[split_at:]
 
-
 def _split_segment_source(
     segment: dict[str, Any], segment_id: str, source: str
 ) -> dict[str, Any]:
@@ -3153,7 +1780,6 @@ def _split_segment_source(
     if segment.get("_ruby_mode") in {"short_xml", "compact"}:
         result["model_source"] = segment_model_text(result, source)
     return result
-
 
 def _replace_with_runtime_parts(
     segment: dict[str, Any],
@@ -3198,7 +1824,6 @@ def _replace_with_runtime_parts(
             }
     return parts
 
-
 class _SegmentParseResult(NamedTuple):
     valid: dict[str, Any]
     unresolved: list[str]
@@ -3206,7 +1831,6 @@ class _SegmentParseResult(NamedTuple):
     complete: bool
     has_valid_end: bool
     ids_complete: bool
-
 
 def _parse_translation_items(
     content: str, expected_ids: list[str]
@@ -3240,7 +1864,6 @@ def _parse_translation_items(
         counts == Counter(expected_ids),
     )
 
-
 def _map_local_translation_response(
     content: str,
     id_map: dict[str, str],
@@ -3254,7 +1877,6 @@ def _map_local_translation_response(
         result.has_valid_end,
         result.ids_complete,
     )
-
 
 async def run_translation(
     project: Path,
@@ -3955,11 +2577,9 @@ async def run_translation(
         "usage": usage,
     }
 
-
 def require_success(summary: dict[str, Any]) -> None:
     if summary.get("failed") or summary.get("pending"):
         raise IncompleteError("选定范围仍有 pending 或 failed")
-
 
 def _base_results(
     project: Path,
@@ -4006,7 +2626,6 @@ def _base_results(
         force=False,
     ).latest_completed
     return {**translations, **{str(key): value for key, value in applied.items()}}
-
 
 def _parse_review_items(
     content: str, expected_ids: list[str]
@@ -4059,7 +2678,6 @@ def _parse_review_items(
         counts == Counter(expected_ids),
     )
 
-
 def _map_local_review_response(
     content: str,
     id_map: dict[str, str],
@@ -4073,7 +2691,6 @@ def _map_local_review_response(
         result.has_valid_end,
         result.ids_complete,
     )
-
 
 async def run_review(
     project: Path,
@@ -4595,7 +3212,6 @@ async def run_review(
         "usage": usage,
     }
 
-
 def run_apply(
     project: Path,
     review_stage: str,
@@ -4730,7 +3346,6 @@ def run_apply(
         "failed": 0,
         "warnings": warnings,
     }
-
 
 def export_project(
     project: Path,
@@ -4976,7 +3591,6 @@ def export_project(
         "mixed_fingerprints": len(used_fingerprints) > 1,
         "output_encoding": encoding,
     }
-
 
 async def run_all(
     project: Path,
@@ -5224,7 +3838,6 @@ async def run_all(
                 )
             )
         return await execute(clients)
-
 
 def inspect_full(project: Path, *, dry_run: bool = False) -> dict[str, Any]:
     config, metadata, files, segments = _project_context(project)
