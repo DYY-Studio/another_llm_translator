@@ -290,6 +290,7 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))
+    definition["extra_headers"] = {}
     definition["model"] = "changed-model"
     definition["extra_body"] = {"provider": {"order": ["google"]}}
     preset_file.write_text(json.dumps(definition), encoding="utf-8")
