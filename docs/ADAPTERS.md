@@ -316,6 +316,12 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 
 宿主把该值写入 Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和参考上下文。这不会改变 File 的存储、选择、调度或导出边界；旧项目缺少有效 `part_id` 时要求重新创建，不从 locator 推测或迁移。
 
+“内容概括 · 实验”直接复用这条通用边界契约。Adapter 不需要实现概括专用方法，也
+不需要声明章节；每个 `(file_id, part_id)` 可独立生成片段概括、聚合和 Markdown 导出。
+`model_sources` 只作为模型输入格式，不改变持久化的原文 Segment。宿主保存原文和实际
+模型文本的摘要及引用范围；当外部 Adapter 的 `model_source` 需要拆分而无法安全保留
+原始定位时，概括请求明确失败，不猜测字符级映射。
+
 每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
 ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。

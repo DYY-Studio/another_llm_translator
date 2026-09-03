@@ -19,7 +19,7 @@ from app.project_export import export_project
 from app.stages import inspect_full, run_all
 from app.stage_review import run_apply, run_review
 from app.stage_translation import run_translation
-from app.sqlite_storage import read_jsonl
+from app.sqlite_storage import read_content_summaries, read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 
@@ -275,6 +275,7 @@ async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> No
     ]
     assert read_jsonl(project, project / "stages" / "proofreading.jsonl")
     assert read_jsonl(project, project / "stages" / "polishing.jsonl")
+    assert read_content_summaries(project) == []
     assert not (project / "stages" / "proofreading_applied.jsonl").exists()
     assert not (project / "stages" / "polishing_applied.jsonl").exists()
 

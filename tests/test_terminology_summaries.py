@@ -10,6 +10,7 @@ import pytest
 
 from app.errors import ConfigError, UsageError
 from app.execution import Scope
+from app.main import run
 from app.project import (
     add_project_files,
     init_project,
@@ -18,13 +19,10 @@ from app.project import (
 )
 from app.sqlite_storage import (
     read_content_summaries,
-    read_files,
     read_json,
     read_jsonl,
-    read_segments,
     read_summary_participation,
     read_summary_runs,
-    replace_source,
     write_summary_participation,
     write_json,
     record_header,
@@ -33,6 +31,11 @@ from app.sqlite_storage import (
 from app.stage_terminology import _digest, run_terminology
 from app.term_library import load_terms, publish_partial_terms
 from tests.helpers import llm_jsonl
+from tests.test_document_adapter_contract import (
+    RecordDocumentAdapter,
+    register_plugin,
+    write_record,
+)
 from tests.test_foundation import make_app_root
 
 
@@ -672,23 +675,33 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
 @pytest.mark.asyncio
 async def test_external_model_source_refuses_unverifiable_runtime_split(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project = _project(tmp_path, "ABCDEFGH")
-    files = read_files(project)
-    segments = [dict(item) for item in read_segments(project)]
-    segments[0]["model_source"] = "opaque model text"
-    replace_source(
-        project,
-        files,
-        segments,
-        read_json(project, project / "project.json"),
+    register_plugin(monkeypatch, RecordDocumentAdapter())
+    source = tmp_path / "book.rec"
+    write_record(
+        source,
+        "# name: demo\nABCDEFGH\nIJKL\n---\nother part",
     )
+    project, _ = init_project(
+        [str(source)],
+        name="record-demo",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="record",
+        adapter_options={"record": {"source_style": "marked"}},
+    )
+    assert project is not None
     write_summary_participation(
         project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+        [{"file_id": "F0001", "part_id": "a", "selected": True}],
     )
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    requests: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload["source_segments"])
         return httpx.Response(
             400,
             text="context_length_exceeded: maximum context tokens",
@@ -704,6 +717,8 @@ async def test_external_model_source_refuses_unverifiable_runtime_split(
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
+    assert requests[0] == ["<k1>ABCDEFGH</k1>", "<k2>IJKL</k2>"]
+    assert requests[1:] == [["<k1>ABCDEFGH</k1>"]]
     assert read_summary_runs(project)[0]["status"] == "failed"
     assert read_content_summaries(project, kind="fragment") == []
 
@@ -1015,3 +1030,114 @@ async def test_summary_run_is_not_left_running_on_cancel_or_exception(
     runs = read_summary_runs(project)
     assert len(runs) == 1
     assert runs[0]["status"] == ("interrupted" if failure == "cancel" else "failed")
+
+
+@pytest.mark.asyncio
+async def test_external_adapter_parts_use_generic_summary_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external-like adapter proves summaries do not depend on TXT/EPUB."""
+    register_plugin(monkeypatch, RecordDocumentAdapter())
+    source = tmp_path / "book.rec"
+    write_record(source, "# name: demo\nAlice entered.\n---\nBob waved.")
+    project, _ = init_project(
+        [str(source)],
+        name="record-demo",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="record",
+        adapter_options={"record": {"source_style": "marked"}},
+    )
+    assert project is not None
+    write_summary_participation(
+        project,
+        [
+            {"file_id": "F0001", "part_id": "a", "selected": True},
+            {"file_id": "F0001", "part_id": "b", "selected": True},
+        ],
+    )
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        source_segments = payload["source_segments"]
+        records = [
+            {
+                "type": "summary",
+                "text": f"概括：{source_segments[0]}",
+                "refs": ["1"],
+            },
+            {
+                "type": "term",
+                "source": "Alice" if "Alice" in source_segments[0] else "Bob",
+                "category": "人物",
+            },
+        ]
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    os.environ["LLM_API_KEY"] = "test"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_summaries=True
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] == 0
+    assert [payload["source_segments"] for payload in requests] == [
+        ["<k1>Alice entered.</k1>"],
+        ["<k2>Bob waved.</k2>"],
+    ]
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert {(item["file_id"], item["part_id"]) for item in summaries} == {
+        ("F0001", "a"),
+        ("F0001", "b"),
+    }
+    assert all(
+        item["source_range"]["file_id"] == item["file_id"]
+        and item["source_range"]["part_id"] == item["part_id"]
+        for item in summaries
+    )
+    ranges = {
+        item["part_id"]: item["source_range"]["segments"][0]
+        for item in summaries
+    }
+    assert ranges["a"]["source"] == "Alice entered."
+    assert ranges["a"]["model_text"] == "<k1>Alice entered.</k1>"
+    assert ranges["b"]["source"] == "Bob waved."
+    assert ranges["b"]["model_text"] == "<k2>Bob waved.</k2>"
+
+
+def test_cli_terminology_keeps_summary_opt_in_out_of_standard_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = _project(tmp_path, "Alice entered.")
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_terminology(
+        _project: Path, _scope: Scope, **kwargs: object
+    ) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "stage": "terminology",
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("app.main.run_terminology", fake_run_terminology)
+    try:
+        assert run(["terminology", str(project)]) == 0
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+    capsys.readouterr()
+
+    assert calls == [{"resume_run_id": None, "reuse_mixed_fingerprints": False}]
