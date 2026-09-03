@@ -344,6 +344,31 @@ async def test_nonstream_remote_protocol_error_retries(tmp_path: Path) -> None:
     assert calls == 2
 
 
+@pytest.mark.asyncio
+async def test_nonstream_response_parse_failure_is_not_reported_as_success(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["llm"]["stream"] = False
+    current["retry"]["http_max_attempts"] = 1
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": 42}}]},
+        )
+
+    with pytest.raises(ExternalError, match="正文不是字符串"):
+        await run_client(current, tmp_path, handler, diagnostics=diagnostics)
+
+    item = diagnostics.snapshot()["requests"]["items"][0]
+    assert item["status"] == "failed"
+    assert diagnostics.request_detail(item["request_id"])["attempts"][0][
+        "outcome"
+    ] == "response_parse_error"
+
+
 
 @pytest.mark.asyncio
 async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
