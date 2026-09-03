@@ -578,6 +578,7 @@ def _resolve_llm_config(
     config["_llm_preset_hash"] = preset.digest
     config["_llm_preset_definition"] = definition
     config["_llm_extra_body"] = definition["extra_body"]
+    config["_llm_extra_headers"] = definition["extra_headers"]
     adapter_id = str(config["llm"]["adapter"])
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != adapter_id:
@@ -597,5 +598,8 @@ def _resolve_llm_config(
         max_output_tokens=int(config["llm"]["max_output_tokens"]),
         stream=stream,
         extra_body=config["_llm_extra_body"],
+        extra_headers=config["_llm_extra_headers"],
+        session_id="RUN-VALIDATION",
+        request_id="REQ-VALIDATION",
     )
     return config

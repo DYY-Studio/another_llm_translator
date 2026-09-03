@@ -837,6 +837,9 @@ class LLMClient:
                     max_output_tokens=effective_output,
                     stream=stream_enabled,
                     extra_body=self.config.get("_llm_extra_body"),
+                    extra_headers=self.config.get("_llm_extra_headers"),
+                    session_id=self.run_id,
+                    request_id=request_id,
                 )
             except BaseException:
                 if lease is not None:

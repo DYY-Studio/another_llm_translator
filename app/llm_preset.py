@@ -32,6 +32,7 @@ _PRESET_KEYS = frozenset(
         "max_parallel_per_key",
         "request_timeout_seconds",
         "extra_body",
+        "extra_headers",
         "stream",
         "stream_endpoint",
         "stream_read_timeout_enabled",
@@ -78,6 +79,7 @@ def load_llm_preset(path: Path) -> LLMPreset:
         if schema_version in {2, 3}:
             value.setdefault("stream_read_timeout_enabled", True)
         value.setdefault("max_parallel_per_key", value.get("max_parallel"))
+    value.setdefault("extra_headers", {})
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
     if unknown:
@@ -175,6 +177,28 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(extra_body, dict):
         raise ConfigError("LLM Preset extra_body 必须是 JSON 对象")
     _reject_placeholders(extra_body)
+    extra_headers = value["extra_headers"]
+    if not isinstance(extra_headers, dict):
+        raise ConfigError("LLM Preset extra_headers 必须是字符串到字符串的对象")
+    header_names: set[str] = set()
+    for name, template in extra_headers.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+        ):
+            raise ConfigError("LLM Preset extra_headers Header 名称无效")
+        normalized_name = name.lower()
+        if normalized_name in header_names:
+            raise ConfigError("LLM Preset extra_headers Header 名称重复")
+        header_names.add(normalized_name)
+        if not isinstance(template, str) or "\r" in template or "\n" in template:
+            raise ConfigError("LLM Preset extra_headers Header 值无效")
+        placeholders = re.findall(r"\$\{([^}]*)\}", template)
+        if template.count("${") != len(placeholders):
+            raise ConfigError("LLM Preset extra_headers 包含无效占位符")
+        unknown = set(placeholders) - {"session_id", "request_id"}
+        if unknown:
+            raise ConfigError("LLM Preset extra_headers 包含未知占位符")
     return LLMPreset(
         preset_id=preset_id,
         adapter_id=value["adapter_id"],

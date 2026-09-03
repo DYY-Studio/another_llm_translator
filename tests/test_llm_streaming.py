@@ -164,12 +164,20 @@ async def test_stream_http_error_reuses_decoded_response_without_double_decompre
     tmp_path: Path,
 ) -> None:
     current = streaming_config(tmp_path)
+    current["_llm_extra_headers"] = {
+        "x-opencode-session": "${session_id}",
+        "x-opencode-request": "${request_id}",
+    }
     current["retry"]["http_max_attempts"] = 2
     calls = 0
+    request_headers: list[tuple[str, str]] = []
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        request_headers.append(
+            (request.headers["x-opencode-session"], request.headers["x-opencode-request"])
+        )
         if calls == 1:
             return httpx.Response(
                 503,
@@ -189,6 +197,8 @@ async def test_stream_http_error_reuses_decoded_response_without_double_decompre
 
     assert response.content == "ok"
     assert calls == 2
+    assert request_headers[0] == request_headers[1]
+    assert request_headers[0][0] == "RUN"
 
 
 @pytest.mark.asyncio

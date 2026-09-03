@@ -45,6 +45,30 @@ def test_preset_loads_nested_extra_body_and_hashes_content(tmp_path: Path) -> No
     assert preset.preset_id == "default"
     assert preset.definition["extra_body"] == value["extra_body"]
     assert preset.digest.startswith("sha256:")
+    assert preset.definition["extra_headers"] == {}
+
+
+def test_preset_accepts_extra_headers_and_rejects_invalid_values(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["extra_headers"] = {"x-opencode-session": "${session_id}"}
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["extra_headers"] == value["extra_headers"]
+
+    value["extra_headers"] = {"bad header": "value"}
+    with pytest.raises(ConfigError, match="Header 名称"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${unknown}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${UNKNOWN}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${session_id"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
 
 
 def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
@@ -266,6 +290,7 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))
+    definition["extra_headers"] = {}
     definition["model"] = "changed-model"
     definition["extra_body"] = {"provider": {"order": ["google"]}}
     preset_file.write_text(json.dumps(definition), encoding="utf-8")

@@ -548,6 +548,20 @@ Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 
 Run 快照和阶段指纹，因此不得保存密钥。非对象、非法 JSON、占位符和字段冲突
 都必须在创建 Run 或发送请求前拒绝。
 
+Preset 也可提供可选的 `extra_headers` 对象，为 Provider 添加自定义请求头：
+
+```json
+{
+  "x-opencode-session": "${session_id}",
+  "x-opencode-request": "${request_id}"
+}
+```
+
+`${session_id}` 使用当前 Run ID，`${request_id}` 使用当前 Req ID；附加 Header 只
+用于 LLM 生成请求，模型列表探测不携带。固定值会保存，请勿填写 API Key；鉴权继续
+使用 credential/Adapter。Header 名称与 Adapter 默认 Header 冲突（大小写不敏感）时
+必须快速失败。
+
 Preset 修改立即影响所有引用项目，不维护版本历史。Adapter 修改立即影响
 所有引用 Preset。项目缺少其引用的全局 Adapter 时明确失败，不自动补齐或
 改用其他 Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持内联

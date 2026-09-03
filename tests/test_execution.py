@@ -1182,14 +1182,22 @@ def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
 @pytest.mark.asyncio
 async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     current = config()
+    current["_llm_extra_headers"] = {
+        "x-opencode-session": "${session_id}",
+        "x-opencode-request": "${request_id}",
+    }
     current["debug"]["enabled"] = True
     current["retry"]["base_delay_seconds"] = 0
     current["retry"]["jitter_seconds"] = 0
     calls = 0
+    request_headers: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        request_headers.append(
+            (request.headers["x-opencode-session"], request.headers["x-opencode-request"])
+        )
         if calls == 1:
             return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
         return httpx.Response(
@@ -1221,6 +1229,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     assert response.content == '{"type":"end"}'
     assert response.reasoning_content is None
     assert calls == 2
+    assert request_headers == [("RUN", request_id), ("RUN", request_id)]
     assert len(list((tmp_path / "payloads").glob(f"{request_id}-A*.request.json"))) == 2
     assert (tmp_path / "attempts.jsonl").is_file()
 

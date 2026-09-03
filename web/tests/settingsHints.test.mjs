@@ -38,6 +38,7 @@ const hintKeys = [
   "preset.itpmHint",
   "preset.maxConcurrencyPerKeyHint",
   "preset.timeoutSecondsHint",
+  "preset.extraHeadersHint",
 ];
 
 test("configuration help text is localized in both supported languages", () => {
