@@ -10,7 +10,8 @@ import httpx
 from app.execution import Scope
 from app.plugins import get_document_adapter, get_document_adapter_for_extension
 from app.project import init_project, load_segments, load_source_files
-from app.stages import export_project, run_translation
+from app.project_export import export_project
+from app.stage_translation import run_translation
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
 

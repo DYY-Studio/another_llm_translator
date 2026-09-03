@@ -15,14 +15,10 @@ from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
 from app.project import add_project_files
-from app.stages import (
-    export_project,
-    inspect_full,
-    run_all,
-    run_apply,
-    run_review,
-    run_translation,
-)
+from app.project_export import export_project
+from app.stages import inspect_full, run_all
+from app.stage_review import run_apply, run_review
+from app.stage_translation import run_translation
 from app.sqlite_storage import read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project

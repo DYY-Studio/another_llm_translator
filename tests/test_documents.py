@@ -36,7 +36,8 @@ from app.plugins import (
     validate_document_import_options,
 )
 from app.project import _normalize_imported_file, init_project, load_segments
-from app.stages import _project_context, export_project
+from app.stage_runtime import _project_context
+from app.project_export import export_project
 from app.sqlite_storage import (
     append_jsonl,
     read_files,
@@ -725,7 +726,7 @@ def test_epub_export_rejects_empty_target_language_without_output(
     config = load_config(config_path)
     config["project"]["target_language"] = ""
     monkeypatch.setattr(
-        "app.stages.load_project_config",
+        "app.stage_runtime.load_project_config",
         lambda *_args, **_kwargs: config,
     )
 

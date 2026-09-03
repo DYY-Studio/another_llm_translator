@@ -26,6 +26,7 @@ FIXED_INTERFACES = [
 @pytest.fixture(autouse=True)
 def fixed_interfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.web.lan_interfaces", lambda: FIXED_INTERFACES)
+    monkeypatch.setattr("app.web_resource_routes.lan_interfaces", lambda: FIXED_INTERFACES)
 
 
 def make_client(

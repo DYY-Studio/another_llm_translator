@@ -8,18 +8,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.execution import Scope, parse_jsonl_document
+from app.execution import Scope
+from app.llm_response import parse_jsonl_document
 from app.logging_utils import attach_project_log, configure_cli_logging
 from app.main import run
 from app.sqlite_storage import read_json, read_jsonl
-from app.stages import (
-    _parse_review_items,
-    _parse_translation_items,
-    _validate_term_items,
-    run_review,
-    run_terminology,
-    run_translation,
-)
+from app.stage_review import _parse_review_items, run_review
+from app.stage_translation import _parse_translation_items, run_translation
+from app.stage_terminology import _validate_term_items, run_terminology
 from tests.helpers import llm_jsonl
 from tests.test_terminology_translation import create_project
 

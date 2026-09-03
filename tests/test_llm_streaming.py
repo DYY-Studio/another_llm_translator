@@ -10,7 +10,8 @@ import pytest
 from app.config import load_global_config
 from app.diagnostics import Diagnostics
 from app.errors import ExternalError
-from app.execution import LLMClient, SlidingWindowLimiter, render_messages
+from app.llm_client import LLMClient, SlidingWindowLimiter
+from app.execution import render_messages
 from app.llm_adapter import load_json_adapter
 
 ROOT = Path(__file__).parents[1]
