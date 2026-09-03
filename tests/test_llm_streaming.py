@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -10,9 +11,9 @@ import pytest
 from app.config import load_global_config
 from app.diagnostics import Diagnostics
 from app.errors import ExternalError
-from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.execution import render_messages
 from app.llm_adapter import load_json_adapter
+from app.llm_client import LLMClient, SlidingWindowLimiter
 
 ROOT = Path(__file__).parents[1]
 
@@ -24,6 +25,18 @@ class ByteChunks(httpx.AsyncByteStream):
     async def __aiter__(self):
         for chunk in self.chunks:
             yield chunk
+
+    async def aclose(self) -> None:
+        return None
+
+
+class ErrorStream(httpx.AsyncByteStream):
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def __aiter__(self):
+        raise self.error
+        yield b""
 
     async def aclose(self) -> None:
         return None
@@ -144,6 +157,217 @@ async def run_client(
         if context is not None:
             context.__exit__(None, None, None)
         os.environ.pop("LLM_API_KEY", None)
+
+
+@pytest.mark.asyncio
+async def test_stream_http_error_reuses_decoded_response_without_double_decompression(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                503,
+                headers={
+                    "content-type": "application/json; charset=utf-8",
+                    "content-encoding": "gzip",
+                },
+                stream=ByteChunks([gzip.compress(b'{"error":"temporary"}')]),
+            )
+        return stream_response(
+            {"choices": [{"delta": {"content": "ok"}}]},
+            "[DONE]",
+        )
+
+    response, _, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+
+    assert response.content == "ok"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_corrupt_compression_fails_without_retry(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            503,
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+            stream=ByteChunks([b"not-gzip"]),
+        )
+
+    with pytest.raises(ExternalError, match="响应内容解码失败"):
+        await run_client(current, tmp_path, handler)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_success_stream_corrupt_compression_fails_without_retry(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "content-encoding": "gzip",
+            },
+            stream=ByteChunks([b"not-gzip"]),
+        )
+
+    with pytest.raises(ExternalError, match="响应内容解码失败"):
+        await run_client(current, tmp_path, handler)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_nonstream_corrupt_compression_fails_without_retry(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+    current["llm"]["stream"] = False
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+            stream=ByteChunks([b"not-gzip"]),
+        )
+
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with pytest.raises(ExternalError, match="响应内容解码失败"):
+        await run_client(current, tmp_path, handler, diagnostics=diagnostics)
+    assert calls == 1
+    item = diagnostics.snapshot()["requests"]["items"][0]
+    assert item["status"] == "failed"
+    assert diagnostics.request_detail(item["request_id"])["attempts"][0][
+        "http_status"
+    ] is None
+
+
+@pytest.mark.asyncio
+async def test_stream_remote_protocol_error_retries(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
+            )
+        return stream_response(
+            {"choices": [{"delta": {"content": "ok"}}]},
+            "[DONE]",
+        )
+
+    response, _, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+    assert response.content == "ok"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_remote_protocol_error_exhausts_retry_budget(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
+        )
+
+    with pytest.raises(ExternalError, match="流式请求重试耗尽"):
+        await run_client(current, tmp_path, handler)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_nonstream_remote_protocol_error_retries(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+    current["llm"]["stream"] = False
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    response, _, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+    assert response.content == "ok"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_nonstream_response_parse_failure_is_not_reported_as_success(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["llm"]["stream"] = False
+    current["retry"]["http_max_attempts"] = 1
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": 42}}]},
+        )
+
+    with pytest.raises(ExternalError, match="正文不是字符串"):
+        await run_client(current, tmp_path, handler, diagnostics=diagnostics)
+
+    item = diagnostics.snapshot()["requests"]["items"][0]
+    assert item["status"] == "failed"
+    assert diagnostics.request_detail(item["request_id"])["attempts"][0][
+        "outcome"
+    ] == "response_parse_error"
+
 
 
 @pytest.mark.asyncio

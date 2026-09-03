@@ -376,6 +376,8 @@ class Diagnostics:
     def fail_request(self, request_id: str, error: str) -> None:
         request = self._request(request_id)
         if request is not None:
+            if request["attempts"]:
+                request["attempts"][-1]["outcome"] = error
             self._finish_request(request, status="failed", error=error)
 
     def request_detail(self, request_id: str) -> dict[str, Any]:
