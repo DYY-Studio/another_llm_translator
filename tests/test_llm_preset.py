@@ -45,6 +45,30 @@ def test_preset_loads_nested_extra_body_and_hashes_content(tmp_path: Path) -> No
     assert preset.preset_id == "default"
     assert preset.definition["extra_body"] == value["extra_body"]
     assert preset.digest.startswith("sha256:")
+    assert preset.definition["extra_headers"] == {}
+
+
+def test_preset_accepts_extra_headers_and_rejects_invalid_values(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["extra_headers"] = {"x-opencode-session": "${session_id}"}
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["extra_headers"] == value["extra_headers"]
+
+    value["extra_headers"] = {"bad header": "value"}
+    with pytest.raises(ConfigError, match="Header 名称"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${unknown}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${UNKNOWN}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${session_id"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
 
 
 def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(

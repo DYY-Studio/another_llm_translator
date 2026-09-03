@@ -195,6 +195,9 @@ def register_resource_routes(
                 max_output_tokens=int(preset.definition["max_output_tokens"]),
                 stream=bool(preset.definition["stream"]),
                 extra_body=preset.definition["extra_body"],
+                extra_headers=preset.definition["extra_headers"],
+                session_id="RUN-VALIDATION",
+                request_id="REQ-VALIDATION",
             )
             return preset
         finally:
@@ -591,6 +594,9 @@ def register_resource_routes(
             max_output_tokens=int(preset.definition["max_output_tokens"]),
             stream=bool(preset.definition["stream"]),
             extra_body=preset.definition["extra_body"],
+            extra_headers=preset.definition["extra_headers"],
+            session_id="RUN-PREVIEW",
+            request_id="REQ-PREVIEW",
         )
         endpoint = (
             preset.definition["stream_endpoint"]
