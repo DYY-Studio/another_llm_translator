@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -10,9 +11,9 @@ import pytest
 from app.config import load_global_config
 from app.diagnostics import Diagnostics
 from app.errors import ExternalError
-from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.execution import render_messages
 from app.llm_adapter import load_json_adapter
+from app.llm_client import LLMClient, SlidingWindowLimiter
 
 ROOT = Path(__file__).parents[1]
 
@@ -144,6 +145,39 @@ async def run_client(
         if context is not None:
             context.__exit__(None, None, None)
         os.environ.pop("LLM_API_KEY", None)
+
+
+@pytest.mark.asyncio
+async def test_stream_http_error_reuses_decoded_response_without_double_decompression(
+    tmp_path: Path,
+) -> None:
+    current = streaming_config(tmp_path)
+    current["retry"]["http_max_attempts"] = 2
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                503,
+                headers={
+                    "content-type": "application/json; charset=utf-8",
+                    "content-encoding": "gzip",
+                },
+                stream=ByteChunks([gzip.compress(b'{"error":"temporary"}')]),
+            )
+        return stream_response(
+            {"choices": [{"delta": {"content": "ok"}}]},
+            "[DONE]",
+        )
+
+    response, _, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+
+    assert response.content == "ok"
+    assert calls == 2
+
 
 
 @pytest.mark.asyncio

@@ -420,8 +420,7 @@ class LLMClient:
         diagnostics: Any | None,
     ) -> tuple[
         int,
-        str,
-        dict[str, str],
+        httpx.Response,
         LLMResponse,
         dict[str, int],
         list[str],
@@ -440,8 +439,7 @@ class LLMClient:
                 await response.aread()
                 return (
                     status,
-                    response.text,
-                    dict(response.headers),
+                    response,
                     LLMResponse("", None),
                     {},
                     [],
@@ -581,8 +579,7 @@ class LLMClient:
                 ) from exc
             return (
                 status,
-                "",
-                dict(response.headers),
+                response,
                 normalized,
                 usage_values,
                 raw_events,
@@ -846,8 +843,7 @@ class LLMClient:
             stream_result: (
                 tuple[
                     int,
-                    str,
-                    dict[str, str],
+                    httpx.Response,
                     LLMResponse,
                     dict[str, int],
                     list[str],
@@ -1157,17 +1153,17 @@ class LLMClient:
                             )
                         ),
                         stream_event_count=(
-                            stream_result[6]
+                            stream_result[5]
                             if stream_result is not None
                             else attempt_stream_event_count
                         ),
                         stream_received_bytes=(
-                            stream_result[7]
+                            stream_result[6]
                             if stream_result is not None
                             else attempt_stream_received_bytes
                         ),
                         stream_first_event_latency_ms=(
-                            stream_result[8]
+                            stream_result[7]
                             if stream_result is not None
                             else attempt_stream_first_event_latency_ms
                         ),
@@ -1181,8 +1177,7 @@ class LLMClient:
                     raise RuntimeError("流式请求没有返回结果")
                 (
                     stream_status,
-                    stream_error_text,
-                    stream_headers,
+                    response,
                     normalized,
                     stream_usage,
                     raw_events,
@@ -1232,11 +1227,6 @@ class LLMClient:
                     if self.on_usage is not None:
                         self.on_usage(self.usage_summary())
                     return normalized, request_id
-                response = httpx.Response(
-                    stream_status,
-                    headers=stream_headers,
-                    text=stream_error_text,
-                )
             elapsed = time.monotonic() - started
             try:
                 response_data = response.json()
