@@ -386,6 +386,8 @@ def create_app(
     register_segment_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_export_routes import register_export_routes
     register_export_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
+    from .web_summary_routes import register_summary_routes
+    register_summary_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_task_routes import register_task_routes
     register_task_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_project_routes import register_project_routes

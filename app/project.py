@@ -513,6 +513,42 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def ensure_missing_summary_prompts(
+    project: Path, *, app_root: Path = APP_ROOT
+) -> list[str]:
+    """Restore missing content-summary prompts while preserving project edits."""
+    bundle = _bundle_source(app_root)
+    missing: list[tuple[Path, Path]] = []
+    for language in PROMPT_LANGUAGES:
+        relative = Path("prompts") / prompt_file("content_summary", language)
+        source = bundle[relative]
+        if not source.is_file():
+            raise ConfigError(f"全局模板缺失：{relative}")
+        destination = project / relative
+        if not destination.is_file():
+            missing.append((relative, source))
+    if not missing:
+        return []
+    timestamp = utc_now().replace(":", "").replace("-", "")
+    backup = project / "snapshots" / "template_updates" / timestamp
+    backup.mkdir(parents=True, exist_ok=False)
+    config_path = project / "config.toml"
+    if config_path.is_file():
+        shutil.copy2(config_path, backup / "config.toml")
+    prompts_path = project / "prompts"
+    if prompts_path.is_dir():
+        shutil.copytree(prompts_path, backup / "prompts")
+    for relative, source in missing:
+        destination = project / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    names = ", ".join(relative.as_posix() for relative, _ in missing)
+    return [
+        f"发现缺失的全局模板：{names}",
+        f"已补齐缺失项目模板；备份位于 {backup}",
+    ]
+
+
 def init_project(
     inputs: list[str],
     *,

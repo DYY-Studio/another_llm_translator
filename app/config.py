@@ -14,7 +14,7 @@ from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
 
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
-LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision")
+LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision", "content_summary")
 
 SCHEMA: dict[str, Any] = {
     "project": {
@@ -27,11 +27,13 @@ SCHEMA: dict[str, Any] = {
         "preset": None,
         "preset_terminology": None,
         "preset_terminology_decision": None,
+        "preset_content_summary": None,
         "preset_translation": None,
         "preset_proofreading": None,
         "preset_polishing": None,
         "temperature_terminology": None,
         "temperature_terminology_decision": None,
+        "temperature_content_summary": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
         "temperature_polishing": None,
@@ -217,6 +219,7 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in (
         "temperature_terminology",
         "temperature_terminology_decision",
+        "temperature_content_summary",
         "temperature_translation",
         "temperature_proofreading",
         "temperature_polishing",
@@ -405,6 +408,8 @@ def load_config(path: Path) -> dict[str, Any]:
     if isinstance(llm, dict):
         llm.setdefault("preset_terminology_decision", "")
         llm.setdefault("temperature_terminology_decision", 0.1)
+        llm.setdefault("preset_content_summary", "")
+        llm.setdefault("temperature_content_summary", 0.1)
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])

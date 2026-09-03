@@ -19,6 +19,7 @@ STAGES = frozenset(
     {
         "terminology",
         "terminology_decision",
+        "content_summary",
         "translation",
         "proofreading",
         "proofreading_applied",
@@ -1281,6 +1282,65 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
             )
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def publish_content_summary_fulls(
+    project: Path, values: Iterable[dict[str, Any]]
+) -> None:
+    """Publish a complete aggregation batch in one SQLite transaction."""
+    checked = [_validate_summary(dict(value), "content summary") for value in values]
+    if not checked:
+        raise ProjectError("内容概括发布批次不能为空")
+    boundaries = [(str(item["file_id"]), str(item["part_id"])) for item in checked]
+    if len(set(boundaries)) != len(boundaries):
+        raise ProjectError("内容概括发布批次不能包含重复边界")
+    if any(item["kind"] != "full" or item["status"] != "completed" for item in checked):
+        raise ProjectError("内容概括发布批次只能包含已完成 full 结果")
+    if len({str(item["record_id"]) for item in checked}) != len(checked):
+        raise ProjectError("内容概括发布批次不能包含重复结果")
+    connection = _with_db(project)
+    try:
+        with connection:
+            for value in checked:
+                connection.execute(
+                    """
+                    INSERT INTO content_summaries(
+                        summary_id, kind, file_id, part_id, status, text,
+                        source_range_json, source_digest, input_digest, prompt_digest,
+                        model, run_id, source_changed, created_at, updated_at,
+                        payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(summary_id) DO UPDATE SET
+                        kind=excluded.kind, file_id=excluded.file_id,
+                        part_id=excluded.part_id, status=excluded.status,
+                        text=excluded.text, source_range_json=excluded.source_range_json,
+                        source_digest=excluded.source_digest,
+                        input_digest=excluded.input_digest,
+                        prompt_digest=excluded.prompt_digest, model=excluded.model,
+                        run_id=excluded.run_id, source_changed=excluded.source_changed,
+                        updated_at=excluded.updated_at, payload_json=excluded.payload_json
+                    """,
+                    _summary_record_payload(value),
+                )
+            for file_id, part_id in boundaries:
+                connection.execute(
+                    """
+                    UPDATE content_summaries
+                       SET status = 'stale', updated_at = ?
+                     WHERE file_id = ? AND part_id = ?
+                       AND kind = 'full' AND status = 'completed'
+                       AND summary_id <> ?
+                    """,
+                    [utc_now(), file_id, part_id, next(
+                        str(item["record_id"])
+                        for item in checked
+                        if item["file_id"] == file_id and item["part_id"] == part_id
+                    )],
+                )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法原子发布内容概括：{project}: {exc}") from exc
     finally:
         connection.close()
 

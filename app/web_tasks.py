@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +38,7 @@ from .logging_utils import get_logger
 from .project import load_segments, load_source_files
 from .sqlite_storage import (
     latest_stage_summary,
+    read_content_summaries,
     read_json,
     read_jsonl,
     read_summary_participation,
@@ -49,6 +50,7 @@ from .stage_review import run_review
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
 from .stage_runtime import prompt_middle_digests
+from .summary_aggregation import aggregate_summaries, aggregation_preflight
 from .term_library import load_terms
 from .term_decision import STAGE as TERMINOLOGY_DECISION_STAGE
 from .term_decision import (
@@ -244,6 +246,34 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
             "estimated_input_tokens": (
                 int(plan["estimated_input_tokens"]) if plan else 0
             ),
+        }
+    if stage == "content_summary":
+        config = load_project_config(project, stage=stage)
+        boundaries = {
+            (str(item["file_id"]), str(item["part_id"]))
+            for item in load_segments(project)
+            if not item["is_empty"]
+        }
+        full = {
+            (str(item["file_id"]), str(item["part_id"]))
+            for item in read_content_summaries(
+                project, kind="full", status="completed"
+            )
+            if not bool(item.get("source_changed", False))
+        }
+        return {
+            "stage": stage,
+            "preset": {
+                "id": str(config["_llm_preset_id"]),
+                "model": str(config["llm"]["model"]),
+            },
+            "selected": len(boundaries),
+            "completed": len(boundaries & full),
+            "pending": len(boundaries - full),
+            "failed": 0,
+            "current_fingerprint_completed": len(boundaries & full),
+            "mismatched_fingerprint_completed": 0,
+            "running_run": _running_run(project, stage, config),
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
@@ -480,6 +510,7 @@ class _StartDecision:
     summary_participation: tuple[tuple[str, str, bool], ...] = ()
     decision_inputs: str | None = None
     options_selected_count: int | None = None
+    summary_selection: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -515,6 +546,7 @@ class WebTask:
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
+    _summary_selection: tuple[tuple[str, str], ...] = field(default_factory=tuple, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
@@ -524,6 +556,10 @@ class WebTask:
             "project_id": self.project_id,
             "stage": self.stage,
             "include_summaries": self._include_summaries,
+            "summary_selection": [
+                {"file_id": file_id, "part_id": part_id}
+                for file_id, part_id in self._summary_selection
+            ],
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -764,6 +800,7 @@ class WebTaskManager:
         ensure_unique: bool,
         prompt_language: str | None,
         include_summaries: bool = False,
+        summary_selection: tuple[tuple[str, str], ...] = (),
     ) -> _StartDecision:
         if stage not in {
             "terminology",
@@ -771,6 +808,7 @@ class WebTaskManager:
             "proofreading",
             "polishing",
             TERMINOLOGY_DECISION_STAGE,
+            "content_summary",
             "run-all",
         }:
             raise UsageError(f"未知后台阶段：{stage}")
@@ -799,7 +837,29 @@ class WebTaskManager:
         ] = ()
         summary_participation: tuple[tuple[str, str, bool], ...] = ()
         options_selected_count: int | None = None
-        if stage == TERMINOLOGY_DECISION_STAGE:
+        if stage == "content_summary":
+            if not summary_selection:
+                raise UsageError("内容概括聚合选择不能为空")
+            if len(summary_selection) != len(set(summary_selection)):
+                raise UsageError("内容概括聚合选择不能重复")
+            aggregation_preflight(
+                project,
+                [
+                    {"file_id": file_id, "part_id": part_id}
+                    for file_id, part_id in summary_selection
+                ],
+            )
+            config = load_project_config(project, stage=stage)
+            options_selected_count = len(summary_selection)
+            selected_count = len(summary_selection)
+            running_run = _running_run(project, stage, config)
+            if running_run is not None:
+                running_run_id = str(running_run["run_id"])
+            if run_action == "resume":
+                raise UsageError("内容概括聚合暂不支持续用，请重新选择后启动")
+            if running_run is not None and run_action != "decline":
+                raise UsageError("发现未完成内容概括 Run，必须先结束旧任务")
+        elif stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(project, prompt_language)
             library = decision_plan_snapshot["library"]
             selected_count = len(decision_plan_snapshot["eligible"]) * 2
@@ -863,11 +923,20 @@ class WebTaskManager:
                     raise UsageError(
                         "存在不同设置指纹的已完成结果，必须明确选择复用或 force"
                     )
-        if stage == TERMINOLOGY_DECISION_STAGE:
+        if stage in {TERMINOLOGY_DECISION_STAGE, "content_summary"}:
             fingerprints = (
-                (stage, _decision_fingerprint_snapshot(project, prompt_language)),
+                (
+                    stage,
+                    _decision_fingerprint_snapshot(project, prompt_language)
+                    if stage == TERMINOLOGY_DECISION_STAGE
+                    else _stage_fingerprint_snapshot(project, stage),
+                ),
             )
-            decision_inputs = _decision_input_snapshot(decision_plan_snapshot)
+            decision_inputs = (
+                _decision_input_snapshot(decision_plan_snapshot)
+                if stage == TERMINOLOGY_DECISION_STAGE
+                else None
+            )
         elif stage == "run-all":
             selection_snapshots = tuple(
                 (
@@ -912,6 +981,7 @@ class WebTaskManager:
             summary_participation=summary_participation,
             decision_inputs=decision_inputs,
             options_selected_count=options_selected_count,
+            summary_selection=summary_selection,
         )
 
     def _dispatch_locked(self) -> None:
@@ -937,6 +1007,7 @@ class WebTaskManager:
                     replace_draft=state._replace_draft,
                     acknowledge_manual_review=state._acknowledge_manual_review,
                     include_summaries=state._include_summaries,
+                    summary_selection=state._summary_selection,
                 )
             )
             state.asyncio_task.add_done_callback(
@@ -971,6 +1042,7 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
+        summary_selection: Iterable[dict[str, str]] = (),
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -985,6 +1057,10 @@ class WebTaskManager:
                 ensure_unique=True,
                 prompt_language=prompt_language,
                 include_summaries=include_summaries,
+                summary_selection=tuple(
+                    (str(item["file_id"]), str(item["part_id"]))
+                    for item in summary_selection
+                ),
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -1003,6 +1079,7 @@ class WebTaskManager:
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
+            state._summary_selection = decision.summary_selection
             state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
@@ -1021,6 +1098,7 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
+        summary_selection: tuple[tuple[str, str], ...] = (),
     ) -> None:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
@@ -1056,6 +1134,7 @@ class WebTaskManager:
                     ensure_unique=False,
                     prompt_language=prompt_language,
                     include_summaries=include_summaries,
+                    summary_selection=summary_selection,
                 )
                 if (
                     state._start_decision is not None
@@ -1108,7 +1187,18 @@ class WebTaskManager:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
                                 usage_base = raw_usage
-                if state.stage == TERMINOLOGY_DECISION_STAGE:
+                if state.stage == "content_summary":
+                    summary = await aggregate_summaries(
+                        state.project,
+                        [
+                            {"file_id": file_id, "part_id": part_id}
+                            for file_id, part_id in summary_selection
+                        ],
+                        limiter=next(iter(shared_limiters.values())),
+                        prompt_language=prompt_language,
+                        on_progress=progress,
+                    )
+                elif state.stage == TERMINOLOGY_DECISION_STAGE:
                     summary = await run_terminology_decision(
                         state.project,
                         replace_draft=replace_draft,
