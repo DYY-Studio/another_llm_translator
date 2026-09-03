@@ -436,7 +436,32 @@ class LLMClient:
         ) as response:
             status = response.status_code
             if not 200 <= status < 300:
-                await response.aread()
+                try:
+                    await response.aread()
+                except httpx.DecodingError as exc:
+                    raise _StreamProtocolError(
+                        "LLM 响应内容解码失败",
+                        status=status,
+                        events=[],
+                        event_count=0,
+                        received_bytes=0,
+                        first_event_latency_ms=None,
+                        usage_values={},
+                    ) from exc
+                except (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    raise _StreamRetryable(
+                        str(exc) or "LLM 流式错误响应连接中断",
+                        events=[],
+                        event_count=0,
+                        received_bytes=0,
+                        first_event_latency_ms=None,
+                        status=status,
+                        retry_after=response.headers.get("Retry-After"),
+                    ) from exc
                 return (
                     status,
                     response,
@@ -523,7 +548,21 @@ class LLMClient:
                         break
             except _StreamRetryable:
                 raise
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            except httpx.DecodingError as exc:
+                raise _StreamProtocolError(
+                    "LLM 响应内容解码失败",
+                    status=status,
+                    events=raw_events,
+                    event_count=event_count,
+                    received_bytes=received_bytes,
+                    first_event_latency_ms=first_event_latency_ms,
+                    usage_values=usage_values,
+                ) from exc
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ) as exc:
                 raise _StreamRetryable(
                     str(exc) or "LLM 流式连接中断",
                     events=raw_events,
@@ -1087,13 +1126,34 @@ class LLMClient:
                 if diagnostics is not None:
                     diagnostics.fail_request(request_id, "response_parse_error")
                 raise
+            except httpx.DecodingError as exc:
+                attempt_error = True
+                attempt_outcome = "response_parse_error"
+                await self._debug_attempt(
+                    request_id,
+                    send_attempt,
+                    payload,
+                    retry_round=attempt,
+                    key_index=key_index,
+                    error=f"LLM 响应内容解码失败：{exc}",
+                    status=response_status,
+                    outcome=attempt_outcome,
+                    parent_request_id=parent_request_id,
+                )
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "response_parse_error")
+                raise ExternalError("LLM 响应内容解码失败") from exc
             except ExternalError:
                 attempt_error = True
                 attempt_outcome = "response_parse_error"
                 if diagnostics is not None:
                     diagnostics.fail_request(request_id, "response_parse_error")
                 raise
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ) as exc:
                 attempt_error = True
                 attempt_outcome = "network_error"
                 elapsed = time.monotonic() - started
