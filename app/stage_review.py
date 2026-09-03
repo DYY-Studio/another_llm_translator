@@ -43,10 +43,6 @@ from .sqlite_storage import (
 
 from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _base_results, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
 
-def require_success(summary: dict[str, Any]) -> None:
-    if summary.get("failed") or summary.get("pending"):
-        raise IncompleteError("选定范围仍有 pending 或 failed")
-
 def _parse_review_items(
     content: str, expected_ids: list[str]
 ) -> _SegmentParseResult:

@@ -29,6 +29,7 @@ from .config import load_project_config
 
 from .errors import (
     ConfigError,
+    IncompleteError,
 )
 
 from .term_library import (load_terms)
@@ -36,7 +37,7 @@ from .term_library import (load_terms)
 
 from .stage_runtime import (_base_results, _project_context, _require_nonempty_segments, prompt_middle_digests)
 from .stage_translation import run_translation
-from .stage_review import require_success, run_review
+from .stage_review import run_review
 from .stage_terminology import _terminology_scan_selection, run_terminology
 
 from .execution import (
@@ -65,6 +66,11 @@ from .sqlite_storage import (
     read_jsonl,
     record_exists,
 )
+
+
+def require_success(summary: dict[str, Any]) -> None:
+    if summary.get("failed") or summary.get("pending"):
+        raise IncompleteError("选定范围仍有 pending 或 failed")
 
 
 async def run_all(
