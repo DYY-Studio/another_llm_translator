@@ -52,12 +52,14 @@ class Diagnostics:
         log_sink: Any | None = None,
         revision_sink: Callable[[], int] | None = None,
         terminal_sink: Callable[[Diagnostics, str], None] | None = None,
+        request_reset_sink: Callable[[], None] | None = None,
     ) -> None:
         self.log_path = log_path
         self.task_id = task_id
         self._log_sink = log_sink or self
         self._revision_sink = revision_sink
         self._terminal_sink = terminal_sink
+        self._request_reset_sink = request_reset_sink
         self.logs: deque[dict[str, Any]] = deque(maxlen=1000)
         self.requests: dict[str, dict[str, Any]] = {}
         self._retained_terminal_details: deque[str] = deque()
@@ -232,14 +234,12 @@ class Diagnostics:
         while len(self._retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
             request_id = self._retained_terminal_details.popleft()
             request = self.requests.get(request_id)
-            if request is None or not request["detail_available"]:
+            if request is None:
                 continue
-            request["detail_available"] = False
-            request["segment_id_map"] = {}
-            request["messages"] = []
-            request["response_content"] = None
-            request["reasoning_content"] = None
-            self._touch_request(request)
+            del self.requests[request_id]
+            self._request_session = uuid.uuid4().hex
+            if self._request_reset_sink is not None:
+                self._request_reset_sink()
 
     def request_started(self, request_id: str) -> None:
         self.active_requests += 1
@@ -554,6 +554,9 @@ class DiagnosticsHub(Diagnostics):
         self._hub_request_cursor += 1
         return self._hub_request_cursor
 
+    def _reset_hub_request_feed(self) -> None:
+        self._hub_request_session = uuid.uuid4().hex
+
     def _touch_request(self, request: dict[str, Any]) -> None:
         super()._touch_request(request)
         request["_hub_revision"] = self._next_hub_revision()
@@ -578,14 +581,41 @@ class DiagnosticsHub(Diagnostics):
                 self._hub_retained_terminal_details.popleft()
             )
             old_request = old_session.requests.get(old_request_id)
-            if old_request is None or not old_request["detail_available"]:
+            if old_request is None:
                 continue
-            old_request["detail_available"] = False
-            old_request["segment_id_map"] = {}
-            old_request["messages"] = []
-            old_request["response_content"] = None
-            old_request["reasoning_content"] = None
-            old_session._touch_request(old_request)
+            del old_session.requests[old_request_id]
+            self._reset_hub_request_feed()
+
+    def _prune_terminal_details(self) -> None:
+        previous_count = len(self.requests)
+        super()._prune_terminal_details()
+        if len(self.requests) < previous_count:
+            self._reset_hub_request_feed()
+
+    def _clear_project_sessions(self, project: str) -> None:
+        stale_task_ids = [
+            task_id
+            for task_id, session in self.sessions.items()
+            if session.project == project and not session._running
+        ]
+        clear_unscoped = self.project == project and not self._running and bool(
+            self.requests
+        )
+        if not stale_task_ids and not clear_unscoped:
+            return
+        stale_sessions = {
+            self.sessions.pop(task_id)
+            for task_id in stale_task_ids
+        }
+        if clear_unscoped:
+            self.requests.clear()
+            self._retained_terminal_details.clear()
+        self._hub_retained_terminal_details = deque(
+            (session, request_id)
+            for session, request_id in self._hub_retained_terminal_details
+            if session not in stale_sessions
+        )
+        self._reset_hub_request_feed()
 
     def begin_request(self, **kwargs: Any) -> None:
         target = self._active_session()
@@ -665,9 +695,12 @@ class DiagnosticsHub(Diagnostics):
         task_id: str | None = None,
     ) -> Iterator[None]:
         if task_id is None:
+            self._clear_project_sessions(project)
+            self._reset_hub_request_feed()
             with super().activate(project, stage):
                 yield
             return
+        self._clear_project_sessions(project)
         session = RunDiagnostics(
             self.log_path,
             task_id=task_id,
@@ -675,6 +708,7 @@ class DiagnosticsHub(Diagnostics):
             log_sink=self,
             revision_sink=self._next_hub_revision,
             terminal_sink=self._retain_terminal_detail,
+            request_reset_sink=self._reset_hub_request_feed,
         )
         self.sessions[task_id] = session
         with session.activate(project, stage, task_id=task_id):

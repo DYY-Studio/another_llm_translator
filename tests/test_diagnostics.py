@@ -215,14 +215,14 @@ def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
         assert filtered["requests"]["items"][0]["task_id"] == "T1"
 
 
-def test_diagnostics_hub_keeps_global_terminal_detail_window_across_sessions(
+def test_diagnostics_hub_removes_old_terminal_records_across_sessions(
     tmp_path: Path,
 ) -> None:
     hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
     for index in range(201):
         task_id = f"T-{index}"
         request_id = f"REQ-{index}"
-        with hub.activate("project", "translation", task_id=task_id):
+        with hub.activate(f"project-{index}", "translation", task_id=task_id):
             hub.begin_request(
                 request_id=request_id,
                 model="model",
@@ -232,11 +232,140 @@ def test_diagnostics_hub_keeps_global_terminal_detail_window_across_sessions(
             hub.complete_request(request_id, content="response", reasoning_content=None)
 
     items = hub.snapshot()["requests"]["items"]
-    assert len(items) == 201
-    assert sum(item["detail_available"] for item in items) == 200
-    with pytest.raises(ValueError, match="已从内存释放.*REQ-0"):
+    assert len(items) == 200
+    assert all(item["detail_available"] for item in items)
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-0"):
         hub.request_detail("REQ-0")
     assert hub.request_detail("REQ-200")["request_id"] == "REQ-200"
+
+
+def test_diagnostics_hub_clears_only_previous_run_for_same_project(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-OTHER",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
+    with hub.activate("first", "translation", task_id="T3"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-OTHER", "REQ-NEW"}
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-OLD"):
+        hub.request_detail("REQ-OLD")
+
+
+def test_diagnostics_hub_clears_previous_task_run_for_unscoped_run(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("other", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-OTHER",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-OTHER", "REQ-NEW"}
+
+
+def test_diagnostics_hub_unscoped_run_resets_incremental_feed(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+        before = hub.snapshot()["requests"]
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+        after = hub.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert [item["request_id"] for item in after["items"]] == ["REQ-NEW"]
+
+
+def test_diagnostics_hub_task_run_clears_previous_unscoped_run(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-NEW"}
 
 
 def test_diagnostics_hub_preserves_details_for_more_than_200_active_requests(
@@ -567,7 +696,9 @@ async def test_rate_limit_waiting_requests_track_queue_and_cancellation(
     assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 0
 
 
-def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> None:
+def test_request_records_are_bounded_and_released_records_removed(
+    tmp_path: Path,
+) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
     with diagnostics.activate("sample", "translation"):
@@ -593,12 +724,11 @@ def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> N
             )
 
     feed = diagnostics.snapshot()["requests"]
-    assert feed["total"] == 201
-    assert len(feed["items"]) == 201
-    assert sum(item["detail_available"] for item in feed["items"]) == 200
-    assert feed["items"][0]["has_content"] is True
-    assert feed["items"][0]["has_reasoning"] is True
-    with pytest.raises(ValueError, match="已从内存释放.*REQ-0"):
+    assert feed["total"] == 200
+    assert len(feed["items"]) == 200
+    assert all(item["detail_available"] for item in feed["items"])
+    assert all(item["request_id"] != "REQ-0" for item in feed["items"])
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-0"):
         diagnostics.request_detail("REQ-0")
     detail = diagnostics.request_detail("REQ-200")
     assert len(detail["messages"][0]["content"]) == 100_000
@@ -620,6 +750,78 @@ def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> N
 
     with diagnostics.activate("third", "polishing"):
         assert diagnostics.snapshot()["requests"]["items"] == []
+
+
+def test_request_record_release_resets_incremental_feed(tmp_path: Path) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    with diagnostics.activate("sample", "translation"):
+        for index in range(200):
+            request_id = f"REQ-{index}"
+            diagnostics.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            diagnostics.complete_request(
+                request_id, content="content", reasoning_content=None
+            )
+        before = diagnostics.snapshot()["requests"]
+
+        diagnostics.begin_request(
+            request_id="REQ-200",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        diagnostics.complete_request(
+            "REQ-200", content="content", reasoning_content=None
+        )
+        after = diagnostics.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert after["total"] == 200
+    assert len(after["items"]) == 200
+    assert all(item["request_id"] != "REQ-0" for item in after["items"])
+
+
+def test_diagnostics_hub_session_prune_resets_incremental_feed(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+
+    with hub.activate("sample", "translation", task_id="T1"):
+        for index in range(200):
+            request_id = f"REQ-{index}"
+            hub.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.complete_request(request_id, content="content", reasoning_content=None)
+        before = hub.snapshot()["requests"]
+
+        hub.begin_request(
+            request_id="REQ-200",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-200", content="content", reasoning_content=None)
+        after = hub.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert after["total"] == 200
+    assert len(after["items"]) == 200
+    assert all(item["request_id"] != "REQ-0" for item in after["items"])
 
 
 def test_request_summary_feed_is_incremental_and_resets_per_run(
