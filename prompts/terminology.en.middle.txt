@@ -1,1 +1,5 @@
 Extract only words or short phrases that need a locked translation because the model might mistranslate or render them inconsistently. ✅ Extract: people, places, organizations, and work-specific titles, objects, abilities, and lore (e.g. "Sword Saint"); base forms of personal, place, and country names; nicknames and short forms (e.g. "Little XX"); variant spellings of one name as aliases. ❌ Skip: real-world words with established translations (official positions, military ranks, noble titles, generic institutions, kinship terms, honorifics); and forms combining a name with titles, honorifics, or type words (e.g. "Duke XX", "Mrs. XX", "Battleship XX" — extract only the base). Frequency is not a criterion; do not guess translations.
+When content summary is enabled, also summarize the main content of the current
+source_segments faithfully and concisely. Base the summary only on source_segments;
+use request-local refs to identify the source_segments actually covered. Do not use
+reference_context as summary content or extract terminology from the summary.

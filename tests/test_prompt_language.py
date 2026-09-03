@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.execution import full_prompt, stage_fingerprint
+from app.llm_response import TerminologyResponseMode
 from app.project import init_project
 from app.sqlite_storage import read_json
 from app.stage_runtime import _prompt, _prompt_language, prompt_middle_digests
@@ -75,6 +76,45 @@ def test_fixed_prompts_define_data_and_output_boundaries() -> None:
     assert "extract only from source_segments" in en
     assert "appearing only there must not trigger extraction" in en
     assert "target forms belong only in preferred_translation" in en
+
+
+@pytest.mark.parametrize(
+    ("mode", "summary_marker", "term_marker"),
+    [
+        (
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+            'type="summary"',
+            'type="term"',
+        ),
+        (TerminologyResponseMode.SUMMARY_ONLY, 'type="summary"', "no term"),
+    ],
+)
+def test_terminology_prompt_declares_summary_mode_protocol(
+    mode: TerminologyResponseMode,
+    summary_marker: str,
+    term_marker: str,
+) -> None:
+    prompt = full_prompt("terminology", "Project policy.", "en", response_mode=mode)
+
+    assert summary_marker in prompt
+    assert "refs" in prompt
+    assert term_marker in prompt
+    if mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
+        assert "source and aliases must be source forms" in prompt
+        assert "preferred_translation" in prompt
+        assert 'Output one type="term" record per term' in prompt
+
+
+def test_terms_only_prompt_keeps_existing_contract() -> None:
+    prompt = full_prompt(
+        "terminology",
+        "Project policy.",
+        "zh-CN",
+        response_mode=TerminologyResponseMode.TERMS_ONLY,
+    )
+
+    assert '每个术语一条 type="term" 记录' in prompt
+    assert 'type="summary"' not in prompt
 
     translation = full_prompt("translation", "Translate freely.", "en")
     assert "terms is relevant terminology" in translation

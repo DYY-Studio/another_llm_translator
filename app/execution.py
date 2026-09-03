@@ -49,6 +49,7 @@ from .i18n import SUPPORTED_LANGUAGES
 
 from .llm_adapter import JSONLLMAdapter
 
+from .llm_response import TerminologyResponseMode, response_record_types
 
 
 
@@ -431,6 +432,36 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     "polishing": _REVIEW_SUFFIX,
 }
 
+_TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
+    "zh-CN": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"] + " " + (
+            '先输出恰好一条 type="summary" 记录，再输出术语记录，最后输出 end。'
+            'summary 仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的'
+            '请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有'
+            "source_segments。"
+        ),
+        "summary-only": (
+            '只输出恰好一条 type="summary" 记录和最后的 end，不输出 term。summary 仅含'
+            'type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的请求内短引用'
+            '数组，不能重复或引用范围外编号。summary 必须概括本次所有 source_segments。'
+        ),
+    },
+    "en": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"] + " " + (
+            'Output exactly one type="summary" record first, then term records, and end last. '
+            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
+            'array of 1-based request-local references into source_segments, and every reference '
+            'must be in range. The summary must cover all source_segments.'
+        ),
+        "summary-only": (
+            'Output exactly one type="summary" record and end last; output no term records. '
+            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
+            'array of 1-based request-local references into source_segments, and every reference '
+            'must be in range. The summary must cover all source_segments.'
+        ),
+    },
+}
+
 _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
     "adjudication": {
         "zh-CN": (
@@ -482,6 +513,7 @@ def full_prompt(
     language: str = "zh-CN",
     document_requirements: Iterable[str] = (),
     phase: str | None = None,
+    response_mode: TerminologyResponseMode | str | None = None,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -492,6 +524,20 @@ def full_prompt(
         or phase not in _TERMINOLOGY_DECISION_PHASE_PREFIX
     ):
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
+    if response_mode is not None:
+        if stage != "terminology" or phase is not None:
+            raise UsageError("只有术语阶段支持 response_mode")
+        try:
+            mode = (
+                response_mode
+                if isinstance(response_mode, TerminologyResponseMode)
+                else TerminologyResponseMode(response_mode)
+            )
+            response_record_types(mode)
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
+    else:
+        mode = TerminologyResponseMode.TERMS_ONLY
     prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[stage][language]}"
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
@@ -508,6 +554,8 @@ def full_prompt(
         if stage == "terminology_decision"
         else _STAGE_SUFFIX[stage][language]
     )
+    if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
+        stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{middle.strip()}\n\n{' '.join(suffix_parts)}"
 
