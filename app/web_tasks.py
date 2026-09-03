@@ -40,6 +40,7 @@ from .sqlite_storage import (
     latest_stage_summary,
     read_json,
     read_jsonl,
+    read_summary_participation,
     record_exists,
     utc_now,
 )
@@ -372,6 +373,21 @@ def _selection_snapshot(
     )
 
 
+def _summary_participation_snapshot(
+    project: Path,
+) -> tuple[tuple[str, str, bool], ...]:
+    return tuple(
+        sorted(
+            (
+                str(item["file_id"]),
+                str(item["part_id"]),
+                bool(item["selected"]),
+            )
+            for item in read_summary_participation(project)
+        )
+    )
+
+
 def _running_runs_snapshot(
     project: Path,
     stages: tuple[str, ...],
@@ -461,6 +477,7 @@ class _StartDecision:
         tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
     ]
     running_runs: tuple[tuple[str, str, str, str], ...]
+    summary_participation: tuple[tuple[str, str, bool], ...] = ()
     decision_inputs: str | None = None
     options_selected_count: int | None = None
 
@@ -497,6 +514,7 @@ class WebTask:
     _prompt_language: str | None = field(default=None, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
+    _include_summaries: bool = field(default=False, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
@@ -505,6 +523,7 @@ class WebTask:
             "project": self.project.name,
             "project_id": self.project_id,
             "stage": self.stage,
+            "include_summaries": self._include_summaries,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -744,6 +763,7 @@ class WebTaskManager:
         acknowledge_manual_review: bool,
         ensure_unique: bool,
         prompt_language: str | None,
+        include_summaries: bool = False,
     ) -> _StartDecision:
         if stage not in {
             "terminology",
@@ -754,6 +774,8 @@ class WebTaskManager:
             "run-all",
         }:
             raise UsageError(f"未知后台阶段：{stage}")
+        if include_summaries and stage != "terminology":
+            raise UsageError("include_summaries 只允许术语阶段的摘要子页面入口")
         force = scope.force
         if force and reuse_mixed_fingerprints:
             raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
@@ -775,6 +797,7 @@ class WebTaskManager:
         selection_snapshots: tuple[
             tuple[str, tuple[tuple[str, str, int, int, str, str, str, str], ...]], ...
         ] = ()
+        summary_participation: tuple[tuple[str, str, bool], ...] = ()
         options_selected_count: int | None = None
         if stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(project, prompt_language)
@@ -819,6 +842,8 @@ class WebTaskManager:
             )
             selected_count = len(selection)
             selection_snapshots = ((stage, selection),)
+            if include_summaries:
+                summary_participation = _summary_participation_snapshot(project)
             running_run = options["running_run"]
             if running_run is not None:
                 running_run_id = str(running_run["run_id"])
@@ -884,6 +909,7 @@ class WebTaskManager:
             fingerprints=fingerprints,
             selection_snapshots=selection_snapshots,
             running_runs=_running_runs_snapshot(project, relevant_stages),
+            summary_participation=summary_participation,
             decision_inputs=decision_inputs,
             options_selected_count=options_selected_count,
         )
@@ -910,6 +936,7 @@ class WebTaskManager:
                     prompt_language=state._prompt_language,
                     replace_draft=state._replace_draft,
                     acknowledge_manual_review=state._acknowledge_manual_review,
+                    include_summaries=state._include_summaries,
                 )
             )
             state.asyncio_task.add_done_callback(
@@ -943,6 +970,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
+        include_summaries: bool = False,
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -956,6 +984,7 @@ class WebTaskManager:
                 acknowledge_manual_review=acknowledge_manual_review,
                 ensure_unique=True,
                 prompt_language=prompt_language,
+                include_summaries=include_summaries,
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -973,6 +1002,7 @@ class WebTaskManager:
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
+            state._include_summaries = include_summaries
             state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
@@ -990,6 +1020,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
+        include_summaries: bool = False,
     ) -> None:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
@@ -1024,12 +1055,13 @@ class WebTaskManager:
                     acknowledge_manual_review=acknowledge_manual_review,
                     ensure_unique=False,
                     prompt_language=prompt_language,
+                    include_summaries=include_summaries,
                 )
                 if (
                     state._start_decision is not None
                     and decision != state._start_decision
                 ):
-                    raise UsageError("排队期间项目选择或设置已变化")
+                    raise UsageError("排队期间项目选择或设置已变化；请重新创建任务")
                 shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
                 if state.stage == "run-all":
                     for stage in LLM_STAGES:
@@ -1096,6 +1128,7 @@ class WebTaskManager:
                         on_progress=progress,
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
+                        include_summaries=include_summaries,
                     )
                 elif state.stage == "translation":
                     summary = await run_translation(

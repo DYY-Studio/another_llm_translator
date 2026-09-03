@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1559,6 +1560,63 @@ def replace_source(
     state_values = [dict(item) for item in adapter_states]
     try:
         with connection:
+            old_rows = connection.execute(
+                """SELECT file_id, part_id, line_index, source, model_source
+                   FROM segments"""
+            ).fetchall()
+            old_orders = {
+                str(row["file_id"]): int(row["file_order"])
+                for row in connection.execute(
+                    "SELECT file_id, file_order FROM files"
+                ).fetchall()
+            }
+            old_by_boundary: dict[tuple[str, str], list[tuple[int, str, str]]]
+            old_by_boundary = {}
+            for row in old_rows:
+                old_by_boundary.setdefault(
+                    (str(row["file_id"]), str(row["part_id"])), []
+                ).append(
+                    (
+                        int(row["line_index"]),
+                        str(row["source"]),
+                        str(row["model_source"] or ""),
+                    )
+                )
+            new_by_boundary: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+            for item in segment_values:
+                new_by_boundary.setdefault(
+                    (str(item["file_id"]), str(item["part_id"])), []
+                ).append(
+                    (
+                        int(item["line_index"]),
+                        str(item["source"]),
+                        str(item.get("model_source") or ""),
+                    )
+                )
+            def boundary_digest(
+                values: list[tuple[int, str, str]] | None,
+            ) -> str | None:
+                if values is None:
+                    return None
+                return hashlib.sha256(
+                    _json(sorted(values)).encode("utf-8")
+                ).hexdigest()
+
+            affected_boundaries = {
+                boundary
+                for boundary in old_by_boundary
+                if boundary_digest(old_by_boundary[boundary])
+                != boundary_digest(new_by_boundary.get(boundary))
+                or old_orders.get(boundary[0])
+                != next(
+                    (
+                        int(item["file_order"])
+                        for item in file_values
+                        if str(item["file_id"]) == boundary[0]
+                    ),
+                    None,
+                )
+            }
             connection.execute("DELETE FROM segments")
             connection.execute("DELETE FROM files")
             connection.execute("DELETE FROM adapter_states")
@@ -1609,6 +1667,13 @@ def replace_source(
                 "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
                 [(key, _json(item)) for key, item in metadata.items()],
             )
+            for file_id, part_id in affected_boundaries:
+                connection.execute(
+                    """UPDATE content_summaries
+                       SET source_changed = 1, updated_at = ?
+                       WHERE file_id = ? AND part_id = ?""",
+                    (utc_now(), file_id, part_id),
+                )
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入项目源数据：{project}: {exc}") from exc
     finally:

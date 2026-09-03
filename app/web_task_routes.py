@@ -41,6 +41,7 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         force = boolean_option("force")
         replace_draft = boolean_option("replace_draft")
         acknowledge_manual_review = boolean_option("acknowledge_manual_review")
+        include_summaries = boolean_option("include_summaries")
         reuse_mixed_fingerprints = boolean_option(
             "reuse_mixed_fingerprints"
         )
@@ -68,6 +69,7 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             ),
             replace_draft=replace_draft,
             acknowledge_manual_review=acknowledge_manual_review,
+            include_summaries=include_summaries,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")

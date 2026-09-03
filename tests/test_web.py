@@ -35,6 +35,7 @@ from app.sqlite_storage import (
     record_exists,
     record_header,
     replace_source,
+    write_summary_participation,
     write_json,
 )
 from app.web import create_app
@@ -3230,6 +3231,57 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
         run_action=None,
     )
 
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_summary_participation_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    write_summary_participation(
+        second_project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_terminology(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_terminology", fake_terminology)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        include_summaries=True,
+    )
+    write_summary_participation(
+        second_project,
+        [{"file_id": "F0001", "part_id": "document", "selected": False}],
+    )
     release.set()
     await manager.tasks[first["task_id"]].asyncio_task
     await manager.tasks[second["task_id"]].asyncio_task
