@@ -2,10 +2,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
+import { isCurrentProjectRequest } from "../requestState";
+import type { ProjectOverview, RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
+import { SummaryWorkspace } from "./SummaryWorkspace";
 import { ConfirmDialog, RelatedGroupDialog, TermImportDialog, TermExportDialog, PartialPublishDialog } from "./TermDialogs";
 
 interface TermForm {
@@ -45,6 +47,15 @@ const emptyManualReview: TermDecisionReviewState["manual_review"] = {
 // across projects.
 const termsCache = new Map<string, TermsCacheEntry>();
 const termsProjectRef = { current: "" };
+
+export type TermsSubpage = "library" | "decision" | "summary";
+const termsSubpageCache = new Map<string, TermsSubpage>();
+const termsSubpageListeners = new Set<(project: string, subpage: TermsSubpage) => void>();
+
+export function openTermsSubpage(project: string, subpage: TermsSubpage) {
+  termsSubpageCache.set(project, subpage);
+  for (const listener of termsSubpageListeners) listener(project, subpage);
+}
 
 // Warms the cache when a project is opened so the first visit to the
 // terminology page renders instantly. Best-effort: failures are left to the
@@ -94,18 +105,22 @@ function matchesFilters(term: Term, primarySource: string, query: string, onlyCo
 
 export function TermsView({
   project,
+  overview,
   focusFailures = false,
   language,
   onFindSegment,
   task,
   onTask,
+  onSubpageChange,
 }: {
   project: string;
+  overview: ProjectOverview;
   focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
   task: TaskState | null;
   onTask: (task: TaskState) => void;
+  onSubpageChange?: (subpage: TermsSubpage) => void;
 }) {
   const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
@@ -120,9 +135,12 @@ export function TermsView({
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(() => termsSubpageCache.get(project) === "summary");
   const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
   const [manualReview, setManualReview] = useState(emptyManualReview);
   const [decisionDraftPending, setDecisionDraftPending] = useState(false);
+  const [decisionPrefetchError, setDecisionPrefetchError] = useState("");
+  const [decisionPrefetchAttempt, setDecisionPrefetchAttempt] = useState(0);
   const [manualFocusId, setManualFocusId] = useState<string | null>(null);
   const [termActionsOpen, setTermActionsOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
@@ -138,6 +156,10 @@ export function TermsView({
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedError, setRelatedError] = useState("");
   const relatedRequestRef = useRef(0);
+  const termsRequestRef = useRef(0);
+  const decisionPrefetchRequestRef = useRef(0);
+  const activeProjectRef = useRef(project);
+  activeProjectRef.current = project;
   const relatedCacheRef = useRef(new Map<string, RelatedTermsResponse>());
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
@@ -172,6 +194,25 @@ export function TermsView({
     : "";
   const selectedIsDisabled = Boolean(selected?.disabled);
 
+  function setCurrentData(value: TermsResponse) {
+    if (activeProjectRef.current === project) setData(value);
+  }
+
+  useEffect(() => {
+    const listener = (targetProject: string, subpage: TermsSubpage) => {
+      if (targetProject !== project) return;
+      setDecisionOpen(subpage === "decision");
+      setSummaryOpen(subpage === "summary");
+      onSubpageChange?.(subpage);
+    };
+    termsSubpageListeners.add(listener);
+    const subpage = termsSubpageCache.get(project) ?? "library";
+    setDecisionOpen(subpage === "decision");
+    setSummaryOpen(subpage === "summary");
+    onSubpageChange?.(subpage);
+    return () => { termsSubpageListeners.delete(listener); };
+  }, [onSubpageChange, project]);
+
   // Restore a cached view synchronously during render so the browser never
   // paints an empty frame. This runs on the first mount too: prefetchTerms
   // warms the cache when the project is opened, so entering the terminology
@@ -205,24 +246,40 @@ export function TermsView({
   }
 
   useEffect(() => {
+    const requestId = ++termsRequestRef.current;
+    const targetProject = project;
     setForm(emptyForm);
     setMessage("");
     void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
-      .then(setData)
-      .catch((error) => setMessage(errorMessage(error, language)));
+      .then((value) => {
+        if (isCurrentProjectRequest(requestId, termsRequestRef.current, targetProject, activeProjectRef.current)) setData(value);
+      })
+      .catch((error) => {
+        if (isCurrentProjectRequest(requestId, termsRequestRef.current, targetProject, activeProjectRef.current)) setMessage(errorMessage(error, language));
+      });
+    return () => { termsRequestRef.current += 1; };
   }, [project]);
 
   useEffect(() => {
+    setManualReview(emptyManualReview);
+    setDecisionDraftPending(false);
+  }, [project]);
+
+  useEffect(() => {
+    const requestId = ++decisionPrefetchRequestRef.current;
+    const targetProject = project;
+    setDecisionPrefetchError("");
     void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
       .then((value) => {
+        if (!isCurrentProjectRequest(requestId, decisionPrefetchRequestRef.current, targetProject, activeProjectRef.current)) return;
         setManualReview(value.manual_review);
         setDecisionDraftPending(Boolean(value.draft));
       })
-      .catch(() => {
-        setManualReview(emptyManualReview);
-        setDecisionDraftPending(false);
+      .catch((error) => {
+        if (isCurrentProjectRequest(requestId, decisionPrefetchRequestRef.current, targetProject, activeProjectRef.current)) setDecisionPrefetchError(errorMessage(error, language));
       });
-  }, [project]);
+    return () => { decisionPrefetchRequestRef.current += 1; };
+  }, [decisionPrefetchAttempt, language, project]);
 
   useEffect(() => {
     if (!data) return;
@@ -330,17 +387,26 @@ export function TermsView({
 
   function loadMoreHits() {
     if (!selected || !hits) return;
+    const requestId = ++hitsRequestRef.current;
+    const targetProject = project;
     const normalized = selected.normalized;
     const offset = hits.hits.length;
     setHitsLoading(true);
     void loadHits(normalized, offset)
-      .then((value) => setHits((current) => (
-        current && current.normalized === normalized
-          ? { ...value, hits: [...current.hits, ...value.hits] }
-          : current
-      )))
-      .catch((error) => setHitsError(errorMessage(error, language)))
-      .finally(() => setHitsLoading(false));
+      .then((value) => {
+        if (!isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) return;
+        setHits((current) => (
+          current && current.normalized === normalized
+            ? { ...value, hits: [...current.hits, ...value.hits] }
+            : current
+        ));
+      })
+      .catch((error) => {
+        if (isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) setHitsError(errorMessage(error, language));
+      })
+      .finally(() => {
+        if (isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) setHitsLoading(false);
+      });
   }
 
   const visible = useMemo(() => {
@@ -436,6 +502,14 @@ export function TermsView({
     if (tab === "manual" && decisionDraftPending) return;
     setDecisionInitialTab(tab);
     setDecisionOpen(true);
+    setSummaryOpen(false);
+    openTermsSubpage(project, "decision");
+  }
+
+  function openSummary() {
+    setDecisionOpen(false);
+    setSummaryOpen(true);
+    openTermsSubpage(project, "summary");
   }
 
   function updateDecisionReview(value: TermDecisionReviewState) {
@@ -446,6 +520,7 @@ export function TermsView({
   function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
     const term = data?.terms.find((value) => value.normalized === item.normalized) ?? null;
     setDecisionOpen(false);
+    openTermsSubpage(project, "library");
     setManualFocusId(manualItemId(item));
     setSearch("");
     setOnlyConflicts(false);
@@ -508,7 +583,7 @@ export function TermsView({
       } else {
         suppressFocusScrollForDataRef.current = null;
       }
-      setData(value);
+      setCurrentData(value);
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
@@ -531,7 +606,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.removedCount", language, { count: value.removed }));
@@ -555,7 +630,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
@@ -575,7 +650,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/clear`,
         { method: "POST", body: JSON.stringify({ confirm: true }) },
       );
-      setData(value);
+      setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setHits(null);
@@ -615,7 +690,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/materialize`,
         { method: "POST", body: JSON.stringify({ normalized: selectedNormalized, alias }) },
       );
-      setData(value);
+      setCurrentData(value);
       const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
       const restored = Boolean(data?.terms.find((term) => term.normalized === value.materialized)?.disabled);
       const groupPrimary = termByKey.get(selected.group_primary ?? selectedNormalized) ?? selected;
@@ -641,7 +716,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/set-primary`,
         { method: "POST", body: JSON.stringify({ normalized: pendingPrimary, confirm: true }) },
       );
-      setData(value);
+      setCurrentData(value);
       selection.reset(pendingPrimary);
       const primary = value.terms.find((term) => term.normalized === pendingPrimary);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -706,7 +781,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === relatedPrimary) ?? null;
       selection.reset(primary?.normalized ?? selectedNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -737,7 +812,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       const target = value.terms.find((term) => term.normalized === selectedNormalized) ?? null;
       selection.reset(target?.normalized ?? "");
       setForm(target ? formFor(target) : emptyForm);
@@ -767,7 +842,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === primaryNormalized) ?? null;
       selection.reset(primary?.normalized ?? primaryNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -794,7 +869,7 @@ export function TermsView({
           body: JSON.stringify({ normalized, confirm: true }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       const focused = value.terms.find((term) => term.normalized === focusedNormalized) ?? null;
       selection.reset(focused?.normalized ?? focusedNormalized);
       setForm(focused ? formFor(focused) : emptyForm);
@@ -819,7 +894,7 @@ export function TermsView({
           body: JSON.stringify({ normalized: [pendingRelatedRemoval.normalized] }),
         },
       );
-      setData(value);
+      setCurrentData(value);
       setPendingRelatedRemoval(null);
       setMessage(translate("terms.relatedRemoved", language));
     } catch (error) {
@@ -829,14 +904,27 @@ export function TermsView({
     }
   }
 
+  if (summaryOpen) {
+    return <SummaryWorkspace
+      key={`summary:${project}`}
+      project={project}
+      overview={overview}
+      language={language}
+      task={task}
+      onTask={onTask}
+      onClose={() => { setSummaryOpen(false); openTermsSubpage(project, "library"); }}
+    />;
+  }
+
   if (decisionOpen) {
     return <TermDecisionWorkspace
+      key={`decision:${project}`}
       project={project}
       language={language}
       task={task}
       onTask={onTask}
-      onTerms={setData}
-      onClose={() => setDecisionOpen(false)}
+      onTerms={setCurrentData}
+      onClose={() => { setDecisionOpen(false); openTermsSubpage(project, "library"); }}
       initialTab={decisionInitialTab}
       onReviewState={updateDecisionReview}
       onNavigateToEditor={openManualEditor}
@@ -882,8 +970,6 @@ export function TermsView({
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
-              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
-              {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
               {selectedActive.length > 0 && <button
                 className="danger-button"
                 onClick={() => { setTermActionsOpen(false); setRemoveOpen(true); }}
@@ -895,6 +981,15 @@ export function TermsView({
               >
                 <summary className="quiet-button">{translate("terms.moreActions", language)}</summary>
                 <div className="term-actions-popover">
+                  <div className="term-actions-group">
+                    <strong>{translate("terms.autoDecision", language)}</strong>
+                    <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => { setTermActionsOpen(false); openDecision("proposals"); }}>{translate("terms.autoDecision", language)}</button>
+                    {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => { setTermActionsOpen(false); openDecision("manual"); }}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
+                  </div>
+                  <div className="term-actions-group">
+                    <strong>{translate("terms.summaryMenuGroup", language)}</strong>
+                    <button className="quiet-button" onClick={() => { setTermActionsOpen(false); openSummary(); }}>{translate("terms.summary", language)}</button>
+                  </div>
                   <button
                     className="danger-button"
                     disabled={!selectedTerms.length}
@@ -911,6 +1006,7 @@ export function TermsView({
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
+        {decisionPrefetchError && <div className="inline-message error-text"><span>{translate("terms.decisionPrefetchError", language, { status: translate("terms.decisionPrefetchFailed", language), detail: decisionPrefetchError })}</span><button className="quiet-button" type="button" onClick={() => setDecisionPrefetchAttempt((value) => value + 1)}>{translate("terms.decisionRetryLoad", language)}</button></div>}
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>
@@ -1306,7 +1402,7 @@ export function TermsView({
           language={language}
           onClose={() => setImportOpen(false)}
           onImported={(value) => {
-            setData(value);
+            setCurrentData(value);
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
@@ -1331,7 +1427,7 @@ export function TermsView({
           onClose={() => setPartialOpen(false)}
           onPublished={async () => {
             setPartialOpen(false);
-            setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
+            setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
             setMessage(translate("terms.published", language));
           }}
         />
