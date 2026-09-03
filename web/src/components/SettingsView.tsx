@@ -317,6 +317,7 @@ function PresetSettings({ language }: { language: Language }) {
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
   const [extraBody, setExtraBody] = useState("{}");
+  const [extraHeaders, setExtraHeaders] = useState("{}");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -360,6 +361,7 @@ function PresetSettings({ language }: { language: Language }) {
       if (!active) return;
       setPreset(definition);
       setExtraBody(JSON.stringify(definition.extra_body, null, 2));
+      setExtraHeaders(JSON.stringify(definition.extra_headers ?? {}, null, 2));
       setPreview(requestPreview);
     }).catch((reason) => {
       if (active) setError(errorMessage(reason, language));
@@ -379,7 +381,7 @@ function PresetSettings({ language }: { language: Language }) {
     setModelsLoading(true);
     setModelsError(""); setMessage(""); setError("");
     try {
-      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
+      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
       const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models?key_index=${encodeURIComponent(String(keyIndex))}`, { method: "POST", body: JSON.stringify(definition) });
       setModels(result.models);
     } catch (reason) { setModelsError(errorMessage(reason, language)); }
@@ -400,7 +402,7 @@ function PresetSettings({ language }: { language: Language }) {
   async function save() {
     if (!preset) return;
     try {
-      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
+      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
       await api(`/api/v1/global/presets/${preset.preset_id}`, { method: "PUT", body: JSON.stringify(definition) });
       setPreset(definition as LLMPreset);
       setPreview(await api<Record<string, unknown>>(`/api/v1/global/presets/${preset.preset_id}/preview`));
@@ -413,7 +415,7 @@ function PresetSettings({ language }: { language: Language }) {
     const presetId = window.prompt(translate("preset.newId", language));
     if (!presetId || !preset) return;
     try {
-      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown };
+      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
       await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
       await loadLists(presetId);
       setMessage(translate("preset.created", language, { id: presetId }));
@@ -501,6 +503,7 @@ function PresetSettings({ language }: { language: Language }) {
                 />
               </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
+              <label className="code-field preset-extra"><span>{translate("preset.extraHeaders", language)}</span><small>{translate("preset.extraHeadersHint", language)}</small><textarea spellCheck={false} value={extraHeaders} onChange={(event) => setExtraHeaders(event.target.value)} /></label>
             </div>
             <h2 className="preview-heading">{translate("preset.requestPreview", language)}</h2>
             <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : translate("preset.previewHint", language)}</pre>

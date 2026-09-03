@@ -588,6 +588,7 @@ export interface LLMPreset {
   stream_endpoint: string;
   stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
+  extra_headers: Record<string, string>;
 }
 
 export interface LLMCredential {

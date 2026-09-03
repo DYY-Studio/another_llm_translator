@@ -1403,9 +1403,11 @@ Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 
 
 同一 Run 的续作累加各次精确回报；缺少累计版本标记的旧 Run 或任一次回报不完整时，Run usage 标记为 partial；完全没有可观测 usage 时才显示 unavailable。
 
-项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、模型、credential 引用、代理、Token 能力、每 Key 限速、两级并发、超时和 `extra_body`。
+项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、模型、credential 引用、代理、Token 能力、每 Key 限速、两级并发、超时、`extra_body` 和可选的 `extra_headers`。
 
 `extra_body` 必须是 JSON 对象，可以包含嵌套对象和数组；宿主在 Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失 Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
+
+`extra_headers` 必须是 Header 名称到字符串模板的对象，例如 `{"x-opencode-session": "${session_id}"}`；值可使用 `${session_id}`（当前 Run ID）和 `${request_id}`（当前 Req ID）占位符。Header 在 Adapter 默认 Header 之后追加，名称冲突按大小写不敏感处理并直接失败；附加 Header 仅用于 LLM 生成请求，不用于模型列表探测。固定值会保存，请勿填写 API Key；鉴权继续使用 credential/Adapter。预览使用示例 Run/Req ID，动态 ID 不会写入 Preset。
 
 `run-all` 在同一项目内按阶段逻辑顺序执行，并可在该次调用内按资源键复用 HTTP Client 和
 Key 调度状态；Run 快照与阶段指纹始终记录当前阶段实际使用的 Preset 和 Adapter。Web 的
