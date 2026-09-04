@@ -188,7 +188,12 @@ def _terminology_summary(
     }
 
 
-def task_options(project: Path, stage: str) -> dict[str, Any]:
+def task_options(
+    project: Path,
+    stage: str,
+    *,
+    include_summaries: bool = False,
+) -> dict[str, Any]:
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
         overrides = read_json(
@@ -304,7 +309,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         )
     completed = summary["completed"]
     current_completed = summary["current_fingerprint_completed"]
-    return {
+    result = {
         "stage": stage,
         "preset": {
             "id": str(config["_llm_preset_id"]),
@@ -320,6 +325,16 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         ),
         "running_run": _running_run(project, stage, config),
     }
+    if stage == "terminology" and include_summaries:
+        participation = read_summary_participation(project)
+        selected_boundaries = sum(
+            1 for item in participation if bool(item["selected"])
+        )
+        result["summary_selected_boundaries"] = selected_boundaries
+        result["summary_only_work"] = (
+            "terminology" in config["chunking"]["cross_boundary_batching"]
+        )
+    return result
 
 
 def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:

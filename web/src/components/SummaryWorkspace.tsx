@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, usageErrorReason } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskState } from "../types";
+import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskState, TaskOptions } from "../types";
+
+interface SummaryPreflight {
+  selected: number;
+  conflict: boolean;
+}
 import {
   boundarySelectionState,
   fileSelectionState,
@@ -371,6 +376,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const participationStateRef = useRef(createSummaryParticipationState());
   const participationQueueRef = useRef(Promise.resolve());
   const [participationSaving, setParticipationSaving] = useState(false);
+  const [preflight, setPreflight] = useState<SummaryPreflight | null>(null);
   const [conflict, setConflict] = useState<"unfinished_run" | "mismatched_fingerprint" | null>(null);
   const [conflictResume, setConflictResume] = useState(false);
   const [conflictReuse, setConflictReuse] = useState(false);
@@ -568,6 +574,25 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setBusy(true);
     setMessage("");
     try {
+      const options = await api<TaskOptions & { summary_selected_boundaries?: number; summary_only_work?: boolean }>(
+        `/api/v1/projects/${project}/task-options/terminology?include_summaries=true`,
+      );
+      setPreflight({
+        selected: options.summary_selected_boundaries ?? 0,
+        conflict: Boolean(options.summary_only_work),
+      });
+    } catch (error) {
+      setMessage(errorMessage(error, language));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function launchGenerate() {
+    setPreflight(null);
+    setBusy(true);
+    setMessage("");
+    try {
       const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
         body: JSON.stringify({ stage: "terminology", language, include_summaries: true }),
@@ -693,6 +718,20 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
       </div>
       {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void aggregate()} />}
       {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void exportMarkdown()} />}
+      {preflight && (
+        <Modal ariaLabel={translate("terms.summaryPreflightTitle", language)}>
+          <div className="summary-dialog-heading">
+            <div><h2>{translate("terms.summaryPreflightTitle", language)}</h2><p>{translate("terms.summaryPreflightConfirm", language, { count: preflight.selected })}</p></div>
+            <button className="quiet-button" type="button" onClick={() => setPreflight(null)}>×</button>
+          </div>
+          {preflight.conflict && <p className="error-text">{translate("terms.summaryPreflightConflict", language)}</p>}
+          {!preflight.selected && <p className="error-text">{translate("terms.summarySelectionEmpty", language)}</p>}
+          <div className="button-group summary-dialog-actions">
+            <button className="quiet-button" type="button" disabled={busy} onClick={() => setPreflight(null)}>{translate("common.cancel", language)}</button>
+            <button className="primary-button" type="button" disabled={busy || !preflight.selected} onClick={() => void launchGenerate()}>{translate("terms.summaryConflictRun", language)}</button>
+          </div>
+        </Modal>
+      )}
       {conflict && (
         <Modal ariaLabel={translate("terms.summaryConflictTitle", language)}>
           <div className="summary-dialog-heading">

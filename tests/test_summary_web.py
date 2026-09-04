@@ -206,6 +206,32 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
     assert "summary_selection" in response.json()["error"]
 
 
+def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    from app.sqlite_storage import write_summary_participation
+
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    with_flag = client.get(
+        "/api/v1/projects/demo/task-options/terminology",
+        params={"include_summaries": "true"},
+    )
+    assert with_flag.status_code == 200
+    body = with_flag.json()
+    assert body["summary_selected_boundaries"] == 1
+    assert body["summary_only_work"] is False
+
+    without_flag = client.get(
+        "/api/v1/projects/demo/task-options/terminology"
+    )
+    assert "summary_selected_boundaries" not in without_flag.json()
+
+
 def test_terminology_start_reports_machine_readable_conflict_reasons(
     tmp_path: Path,
 ):
