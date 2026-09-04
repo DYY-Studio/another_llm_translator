@@ -25,6 +25,13 @@ class UsageError(AppError):
     exit_code = 2
     code = "usage_error"
 
+    def __init__(
+        self, message: str = "", *, reason: str | None = None
+    ) -> None:
+        super().__init__(message)
+        if reason is not None:
+            self.params = {"reason": reason}
+
 
 class TermGroupError(UsageError):
     code = "term_group_error"

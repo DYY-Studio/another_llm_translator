@@ -6,10 +6,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.project import init_project
+from app.config import load_project_config
+from app.execution import create_run, segment_model_source
 from app.web_tasks import task_options
 from app.sqlite_storage import read_json, read_segments, record_header, write_content_summary
 from app.stage_terminology import _digest
-from app.execution import segment_model_source
 from app.web import create_app
 from app.summary_aggregation import aggregate_summaries
 from tests.test_foundation import make_app_root
@@ -203,3 +204,76 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
     )
     assert response.status_code == 400
     assert "summary_selection" in response.json()["error"]
+
+
+def test_terminology_start_reports_machine_readable_conflict_reasons(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    create_run(
+        project,
+        config=load_project_config(project, stage="terminology"),
+        stage="terminology",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    plain = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology"},
+    )
+    assert plain.status_code == 400
+    assert plain.json()["params"]["reason"] == "unfinished_run"
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology", "summary_selection": []},
+    )
+    assert response.status_code == 400
+    assert "summary_selection" in response.json()["error"]
+
+
+def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    create_run(
+        project,
+        config=load_project_config(project, stage="content_summary"),
+        stage="content_summary",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    second = client.post(
+        "/api/v1/projects/demo/summaries/aggregate",
+        json={"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
+    )
+    assert second.status_code == 400
+    assert second.json()["code"] == "usage_error"
+    assert second.json()["params"]["reason"] == "unfinished_run"

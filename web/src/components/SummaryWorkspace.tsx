@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, usageErrorReason } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskState } from "../types";
 import {
@@ -371,6 +371,10 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const participationStateRef = useRef(createSummaryParticipationState());
   const participationQueueRef = useRef(Promise.resolve());
   const [participationSaving, setParticipationSaving] = useState(false);
+  const [conflict, setConflict] = useState<"unfinished_run" | "mismatched_fingerprint" | null>(null);
+  const [conflictResume, setConflictResume] = useState(false);
+  const [conflictReuse, setConflictReuse] = useState(false);
+  const [conflictForce, setConflictForce] = useState(false);
   workspaceProjectRef.current = project;
 
   const names = useMemo(() => new Map(overview.files.map((file) => [file.file_id, file.name])), [overview.files]);
@@ -520,6 +524,42 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     });
   }
 
+  async function startSummaries(decision: { resume: boolean; reuse: boolean; force: boolean }) {
+    if (!participation.size) {
+      setMessage(translate("terms.summarySelectionEmpty", language));
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
+        method: "POST",
+        body: JSON.stringify({
+          stage: "terminology",
+          language,
+          include_summaries: true,
+          run_action: decision.resume ? "resume" : decision.force ? "decline" : null,
+          reuse_mixed_fingerprints: decision.reuse,
+          force: decision.force,
+        }),
+      });
+      onTask(next);
+      setConflict(null);
+    } catch (error) {
+      const reason = usageErrorReason(error);
+      if (reason === "unfinished_run" || reason === "mismatched_fingerprint") {
+        setConflict(reason);
+        setConflictResume(reason === "unfinished_run");
+        setConflictReuse(false);
+        setConflictForce(reason === "mismatched_fingerprint");
+        return;
+      }
+      setMessage(errorMessage(error, language));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function generateSummaries() {
     if (!participation.size) {
       setMessage(translate("terms.summarySelectionEmpty", language));
@@ -534,6 +574,14 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
       });
       onTask(next);
     } catch (error) {
+      const reason = usageErrorReason(error);
+      if (reason === "unfinished_run" || reason === "mismatched_fingerprint") {
+        setConflict(reason);
+        setConflictResume(reason === "unfinished_run");
+        setConflictReuse(false);
+        setConflictForce(reason === "mismatched_fingerprint");
+        return;
+      }
       setMessage(errorMessage(error, language));
     } finally {
       setBusy(false);
@@ -645,6 +693,34 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
       </div>
       {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void aggregate()} />}
       {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void exportMarkdown()} />}
+      {conflict && (
+        <Modal ariaLabel={translate("terms.summaryConflictTitle", language)}>
+          <div className="summary-dialog-heading">
+            <div><h2>{translate("terms.summaryConflictTitle", language)}</h2><p>{translate(conflict === "unfinished_run" ? "terms.summaryConflictUnfinished" : "terms.summaryConflictFingerprint", language)}</p></div>
+            <button className="quiet-button" type="button" onClick={() => setConflict(null)}>×</button>
+          </div>
+          {conflict === "unfinished_run" && (
+            <label className="radio-option decision-option">
+              <input type="radio" checked={conflictResume} onChange={() => { setConflictResume(true); setConflictForce(false); }} />
+              <span><strong>{translate("terms.summaryConflictResume", language)}</strong><small>{translate("terms.summaryConflictResumeHint", language)}</small></span>
+            </label>
+          )}
+          {conflict === "mismatched_fingerprint" && (
+            <label className="radio-option decision-option">
+              <input type="radio" checked={conflictReuse} onChange={() => { setConflictReuse(true); setConflictForce(false); }} />
+              <span><strong>{translate("terms.summaryConflictReuse", language)}</strong><small>{translate("terms.summaryConflictReuseHint", language)}</small></span>
+            </label>
+          )}
+          <label className="radio-option decision-option">
+            <input type="radio" checked={conflictForce} onChange={() => { setConflictForce(true); setConflictResume(false); setConflictReuse(false); }} />
+            <span><strong>{translate("terms.summaryConflictForce", language)}</strong><small>{translate("terms.summaryConflictForceHint", language)}</small></span>
+          </label>
+          <div className="button-group summary-dialog-actions">
+            <button className="quiet-button" type="button" disabled={busy} onClick={() => setConflict(null)}>{translate("common.cancel", language)}</button>
+            <button className="primary-button" type="button" disabled={busy || (!conflictResume && !conflictReuse && !conflictForce)} onClick={() => void startSummaries({ resume: conflictResume, reuse: conflictReuse, force: conflictForce })}>{translate("terms.summaryConflictRun", language)}</button>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }
