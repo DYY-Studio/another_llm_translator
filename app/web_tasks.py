@@ -338,13 +338,6 @@ def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
     )
 
 
-def _decision_fingerprint_snapshot(
-    project: Path, prompt_language: str | None
-) -> str:
-    plan = decision_plan(project, prompt_language)
-    return _decision_fingerprint(plan["config"], plan["prompts"], plan["library"])
-
-
 def _stable_digest(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -511,6 +504,7 @@ class _StartDecision:
     decision_inputs: str | None = None
     options_selected_count: int | None = None
     summary_selection: tuple[tuple[str, str], ...] = ()
+    plan: dict[str, Any] | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -927,7 +921,11 @@ class WebTaskManager:
             fingerprints = (
                 (
                     stage,
-                    _decision_fingerprint_snapshot(project, prompt_language)
+                    _decision_fingerprint(
+                        decision_plan_snapshot["config"],
+                        decision_plan_snapshot["prompts"],
+                        decision_plan_snapshot["library"],
+                    )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
                 ),
@@ -982,6 +980,7 @@ class WebTaskManager:
             decision_inputs=decision_inputs,
             options_selected_count=options_selected_count,
             summary_selection=summary_selection,
+            plan=decision_plan_snapshot,
         )
 
     def _dispatch_locked(self) -> None:
@@ -1207,6 +1206,7 @@ class WebTaskManager:
                         on_progress=progress,
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
+                        plan=decision.plan,
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(

@@ -516,11 +516,13 @@ async def run_terminology_decision(
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing = _drafts.current_decision_draft(project)
     if existing is not None and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
-    plan = decision_plan(project, prompt_language)
+    if plan is None:
+        plan = decision_plan(project, prompt_language)
     library = plan["library"]
     config = plan["config"]
     metadata = read_json(project, project / "project.json")

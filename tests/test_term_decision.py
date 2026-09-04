@@ -2980,6 +2980,45 @@ def test_web_starts_terminology_decision_task_without_options_local(
     assert state["total_segments"] == 4
 
 
+def test_web_decision_start_computes_plan_twice_and_passes_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    plan_calls = 0
+    original_plan = decision_plan
+
+    def counting_plan(*args: object, **kwargs: object) -> object:
+        nonlocal plan_calls
+        plan_calls += 1
+        return original_plan(*args, **kwargs)
+
+    plans: list[object] = []
+
+    async def fake_decision(_: Path, **kwargs: object) -> dict[str, object]:
+        plans.append(kwargs.get("plan"))
+        progress = kwargs["on_progress"]
+        assert callable(progress)
+        progress(4, 0, 4)
+        return {"completed": 4, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.decision_plan", counting_plan)
+    monkeypatch.setattr("app.term_decision.decision_plan", counting_plan)
+    monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
+        "/api/v1/projects/decision-demo/tasks",
+        json={"stage": "terminology_decision"},
+    )
+    assert started.status_code == 200
+    task_id = started.json()["task_id"]
+    state = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert state["status"] == "completed"
+    assert plan_calls == 2
+    assert len(plans) == 1
+    assert plans[0] is not None
+    assert plans[0]["eligible"]
+
+
 def test_web_resumes_complete_legacy_group_checkpoint_into_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
