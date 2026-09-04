@@ -528,6 +528,7 @@ class WebTask:
     completed_segments: int = 0
     failed_segments: int = 0
     total_segments: int = 0
+    summary_selection_counts: tuple[int, int, int] | None = None
     failure_counts: dict[str, int] = field(default_factory=dict)
     usage: dict[str, Any] = field(
         default_factory=lambda: {
@@ -575,6 +576,15 @@ class WebTask:
                 - self.failed_segments,
             ),
             "total_segments": self.total_segments,
+            "summary_selection_progress": (
+                {
+                    "completed": self.summary_selection_counts[0],
+                    "failed": self.summary_selection_counts[1],
+                    "total": self.summary_selection_counts[2],
+                }
+                if self.summary_selection_counts is not None
+                else None
+            ),
             "failure_counts": dict(self.failure_counts),
             "usage": self.usage,
         }
@@ -1120,6 +1130,9 @@ class WebTaskManager:
             state.failed_segments = failed
             state.total_segments = total
 
+        def boundary_progress(completed: int, failed: int, total: int) -> None:
+            state.summary_selection_counts = (completed, failed, total)
+
         def usage_changed(current: dict[str, Any] | None) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
             if self.diagnostics is not None:
@@ -1206,7 +1219,7 @@ class WebTaskManager:
                         ],
                         limiter=next(iter(shared_limiters.values())),
                         prompt_language=prompt_language,
-                        on_progress=progress,
+                        on_progress=boundary_progress,
                     )
                 elif state.stage == TERMINOLOGY_DECISION_STAGE:
                     summary = await run_terminology_decision(
@@ -1264,16 +1277,23 @@ class WebTaskManager:
                         on_usage=usage_changed,
                     )
             state.summary = summary
-            state.completed_segments = int(summary.get("completed", 0)) + int(
-                summary.get("reused", 0)
-            )
-            state.failed_segments = int(summary.get("failed", 0))
+            if state.stage == "content_summary":
+                if state.summary_selection_counts is not None:
+                    completed, failed, total = state.summary_selection_counts
+                    state.completed_segments = completed
+                    state.failed_segments = failed
+                    state.total_segments = total
+            else:
+                state.completed_segments = int(summary.get("completed", 0)) + int(
+                    summary.get("reused", 0)
+                )
+                state.failed_segments = int(summary.get("failed", 0))
+                if summary.get("selected") is not None:
+                    state.total_segments = int(summary["selected"])
             state.failure_counts = {
                 str(key): int(value)
                 for key, value in (summary.get("failure_counts") or {}).items()
             }
-            if summary.get("selected") is not None:
-                state.total_segments = int(summary["selected"])
             summary_usage = summary.get("usage")
             if isinstance(summary_usage, dict):
                 state.usage = summary_usage
