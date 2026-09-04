@@ -594,6 +594,52 @@ def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> No
     ).status_code == 400
 
 
+def test_web_open_project_surfaces_storage_upgrade_backup_warning(
+    tmp_path: Path,
+) -> None:
+    from tests.test_sqlite_storage import create_v2_project
+
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    legacy_parent = tmp_path / "legacy-source"
+    legacy_parent.mkdir()
+    legacy, _file_record, _segment_record, _stage_record = create_v2_project(
+        legacy_parent
+    )
+    target = projects_root / "legacy"
+    legacy.replace(target)
+    metadata = record_header(
+        "project",
+        "PRJ-V2",
+        record_id="PRJ-V2",
+        name="legacy",
+        global_bundle_hash_seen=None,
+        file_count=1,
+        segment_count=1,
+        next_file_sequence=2,
+        status="active",
+    )
+    connection = sqlite3.connect(target / "project.sqlite")
+    try:
+        with connection:
+            connection.execute("DELETE FROM project_meta")
+            connection.executemany(
+                "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
+                [(key, json.dumps(item)) for key, item in metadata.items()],
+            )
+    finally:
+        connection.close()
+
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+    opened = client.post("/api/v1/projects/open", json={"path": str(target)})
+    assert opened.status_code == 200
+    warnings = opened.json()["warnings"]
+    assert any("snapshots/storage_migrations" in item for item in warnings)
+    assert any("已升级" in item for item in warnings)
+
+
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
     tmp_path: Path,
 ) -> None:
