@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, usageErrorReason } from "../api";
+import { api, apiErrorFromResponse, usageErrorReason } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
+import { nativeBridgeAvailable, saveExport } from "../native";
 import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskState, TaskOptions } from "../types";
 
 interface SummaryPreflight {
@@ -314,6 +315,8 @@ function SelectionDialog({
   selected,
   names,
   language,
+  path,
+  onPath,
   onSelection,
   onClose,
   onConfirm,
@@ -323,6 +326,8 @@ function SelectionDialog({
   selected: Set<string>;
   names: Map<string, string>;
   language: Language;
+  path?: string;
+  onPath?: (next: string) => void;
   onSelection: (next: Set<string>) => void;
   onClose: () => void;
   onConfirm: () => void;
@@ -345,6 +350,12 @@ function SelectionDialog({
         language={language}
         emptyMessage={translate("terms.summaryNoMatch", language)}
       />
+      {mode === "export" && onPath !== undefined && (
+        <label>
+          {translate("terms.summaryExportPath", language)}
+          <input value={path ?? ""} onChange={(event) => onPath(event.target.value)} />
+        </label>
+      )}
       {!hasSelection && <p className="error-text summary-message">{translate(mode === "aggregate" ? "terms.summaryAggregateEmpty" : "terms.summaryExportEmpty", language)}</p>}
       <div className="button-group summary-dialog-actions">
         <button className="quiet-button" type="button" onClick={onClose}>{translate("common.cancel", language)}</button>
@@ -366,6 +377,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [participation, setParticipation] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<"aggregate" | "export" | null>(null);
   const [dialogSelection, setDialogSelection] = useState<Set<string>>(new Set());
+  const [exportPath, setExportPath] = useState("summary.md");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -633,20 +645,48 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
 
   async function exportMarkdown() {
     if (!dialogSelection.size) return;
+    const trimmed = exportPath.trim() || "summary.md";
     setBusy(true);
     setMessage("");
     try {
       const result = await api<{ path: string }>(`/api/v1/projects/${project}/summaries/export`, {
         method: "POST",
-        body: JSON.stringify({ boundaries: selectionItems(dialogSelection, boundaries), path: "summary.md" }),
+        body: JSON.stringify({ boundaries: selectionItems(dialogSelection, boundaries), path: trimmed }),
       });
       setDialog(null);
       setMessage(translate("terms.summaryExportDone", language, { path: result.path }));
+      downloadExportMarkdown(result.path);
     } catch (error) {
       setMessage(errorMessage(error, language));
     } finally {
       setBusy(false);
     }
+  }
+
+  function downloadExportMarkdown(path: string) {
+    const filename = path.split("/").pop() || "summary.md";
+    const url = `/api/v1/projects/${project}/exports/download`;
+    if (nativeBridgeAvailable()) {
+      void saveExport(url, filename, JSON.stringify({ file: path }))
+        .then((saved) => { if (saved) setMessage(translate("terms.summaryExportSaved", language, { path: saved })); })
+        .catch((reason) => setMessage(errorMessage(reason, language)));
+      return;
+    }
+    void fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: path }),
+    }).then(async (response) => {
+      if (!response.ok) throw await apiErrorFromResponse(response);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    }).catch((reason) => setMessage(errorMessage(reason, language)));
   }
 
   return (
@@ -717,7 +757,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         {sourceOpen && <SourcePanel project={project} boundary={focused} language={language} focusSegmentIds={sourceSegmentIds} onClose={() => setSourceOpen(false)} />}
       </div>
       {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void aggregate()} />}
-      {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void exportMarkdown()} />}
+      {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} onPath={setExportPath} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void exportMarkdown()} />}
       {preflight && (
         <Modal ariaLabel={translate("terms.summaryPreflightTitle", language)}>
           <div className="summary-dialog-heading">
