@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
-import { TermsView, prefetchTerms } from "./components/TermsView";
+import { TermsView, openTermsSubpage, prefetchTerms, type TermsSubpage } from "./components/TermsView";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ExportView } from "./components/ExportView";
 import { Overview } from "./components/Overview";
@@ -23,7 +23,9 @@ import type {
   ThemeMode,
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
+import { canAutoSelectProject, isCurrentProjectRequest } from "./requestState";
 import { STORAGE_KEYS } from "./storageKeys";
+import { termsSubpageForTask } from "./summaryWorkspaceState";
 import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
 import "./styles.css";
 
@@ -77,6 +79,7 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState("");
   const [stage, setStage] = useState<Stage>("overview");
+  const [termsSubpage, setTermsSubpage] = useState<TermsSubpage>("library");
   const [pendingJump, setPendingJump] = useState<{
     search: string;
     segmentId: string;
@@ -105,6 +108,10 @@ export default function App() {
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const tasksRef = useRef<Record<string, TaskState>>({});
+  const projectsRequestRef = useRef(0);
+  const overviewRequestRef = useRef(0);
+  const activeProjectRef = useRef(project);
+  activeProjectRef.current = project;
   const syncingTasksRef = useRef(false);
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const selectedProject = projects.find((item) => item.selector === project) ?? null;
@@ -220,11 +227,16 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
+    const requestId = ++projectsRequestRef.current;
+    const requestProject = activeProjectRef.current;
     const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
+    if (requestId !== projectsRequestRef.current) return value.projects;
     setProjects(value.projects);
     await syncActiveTasks();
+    if (requestId !== projectsRequestRef.current || !canAutoSelectProject(requestProject, activeProjectRef.current)) return value.projects;
     const storedProjectId = readSelectedProjectId();
     setProject((current) => {
+      if (!canAutoSelectProject(requestProject, activeProjectRef.current)) return current;
       if (current && value.projects.some((item) => item.selector === current)) return current;
       return value.projects.find((item) => item.project_id === storedProjectId)?.selector
         ?? value.projects[0]?.selector
@@ -234,11 +246,17 @@ export default function App() {
   }, [syncActiveTasks]);
 
   const refresh = useCallback(async () => {
-    if (!project) { setOverview(null); return; }
+    const targetProject = project;
+    const requestId = ++overviewRequestRef.current;
+    if (!targetProject) {
+      if (isCurrentProjectRequest(requestId, overviewRequestRef.current, targetProject, activeProjectRef.current)) setOverview(null);
+      return;
+    }
     // The shell only needs project totals and file metadata. Segment rows are
     // loaded by SegmentWorkspace in bounded windows, so do not fetch a second
     // full page just to refresh the summary after an edit.
-    setOverview(await api<ProjectOverview>(`/api/v1/projects/${project}?offset=0&limit=1`));
+    const value = await api<ProjectOverview>(`/api/v1/projects/${targetProject}?offset=0&limit=1`);
+    if (isCurrentProjectRequest(requestId, overviewRequestRef.current, targetProject, activeProjectRef.current)) setOverview(value);
   }, [project]);
 
   const refreshProject = useCallback(async () => {
@@ -260,6 +278,10 @@ export default function App() {
       await loadProjects();
     }).catch((value) => setError(value));
   }, []);
+  useEffect(() => {
+    overviewRequestRef.current += 1;
+    setOverview(null);
+  }, [project]);
   useEffect(() => { void refresh().catch((value) => setError(value)); }, [refresh]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
@@ -365,12 +387,17 @@ export default function App() {
       return;
     }
     setProject(summary.selector);
-    const destination = next.stage === "terminology_decision"
+    const destination = next.stage === "content_summary" || next.stage === "terminology_decision"
       ? "terminology"
       : ["terminology", "translation", "proofreading", "polishing"].includes(next.stage)
         ? next.stage as Stage
         : "overview";
     setStage(destination);
+    if (destination === "terminology") {
+      const subpage = termsSubpageForTask(next.stage, next.include_summaries);
+      setTermsSubpage(subpage);
+      openTermsSubpage(summary.selector, subpage);
+    }
     setFailureFocus(null);
   }
 
@@ -434,7 +461,7 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView project={project} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} />;
+    if (stage === "terminology") content = <TermsView project={project} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
@@ -468,7 +495,7 @@ export default function App() {
         onShowFailures={showFailures}
         onRun={openRunDialog}
         onCancel={cancelRun}
-        canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count)}
+        canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count && !(stage === "terminology" && termsSubpage !== "library"))}
         runLoading={runOptionsLoading}
         starting={starting}
         themeMode={themeMode}

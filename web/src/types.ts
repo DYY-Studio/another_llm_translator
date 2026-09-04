@@ -8,6 +8,51 @@ export type Stage =
   | "export"
   | "settings";
 
+export interface SummaryBoundary {
+  file_id: string;
+  part_id: string;
+  segment_count: number;
+}
+
+export interface SummaryArtifact {
+  record_type: "content_summary";
+  record_id: string;
+  kind: "fragment" | "reduction" | "full";
+  file_id: string;
+  part_id: string;
+  status: "completed" | "failed" | "stale" | string;
+  text: string | null;
+  error_class?: string | null;
+  error_message?: string | null;
+  error?: string | null;
+  refs?: string[];
+  source_range: Record<string, unknown>;
+  source_changed: boolean;
+  provenance?: {
+    origin?: string;
+    artifact_ids?: string[];
+    source_ranges?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  source_digest: string;
+  input_digest: string;
+  prompt_digest: string;
+  model: string;
+  run_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SummariesResponse {
+  participation: Array<{
+    file_id: string;
+    part_id: string;
+    selected: boolean;
+  }>;
+  boundaries: SummaryBoundary[];
+  artifacts: SummaryArtifact[];
+}
+
 export type SettingsField =
   | "target_language"
   | "target_language_tag"
@@ -136,6 +181,8 @@ export interface TaskState {
   project_id: string;
   stage: string;
   status: string;
+  include_summaries?: boolean;
+  summary_selection?: Array<{ file_id: string; part_id: string }>;
   error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
   completed_segments: number;

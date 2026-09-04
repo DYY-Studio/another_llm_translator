@@ -15,6 +15,12 @@ const items: Array<{ id: Stage; key: string }> = [
   { id: "export", key: "nav.export" },
 ];
 
+function taskStageLabelKey(stage: string): string {
+  if (stage === "terminology_decision") return "stage.terminologyDecision";
+  if (stage === "content_summary") return "stage.contentSummary";
+  return `stage.${stage}`;
+}
+
 export function AppShell({
   project,
   stage,
@@ -137,9 +143,7 @@ export function AppShell({
                     const nextPending = next.pending_segments;
                     const nextTotal = next.total_segments;
                     const nextProcessed = nextCompleted + nextFailed;
-                    const nextStage = next.stage === "terminology_decision"
-                      ? "stage.terminologyDecision"
-                      : `stage.${next.stage}`;
+                    const nextStage = taskStageLabelKey(next.stage);
                     return (
                       <article className="task-panel-item" key={next.task_id}>
                         <div className="task-panel-identity">
@@ -197,7 +201,7 @@ export function AppShell({
         <section className={`global-run-status${terminal ? " terminal" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
-            <span>{task.project} · {task.stage}</span>
+            <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}</span>
           </div>
           <div className="run-progress">
             <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>

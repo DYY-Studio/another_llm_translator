@@ -1,0 +1,1 @@
+Combine the supplied local summaries into one concise, coherent content summary. Preserve event order, relationships, and important facts without mentioning the processing steps.

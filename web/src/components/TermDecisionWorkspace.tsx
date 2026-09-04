@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
+import { isCurrentProjectRequest } from "../requestState";
 import {
   decisionAliasChanges,
   decisionProposalChanges,
@@ -12,6 +13,12 @@ import {
   type DecisionProposalStatus,
 } from "../termDecision";
 import { RunDialog } from "./RunDialog";
+import {
+  createTermDecisionWorkspaceState,
+  restoreTermDecisionWorkspaceState,
+  updateTermDecisionWorkspaceState,
+  type DecisionTab,
+} from "../termDecisionWorkspaceState";
 import type {
   RunDecision,
   TaskOptions,
@@ -26,7 +33,7 @@ import type {
 } from "../types";
 
 const PAGE_SIZE = 20;
-type DecisionTab = "proposals" | "manual";
+const decisionWorkspaceCache = new Map<string, ReturnType<typeof createTermDecisionWorkspaceState>>();
 
 function valueOrDash(value: string) {
   return value || "—";
@@ -180,47 +187,86 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   onReviewState: (review: TermDecisionReviewState) => void;
   onNavigateToEditor: (item: TermDecisionManualReviewItem, tab: "edit" | "group") => void;
 }) {
+  const restored = restoreTermDecisionWorkspaceState(decisionWorkspaceCache, project, initialTab);
+  const initial = initialTab === "manual" ? { ...restored, tab: "manual" as const } : restored;
   const [review, setReview] = useState<TermDecisionReviewState | null>(null);
   const [options, setOptions] = useState<TaskOptions | null>(null);
   const [reviewLoading, setReviewLoading] = useState(true);
-  const [tab, setTab] = useState<DecisionTab>(initialTab);
-  const [search, setSearch] = useState("");
-  const [kind, setKind] = useState("");
-  const [status, setStatus] = useState<DecisionProposalStatus>("all");
-  const [manualStatus, setManualStatus] = useState<"all" | "open" | "resolved">("open");
-  const [page, setPage] = useState(0);
+  const [tab, setTab] = useState<DecisionTab>(initial.tab);
+  const [search, setSearch] = useState(initial.search);
+  const [kind, setKind] = useState(initial.kind);
+  const [status, setStatus] = useState<DecisionProposalStatus>(initial.status);
+  const [manualStatus, setManualStatus] = useState<"all" | "open" | "resolved">(initial.manualStatus);
+  const [page, setPage] = useState(initial.page);
+  const [scrollTop, setScrollTop] = useState(initial.scrollTop);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [replaceDraft, setReplaceDraft] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
+  const decisionRequestRef = useRef(0);
+  const activeProjectRef = useRef(project);
+  activeProjectRef.current = project;
   const running = Boolean(task && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
 
-  async function load() {
-    const reviewRequest = api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`);
-    const optionsRequest = api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology_decision`);
-    const nextReview = await reviewRequest;
-    setReview(nextReview);
-    setReviewLoading(false);
-    onReviewState(nextReview);
+  async function load(): Promise<TermDecisionReviewState | null> {
+    const requestId = ++decisionRequestRef.current;
+    const targetProject = project;
+    const isCurrent = () => isCurrentProjectRequest(
+      requestId,
+      decisionRequestRef.current,
+      targetProject,
+      activeProjectRef.current,
+    );
     try {
-      const nextOptions = await optionsRequest;
-      setOptions(nextOptions);
+      const nextReview = await api<TermDecisionReviewState>(`/api/v1/projects/${targetProject}/terms/decision`);
+      if (!isCurrent()) return null;
+      setReview(nextReview);
+      setReviewLoading(false);
+      onReviewState(nextReview);
+      try {
+        const nextOptions = await api<TaskOptions>(`/api/v1/projects/${targetProject}/task-options/terminology_decision`);
+        if (isCurrent()) setOptions(nextOptions);
+      } catch (error) {
+        if (isCurrent()) setMessage(errorMessage(error, language));
+      }
+      return nextReview;
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      if (isCurrent()) {
+        setReviewLoading(false);
+        setMessage(errorMessage(error, language));
+      }
+      return null;
     }
-    return nextReview;
   }
 
   useEffect(() => {
     setReviewLoading(true);
-    void load().catch((error) => { setReviewLoading(false); setMessage(errorMessage(error, language)); });
+    void load();
+    return () => { decisionRequestRef.current += 1; };
   }, [project]);
   useEffect(() => {
     if (task?.stage !== "terminology_decision") return;
-    if (["completed", "cancelled", "failed"].includes(task.status)) void load().catch((error) => setMessage(errorMessage(error, language)));
+    if (["completed", "cancelled", "failed"].includes(task.status)) void load();
     if (task.status === "failed") setMessage(errorMessage(task.error, language));
   }, [task?.task_id, task?.status, language]);
+
+  useEffect(() => {
+    decisionWorkspaceCache.set(project, updateTermDecisionWorkspaceState(createTermDecisionWorkspaceState(), {
+      tab,
+      search,
+      kind,
+      status,
+      manualStatus,
+      page,
+      scrollTop,
+    }));
+  }, [kind, manualStatus, page, project, search, scrollTop, status, tab]);
+
+  useEffect(() => {
+    if (reviewLoading) return;
+    contentRef.current?.scrollTo({ top: scrollTop });
+  }, [project, reviewLoading]);
 
   const rejected = useMemo(() => new Set(review?.draft?.rejected_proposal_ids ?? []), [review]);
   const filtered = useMemo(() => filterDecisionProposals(review?.draft?.proposals ?? [], search, kind, status, rejected), [review, search, kind, status, rejected]);
@@ -246,10 +292,12 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     setPage(0);
     setSearch("");
     contentRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
   }
   function changePage(next: number) {
     setPage(next);
     contentRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
   }
   function openRunDialog(replace: boolean) {
     if (!options || options.selected === 0) return;
@@ -297,6 +345,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       const result = await api<{ terms?: TermsResponse }>(`/api/v1/projects/${project}/terms/decision/${path}`, { method: "POST", body: JSON.stringify({ confirm: true }) });
       if (result.terms) onTerms(result.terms);
       const next = await load();
+      if (!next) return;
       if (path === "apply") {
         if (next.manual_review.remaining > 0) {
           setTab("manual");
@@ -324,8 +373,8 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       {message && <p className="inline-message error-text">{message}</p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
         {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
-        {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist"><button className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}
-        <div className="term-decision-content" ref={contentRef}>
+        {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist" aria-label={translate("terms.decisionTabs", language)}><button type="button" role="tab" id="decision-proposals-tab" aria-selected={tab === "proposals"} aria-controls="decision-proposals-panel" className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button type="button" role="tab" id="decision-manual-tab" aria-selected={tab === "manual"} aria-controls="decision-manual-panel" className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}
+        <div className="term-decision-content" id={`decision-${tab}-panel`} role="tabpanel" aria-labelledby={`decision-${tab}-tab`} ref={contentRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
           {tab === "proposals" && review?.draft && <><div className="term-decision-summary"><span>{translate("terms.decisionAccepted", language)} {summary.accepted}</span><span>{translate("terms.decisionRejected", language)} {summary.rejected}</span><span>{translate("terms.decisionDisabled", language)} {summary.disabled}</span><span>{translate("terms.decisionTranslations", language)} {summary.translations}</span><span>{translate("terms.decisionStructural", language)} {summary.structural}</span></div>{review.draft.needs_review.length > 0 && <div className="term-decision-review-preview"><strong>{translate("terms.decisionNeedsReview", language)} {review.draft.needs_review.length}</strong><span>{translate("terms.decisionNeedsReviewHint", language)}</span><div>{review.draft.needs_review.slice(0, 3).map((item) => <span key={item.normalized}>{item.source}</span>)}</div></div>}<div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionSearch", language)} /><select value={kind} onChange={(event) => { setKind(event.target.value); setPage(0); }}><option value="">{translate("terms.decisionAllKinds", language)}</option><option value="term_update">{translate("terms.decisionTermUpdate", language)}</option><option value="relationship">{translate("terms.decisionRelationship", language)}</option></select><select value={status} onChange={(event) => { setStatus(event.target.value as DecisionProposalStatus); setPage(0); }}><option value="all">{translate("terms.decisionAllStatus", language)}</option><option value="accepted">{translate("terms.decisionAcceptedStatus", language)}</option><option value="rejected">{translate("terms.decisionRejectedStatus", language)}</option></select><Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></div><div className="term-decision-list">{visible.map((proposal) => <ProposalCard key={proposal.proposal_id} proposal={proposal} rejected={rejected.has(proposal.proposal_id)} busy={busy} running={running} language={language} onToggle={() => void setRejected(proposal.proposal_id, !rejected.has(proposal.proposal_id))} />)}</div>{!visible.length && <p className="diagnostics-empty">{translate("terms.decisionNoMatch", language)}</p>}<Pagination page={page} pageCount={pageCount} language={language} onPage={changePage} /></>}
           {tab === "manual" && showManualTab && <><div className="manual-review-summary"><strong>{translate("terms.decisionManualProgress", language, progressValues)}</strong><span>{translate("terms.decisionManualHint", language)}</span></div><div className="term-decision-filters term-decision-sticky"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder={translate("terms.decisionManualSearch", language)} /><select value={manualStatus} onChange={(event) => { setManualStatus(event.target.value as typeof manualStatus); setPage(0); }}><option value="open">{translate("terms.decisionManualOpen", language)}</option><option value="resolved">{translate("terms.decisionManualResolved", language)}</option><option value="all">{translate("terms.decisionAllStatus", language)}</option></select><Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></div><div className="manual-review-list">{manualVisible.map((item) => <article className={`manual-review-card ${item.resolved ? "resolved" : ""}`} key={`${item.run_id}:${item.normalized}`}><header><div><strong>{item.source}</strong><small>{item.normalized}</small></div><span>{item.resolved ? translate("terms.decisionManualResolvedBadge", language) : translate("terms.decisionManualOpenBadge", language)}</span></header><p>{item.reason}</p><small>{translate("terms.decisionHits", language)} {item.evidence.hit_count}</small><ConflictDetails conflicts={item.conflicts ? { [item.normalized]: item.conflicts } : undefined} language={language} /><EvidenceDetails evidence={{ [item.normalized]: item.evidence }} language={language} /><div className="manual-review-actions"><button disabled={busy} onClick={() => onNavigateToEditor(item, "edit")}>{translate("terms.decisionEditTerm", language)}</button><button disabled={busy} onClick={() => onNavigateToEditor(item, "group")}>{translate("terms.decisionViewRelation", language)}</button><button disabled={busy} onClick={() => void setManualResolved(item, !item.resolved)}>{item.resolved ? translate("terms.decisionRestoreManual", language) : translate("terms.decisionMarkHandled", language)}</button></div></article>)}</div>{!manualVisible.length && <p className="diagnostics-empty">{translate("terms.decisionManualEmpty", language)}</p>}<Pagination page={page} pageCount={manualPageCount} language={language} onPage={changePage} /></>}
           {!review?.draft && tab === "proposals" && !running && <p className="diagnostics-empty">{translate("terms.decisionNoDraft", language)}</p>}

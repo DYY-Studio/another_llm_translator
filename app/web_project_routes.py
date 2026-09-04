@@ -24,14 +24,15 @@ from .project import (
     add_project_files,
     apply_file_replacement,
     delete_project,
+    ensure_missing_summary_prompts,
     init_project,
+    load_source_files,
     natural_path_key,
     prepare_file_replacement,
     remove_project_files,
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
-    load_source_files,
 )
 from .sqlite_storage import compact_project_database, read_json, read_adapter_state
 from .user_config import user_root
@@ -335,13 +336,16 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         if not candidate.is_absolute():
             raise UsageError("项目路径必须是绝对路径")
         root = resolve_project(str(candidate))
-        metadata = read_json(root, root / "project.json")
+        with project_write_lock(root):
+            warnings = ensure_missing_summary_prompts(root, app_root=app_root)
+            metadata = read_json(root, root / "project.json")
         remember_project(root)
         return {
             "selector": project_selector(root, metadata),
             "name": metadata["name"],
             "path": str(root),
             "external": root.parent != projects_root.resolve(),
+            "warnings": warnings,
         }
 
     @app.delete("/api/v1/projects/{name}")

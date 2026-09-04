@@ -47,6 +47,7 @@ from .execution import (
 )
 from .llm_client import LLMClient, SlidingWindowLimiter
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
+from .llm_response import TerminologyResponseMode
 from .llm_keys import KeyPool
 from .logging_utils import get_logger
 from .plugins import (
@@ -90,7 +91,6 @@ _VALIDATION_REPAIR = {
         "you may keep the candidate when it does not."
     ),
 }
-
 
 
 def _project_context(
@@ -140,9 +140,7 @@ def _project_context(
                 if key in state
             }
         if stage is not None:
-            adapter = get_document_adapter(
-                str(file_record["document_adapter_id"])
-            )
+            adapter = get_document_adapter(str(file_record["document_adapter_id"]))
             requirements: dict[str, str] = {}
             for language in PROMPT_LANGUAGES:
                 requirement = adapter.model_prompt_requirements(
@@ -161,14 +159,14 @@ def _project_context(
     config["_document_adapter_options"] = adapter_options
     config["_document_adapters"] = adapters
     if stage is not None:
-        config["_document_adapter_prompt_requirements"] = (
-            adapter_prompt_requirements
-        )
+        config["_document_adapter_prompt_requirements"] = adapter_prompt_requirements
     return config, metadata, files, segments
+
 
 def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
     if not any(not segment["is_empty"] for segment in segments):
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
+
 
 def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
     if isinstance(value, str):
@@ -181,6 +179,7 @@ def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
             for key, item in value.items()
         }
     return value
+
 
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     return {
@@ -198,6 +197,7 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
         "force": scope.force,
     }
 
+
 def _configured_output_warning(config: dict[str, Any]) -> str | None:
     maximum_available = (
         config["llm"]["context_window_tokens"]
@@ -210,6 +210,7 @@ def _configured_output_warning(config: dict[str, Any]) -> str | None:
         f"max_output_tokens={configured} 超过上下文可用上限 "
         f"{maximum_available}；实际请求将按剩余空间自动收窄"
     )
+
 
 def _finalize_planning_failure(
     project: Path,
@@ -232,8 +233,10 @@ def _finalize_planning_failure(
         usage=None,
     )
 
+
 def _extend_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
+
 
 def _resume_scope(
     project: Path, scope: Scope, resume_run_id: str | None
@@ -253,6 +256,7 @@ def _resume_scope(
         resumed_scope.force,
     )
     return resumed_scope, resume_arguments_ignored
+
 
 def _assemble_warnings(
     *,
@@ -291,6 +295,7 @@ def _assemble_warnings(
     if fingerprint_warning:
         warnings.append(fingerprint_warning)
     return warnings
+
 
 def _create_or_continue_run(
     project: Path,
@@ -354,6 +359,7 @@ def _create_or_continue_run(
 
     return run_id, run_dir, continuation_index, fail_planning
 
+
 @dataclass
 class _Preflight:
     request_segments: list[dict[str, Any]]
@@ -362,6 +368,7 @@ class _Preflight:
     preflight_failed: list[dict[str, Any]]
     fast_checked: int
     exact_checked: int
+
 
 def _split_oversized_preflight(
     work: Iterable[dict[str, Any]],
@@ -407,12 +414,18 @@ def _split_oversized_preflight(
                 preflight_failed.append(segment)
                 continue
         pending_parts: list[Any] = [
-            initial_part(segment) if initial_part is not None else str(segment["source"])
+            initial_part(segment)
+            if initial_part is not None
+            else str(segment["source"])
         ]
         accepted_parts: list[Any] = []
         while pending_parts:
             part = pending_parts.pop(0)
-            probe = make_probe(segment, part)
+            try:
+                probe = make_probe(segment, part)
+            except ConfigError as exc:
+                fail_planning(exc)
+                raise
             try:
                 fast = estimate_single_segment_preflight(
                     probe,
@@ -442,7 +455,12 @@ def _split_oversized_preflight(
         part_ids: list[str] = []
         for index, part in enumerate(accepted_parts, start=1):
             part_id = f"{segment['segment_id']}-P{index:03d}"
-            request_segments.append(accept_part(segment, part_id, part))
+            try:
+                accepted = accept_part(segment, part_id, part)
+            except ConfigError as exc:
+                fail_planning(exc)
+                raise
+            request_segments.append(accepted)
             part_original[part_id] = str(segment["segment_id"])
             part_ids.append(part_id)
         original_parts[str(segment["segment_id"])] = part_ids
@@ -454,6 +472,7 @@ def _split_oversized_preflight(
         fast_checked=fast_checked,
         exact_checked=exact_checked,
     )
+
 
 @dataclass
 class StageRunState:
@@ -472,6 +491,7 @@ class StageRunState:
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
+
 
 async def _execute_stage_run(
     state: StageRunState,
@@ -495,6 +515,11 @@ async def _execute_stage_run(
     failure_counts: Counter[str],
     http_client: httpx.AsyncClient | None = None,
     runtime_parts_kwargs: dict[str, Any] | None = None,
+    runtime_request_observer: Callable[[list[dict[str, Any]]], None] | None = None,
+    runtime_split_observer: Callable[
+        [list[dict[str, Any]], list[list[dict[str, Any]]]], None
+    ]
+    | None = None,
 ) -> dict[str, Any] | None:
     logger = get_logger(state.stage)
     logger.info("run start run=%s", state.run_id)
@@ -536,11 +561,7 @@ async def _execute_stage_run(
             int(execution["requests_per_minute"]),
             int(execution["input_tokens_per_minute"]),
             int(execution["max_parallel"]),
-            int(
-                execution.get(
-                    "max_parallel_per_key", execution["max_parallel"]
-                )
-            ),
+            int(execution.get("max_parallel_per_key", execution["max_parallel"])),
         )
 
     def ensure_runtime_chunk(chunk: ChunkPlan) -> ChunkPlan:
@@ -567,6 +588,8 @@ async def _execute_stage_run(
     ) -> None:
         chunk = ensure_runtime_chunk(chunk)
         try:
+            if runtime_request_observer is not None:
+                runtime_request_observer(list(chunk.segments))
             await process_once(chunk, split_parent_request_id)
             return
         except ContextLengthError as exc:
@@ -581,8 +604,7 @@ async def _execute_stage_run(
             items = [
                 item
                 for item in chunk.segments
-                if requested_ids is None
-                or str(item["segment_id"]) in requested_ids
+                if requested_ids is None or str(item["segment_id"]) in requested_ids
             ]
             if not items:
                 return
@@ -607,6 +629,8 @@ async def _execute_stage_run(
             if not groups:
                 await record_context_failure(items)
                 return
+            if runtime_split_observer is not None:
+                runtime_split_observer(list(items), [list(group) for group in groups])
             for group in groups:
                 await process(
                     ChunkPlan(
@@ -623,9 +647,7 @@ async def _execute_stage_run(
     def key_audit() -> dict[str, Any] | None:
         if state.llm is None or state.llm._api_keys is None:
             return None
-        return state.llm.key_audit_summary(
-            execution_index=state.continuation_index + 1
-        )
+        return state.llm.key_audit_summary(execution_index=state.continuation_index + 1)
 
     try:
         async with LLMClient(
@@ -727,6 +749,7 @@ async def _execute_stage_run(
         key_audit=key_audit(),
     )
 
+
 async def _localized_request_loop(
     group: list[dict[str, Any]],
     *,
@@ -772,15 +795,11 @@ async def _localized_request_loop(
                     "source": segment_model_source(item),
                     "failed_candidate": segment_model_text(
                         item,
-                        str(
-                            repair_candidates[str(item["segment_id"])][
-                                "candidate"
-                            ]
-                        ),
+                        str(repair_candidates[str(item["segment_id"])]["candidate"]),
                     ),
-                    "validation_matches": repair_candidates[
-                        str(item["segment_id"])
-                    ]["findings"],
+                    "validation_matches": repair_candidates[str(item["segment_id"])][
+                        "findings"
+                    ],
                 }
                 for item in items
             ]
@@ -859,11 +878,13 @@ async def _localized_request_loop(
         )
     return list(dict.fromkeys(exhausted))
 
+
 def _restore_leading_whitespace(source: str, text: str) -> str:
     prefix_end = 0
     while prefix_end < len(source) and source[prefix_end].isspace():
         prefix_end += 1
     return source[:prefix_end] + text.lstrip()
+
 
 def _confirm_fingerprint_reuse(
     stage: str,
@@ -895,15 +916,11 @@ def _confirm_fingerprint_reuse(
     if reuse_allowed:
         return f"{message}；已显式复用"
     if dry_run:
-        return (
-            f"{message}；正式执行必须选择 "
-            "--reuse-mixed-fingerprints 或 --force"
-        )
+        return f"{message}；正式执行必须选择 --reuse-mixed-fingerprints 或 --force"
     interactive = sys.stdin.isatty() if interactive is None else interactive
     if choice is None and not interactive:
         raise UsageError(
-            f"{message}；非交互环境必须指定 "
-            "--reuse-mixed-fingerprints 或 --force"
+            f"{message}；非交互环境必须指定 --reuse-mixed-fingerprints 或 --force"
         )
     if choice is None:
         print(
@@ -931,6 +948,7 @@ def _confirm_fingerprint_reuse(
     if choice == "new":
         raise UsageError(f"{message}；已拒绝复用，请使用 --force 重做选定范围")
     raise UsageError("指纹复用选择必须是 reuse 或 new")
+
 
 def _request_estimate(
     messages: list[dict[str, str]],
@@ -960,6 +978,7 @@ def _request_estimate(
         )
     return estimated
 
+
 def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
     """Resolve the run prompt language, falling back to zh-CN."""
     value = requested or resolve_language()
@@ -970,6 +989,7 @@ def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
         return value
     return "zh-CN"
 
+
 def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
     """Per-language middle content digests; missing languages are omitted."""
     digests: dict[str, str] = {}
@@ -979,12 +999,17 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
             digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
     return digests
 
+
 def _prompt(project: Path, stage: str, language: str | None = None) -> str:
     factory = _prompt_factory(project, stage, language)
     return factory(())
 
+
 def _prompt_factory(
-    project: Path, stage: str, language: str | None = None
+    project: Path,
+    stage: str,
+    language: str | None = None,
+    response_mode: TerminologyResponseMode | str | None = None,
 ) -> Callable[[Iterable[str]], str]:
     language = _prompt_language(project, stage, language)
     name = prompt_file(stage, language)
@@ -999,9 +1024,11 @@ def _prompt_factory(
             middle,
             language,
             document_requirements=requirements,
+            response_mode=response_mode,
         )
 
     return build
+
 
 def _document_prompt_requirement_helpers(
     config: dict[str, Any],
@@ -1034,6 +1061,7 @@ def _document_prompt_requirement_helpers(
 
     return requirements_for, partition_key
 
+
 def _split_source_once(source: str) -> tuple[str, str]:
     if len(source) < 2:
         raise ConfigError("固定 Prompt 与单字符输入仍超过模型硬限制")
@@ -1053,13 +1081,24 @@ def _split_source_once(source: str) -> tuple[str, str]:
         raise ConfigError("单个 Aozora Ruby 超过模型硬限制，无法安全拆分")
     return source[:split_at], source[split_at:]
 
+
 def _split_segment_source(
     segment: dict[str, Any], segment_id: str, source: str
 ) -> dict[str, Any]:
+    original_source = str(segment["source"])
+    existing_model_source = segment.get("model_source")
     result = {**segment, "segment_id": segment_id, "source": source}
     if segment.get("_ruby_mode") in {"short_xml", "compact"}:
         result["model_source"] = segment_model_text(result, source)
+    elif isinstance(existing_model_source, str):
+        if existing_model_source != original_source:
+            raise ConfigError(
+                "Document Adapter 提供的 model_source 无法验证切片映射；"
+                "请在 Adapter 中提供可验证切片或关闭概括拆分"
+            )
+        result["model_source"] = source
     return result
+
 
 def _replace_with_runtime_parts(
     segment: dict[str, Any],
@@ -1104,6 +1143,7 @@ def _replace_with_runtime_parts(
             }
     return parts
 
+
 class _SegmentParseResult(NamedTuple):
     valid: dict[str, Any]
     unresolved: list[str]
@@ -1111,6 +1151,7 @@ class _SegmentParseResult(NamedTuple):
     complete: bool
     has_valid_end: bool
     ids_complete: bool
+
 
 def _base_results(
     project: Path,
@@ -1141,9 +1182,7 @@ def _base_results(
         str(key): value
         for key, value in classify_stage(
             [],
-            load_stage_history(
-                project, "translation"
-            ),
+            load_stage_history(project, "translation"),
             force=False,
         ).latest_completed.items()
     }
@@ -1151,9 +1190,7 @@ def _base_results(
         return translations
     applied = classify_stage(
         [],
-        load_stage_history(
-            project, "proofreading_applied"
-        ),
+        load_stage_history(project, "proofreading_applied"),
         force=False,
     ).latest_completed
     return {**translations, **{str(key): value for key, value in applied.items()}}

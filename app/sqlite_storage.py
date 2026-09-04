@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -12,12 +13,13 @@ from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 STAGES = frozenset(
     {
         "terminology",
         "terminology_decision",
+        "content_summary",
         "translation",
         "proofreading",
         "proofreading_applied",
@@ -47,6 +49,9 @@ ERROR_CATEGORIES = frozenset(
         "stage_error",
     }
 )
+SUMMARY_KINDS = frozenset({"fragment", "reduction", "full"})
+SUMMARY_STATUSES = frozenset({"draft", "running", "completed", "failed", "stale"})
+SUMMARY_RUN_MODES = frozenset({"fragment", "aggregation"})
 
 
 def _validate_record(value: Any, location: str) -> dict[str, Any]:
@@ -150,7 +155,7 @@ def initialize(project: Path) -> None:
     try:
         connection = _connect(path)
         with connection:
-            _ensure_schema(connection)
+            _ensure_schema(connection, project)
     except sqlite3.Error as exc:
         raise StorageError(f"无法初始化项目 SQLite：{path}: {exc}") from exc
     finally:
@@ -162,8 +167,7 @@ def initialize(project: Path) -> None:
 
 def _create_tables(connection: sqlite3.Connection) -> None:
     """Create the current schema objects without changing existing tables."""
-    connection.executescript(
-        """
+    schema = """
         CREATE TABLE IF NOT EXISTS schema_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -241,8 +245,57 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS run_chunks_run
             ON run_chunks(run_id, sequence);
+        CREATE TABLE IF NOT EXISTS summary_participation (
+            file_id TEXT NOT NULL,
+            part_id TEXT NOT NULL,
+            selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(file_id, part_id)
+        );
+        CREATE INDEX IF NOT EXISTS summary_participation_part
+            ON summary_participation(part_id, file_id);
+        CREATE TABLE IF NOT EXISTS content_summaries (
+            summary_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            part_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            text TEXT,
+            source_range_json TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            prompt_digest TEXT NOT NULL,
+            model TEXT NOT NULL,
+            run_id TEXT,
+            source_changed INTEGER NOT NULL DEFAULT 0
+                CHECK (source_changed IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS content_summaries_boundary
+            ON content_summaries(file_id, part_id, kind, status);
+        CREATE INDEX IF NOT EXISTS content_summaries_run
+            ON content_summaries(run_id, updated_at);
+        CREATE TABLE IF NOT EXISTS summary_runs (
+            run_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_ranges_json TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            prompt_digest TEXT NOT NULL,
+            model TEXT NOT NULL,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS summary_runs_status
+            ON summary_runs(mode, status, updated_at);
         """
-    )
+    for statement in schema.split(";"):
+        statement = statement.strip()
+        if statement:
+            connection.execute(statement)
 
 
 def _project_id(connection: sqlite3.Connection) -> str | None:
@@ -327,6 +380,41 @@ _CHUNK_RESIDUAL_FIELDS = (
     "run_id",
 )
 _TERMS_RESIDUAL_FIELDS = ("schema_version", "record_type", "project_id")
+_SUMMARY_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "kind",
+    "file_id",
+    "part_id",
+    "status",
+    "text",
+    "source_range",
+    "source_digest",
+    "input_digest",
+    "prompt_digest",
+    "model",
+    "run_id",
+    "source_changed",
+    "created_at",
+    "updated_at",
+)
+_SUMMARY_RUN_RESIDUAL_FIELDS = (
+    "schema_version",
+    "record_type",
+    "record_id",
+    "project_id",
+    "run_id",
+    "mode",
+    "status",
+    "source_ranges",
+    "input_digest",
+    "prompt_digest",
+    "model",
+    "started_at",
+    "updated_at",
+)
 
 
 def _check_mirrors(
@@ -780,34 +868,105 @@ def _migrate_legacy_to_v3(connection: sqlite3.Connection) -> None:
     )
 
 
-def _ensure_schema(connection: sqlite3.Connection) -> None:
-    """Ensure the project database matches SCHEMA_VERSION, migrating v1/v2."""
-    _create_tables(connection)
+def _schema_version(connection: sqlite3.Connection) -> int | None:
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()
+    if table is None:
+        return None
     row = connection.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     if row is None:
+        return None
+    raw_value = row[0]
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ProjectError(
+            f"不支持的项目 SQLite schema_version：{raw_value!r}；请重新创建项目"
+        ) from exc
+
+
+def _backup_before_schema_upgrade(project: Path, version: int) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_dir = project / "snapshots" / "storage_migrations"
+    backup_path = backup_dir / f"project-v{version}-to-v{SCHEMA_VERSION}-{timestamp}.sqlite"
+    source_connection: sqlite3.Connection | None = None
+    backup_connection: sqlite3.Connection | None = None
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        # The caller holds a BEGIN IMMEDIATE on ``connection``.  A second
+        # read connection can copy the last committed snapshot while that
+        # writer slot prevents a concurrent writer from changing it.
+        source_connection = sqlite3.connect(database_path(project), timeout=30)
+        backup_connection = sqlite3.connect(backup_path)
+        source_connection.backup(backup_connection)
+        backup_connection.commit()
+    except (OSError, sqlite3.Error) as exc:
+        raise StorageError(
+            f"无法在升级 SQLite 前创建一致备份：{project}: {exc}"
+        ) from exc
+    finally:
+        if source_connection is not None:
+            source_connection.close()
+        if backup_connection is not None:
+            backup_connection.close()
+    return backup_path
+
+
+def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) -> Path | None:
+    """Ensure the project database matches SCHEMA_VERSION.
+
+    A pre-upgrade SQLite backup is made before changing an existing schema.
+    The returned path lets callers surface that backup to users.
+    """
+    version = _schema_version(connection)
+    if version is None:
+        _create_tables(connection)
         version = SCHEMA_VERSION
-    else:
-        version = int(row[0])
+        connection.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
+            (str(version),),
+        )
+        return None
+    elif version not in {1, 2, 3, SCHEMA_VERSION}:
+        raise ProjectError(
+            f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
+        )
+    if version == SCHEMA_VERSION:
+        _create_tables(connection)
+        return None
+
+    if project is None:
+        raise StorageError("SQLite schema 升级缺少项目路径，无法创建备份")
+    try:
+        # Reserve the database writer slot while taking the backup.  This
+        # keeps a concurrent writer from changing the snapshot between the
+        # version check and sqlite's online backup.
+        connection.execute("BEGIN IMMEDIATE")
+        backup_path = _backup_before_schema_upgrade(project, version)
         if version in {1, 2}:
+            _create_tables(connection)
             _migrate_legacy_to_v3(connection)
-            version = 3
-        elif version != SCHEMA_VERSION:
-            raise ProjectError(
-                f"不支持的项目 SQLite schema_version：{row[0]}；请重新创建项目"
-            )
-    connection.execute(
-        "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (str(version),),
-    )
+        else:
+            _create_tables(connection)
+        connection.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return backup_path
 
 
 _SUPPORTED_CACHE: set[Path] = set()
 
 
-def ensure_supported(project: Path) -> None:
+def ensure_supported(project: Path) -> Path | None:
     path = database_path(project)
     if path in _SUPPORTED_CACHE:
         return
@@ -818,13 +977,11 @@ def ensure_supported(project: Path) -> None:
     try:
         connection = _connect(path)
         with connection:
-            if connection.execute(
-                "SELECT 1 FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone() is None:
+            if _schema_version(connection) is None:
                 raise ProjectError(
                     "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
                 )
-            _ensure_schema(connection)
+            backup_path = _ensure_schema(connection, project)
     except sqlite3.Error as exc:
         raise StorageError(f"无法读取项目 schema：{path}: {exc}") from exc
     finally:
@@ -833,6 +990,7 @@ def ensure_supported(project: Path) -> None:
         except UnboundLocalError:
             pass
     _SUPPORTED_CACHE.add(path)
+    return backup_path
 
 
 def _json(value: Any) -> str:
@@ -1015,6 +1173,440 @@ def read_project_meta(project: Path) -> dict[str, Any]:
         connection.close()
 
 
+def _summary_value(value: dict[str, Any], key: str, *, location: str) -> Any:
+    if key not in value:
+        raise StorageError(f"内容概括记录缺少 {key}：{location}")
+    return value[key]
+
+
+def _validate_summary(value: dict[str, Any], location: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise StorageError(f"不支持或缺少 schema_version：{location}")
+    if value.get("record_type") != "content_summary":
+        raise StorageError(f"不支持的内容概括 record_type：{location}")
+    value.setdefault("source_changed", False)
+    kind = _summary_value(value, "kind", location=location)
+    if kind not in SUMMARY_KINDS:
+        raise StorageError(f"不支持的内容概括 kind：{location}: {kind}")
+    status = _summary_value(value, "status", location=location)
+    if status not in SUMMARY_STATUSES:
+        raise StorageError(f"不支持的内容概括 status：{location}: {status}")
+    for key in (
+        "record_id",
+        "file_id",
+        "part_id",
+        "source_digest",
+        "input_digest",
+        "prompt_digest",
+        "model",
+    ):
+        item = _summary_value(value, key, location=location)
+        if not isinstance(item, str) or not item:
+            raise StorageError(f"内容概括 {key} 必须是非空字符串：{location}")
+    if "source_range" not in value:
+        raise StorageError(f"内容概括记录缺少 source_range：{location}")
+    if not isinstance(value["source_changed"], bool):
+        raise StorageError(f"内容概括 source_changed 必须是布尔值：{location}")
+    return value
+
+
+def _validate_summary_run(value: dict[str, Any], location: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise StorageError(f"不支持或缺少 schema_version：{location}")
+    if value.get("record_type") != "summary_run":
+        raise StorageError(f"不支持的概括 Run record_type：{location}")
+    for key in ("record_id", "run_id", "input_digest", "prompt_digest", "model"):
+        item = _summary_value(value, key, location=location)
+        if not isinstance(item, str) or not item:
+            raise StorageError(f"概括 Run {key} 必须是非空字符串：{location}")
+    mode = _summary_value(value, "mode", location=location)
+    if mode not in SUMMARY_RUN_MODES:
+        raise StorageError(f"不支持的概括 Run mode：{location}: {mode}")
+    status = _summary_value(value, "status", location=location)
+    if status not in RECORD_STATUSES:
+        raise StorageError(f"不支持的概括 Run status：{location}: {status}")
+    if "source_ranges" not in value:
+        raise StorageError(f"概括 Run 缺少 source_ranges：{location}")
+    return value
+
+
+def _summary_record_payload(value: dict[str, Any]) -> tuple[Any, ...]:
+    now = str(value.get("updated_at") or value.get("created_at") or utc_now())
+    created_at = str(value.get("created_at") or now)
+    source_changed = bool(value.get("source_changed", False))
+    return (
+        str(value["record_id"]),
+        str(value["kind"]),
+        str(value["file_id"]),
+        str(value["part_id"]),
+        str(value["status"]),
+        value.get("text"),
+        _json(value["source_range"]),
+        str(value["source_digest"]),
+        str(value["input_digest"]),
+        str(value["prompt_digest"]),
+        str(value["model"]),
+        value.get("run_id"),
+        int(source_changed),
+        created_at,
+        now,
+        _residual(value, _SUMMARY_RESIDUAL_FIELDS),
+    )
+
+
+def write_content_summary(project: Path, value: dict[str, Any]) -> None:
+    """Atomically upsert one content-summary artifact with its provenance."""
+    checked = _validate_summary(dict(value), "content summary")
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO content_summaries(
+                    summary_id, kind, file_id, part_id, status, text,
+                    source_range_json, source_digest, input_digest, prompt_digest,
+                    model, run_id, source_changed, created_at, updated_at,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(summary_id) DO UPDATE SET
+                    kind=excluded.kind, file_id=excluded.file_id,
+                    part_id=excluded.part_id, status=excluded.status,
+                    text=excluded.text, source_range_json=excluded.source_range_json,
+                    source_digest=excluded.source_digest,
+                    input_digest=excluded.input_digest,
+                    prompt_digest=excluded.prompt_digest, model=excluded.model,
+                    run_id=excluded.run_id, source_changed=excluded.source_changed,
+                    updated_at=excluded.updated_at, payload_json=excluded.payload_json
+                """,
+                _summary_record_payload(checked),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法写入内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def publish_content_summary_fulls(
+    project: Path, values: Iterable[dict[str, Any]]
+) -> None:
+    """Publish a complete aggregation batch in one SQLite transaction."""
+    checked = [_validate_summary(dict(value), "content summary") for value in values]
+    if not checked:
+        raise ProjectError("内容概括发布批次不能为空")
+    boundaries = [(str(item["file_id"]), str(item["part_id"])) for item in checked]
+    if len(set(boundaries)) != len(boundaries):
+        raise ProjectError("内容概括发布批次不能包含重复边界")
+    if any(item["kind"] != "full" or item["status"] != "completed" for item in checked):
+        raise ProjectError("内容概括发布批次只能包含已完成 full 结果")
+    if len({str(item["record_id"]) for item in checked}) != len(checked):
+        raise ProjectError("内容概括发布批次不能包含重复结果")
+    connection = _with_db(project)
+    try:
+        with connection:
+            for value in checked:
+                connection.execute(
+                    """
+                    INSERT INTO content_summaries(
+                        summary_id, kind, file_id, part_id, status, text,
+                        source_range_json, source_digest, input_digest, prompt_digest,
+                        model, run_id, source_changed, created_at, updated_at,
+                        payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(summary_id) DO UPDATE SET
+                        kind=excluded.kind, file_id=excluded.file_id,
+                        part_id=excluded.part_id, status=excluded.status,
+                        text=excluded.text, source_range_json=excluded.source_range_json,
+                        source_digest=excluded.source_digest,
+                        input_digest=excluded.input_digest,
+                        prompt_digest=excluded.prompt_digest, model=excluded.model,
+                        run_id=excluded.run_id, source_changed=excluded.source_changed,
+                        updated_at=excluded.updated_at, payload_json=excluded.payload_json
+                    """,
+                    _summary_record_payload(value),
+                )
+            for file_id, part_id in boundaries:
+                connection.execute(
+                    """
+                    UPDATE content_summaries
+                       SET status = 'stale', updated_at = ?
+                     WHERE file_id = ? AND part_id = ?
+                       AND kind = 'full' AND status = 'completed'
+                       AND summary_id <> ?
+                    """,
+                    [utc_now(), file_id, part_id, next(
+                        str(item["record_id"])
+                        for item in checked
+                        if item["file_id"] == file_id and item["part_id"] == part_id
+                    )],
+                )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法原子发布内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _hydrate_summary(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    value = _load(str(row["payload_json"]))
+    value = _with_common_header(
+        value,
+        project_id=project_id,
+        record_type="content_summary",
+        record_id=str(row["summary_id"]),
+        fields={
+            "kind": str(row["kind"]),
+            "file_id": str(row["file_id"]),
+            "part_id": str(row["part_id"]),
+            "status": str(row["status"]),
+            "text": row["text"],
+            "source_range": json.loads(str(row["source_range_json"])),
+            "source_digest": str(row["source_digest"]),
+            "input_digest": str(row["input_digest"]),
+            "prompt_digest": str(row["prompt_digest"]),
+            "model": str(row["model"]),
+            "run_id": row["run_id"],
+            "source_changed": bool(row["source_changed"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        },
+    )
+    return _validate_summary(value, f"content_summaries/{row['summary_id']}")
+
+
+def read_content_summaries(
+    project: Path,
+    *,
+    file_id: str | None = None,
+    part_id: str | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    if bool(file_id) != bool(part_id):
+        raise ProjectError("file_id 与 part_id 必须同时提供")
+    if kind is not None and kind not in SUMMARY_KINDS:
+        raise ProjectError(f"不支持的内容概括 kind：{kind}")
+    if status is not None and status not in SUMMARY_STATUSES:
+        raise ProjectError(f"不支持的内容概括 status：{status}")
+    connection = _with_db(project)
+    try:
+        clauses = []
+        params: list[Any] = []
+        if file_id:
+            clauses.extend(["file_id = ?", "part_id = ?"])
+            params.extend([file_id, part_id])
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = connection.execute(
+            """SELECT summary_id, kind, file_id, part_id, status, text,
+                      source_range_json, source_digest, input_digest, prompt_digest,
+                      model, run_id, source_changed, created_at, updated_at,
+                      payload_json
+               FROM content_summaries"""
+            + where
+            + " ORDER BY file_id, part_id, kind, updated_at, summary_id",
+            params,
+        ).fetchall()
+        project_id = _project_id(connection)
+        return [_hydrate_summary(row, project_id) for row in rows]
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def write_summary_participation(
+    project: Path, values: Iterable[dict[str, Any]]
+) -> None:
+    records = [dict(value) for value in values]
+    for value in records:
+        if not isinstance(value.get("file_id"), str) or not value["file_id"]:
+            raise ProjectError("概括参与选择缺少 file_id")
+        if not isinstance(value.get("part_id"), str) or not value["part_id"]:
+            raise ProjectError("概括参与选择缺少 part_id")
+        if not isinstance(value.get("selected"), bool):
+            raise ProjectError("概括参与选择 selected 必须是布尔值")
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute("DELETE FROM summary_participation")
+            connection.executemany(
+                """INSERT INTO summary_participation(
+                       file_id, part_id, selected, updated_at
+                   ) VALUES (?, ?, ?, ?)""",
+                [
+                    (
+                        value["file_id"],
+                        value["part_id"],
+                        int(value["selected"]),
+                        utc_now(),
+                    )
+                    for value in records
+                ],
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法写入概括参与选择：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_summary_participation(project: Path) -> list[dict[str, Any]]:
+    connection = _with_db(project)
+    try:
+        rows = connection.execute(
+            """SELECT file_id, part_id, selected
+               FROM summary_participation
+               ORDER BY file_id, part_id"""
+        ).fetchall()
+        return [
+            {
+                "file_id": str(row["file_id"]),
+                "part_id": str(row["part_id"]),
+                "selected": bool(row["selected"]),
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取概括参与选择：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _summary_run_payload(value: dict[str, Any]) -> tuple[Any, ...]:
+    updated_at = str(value.get("updated_at") or value.get("started_at") or utc_now())
+    return (
+        str(value["run_id"]),
+        str(value["mode"]),
+        str(value["status"]),
+        _json(value["source_ranges"]),
+        str(value["input_digest"]),
+        str(value["prompt_digest"]),
+        str(value["model"]),
+        value.get("started_at"),
+        updated_at,
+        _residual(value, _SUMMARY_RUN_RESIDUAL_FIELDS),
+    )
+
+
+def write_summary_run(project: Path, value: dict[str, Any]) -> None:
+    checked = _validate_summary_run(dict(value), "summary run")
+    if checked.get("run_id") != checked.get("record_id"):
+        raise ProjectError("概括 Run 的 run_id 与 record_id 必须一致")
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO summary_runs(
+                    run_id, mode, status, source_ranges_json, input_digest,
+                    prompt_digest, model, started_at, updated_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    mode=excluded.mode, status=excluded.status,
+                    source_ranges_json=excluded.source_ranges_json,
+                    input_digest=excluded.input_digest,
+                    prompt_digest=excluded.prompt_digest, model=excluded.model,
+                    started_at=excluded.started_at, updated_at=excluded.updated_at,
+                    payload_json=excluded.payload_json
+                """,
+                _summary_run_payload(checked),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法写入概括 Run：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _hydrate_summary_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    value = _load(str(row["payload_json"]))
+    value = _with_common_header(
+        value,
+        project_id=project_id,
+        record_type="summary_run",
+        record_id=str(row["run_id"]),
+        fields={
+            "run_id": str(row["run_id"]),
+            "mode": str(row["mode"]),
+            "status": str(row["status"]),
+            "source_ranges": json.loads(str(row["source_ranges_json"])),
+            "input_digest": str(row["input_digest"]),
+            "prompt_digest": str(row["prompt_digest"]),
+            "model": str(row["model"]),
+            "started_at": row["started_at"],
+            "updated_at": str(row["updated_at"]),
+        },
+    )
+    return _validate_summary_run(value, f"summary_runs/{row['run_id']}")
+
+
+def read_summary_runs(
+    project: Path, *, mode: str | None = None, status: str | None = None
+) -> list[dict[str, Any]]:
+    if mode is not None and mode not in SUMMARY_RUN_MODES:
+        raise ProjectError(f"不支持的概括 Run mode：{mode}")
+    if status is not None and status not in RECORD_STATUSES:
+        raise ProjectError(f"不支持的概括 Run status：{status}")
+    connection = _with_db(project)
+    try:
+        clauses = []
+        params: list[Any] = []
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = connection.execute(
+            """SELECT run_id, mode, status, source_ranges_json, input_digest,
+                      prompt_digest, model, started_at, updated_at, payload_json
+               FROM summary_runs"""
+            + where
+            + " ORDER BY updated_at DESC, run_id DESC",
+            params,
+        ).fetchall()
+        project_id = _project_id(connection)
+        return [_hydrate_summary_run(row, project_id) for row in rows]
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法读取概括 Run：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def mark_content_summaries_source_changed(
+    project: Path, boundaries: Iterable[dict[str, Any]]
+) -> int:
+    values = [dict(boundary) for boundary in boundaries]
+    for value in values:
+        if not isinstance(value.get("file_id"), str) or not value["file_id"]:
+            raise ProjectError("source changed 标记缺少 file_id")
+        if not isinstance(value.get("part_id"), str) or not value["part_id"]:
+            raise ProjectError("source changed 标记缺少 part_id")
+    if not values:
+        return 0
+    connection = _with_db(project)
+    try:
+        with connection:
+            changed = 0
+            updated_at = utc_now()
+            for value in values:
+                cursor = connection.execute(
+                    """UPDATE content_summaries
+                       SET source_changed = 1, updated_at = ?
+                       WHERE file_id = ? AND part_id = ?""",
+                    (updated_at, value["file_id"], value["part_id"]),
+                )
+                changed += cursor.rowcount
+            return changed
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法标记内容概括源已变化：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def replace_source(
     project: Path,
     files: Iterable[dict[str, Any]],
@@ -1028,6 +1620,63 @@ def replace_source(
     state_values = [dict(item) for item in adapter_states]
     try:
         with connection:
+            old_rows = connection.execute(
+                """SELECT file_id, part_id, line_index, source, model_source
+                   FROM segments"""
+            ).fetchall()
+            old_orders = {
+                str(row["file_id"]): int(row["file_order"])
+                for row in connection.execute(
+                    "SELECT file_id, file_order FROM files"
+                ).fetchall()
+            }
+            old_by_boundary: dict[tuple[str, str], list[tuple[int, str, str]]]
+            old_by_boundary = {}
+            for row in old_rows:
+                old_by_boundary.setdefault(
+                    (str(row["file_id"]), str(row["part_id"])), []
+                ).append(
+                    (
+                        int(row["line_index"]),
+                        str(row["source"]),
+                        str(row["model_source"] or ""),
+                    )
+                )
+            new_by_boundary: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+            for item in segment_values:
+                new_by_boundary.setdefault(
+                    (str(item["file_id"]), str(item["part_id"])), []
+                ).append(
+                    (
+                        int(item["line_index"]),
+                        str(item["source"]),
+                        str(item.get("model_source") or ""),
+                    )
+                )
+            def boundary_digest(
+                values: list[tuple[int, str, str]] | None,
+            ) -> str | None:
+                if values is None:
+                    return None
+                return hashlib.sha256(
+                    _json(sorted(values)).encode("utf-8")
+                ).hexdigest()
+
+            affected_boundaries = {
+                boundary
+                for boundary in old_by_boundary
+                if boundary_digest(old_by_boundary[boundary])
+                != boundary_digest(new_by_boundary.get(boundary))
+                or old_orders.get(boundary[0])
+                != next(
+                    (
+                        int(item["file_order"])
+                        for item in file_values
+                        if str(item["file_id"]) == boundary[0]
+                    ),
+                    None,
+                )
+            }
             connection.execute("DELETE FROM segments")
             connection.execute("DELETE FROM files")
             connection.execute("DELETE FROM adapter_states")
@@ -1078,6 +1727,13 @@ def replace_source(
                 "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
                 [(key, _json(item)) for key, item in metadata.items()],
             )
+            for file_id, part_id in affected_boundaries:
+                connection.execute(
+                    """UPDATE content_summaries
+                       SET source_changed = 1, updated_at = ?
+                       WHERE file_id = ? AND part_id = ?""",
+                    (utc_now(), file_id, part_id),
+                )
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入项目源数据：{project}: {exc}") from exc
     finally:

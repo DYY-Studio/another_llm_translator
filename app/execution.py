@@ -49,6 +49,7 @@ from .i18n import SUPPORTED_LANGUAGES
 
 from .llm_adapter import JSONLLMAdapter
 
+from .llm_response import TerminologyResponseMode, response_record_types
 
 
 
@@ -75,6 +76,7 @@ STAGE_FILES = {
 STAGE_CODES = {
     "terminology": "TERM",
     "terminology_decision": "TERMD",
+    "content_summary": "SUM",
     "translation": "TR",
     "proofreading": "PR",
     "polishing": "PO",
@@ -321,6 +323,19 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
             "ID, ordering, or weight."
         ),
     },
+    "content_summary": {
+        "zh-CN": (
+            "你是内容概括器。target_language 是输出语言；summaries 是本次待整合的"
+            "局部概括，每项有请求内短 id、摘要文本和原始引用。只依据 summaries"
+            "整合成一段连贯、准确的概括，不补写未被输入支持的事实。"
+        ),
+        "en": (
+            "You consolidate content summaries. target_language is the output language;"
+            " summaries are the local summaries to combine, each with a request-local"
+            " id, text, and source references. Produce one coherent, accurate summary"
+            " supported by the summaries and do not invent unsupported facts."
+        ),
+    },
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
@@ -429,6 +444,49 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     },
     "proofreading": _REVIEW_SUFFIX,
     "polishing": _REVIEW_SUFFIX,
+    "content_summary": {
+        "zh-CN": (
+            '只输出恰好一条 type="summary" 记录和最后的 end。summary 仅含 type、'
+            "非空 text 和 refs；refs 是 summaries 的从 1 开始的请求内短 id 数组，"
+            "不得重复或超出范围，并应覆盖本次全部 summaries。"
+        ),
+        "en": (
+            'Output exactly one type="summary" record followed by the final end. '
+            "A summary contains only type, non-empty text, and refs; refs is a "
+            "non-repeating array of 1-based request-local ids into summaries and "
+            "must cover all summaries."
+        ),
+    },
+}
+
+_TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
+    "zh-CN": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"] + " " + (
+            '先输出恰好一条 type="summary" 记录，再输出术语记录，最后输出 end。'
+            'summary 仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的'
+            '请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有'
+            "source_segments。"
+        ),
+        "summary-only": (
+            '只输出恰好一条 type="summary" 记录和最后的 end，不输出 term。summary 仅含'
+            'type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的请求内短引用'
+            '数组，不能重复或引用范围外编号。summary 必须概括本次所有 source_segments。'
+        ),
+    },
+    "en": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"] + " " + (
+            'Output exactly one type="summary" record first, then term records, and end last. '
+            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
+            'array of 1-based request-local references into source_segments, and every reference '
+            'must be in range. The summary must cover all source_segments.'
+        ),
+        "summary-only": (
+            'Output exactly one type="summary" record and end last; output no term records. '
+            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
+            'array of 1-based request-local references into source_segments, and every reference '
+            'must be in range. The summary must cover all source_segments.'
+        ),
+    },
 }
 
 _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
@@ -482,6 +540,7 @@ def full_prompt(
     language: str = "zh-CN",
     document_requirements: Iterable[str] = (),
     phase: str | None = None,
+    response_mode: TerminologyResponseMode | str | None = None,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -492,11 +551,25 @@ def full_prompt(
         or phase not in _TERMINOLOGY_DECISION_PHASE_PREFIX
     ):
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
+    if response_mode is not None:
+        if stage != "terminology" or phase is not None:
+            raise UsageError("只有术语阶段支持 response_mode")
+        try:
+            mode = (
+                response_mode
+                if isinstance(response_mode, TerminologyResponseMode)
+                else TerminologyResponseMode(response_mode)
+            )
+            response_record_types(mode)
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
+    else:
+        mode = TerminologyResponseMode.TERMS_ONLY
     prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[stage][language]}"
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
     suffix_parts = []
-    if stage not in {"terminology", "terminology_decision"}:
+    if stage not in {"terminology", "terminology_decision", "content_summary"}:
         suffix_parts.append(_SEGMENT_TEXT_SUFFIX[language])
     suffix_parts.extend(
         requirement.strip()
@@ -508,6 +581,8 @@ def full_prompt(
         if stage == "terminology_decision"
         else _STAGE_SUFFIX[stage][language]
     )
+    if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
+        stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{middle.strip()}\n\n{' '.join(suffix_parts)}"
 
@@ -538,7 +613,7 @@ def stage_fingerprint(
             "prompt_rules_version": PROMPT_RULES_VERSION,
             "prompt_languages": prompt_languages or {},
             "temperature": config["llm"][temperature_key],
-            "context": config["context"][stage],
+            "context": config["context"].get(stage, {}),
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,
             "document_adapter_options": config.get("_document_adapter_options", {}),
@@ -1097,6 +1172,7 @@ def create_run(
     if stage in {
         "terminology",
         "terminology_decision",
+        "content_summary",
         "translation",
         "proofreading",
         "polishing",
