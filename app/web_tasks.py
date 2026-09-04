@@ -338,13 +338,6 @@ def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
     )
 
 
-def _decision_fingerprint_snapshot(
-    project: Path, prompt_language: str | None
-) -> str:
-    plan = decision_plan(project, prompt_language)
-    return _decision_fingerprint(plan["config"], plan["prompts"], plan["library"])
-
-
 def _stable_digest(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -927,7 +920,11 @@ class WebTaskManager:
             fingerprints = (
                 (
                     stage,
-                    _decision_fingerprint_snapshot(project, prompt_language)
+                    _decision_fingerprint(
+                        decision_plan_snapshot["config"],
+                        decision_plan_snapshot["prompts"],
+                        decision_plan_snapshot["library"],
+                    )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
                 ),
