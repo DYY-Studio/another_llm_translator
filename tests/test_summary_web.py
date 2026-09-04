@@ -120,14 +120,16 @@ def test_summary_routes_expose_selection_preflight_and_export(tmp_path):
     assert exported.json()["path"] == "notes/summary.md"
 
 
-def test_open_project_restores_only_missing_summary_prompt(tmp_path: Path):
+def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     project = _project(tmp_path)
     app_root = tmp_path / "app-root"
     missing = project / "prompts" / "content_summary.zh-CN.middle.txt"
+    missing_fragment = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
     existing = project / "prompts" / "content_summary.en.middle.txt"
     custom = "用户自定义概括提示词。"
     existing.write_text(custom, encoding="utf-8")
     missing.unlink()
+    missing_fragment.unlink()
 
     client = TestClient(create_app(projects_root=project.parent, app_root=app_root))
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
@@ -136,8 +138,18 @@ def test_open_project_restores_only_missing_summary_prompt(tmp_path: Path):
     assert missing.read_text(encoding="utf-8") == (
         app_root / "prompts" / missing.name
     ).read_text(encoding="utf-8")
+    assert missing_fragment.read_text(encoding="utf-8") == (
+        app_root / "prompts" / missing_fragment.name
+    ).read_text(encoding="utf-8")
     assert existing.read_text(encoding="utf-8") == custom
-    assert any("content_summary.zh-CN.middle.txt" in item for item in opened.json()["warnings"])
+    assert any(
+        "content_summary.zh-CN.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
+    assert any(
+        "fragment_summary.zh-CN.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
 
 
 def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):

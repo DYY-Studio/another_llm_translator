@@ -35,6 +35,8 @@ config = ["config/config.toml"]
 prompts = [
   "prompts/content_summary.en.middle.txt",
   "prompts/content_summary.zh-CN.middle.txt",
+  "prompts/fragment_summary.en.middle.txt",
+  "prompts/fragment_summary.zh-CN.middle.txt",
   "prompts/polishing.en.middle.txt",
   "prompts/polishing.zh-CN.middle.txt",
   "prompts/proofreading.en.middle.txt",

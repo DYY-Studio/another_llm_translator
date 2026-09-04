@@ -336,6 +336,18 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
             " supported by the summaries and do not invent unsupported facts."
         ),
     },
+    "fragment_summary": {
+        "zh-CN": (
+            "你是片段内容概括器。target_language 是输出语言；只依据"
+            "source_segments 概括本次内容。reference_context 仅供理解，不得作为"
+            "概括来源。"
+        ),
+        "en": (
+            "You summarize the current content fragment. target_language is the"
+            " output language; summarize only from source_segments."
+            " reference_context is context only and must not be used as summary content."
+        ),
+    },
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
@@ -457,35 +469,45 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
             "must cover all summaries."
         ),
     },
+    "fragment_summary": {
+        "zh-CN": (
+            '只输出恰好一条 type="summary" 记录和最后的 end，不输出 term。summary '
+            "仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的"
+            "请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有"
+            "source_segments。"
+        ),
+        "en": (
+            'Output exactly one type="summary" record and end last; output no term '
+            "records. A summary contains only type, non-empty text, and refs; refs is "
+            "a non-repeating array of 1-based request-local references into source_segments, "
+            "and every reference must be in range. The summary must cover all "
+            "source_segments."
+        ),
+    },
 }
 
 _TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
     "zh-CN": {
-        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"] + " " + (
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"]
+        + " "
+        + (
             '先输出恰好一条 type="summary" 记录，再输出术语记录，最后输出 end。'
             'summary 仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的'
             '请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有'
             "source_segments。"
         ),
-        "summary-only": (
-            '只输出恰好一条 type="summary" 记录和最后的 end，不输出 term。summary 仅含'
-            'type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的请求内短引用'
-            '数组，不能重复或引用范围外编号。summary 必须概括本次所有 source_segments。'
-        ),
+        "summary-only": _STAGE_SUFFIX["fragment_summary"]["zh-CN"],
     },
     "en": {
-        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"] + " " + (
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"]
+        + " "
+        + (
             'Output exactly one type="summary" record first, then term records, and end last. '
             'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
             'array of 1-based request-local references into source_segments, and every reference '
             'must be in range. The summary must cover all source_segments.'
         ),
-        "summary-only": (
-            'Output exactly one type="summary" record and end last; output no term records. '
-            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
-            'array of 1-based request-local references into source_segments, and every reference '
-            'must be in range. The summary must cover all source_segments.'
-        ),
+        "summary-only": _STAGE_SUFFIX["fragment_summary"]["en"],
     },
 }
 
@@ -541,6 +563,7 @@ def full_prompt(
     document_requirements: Iterable[str] = (),
     phase: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
+    fragment_summary_middle: str | None = None,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -565,11 +588,35 @@ def full_prompt(
             raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
     else:
         mode = TerminologyResponseMode.TERMS_ONLY
-    prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[stage][language]}"
+    if mode is not TerminologyResponseMode.TERMS_ONLY and fragment_summary_middle is None:
+        raise UsageError(
+            "启用术语概括响应模式时必须提供独立的片段概括 Prompt"
+        )
+    effective_stage = stage
+    effective_middle = middle
+    if mode is TerminologyResponseMode.SUMMARY_ONLY:
+        effective_stage = "fragment_summary"
+        assert fragment_summary_middle is not None
+        effective_middle = fragment_summary_middle
+    elif (
+        mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
+        and fragment_summary_middle is not None
+    ):
+        effective_middle = "\n\n".join(
+            value.strip()
+            for value in (middle, fragment_summary_middle)
+            if value.strip()
+        )
+    prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[effective_stage][language]}"
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
     suffix_parts = []
-    if stage not in {"terminology", "terminology_decision", "content_summary"}:
+    if effective_stage not in {
+        "terminology",
+        "terminology_decision",
+        "content_summary",
+        "fragment_summary",
+    }:
         suffix_parts.append(_SEGMENT_TEXT_SUFFIX[language])
     suffix_parts.extend(
         requirement.strip()
@@ -579,12 +626,12 @@ def full_prompt(
     stage_suffix = (
         terminology_decision_protocol(language)
         if stage == "terminology_decision"
-        else _STAGE_SUFFIX[stage][language]
+        else _STAGE_SUFFIX[effective_stage][language]
     )
     if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
         stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
-    return f"{prefix}\n\n{middle.strip()}\n\n{' '.join(suffix_parts)}"
+    return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
 
 def stage_fingerprint(
     config: dict[str, Any],
@@ -1122,6 +1169,46 @@ def materialize_chunk_stream(
             ),
         )
 
+
+def _write_prompt_variants(
+    directory: Path,
+    variants: Mapping[str, str] | None,
+    variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    *,
+    primary_mode: str | None = None,
+) -> dict[str, str]:
+    if not variants:
+        return {}
+    target = directory / "prompt_variants"
+    target.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, str] = {}
+    for name, prompt in variants.items():
+        filename = name.replace("+", "-and-") + ".txt"
+        if "/" in filename or "\\" in filename or not isinstance(prompt, str):
+            raise UsageError(f"无效的 Prompt variant：{name}")
+        (target / filename).write_text(prompt, encoding="utf-8")
+        paths[name] = (Path("prompt_variants") / filename).as_posix()
+    metadata_path = directory / "prompt_variants.json"
+    metadata: dict[str, Any] = {}
+    if metadata_path.is_file():
+        try:
+            existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StorageError(f"Prompt variant 元数据无效：{metadata_path}") from exc
+        if not isinstance(existing, dict):
+            raise StorageError(f"Prompt variant 元数据无效：{metadata_path}")
+        metadata.update(existing)
+    for name, path in paths.items():
+        entry = {
+            "path": path,
+            "requirements": list((variant_requirements or {}).get(name, ())),
+        }
+        if primary_mode is not None:
+            entry["primary_mode"] = primary_mode
+        metadata[name] = entry
+    atomic_write_json(directory / "prompt_variants.json", metadata)
+    return paths
+
 def create_run(
     project: Path,
     *,
@@ -1133,6 +1220,9 @@ def create_run(
     requested_count: int,
     reused_count: int,
     details: dict[str, Any] | None = None,
+    prompt_variants: Mapping[str, str] | None = None,
+    prompt_variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    primary_mode: str | None = None,
 ) -> tuple[str, Path]:
     project_metadata = read_json(project, project / "project.json")
     suffix = uuid.uuid4().hex[:6].upper()
@@ -1148,6 +1238,15 @@ def create_run(
     )
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    prompt_variant_paths = _write_prompt_variants(
+        run_dir,
+        prompt_variants,
+        prompt_variant_requirements,
+        primary_mode=primary_mode,
+    )
+    manifest_details = dict(details or {})
+    if prompt_variant_paths:
+        manifest_details["prompt_variants"] = prompt_variant_paths
     manifest = record_header(
         "run",
         str(project_metadata["project_id"]),
@@ -1165,7 +1264,7 @@ def create_run(
             "_document_adapter_prompt_requirements", {}
         ),
         translation_validators=config.get("_translation_validators", []),
-        **(details or {}),
+        **manifest_details,
         started_at=utc_now(),
         completed_at=None,
     )
@@ -1307,11 +1406,15 @@ def continue_run(
     config: dict[str, Any],
     stage: str,
     fingerprint: str,
-    prompt: str,
+    prompt: str | None,
     scope: Scope,
     selected_count: int,
     requested_count: int,
     reused_count: int,
+    prompt_variants: Mapping[str, str] | None = None,
+    prompt_variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    prompt_languages: Mapping[str, str] | None = None,
+    primary_mode: str | None = None,
 ) -> tuple[str, Path, int]:
     run_dir = project / "runs" / run_id
     manifest = read_json(project, run_dir / "manifest.json")
@@ -1328,7 +1431,14 @@ def continue_run(
         snapshot_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}),
     )
-    (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    if prompt is not None:
+        (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    prompt_variant_paths = _write_prompt_variants(
+        snapshot_dir,
+        prompt_variants,
+        prompt_variant_requirements,
+        primary_mode=primary_mode,
+    )
     continuations.append(
         {
             "started_at": utc_now(),
@@ -1345,6 +1455,21 @@ def continue_run(
             "selected_segment_count": selected_count,
             "requested_segment_count": requested_count,
             "reused_segment_count": reused_count,
+            **(
+                {"prompt_variants": prompt_variant_paths}
+                if prompt_variant_paths
+                else {}
+            ),
+            **(
+                {"prompt_languages": dict(prompt_languages)}
+                if prompt_languages
+                else {}
+            ),
+            **(
+                {"primary_mode": primary_mode}
+                if primary_mode is not None
+                else {}
+            ),
         }
     )
     manifest["continuations"] = continuations

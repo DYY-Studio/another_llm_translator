@@ -531,9 +531,13 @@ def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> N
         selected_count=1,
         requested_count=1,
         reused_count=0,
+        prompt_variants={"summary-only": "prompt"},
+        prompt_languages={"summary-only": "zh-CN"},
     )
     assert resumed_id == run_id
     assert continuation_index == 1
+    continuation = read_json(project, run_dir / "manifest.json")["continuations"][0]
+    assert continuation["prompt_languages"] == {"summary-only": "zh-CN"}
     resumed = next(
         materialize_chunk_stream(
             resumed_id,

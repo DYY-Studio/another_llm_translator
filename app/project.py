@@ -59,6 +59,7 @@ from .user_config import APP_ROOT, effective_path, user_root
 
 PROJECTS_ROOT = user_root() / "projects"
 PROMPT_LANGUAGES = ("zh-CN", "en")
+PROMPT_RESOURCE_STAGES = (*LLM_MODEL_STAGES, "fragment_summary")
 
 
 def prompt_file(stage: str, language: str) -> str:
@@ -67,7 +68,7 @@ def prompt_file(stage: str, language: str) -> str:
 
 PROMPT_NAMES = tuple(
     prompt_file(stage, language)
-    for stage in LLM_MODEL_STAGES
+    for stage in PROMPT_RESOURCE_STAGES
     for language in PROMPT_LANGUAGES
 )
 _TXT_EXTENSIONS = frozenset({".txt", ".text"})
@@ -516,17 +517,18 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
 def ensure_missing_summary_prompts(
     project: Path, *, app_root: Path = APP_ROOT
 ) -> list[str]:
-    """Restore missing content-summary prompts while preserving project edits."""
+    """Restore missing summary prompts while preserving project edits."""
     bundle = _bundle_source(app_root)
     missing: list[tuple[Path, Path]] = []
     for language in PROMPT_LANGUAGES:
-        relative = Path("prompts") / prompt_file("content_summary", language)
-        source = bundle[relative]
-        if not source.is_file():
-            raise ConfigError(f"全局模板缺失：{relative}")
-        destination = project / relative
-        if not destination.is_file():
-            missing.append((relative, source))
+        for stage in ("fragment_summary", "content_summary"):
+            relative = Path("prompts") / prompt_file(stage, language)
+            source = bundle[relative]
+            if not source.is_file():
+                raise ConfigError(f"全局模板缺失：{relative}")
+            destination = project / relative
+            if not destination.is_file():
+                missing.append((relative, source))
     if not missing:
         return []
     timestamp = utc_now().replace(":", "").replace("-", "")
