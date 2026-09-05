@@ -1,14 +1,17 @@
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+
 import httpx
+
 from .errors import (
     ContextLengthError,
     ExternalError,
@@ -16,11 +19,11 @@ from .errors import (
     StorageError,
     UsageError,
 )
-from .term_library import _merge_and_publish_terms, load_terms
 from .execution import (
     ChunkPlan,
     PreviousContextIndex,
     Scope,
+    _write_prompt_variants,
     build_chunk_plans,
     render_messages,
     segment_model_source,
@@ -28,29 +31,30 @@ from .execution import (
     stage_fingerprint,
 )
 from .llm_client import SlidingWindowLimiter
+from .llm_keys import KeyPool
 from .llm_response import (
     TerminologyResponseMode,
     parse_jsonl_document,
     parse_terminology_response,
 )
-from .llm_keys import KeyPool
 from .logging_utils import get_logger
 from .sqlite_storage import (
+    atomic_write_json,
     append_jsonl,
     read_content_summaries,
-    read_summary_participation,
     read_json,
     read_jsonl,
+    read_summary_participation,
     record_exists,
     record_header,
     terminology_scan_state,
     utc_now,
-    write_json,
     write_content_summary,
+    write_json,
     write_summary_run,
 )
-
 from .stage_runtime import (
+    _FORMAT_CORRECTION,
     StageRunState,
     _assemble_warnings,
     _create_or_continue_run,
@@ -58,18 +62,17 @@ from .stage_runtime import (
     _execute_stage_run,
     _project_context,
     _prompt_factory,
-    _prompt_language,
+    _prompt_language_for_stages,
     _request_estimate,
     _require_nonempty_segments,
     _resume_scope,
     _scope_record,
     _split_oversized_preflight,
-    _split_source_once,
     _split_segment_source,
+    _split_source_once,
     prompt_middle_digests,
-    _FORMAT_CORRECTION,
 )
-
+from .term_library import _merge_and_publish_terms, load_terms
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
 
@@ -100,6 +103,7 @@ def _summary_covered_segments(
     *,
     prompt_digests: Callable[[list[dict[str, Any]]], set[str]],
     model: str,
+    target_language: str,
 ) -> set[str]:
     valid_slices: dict[str, dict[str, dict[str, Any]]] = {}
     artifacts = read_content_summaries(project, kind="fragment", status="completed")
@@ -174,12 +178,19 @@ def _summary_covered_segments(
                 for value in stable_values
             ]
         )
+        current_prompt_digests = prompt_digests(
+            [item for item in current if item is not None]
+        )
+        artifact_prompt_digests = {
+            str(artifact.get("prompt_digest")),
+            str(artifact.get("fragment_prompt_digest")),
+        }
         if (
             artifact.get("source_digest") == source_digest
             and artifact.get("input_digest") == input_digest
-            and artifact.get("prompt_digest")
-            in prompt_digests([item for item in current if item is not None])
+            and artifact_prompt_digests & current_prompt_digests
             and artifact.get("model") == model
+            and artifact.get("target_language") == target_language
         ):
             for value in stable_values:
                 valid_slices.setdefault(value["segment_id"], {})[
@@ -285,7 +296,6 @@ async def run_terminology(
         len(segments),
     )
     _require_nonempty_segments(segments)
-    language = _prompt_language(project, "terminology", prompt_language)
     if (
         include_summaries
         and "terminology" in config["chunking"]["cross_boundary_batching"]
@@ -293,62 +303,252 @@ async def run_terminology(
         raise UsageError(
             "include_summaries 要求关闭 chunking.cross_boundary_batching 中的 terminology"
         )
-    prompt_factory = _prompt_factory(project, "terminology", language)
-    mode_prompt_factories = {
-        mode: _prompt_factory(
-            project,
-            "terminology",
-            language,
-            response_mode=mode,
-        )
-        for mode in TerminologyResponseMode
-    }
-    prompt = prompt_factory(())
-    requirements_for_items, base_prompt_partition_key = (
-        _document_prompt_requirement_helpers(config, language)
-    )
+    mode_prompt_factories: dict[
+        TerminologyResponseMode, Callable[[tuple[str, ...]], str]
+    ] = {}
+    fragment_prompt_factories: dict[
+        str, Callable[[tuple[str, ...]], str]
+    ] = {}
+    mode_prompt_languages: dict[TerminologyResponseMode, str] = {}
+    mode_requirement_helpers: dict[
+        TerminologyResponseMode,
+        tuple[
+            Callable[[list[dict[str, Any]]], tuple[str, ...]],
+            Callable[[dict[str, Any]], object],
+        ],
+    ] = {}
+    prompt_configs: dict[str, dict[str, Any]] = {"terminology": config}
 
-    def prompt_for_items(items: list[dict[str, Any]]) -> str:
-        raw_mode = items[0].get(_SUMMARY_MODE_KEY, TerminologyResponseMode.TERMS_ONLY)
+    def prompt_config_for_stage(stage: str) -> dict[str, Any]:
+        stage_config = prompt_configs.get(stage)
+        if stage_config is None:
+            stage_config, _, _, _ = _project_context(project, stage=stage)
+            prompt_configs[stage] = stage_config
+        return stage_config
+
+    def required_stages_for_mode(mode: TerminologyResponseMode) -> tuple[str, ...]:
+        return (
+            ("fragment_summary",)
+            if mode is TerminologyResponseMode.SUMMARY_ONLY
+            else ("terminology", "fragment_summary")
+            if mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
+            else ("terminology",)
+        )
+
+    def prompt_language_for_mode(mode: TerminologyResponseMode) -> str:
+        language_for_mode = mode_prompt_languages.get(mode)
+        if language_for_mode is None:
+            language_for_mode = _prompt_language_for_stages(
+                project,
+                prompt_language,
+                required_stages_for_mode(mode),
+            )
+            mode_prompt_languages[mode] = language_for_mode
+        return language_for_mode
+
+    def prompt_factory_for(
+        mode: TerminologyResponseMode,
+    ) -> Callable[[Iterable[str]], str]:
+        factory = mode_prompt_factories.get(mode)
+        if factory is None:
+            factory = _prompt_factory(
+                project,
+                "terminology",
+                prompt_language_for_mode(mode),
+                response_mode=(
+                    None if mode is TerminologyResponseMode.TERMS_ONLY else mode
+                ),
+            )
+            mode_prompt_factories[mode] = factory
+        return factory
+
+    def fragment_prompt_factory_for(
+        language: str,
+    ) -> Callable[[Iterable[str]], str]:
+        factory = fragment_prompt_factories.get(language)
+        if factory is None:
+            factory = _prompt_factory(
+                project,
+                "terminology",
+                language,
+                response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+            )
+            fragment_prompt_factories[language] = factory
+        return factory
+
+    def requirement_helper_for(
+        mode: TerminologyResponseMode,
+    ) -> tuple[
+        Callable[[list[dict[str, Any]]], tuple[str, ...]],
+        Callable[[dict[str, Any]], object],
+    ]:
+        helper = mode_requirement_helpers.get(mode)
+        if helper is None:
+            language = prompt_language_for_mode(mode)
+            if mode is TerminologyResponseMode.SUMMARY_ONLY:
+                helper = _document_prompt_requirement_helpers(
+                    prompt_config_for_stage("fragment_summary"), language
+                )
+            elif mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
+                terminology_helper = _document_prompt_requirement_helpers(
+                    prompt_config_for_stage("terminology"), language
+                )
+                fragment_helper = _document_prompt_requirement_helpers(
+                    prompt_config_for_stage("fragment_summary"), language
+                )
+
+                def requirements_for_joint(
+                    items: list[dict[str, Any]],
+                ) -> tuple[str, ...]:
+                    values: list[str] = []
+                    for requirement_helper in (
+                        terminology_helper,
+                        fragment_helper,
+                    ):
+                        for requirement in requirement_helper[0](items):
+                            if requirement not in values:
+                                values.append(requirement)
+                    return tuple(values)
+
+                def partition_key_for_joint(item: dict[str, Any]) -> object:
+                    return (
+                        terminology_helper[1](item),
+                        fragment_helper[1](item),
+                    )
+
+                helper = (requirements_for_joint, partition_key_for_joint)
+            else:
+                helper = _document_prompt_requirement_helpers(
+                    prompt_config_for_stage("terminology"), language
+                )
+            mode_requirement_helpers[mode] = helper
+        return helper
+
+    def prompt_requirements_for_mode(
+        mode: TerminologyResponseMode,
+    ) -> dict[str, dict[str, str]]:
+        combined: dict[str, dict[str, str]] = {}
+        for stage in required_stages_for_mode(mode):
+            by_file = prompt_config_for_stage(stage).get(
+                "_document_adapter_prompt_requirements", {}
+            )
+            if not isinstance(by_file, dict):
+                raise StorageError("Document Adapter Prompt 要求索引无效")
+            for file_id, language_requirements in by_file.items():
+                if not isinstance(language_requirements, dict):
+                    raise StorageError("Document Adapter Prompt 要求记录无效")
+                target = combined.setdefault(str(file_id), {})
+                for language, requirement in language_requirements.items():
+                    if not isinstance(requirement, str) or not requirement:
+                        continue
+                    previous = target.get(str(language))
+                    if previous is None:
+                        target[str(language)] = requirement
+                    elif requirement != previous:
+                        target[str(language)] = f"{previous}\n{requirement}"
+        return combined
+
+    def mode_for_item(
+        item: dict[str, Any],
+        *,
+        default: TerminologyResponseMode,
+    ) -> TerminologyResponseMode:
+        raw_mode = item.get(_SUMMARY_MODE_KEY, default)
         try:
-            mode = TerminologyResponseMode(raw_mode)
+            return TerminologyResponseMode(raw_mode)
         except (TypeError, ValueError) as exc:
             raise StorageError(f"术语请求缺少有效响应模式：{raw_mode}") from exc
-        return mode_prompt_factories[mode](requirements_for_items(items))
+
+    def requirements_for_mode(
+        items: list[dict[str, Any]], mode: TerminologyResponseMode
+    ) -> tuple[str, ...]:
+        return requirement_helper_for(mode)[0](items)
+
+    def prompt_for_items(items: list[dict[str, Any]]) -> str:
+        return prompt_details_for_items(items)[2]
+
+    def prompt_details_for_items(
+        items: list[dict[str, Any]],
+    ) -> tuple[TerminologyResponseMode, tuple[str, ...], str]:
+        mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.TERMS_ONLY
+        )
+        requirements = requirements_for_mode(items, mode)
+        return mode, requirements, prompt_factory_for(mode)(requirements)
+
+    def prompt_language_for_items(items: list[dict[str, Any]]) -> str:
+        mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.TERMS_ONLY
+        )
+        return prompt_language_for_mode(mode)
 
     def summary_prompt_digest_for(items: list[dict[str, Any]]) -> str:
-        raw_mode = items[0].get(_SUMMARY_MODE_KEY, TerminologyResponseMode.SUMMARY_ONLY)
-        try:
-            mode = TerminologyResponseMode(raw_mode)
-        except (TypeError, ValueError) as exc:
-            raise StorageError(f"术语概括请求缺少有效响应模式：{raw_mode}") from exc
+        mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.SUMMARY_ONLY
+        )
         if mode is TerminologyResponseMode.TERMS_ONLY:
             raise StorageError("术语概括请求不能使用 terms-only 模式")
-        return _digest(mode_prompt_factories[mode](requirements_for_items(items)))
+        return _digest(prompt_factory_for(mode)(requirements_for_mode(items, mode)))
+
+    def fragment_prompt_digest_for(items: list[dict[str, Any]]) -> str:
+        mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.SUMMARY_ONLY
+        )
+        if mode is TerminologyResponseMode.TERMS_ONLY:
+            raise StorageError("术语概括请求不能使用 terms-only 模式")
+        if mode is TerminologyResponseMode.SUMMARY_ONLY:
+            return summary_prompt_digest_for(items)
+        return _digest(
+            fragment_prompt_factory_for(prompt_language_for_mode(mode))(
+                _document_prompt_requirement_helpers(
+                    prompt_config_for_stage("fragment_summary"),
+                    prompt_language_for_mode(mode),
+                )[0](items)
+            )
+        )
 
     def summary_prompt_digests(items: list[dict[str, Any]]) -> set[str]:
-        requirements = requirements_for_items(items)
+        modes = {
+            mode_for_item(item, default=TerminologyResponseMode.SUMMARY_ONLY)
+            for item in items
+        }
+        if TerminologyResponseMode.TERMS_ONLY in modes:
+            raise StorageError("术语概括请求不能使用 terms-only 模式")
+        mode = (
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
+            if TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY in modes
+            else TerminologyResponseMode.SUMMARY_ONLY
+        )
+        requirements = requirements_for_mode(items, mode)
+        prompt_digest = _digest(prompt_factory_for(mode)(requirements))
+        if mode is TerminologyResponseMode.SUMMARY_ONLY:
+            return {prompt_digest}
         return {
-            _digest(mode_prompt_factories[mode](requirements))
-            for mode in (
-                TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-                TerminologyResponseMode.SUMMARY_ONLY,
-            )
+            prompt_digest,
+            _digest(
+                fragment_prompt_factory_for(prompt_language_for_mode(mode))(
+                    _document_prompt_requirement_helpers(
+                        prompt_config_for_stage("fragment_summary"),
+                        prompt_language_for_mode(mode),
+                    )[0](items)
+                )
+            ),
         }
 
     def prompt_partition_key(item: dict[str, Any]) -> object:
         if not include_summaries:
-            return base_prompt_partition_key(item)
+            mode = TerminologyResponseMode.TERMS_ONLY
+        else:
+            mode = mode_for_item(
+                item, default=TerminologyResponseMode.TERMS_ONLY
+            )
         return (
-            base_prompt_partition_key(item),
+            requirement_helper_for(mode)[1](item),
             item.get(_SUMMARY_MODE_KEY, TerminologyResponseMode.TERMS_ONLY.value),
             str(item["file_id"]),
             str(item["part_id"]),
-        )
+        ) if include_summaries else requirement_helper_for(mode)[1](item)
 
-    fingerprint = stage_fingerprint(
-        config, "terminology", prompt_middle_digests(project, "terminology")
-    )
     active_path = project / "terminology" / "active_task.json"
     active = (
         read_json(project, active_path) if record_exists(project, active_path) else None
@@ -357,6 +557,12 @@ async def run_terminology(
     partial_published = bool(
         active is not None and active.get("status") == "partial_published"
     )
+
+    def segment_needs_terms(segment: dict[str, Any]) -> bool:
+        return scope.force or (
+            not (include_summaries and partial_published)
+            and str(segment["segment_id"]) not in completed_ids
+        )
 
     resume_manifest = (
         read_json(project, project / "runs" / resume_run_id / "manifest.json")
@@ -377,16 +583,6 @@ async def run_terminology(
             raise StorageError("续用 Run 的 include_summaries 与当前请求不一致")
     if create_task:
         task_id = f"TERM-TASK-{uuid.uuid4().hex[:10].upper()}"
-        active = record_header(
-            "terminology_task",
-            str(metadata["project_id"]),
-            record_id=task_id,
-            active_task_id=task_id,
-            status="active",
-            initial_stage_fingerprint=fingerprint,
-        )
-        if not scope.dry_run:
-            write_json(project, active_path, active)
     elif active and active.get("status") == "active":
         task_id = str(active["active_task_id"])
     else:
@@ -406,16 +602,11 @@ async def run_terminology(
         task_id,
         force_all=scope.force,
     )
-    if include_summaries and partial_published and not scope.force:
-        term_work: list[dict[str, Any]] = []
-    elif scope.force and not create_task:
-        term_work = selected
-    else:
-        term_work = [
-            segment
-            for segment in selected
-            if str(segment["segment_id"]) not in completed_ids
-        ]
+    term_work = (
+        []
+        if include_summaries and partial_published and not scope.force
+        else [segment for segment in selected if segment_needs_terms(segment)]
+    )
     summary_selection = (
         _summary_participation(project, selected) if include_summaries else set()
     )
@@ -434,25 +625,38 @@ async def run_terminology(
                     (str(value["file_id"]), str(value["part_id"])) for value in selected
                 }
             }
+
+    summary_candidates = [
+        {
+            **segment,
+            _SUMMARY_MODE_KEY: (
+                TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY.value
+                if segment_needs_terms(segment)
+                else TerminologyResponseMode.SUMMARY_ONLY.value
+            ),
+        }
+        for segment in selected
+        if include_summaries
+        and (str(segment["file_id"]), str(segment["part_id"])) in summary_selection
+    ]
     covered_summary_ids = (
         _summary_covered_segments(
             project,
-            selected,
+            summary_candidates,
             prompt_digests=summary_prompt_digests,
             model=str(config["llm"]["model"]),
+            target_language=str(config["project"]["target_language"]),
         )
-        if include_summaries
+        if summary_candidates
         else set()
     )
     work: list[dict[str, Any]] = []
     required_modes: dict[str, set[str]] = {}
+    required_prompt_modes: set[TerminologyResponseMode] = set()
     for segment in selected:
         segment_id = str(segment["segment_id"])
         boundary = (str(segment["file_id"]), str(segment["part_id"]))
-        needs_terms = scope.force or (
-            not (include_summaries and partial_published)
-            and segment_id not in completed_ids
-        )
+        needs_terms = segment_needs_terms(segment)
         needs_summary = (
             include_summaries
             and boundary in summary_selection
@@ -468,6 +672,7 @@ async def run_terminology(
             mode = TerminologyResponseMode.SUMMARY_ONLY
         annotated = {**segment, _SUMMARY_MODE_KEY: mode.value}
         work.append(annotated)
+        required_prompt_modes.add(mode)
         required_modes.setdefault(segment_id, set()).update(
             {"term"}
             if mode is TerminologyResponseMode.TERMS_ONLY
@@ -482,6 +687,70 @@ async def run_terminology(
         len(work),
         len(completed_ids),
     )
+    prompt_mode = next(
+        (
+            mode
+            for mode in (
+                TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+                TerminologyResponseMode.TERMS_ONLY,
+                TerminologyResponseMode.SUMMARY_ONLY,
+            )
+            if mode in required_prompt_modes
+        ),
+        None,
+    )
+    if prompt_mode is None:
+        prompt = ""
+        fingerprint_prompt_digests = (
+            prompt_middle_digests(project, "terminology")
+            if not include_summaries
+            else {}
+        )
+    else:
+        primary_requirements: tuple[str, ...] = ()
+        if include_summaries:
+            primary_items = [
+                segment
+                for segment in work
+                if mode_for_item(
+                    segment, default=TerminologyResponseMode.TERMS_ONLY
+                )
+                is prompt_mode
+            ]
+            if primary_items:
+                primary_requirements = requirements_for_mode(
+                    [primary_items[0]], prompt_mode
+                )
+        prompt = prompt_factory_for(prompt_mode)(primary_requirements)
+        fingerprint_prompt_digests = (
+            prompt_middle_digests(project, "terminology")
+            if TerminologyResponseMode.TERMS_ONLY in required_prompt_modes
+            or TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
+            in required_prompt_modes
+            else {}
+        )
+    run_config = dict(config)
+    run_config["_document_adapter_prompt_requirements"] = (
+        prompt_requirements_for_mode(prompt_mode) if prompt_mode is not None else {}
+    )
+    fingerprint = stage_fingerprint(
+        run_config if prompt_mode is TerminologyResponseMode.SUMMARY_ONLY else config,
+        "terminology",
+        fingerprint_prompt_digests,
+    )
+
+    if create_task:
+        active = record_header(
+            "terminology_task",
+            str(metadata["project_id"]),
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint=fingerprint,
+        )
+        if not scope.dry_run:
+            write_json(project, active_path, active)
+
     reopen_completed_task = (
         resume_run_id is None
         and not scope.force
@@ -500,7 +769,18 @@ async def run_terminology(
         ),
         config=config,
         fingerprint=fingerprint,
-        existing_fingerprints=existing_fingerprints,
+        existing_fingerprints=(
+            existing_fingerprints
+            if any(
+                mode
+                in {
+                    TerminologyResponseMode.TERMS_ONLY,
+                    TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+                }
+                for mode in required_prompt_modes
+            )
+            else set()
+        ),
         reusable_count=len(selected_ids & completed_ids),
         force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
@@ -533,9 +813,13 @@ async def run_terminology(
         project,
         "terminology",
         scope=scope,
-        config=config,
+        config=run_config,
         fingerprint=fingerprint,
-        prompt=prompt,
+        prompt=(
+            prompt
+            if prompt_mode is not None and not include_summaries
+            else None
+        ),
         resume_run_id=resume_run_id,
         selected_count=len(selected),
         requested_count=len(work),
@@ -543,7 +827,15 @@ async def run_terminology(
         details={
             "active_task_id": task_id,
             "scope": _scope_record(scope, force_all=scope.force),
-            "prompt_language": language,
+            "prompt_language": (
+                prompt_language_for_mode(prompt_mode)
+                if prompt_mode is not None
+                else None
+            ),
+            "primary_mode": (
+                prompt_mode.value if prompt_mode is not None else None
+            ),
+            "prompt_languages": {},
             "include_summaries": include_summaries,
             "summary_participation": [
                 dict(item) for item in read_summary_participation(project)
@@ -554,6 +846,9 @@ async def run_terminology(
             },
         },
         warnings=warnings,
+        prompt_variants=None,
+        prompt_variant_requirements=None,
+        primary_mode=prompt_mode.value if prompt_mode is not None else None,
     )
 
     if reopen_completed_task:
@@ -579,6 +874,25 @@ async def run_terminology(
     part_original = preflight.part_original
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
+    if include_summaries:
+        actual_modes = {
+            mode_for_item(
+                item, default=TerminologyResponseMode.TERMS_ONLY
+            )
+            for item in request_segments
+        }
+        prompt_mode = next(
+            (
+                mode
+                for mode in (
+                    TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+                    TerminologyResponseMode.TERMS_ONLY,
+                    TerminologyResponseMode.SUMMARY_ONLY,
+                )
+                if mode in actual_modes
+            ),
+            None,
+        )
     logger.info(
         "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d fast=%d exact=%d",
         time.perf_counter() - preparation_started_at,
@@ -622,6 +936,7 @@ async def run_terminology(
         }
 
     summary_run_requests: dict[str, dict[str, Any]] = {}
+    summary_prompt_modes_used: set[TerminologyResponseMode] = set()
 
     if scope.dry_run:
         plans = build_chunk_plans(
@@ -656,7 +971,99 @@ async def run_terminology(
         }
 
     assert run_id is not None and run_dir is not None
+    if include_summaries:
+        snapshot_dir = (
+            run_dir / "continuations" / f"{continuation_index:04d}"
+            if continuation_index
+            else run_dir
+        )
+        manifest = read_json(project, run_dir / "manifest.json")
+        if continuation_index:
+            continuations = manifest.get("continuations")
+            if (
+                not isinstance(continuations, list)
+                or len(continuations) < continuation_index
+                or not isinstance(continuations[continuation_index - 1], dict)
+            ):
+                raise StorageError(f"Run 缺少续作快照：{run_id}")
+            primary_snapshot = continuations[continuation_index - 1]
+        else:
+            primary_snapshot = manifest
+        primary_requirements = (
+            prompt_requirements_for_mode(prompt_mode)
+            if prompt_mode is not None
+            else {}
+        )
+        primary_snapshot.pop("primary_mode", None)
+        primary_snapshot.pop("prompt_language", None)
+        if prompt_mode is not None:
+            primary_snapshot["primary_mode"] = prompt_mode.value
+            primary_snapshot["prompt_language"] = prompt_language_for_mode(
+                prompt_mode
+            )
+        if not continuation_index:
+            manifest["document_adapter_prompt_requirements"] = primary_requirements
+        atomic_write_json(
+            snapshot_dir / "document_adapter_prompt_requirements.json",
+            primary_requirements,
+        )
+        write_json(project, run_dir / "manifest.json", manifest)
     write_lock = asyncio.Lock()
+
+    def prompt_variant_name(
+        mode: TerminologyResponseMode, requirements: tuple[str, ...]
+    ) -> str:
+        suffix = f"__requirements-{_digest(requirements)[7:23]}" if requirements else ""
+        return f"{mode.value}{suffix}"
+
+    async def record_prompt_variant(
+        mode: TerminologyResponseMode,
+        prompt_text: str,
+        requirements: tuple[str, ...],
+    ) -> None:
+        if not include_summaries:
+            return
+        snapshot_dir = (
+            run_dir / "continuations" / f"{continuation_index:04d}"
+            if continuation_index
+            else run_dir
+        )
+        name = prompt_variant_name(mode, requirements)
+        async with write_lock:
+            paths = _write_prompt_variants(
+                snapshot_dir,
+                {name: prompt_text},
+                {name: requirements},
+                primary_mode=(
+                    prompt_mode.value if prompt_mode is not None else None
+                ),
+            )
+            manifest = read_json(project, run_dir / "manifest.json")
+            if continuation_index:
+                continuations = manifest.get("continuations")
+                if (
+                    not isinstance(continuations, list)
+                    or len(continuations) < continuation_index
+                    or not isinstance(
+                        continuations[continuation_index - 1], dict
+                    )
+                ):
+                    raise StorageError(f"Run 缺少续作快照：{run_id}")
+                target = continuations[continuation_index - 1]
+            else:
+                target = manifest
+            variant_paths = target.setdefault("prompt_variants", {})
+            languages = target.setdefault("prompt_languages", {})
+            if not isinstance(variant_paths, dict) or not isinstance(languages, dict):
+                raise StorageError(f"Run Prompt 快照元数据无效：{run_id}")
+            variant_paths.update(paths)
+            languages[mode.value] = prompt_language_for_mode(mode)
+            write_json(project, run_dir / "manifest.json", manifest)
+            if prompt_mode is mode:
+                (snapshot_dir / "prompt.txt").write_text(
+                    prompt_text, encoding="utf-8"
+                )
+
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
     failure_counts: Counter[str] = Counter()
@@ -697,6 +1104,8 @@ async def run_terminology(
                 input_digest=_digest([]),
                 prompt_digest=_digest([]),
                 model=str(config["llm"]["model"]),
+                target_language=str(config["project"]["target_language"]),
+                prompt_languages={},
                 include_summaries=True,
                 selection=[
                     {"file_id": file_id, "part_id": part_id}
@@ -770,6 +1179,11 @@ async def run_terminology(
                 if len(prompt_digests) == 1
                 else _digest(prompt_digests)
             ),
+            "prompt_languages": {
+                mode.value: mode_prompt_languages[mode]
+                for mode in sorted(summary_prompt_modes_used, key=lambda value: value.value)
+            },
+            "target_language": str(config["project"]["target_language"]),
             "updated_at": utc_now(),
         }
         write_summary_run(project, summary_run_record)
@@ -782,6 +1196,9 @@ async def run_terminology(
                 TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY.value,
                 TerminologyResponseMode.SUMMARY_ONLY.value,
             }:
+                summary_prompt_modes_used.add(
+                    TerminologyResponseMode(str(item[_SUMMARY_MODE_KEY]))
+                )
                 summary_run_requests[str(item["segment_id"])] = dict(item)
         persist_summary_run()
 
@@ -885,6 +1302,7 @@ async def run_terminology(
             ]
         )
         prompt_digest = summary_prompt_digest_for(items)
+        fragment_prompt_digest = fragment_prompt_digest_for(items)
         source_range = {
             "file_id": file_id,
             "part_id": part_id,
@@ -901,6 +1319,7 @@ async def run_terminology(
                     input_digest,
                     prompt_digest,
                     config["llm"]["model"],
+                    config["project"]["target_language"],
                 ]
             )[7:31].upper()
         )
@@ -917,7 +1336,9 @@ async def run_terminology(
             source_digest=source_digest,
             input_digest=input_digest,
             prompt_digest=prompt_digest,
+            fragment_prompt_digest=fragment_prompt_digest,
             model=str(config["llm"]["model"]),
+            target_language=str(config["project"]["target_language"]),
             run_id=run_id,
             refs=list(refs or []),
             request_id=run_request_id,
@@ -959,10 +1380,16 @@ async def run_terminology(
                 observe_summary_request(unresolved)
             payload = payload_builder(unresolved)
             if format_attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[language]
-            messages = render_messages(prompt_for_items(unresolved), payload)
+                payload["format_correction"] = _FORMAT_CORRECTION[
+                    prompt_language_for_items(unresolved)
+                ]
+            actual_mode, requirements, prompt_text = prompt_details_for_items(
+                unresolved
+            )
+            messages = render_messages(prompt_text, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
+            await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
                 response, _ = await state.llm.chat(
                     messages=messages,
@@ -1143,10 +1570,16 @@ async def run_terminology(
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
             if format_attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[language]
-            messages = render_messages(prompt_for_items(unresolved), payload)
+                payload["format_correction"] = _FORMAT_CORRECTION[
+                    prompt_language_for_items(unresolved)
+                ]
+            actual_mode, requirements, prompt_text = prompt_details_for_items(
+                unresolved
+            )
+            messages = render_messages(prompt_text, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             estimated = _request_estimate(messages, config, request_id)
+            await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
                 response, _ = await state.llm.chat(
                     messages=messages,

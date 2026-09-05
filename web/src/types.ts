@@ -189,6 +189,7 @@ export interface TaskState {
   failed_segments: number;
   pending_segments: number;
   total_segments: number;
+  summary_selection_progress?: { completed: number; failed: number; total: number } | null;
   failure_counts: Record<string, number>;
   usage: TaskUsage;
 }

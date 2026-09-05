@@ -34,7 +34,12 @@ from .project import (
     resolve_project,
     resolve_project_parent,
 )
-from .sqlite_storage import compact_project_database, read_json, read_adapter_state
+from .sqlite_storage import (
+    compact_project_database,
+    ensure_supported,
+    read_adapter_state,
+    read_json,
+)
 from .user_config import user_root
 from .web_store import WebStore
 
@@ -338,6 +343,12 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         root = resolve_project(str(candidate))
         with project_write_lock(root):
             warnings = ensure_missing_summary_prompts(root, app_root=app_root)
+            backup = ensure_supported(root)
+            if backup is not None:
+                warnings = [
+                    *warnings,
+                    f"项目 SQLite 已升级至当前版本；升级前备份位于 {backup}",
+                ]
             metadata = read_json(root, root / "project.json")
         remember_project(root)
         return {

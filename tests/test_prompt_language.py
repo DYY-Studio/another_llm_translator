@@ -8,11 +8,18 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.execution import full_prompt, stage_fingerprint
+from app.errors import UsageError
+from app.execution import Scope, full_prompt, stage_fingerprint
 from app.llm_response import TerminologyResponseMode
 from app.project import init_project
 from app.sqlite_storage import read_json
-from app.stage_runtime import _prompt, _prompt_language, prompt_middle_digests
+from app.stage_runtime import (
+    _prompt,
+    _prompt_factory,
+    _prompt_language,
+    prompt_middle_digests,
+)
+from app.stage_terminology import run_terminology
 from app.stage_translation import run_translation
 from app.web import create_app
 from tests.helpers import llm_jsonl, use_llm_preset
@@ -94,7 +101,13 @@ def test_terminology_prompt_declares_summary_mode_protocol(
     summary_marker: str,
     term_marker: str,
 ) -> None:
-    prompt = full_prompt("terminology", "Project policy.", "en", response_mode=mode)
+    prompt = full_prompt(
+        "terminology",
+        "Project policy.",
+        "en",
+        response_mode=mode,
+        fragment_summary_middle="Summary policy.",
+    )
 
     assert summary_marker in prompt
     assert "refs" in prompt
@@ -103,6 +116,71 @@ def test_terminology_prompt_declares_summary_mode_protocol(
         assert "source and aliases must be source forms" in prompt
         assert "preferred_translation" in prompt
         assert 'Output one type="term" record per term' in prompt
+
+
+def test_summary_response_modes_require_independent_prompt_middle() -> None:
+    with pytest.raises(UsageError, match="独立的片段概括 Prompt"):
+        full_prompt(
+            "terminology",
+            "Project policy.",
+            "en",
+            response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+        )
+
+
+def test_summary_only_factory_does_not_read_terminology_prompt(tmp_path: Path) -> None:
+    project = create_project_sync(tmp_path)
+    for language in ("zh-CN", "en"):
+        (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
+
+    prompt = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+    )([])
+
+    assert "Summarize" in prompt
+    assert 'type="term"' not in prompt
+
+
+def test_joint_factory_falls_back_to_one_prompt_language_pair(tmp_path: Path) -> None:
+    project = create_project_sync(tmp_path)
+    (project / "prompts" / "terminology.zh-CN.middle.txt").write_text(
+        "__ZH_TERMINOLOGY__", encoding="utf-8"
+    )
+    (project / "prompts" / "terminology.en.middle.txt").write_text(
+        "__EN_TERMINOLOGY__", encoding="utf-8"
+    )
+    (project / "prompts" / "fragment_summary.zh-CN.middle.txt").write_text(
+        "__ZH_FRAGMENT__", encoding="utf-8"
+    )
+    (project / "prompts" / "fragment_summary.en.middle.txt").write_text(
+        "__EN_FRAGMENT__", encoding="utf-8"
+    )
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+
+    prompt = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+    )([])
+
+    assert "__ZH_TERMINOLOGY__" in prompt
+    assert "__ZH_FRAGMENT__" in prompt
+    assert "__EN_TERMINOLOGY__" not in prompt
+    assert "__EN_FRAGMENT__" not in prompt
+
+    summary_only = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+    )([])
+    assert "__ZH_FRAGMENT__" in summary_only
+    assert "__EN_FRAGMENT__" not in summary_only
+    assert "__ZH_TERMINOLOGY__" not in summary_only
 
 
 def test_terms_only_prompt_keeps_existing_contract() -> None:
@@ -129,6 +207,128 @@ def test_terms_only_prompt_keeps_existing_contract() -> None:
         assert "status must be accepted or suggested" in review
         assert "accepted record contains only type, id, and status" in review
         assert "non-empty complete suggested_text" in review
+
+
+def test_init_project_copies_fragment_summary_prompt(tmp_path: Path) -> None:
+    project = create_project_sync(tmp_path)
+
+    assert (project / "prompts" / "fragment_summary.zh-CN.middle.txt").is_file()
+    assert (project / "prompts" / "fragment_summary.en.middle.txt").is_file()
+
+
+def test_summary_modes_use_independent_fragment_prompt_middle(tmp_path: Path) -> None:
+    project = create_project_sync(tmp_path)
+    fragment_prompt = project / "prompts" / "fragment_summary.en.middle.txt"
+    fragment_prompt.write_text("__FRAGMENT_SUMMARY_POLICY__", encoding="utf-8")
+    terminology_prompt = project / "prompts" / "terminology.en.middle.txt"
+    terminology_prompt.write_text("__TERMINOLOGY_POLICY__", encoding="utf-8")
+
+    terms_only = _prompt_factory(project, "terminology", "en")([])
+    joint = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+    )([])
+    summary_only = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+    )([])
+
+    assert "__TERMINOLOGY_POLICY__" in terms_only
+    assert "__FRAGMENT_SUMMARY_POLICY__" not in terms_only
+    assert joint.index("__TERMINOLOGY_POLICY__") < joint.index(
+        "__FRAGMENT_SUMMARY_POLICY__"
+    )
+    assert "extract terminology candidates" in joint
+    assert "extract terminology candidates" not in summary_only
+    assert "__FRAGMENT_SUMMARY_POLICY__" in summary_only
+    assert 'type="term"' not in summary_only
+
+
+@pytest.mark.asyncio
+async def test_terms_only_run_does_not_require_fragment_prompt(tmp_path: Path) -> None:
+    project = await create_project(tmp_path)
+    for language in ("zh-CN", "en"):
+        (project / "prompts" / f"fragment_summary.{language}.middle.txt").unlink()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [{"type": "term", "source": "one", "category": "word"}]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_terminology(project, Scope(), http_client=client)
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+    assert result["failed"] == 0
+
+
+def test_explicit_terms_only_factory_does_not_read_fragment_prompt(
+    tmp_path: Path,
+) -> None:
+    project = create_project_sync(tmp_path)
+    for language in ("zh-CN", "en"):
+        (project / "prompts" / f"fragment_summary.{language}.middle.txt").unlink()
+
+    prompt = _prompt_factory(
+        project,
+        "terminology",
+        "en",
+        response_mode=TerminologyResponseMode.TERMS_ONLY,
+    )([])
+
+    assert "extract terminology candidates" in prompt
+    assert 'type="summary"' not in prompt
+
+
+def test_fragment_prompt_changes_do_not_invalidate_terminology_fingerprint(
+    tmp_path: Path,
+) -> None:
+    from app.config import load_project_config
+
+    project = create_project_sync(tmp_path)
+    config = load_project_config(project, stage="terminology")
+    baseline = stage_fingerprint(
+        config,
+        "terminology",
+        prompt_middle_digests(project, "terminology"),
+    )
+
+    fragment = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
+    fragment.write_text(
+        fragment.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8"
+    )
+    assert stage_fingerprint(
+        config,
+        "terminology",
+        prompt_middle_digests(project, "terminology"),
+    ) == baseline
+
+    terminology = project / "prompts" / "terminology.zh-CN.middle.txt"
+    terminology.write_text(
+        terminology.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8"
+    )
+    assert stage_fingerprint(
+        config,
+        "terminology",
+        prompt_middle_digests(project, "terminology"),
+    ) != baseline
 
 
 def test_terminology_decision_has_distinct_phase_prompts_with_shared_middle() -> None:
@@ -471,6 +671,35 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert "The user message is JSON" in en["assembled"]
     assert set(en["languages"]) == {"zh-CN", "en"}
 
+    fragment = client.get("/api/v1/global/prompts/fragment_summary")
+    assert fragment.status_code == 200
+    assert fragment.json()["language"] == "zh-CN"
+    assert fragment.json()["assembled_mode_languages"] == {"summary-only": "zh-CN"}
+    assert "概括" in fragment.json()["assembled"]
+    assert "术语候选提取器" not in fragment.json()["assembled"]
+
+    terminology = client.get("/api/v1/global/prompts/terminology").json()
+    assert set(terminology["assembled_modes"]) == {
+        "terms-only",
+        "terms+fragment-summary",
+        "summary-only",
+    }
+    assert terminology["assembled_mode_languages"] == {
+        "terms-only": "zh-CN",
+        "terms+fragment-summary": "zh-CN",
+        "summary-only": "zh-CN",
+    }
+    assert terminology["assembled_modes"]["terms+fragment-summary"].index(
+        (tmp_path / "app-root" / "prompts" / "terminology.zh-CN.middle.txt")
+        .read_text(encoding="utf-8")
+        .strip()
+    ) < terminology["assembled_modes"]["terms+fragment-summary"].index(
+        (tmp_path / "app-root" / "prompts" / "fragment_summary.zh-CN.middle.txt")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    assert "术语候选提取器" not in terminology["assembled_modes"]["summary-only"]
+
     decision = client.get("/api/v1/global/prompts/terminology_decision").json()
     assert set(decision["assembled_phases"]) == {"adjudication", "consistency"}
     assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
@@ -501,6 +730,204 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert (tmp_path / "user-root" / "prompts" / "translation.en.middle.txt").read_text(
         encoding="utf-8"
     ) == "EN MIDDLE"
+
+
+def test_project_terms_only_prompt_preview_survives_missing_fragment_prompt(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    (project / "prompts" / "fragment_summary.zh-CN.middle.txt").unlink()
+    app_root = tmp_path / "empty-global"
+    (app_root / "prompts").mkdir(parents=True)
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+
+    response = client.get("/api/v1/projects/sample/prompts/terminology")
+
+    assert response.status_code == 200
+    value = response.json()
+    assert "terms-only" in value["assembled_modes"]
+    assert value["assembled_mode_languages"] == {"terms-only": "zh-CN"}
+    assert "terms+fragment-summary" not in value["assembled_modes"]
+    assert "summary-only" not in value["assembled_modes"]
+
+
+def test_project_prompt_languages_exclude_missing_project_resources(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+
+    response = client.get("/api/v1/projects/sample/prompts/fragment_summary")
+
+    assert response.status_code == 200
+    assert response.json()["languages"] == ["zh-CN"]
+
+
+def test_project_prompt_preview_matches_runtime_project_language_fallback(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    (project / "prompts" / "terminology.en.middle.txt").unlink()
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+    (app_root / "prompts" / "terminology.en.middle.txt").write_text(
+        "__GLOBAL_TERMINOLOGY__", encoding="utf-8"
+    )
+    (app_root / "prompts" / "fragment_summary.en.middle.txt").write_text(
+        "__GLOBAL_FRAGMENT__", encoding="utf-8"
+    )
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+
+    terminology = client.get(
+        "/api/v1/projects/sample/prompts/terminology",
+        params={"language": "en"},
+    )
+    fragment = client.get(
+        "/api/v1/projects/sample/prompts/fragment_summary",
+        params={"language": "en"},
+    )
+
+    assert terminology.status_code == 200
+    terminology_value = terminology.json()
+    assert terminology_value["language"] == "zh-CN"
+    assert terminology_value["assembled_mode_languages"] == {
+        "terms-only": "zh-CN",
+        "terms+fragment-summary": "zh-CN",
+        "summary-only": "zh-CN",
+    }
+    assert "__GLOBAL_TERMINOLOGY__" not in terminology_value["assembled_modes"]["terms-only"]
+    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["terms+fragment-summary"]
+    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["summary-only"]
+    assert fragment.status_code == 200
+    assert fragment.json()["language"] == "zh-CN"
+    assert "__GLOBAL_FRAGMENT__" not in fragment.json()["assembled"]
+
+
+def test_project_summary_preview_uses_requested_fragment_language_independently(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    (project / "prompts" / "terminology.en.middle.txt").unlink()
+    (project / "prompts" / "fragment_summary.en.middle.txt").write_text(
+        "__EN_FRAGMENT__", encoding="utf-8"
+    )
+    (project / "prompts" / "fragment_summary.zh-CN.middle.txt").write_text(
+        "__ZH_FRAGMENT__", encoding="utf-8"
+    )
+    app_root = tmp_path / "empty-global"
+    (app_root / "prompts").mkdir(parents=True)
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+
+    response = client.get(
+        "/api/v1/projects/sample/prompts/terminology",
+        params={"language": "en"},
+    )
+
+    assert response.status_code == 200
+    summary = response.json()["assembled_modes"]["summary-only"]
+    assert response.json()["assembled_mode_languages"] == {
+        "terms-only": "zh-CN",
+        "terms+fragment-summary": "zh-CN",
+        "summary-only": "en",
+    }
+    assert "__EN_FRAGMENT__" in summary
+    assert "__ZH_FRAGMENT__" not in summary
+
+
+def test_prompt_library_supports_fragment_summary_resource(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    saved = client.put(
+        "/api/v1/prompt-library/fragment_summary/en/concise",
+        json={"content": "Library fragment policy."},
+    )
+    assert saved.status_code == 200
+    detail = client.get(
+        "/api/v1/prompt-library/fragment_summary/en/concise"
+    )
+    assert detail.status_code == 200
+    assert detail.json()["content"] == "Library fragment policy."
+    assert "Library fragment policy." in detail.json()["assembled"]
+    assert detail.json()["assembled_mode_languages"] == {"summary-only": "en"}
+    assert detail.json()["assembled_modes"] == {
+        "summary-only": detail.json()["assembled"]
+    }
+
+
+def test_prompt_library_terminology_entry_previews_all_response_modes(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    saved = client.put(
+        "/api/v1/prompt-library/terminology/en/concise",
+        json={"content": "Library terminology policy."},
+    )
+    assert saved.status_code == 200
+
+    detail = client.get("/api/v1/prompt-library/terminology/en/concise")
+    assert detail.status_code == 200
+    modes = detail.json()["assembled_modes"]
+    assert detail.json()["assembled_mode_languages"] == {
+        "terms-only": "en",
+        "terms+fragment-summary": "en",
+        "summary-only": "en",
+    }
+    assert set(modes) == {
+        "terms-only",
+        "terms+fragment-summary",
+        "summary-only",
+    }
+    assert "Library terminology policy." in modes["terms-only"]
+    assert "Library terminology policy." in modes["terms+fragment-summary"]
+    assert "Library terminology policy." not in modes["summary-only"]
+
+
+def test_prompt_library_joint_preview_falls_back_to_one_language_pair(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+
+    assert client.put(
+        "/api/v1/prompt-library/terminology/en/paired",
+        json={"content": "__EN_TERMINOLOGY__"},
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/prompt-library/terminology/zh-CN/paired",
+        json={"content": "__ZH_TERMINOLOGY__"},
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/prompt-library/fragment_summary/zh-CN/paired",
+        json={"content": "__ZH_FRAGMENT__"},
+    ).status_code == 200
+    (app_root / "prompts" / "fragment_summary.en.middle.txt").unlink()
+
+    detail = client.get("/api/v1/prompt-library/terminology/en/paired")
+
+    assert detail.status_code == 200
+    value = detail.json()
+    assert value["assembled_mode_languages"] == {
+        "terms-only": "en",
+        "terms+fragment-summary": "zh-CN",
+        "summary-only": "zh-CN",
+    }
+    assert "__ZH_TERMINOLOGY__" in value["assembled_modes"]["terms+fragment-summary"]
+    assert "__ZH_FRAGMENT__" in value["assembled_modes"]["terms+fragment-summary"]
+    assert "__EN_TERMINOLOGY__" not in value["assembled_modes"]["terms+fragment-summary"]
 
 
 def test_web_task_start_forwards_language(

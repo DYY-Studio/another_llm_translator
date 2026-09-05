@@ -60,6 +60,13 @@ export function errorPayloadFrom(reason: unknown): ErrorPayload | null {
   };
 }
 
+export function usageErrorReason(reason: unknown): string | null {
+  const payload = errorPayloadFrom(reason);
+  if (!payload || payload.code !== "usage_error") return null;
+  const value = payload.params.reason;
+  return typeof value === "string" && value ? value : null;
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},

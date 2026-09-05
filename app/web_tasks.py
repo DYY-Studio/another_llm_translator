@@ -188,7 +188,12 @@ def _terminology_summary(
     }
 
 
-def task_options(project: Path, stage: str) -> dict[str, Any]:
+def task_options(
+    project: Path,
+    stage: str,
+    *,
+    include_summaries: bool = False,
+) -> dict[str, Any]:
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
         overrides = read_json(
@@ -304,7 +309,7 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         )
     completed = summary["completed"]
     current_completed = summary["current_fingerprint_completed"]
-    return {
+    result = {
         "stage": stage,
         "preset": {
             "id": str(config["_llm_preset_id"]),
@@ -320,6 +325,16 @@ def task_options(project: Path, stage: str) -> dict[str, Any]:
         ),
         "running_run": _running_run(project, stage, config),
     }
+    if stage == "terminology" and include_summaries:
+        participation = read_summary_participation(project)
+        selected_boundaries = sum(
+            1 for item in participation if bool(item["selected"])
+        )
+        result["summary_selected_boundaries"] = selected_boundaries
+        result["summary_only_work"] = (
+            "terminology" in config["chunking"]["cross_boundary_batching"]
+        )
+    return result
 
 
 def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
@@ -522,6 +537,7 @@ class WebTask:
     completed_segments: int = 0
     failed_segments: int = 0
     total_segments: int = 0
+    summary_selection_counts: tuple[int, int, int] | None = None
     failure_counts: dict[str, int] = field(default_factory=dict)
     usage: dict[str, Any] = field(
         default_factory=lambda: {
@@ -569,6 +585,15 @@ class WebTask:
                 - self.failed_segments,
             ),
             "total_segments": self.total_segments,
+            "summary_selection_progress": (
+                {
+                    "completed": self.summary_selection_counts[0],
+                    "failed": self.summary_selection_counts[1],
+                    "total": self.summary_selection_counts[2],
+                }
+                if self.summary_selection_counts is not None
+                else None
+            ),
             "failure_counts": dict(self.failure_counts),
             "usage": self.usage,
         }
@@ -807,7 +832,10 @@ class WebTaskManager:
         }:
             raise UsageError(f"未知后台阶段：{stage}")
         if include_summaries and stage != "terminology":
-            raise UsageError("include_summaries 只允许术语阶段的摘要子页面入口")
+            raise UsageError(
+                "include_summaries 只允许术语阶段的摘要子页面入口",
+                reason="include_summaries_outside_terminology",
+            )
         force = scope.force
         if force and reuse_mixed_fingerprints:
             raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
@@ -852,7 +880,10 @@ class WebTaskManager:
             if run_action == "resume":
                 raise UsageError("内容概括聚合暂不支持续用，请重新选择后启动")
             if running_run is not None and run_action != "decline":
-                raise UsageError("发现未完成内容概括 Run，必须先结束旧任务")
+                raise UsageError(
+                    "发现未完成内容概括 Run，必须先结束旧任务",
+                    reason="unfinished_run",
+                )
         elif stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(project, prompt_language)
             library = decision_plan_snapshot["library"]
@@ -908,14 +939,18 @@ class WebTaskManager:
                     raise UsageError("续用 Run 时不能同时指定 force 或复用结果")
             else:
                 if running_run is not None and run_action != "decline":
-                    raise UsageError("发现未完成 Run，必须选择续用或结束并新建")
+                    raise UsageError(
+                        "发现未完成 Run，必须选择续用或结束并新建",
+                        reason="unfinished_run",
+                    )
                 if (
                     options["mismatched_fingerprint_completed"]
                     and not force
                     and not reuse_mixed_fingerprints
                 ):
                     raise UsageError(
-                        "存在不同设置指纹的已完成结果，必须明确选择复用或 force"
+                        "存在不同设置指纹的已完成结果，必须明确选择复用或 force",
+                        reason="mismatched_fingerprint",
                     )
         if stage in {TERMINOLOGY_DECISION_STAGE, "content_summary"}:
             fingerprints = (
@@ -1109,6 +1144,9 @@ class WebTaskManager:
             state.failed_segments = failed
             state.total_segments = total
 
+        def boundary_progress(completed: int, failed: int, total: int) -> None:
+            state.summary_selection_counts = (completed, failed, total)
+
         def usage_changed(current: dict[str, Any] | None) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
             if self.diagnostics is not None:
@@ -1195,7 +1233,7 @@ class WebTaskManager:
                         ],
                         limiter=next(iter(shared_limiters.values())),
                         prompt_language=prompt_language,
-                        on_progress=progress,
+                        on_progress=boundary_progress,
                     )
                 elif state.stage == TERMINOLOGY_DECISION_STAGE:
                     summary = await run_terminology_decision(
@@ -1254,16 +1292,23 @@ class WebTaskManager:
                         on_usage=usage_changed,
                     )
             state.summary = summary
-            state.completed_segments = int(summary.get("completed", 0)) + int(
-                summary.get("reused", 0)
-            )
-            state.failed_segments = int(summary.get("failed", 0))
+            if state.stage == "content_summary":
+                if state.summary_selection_counts is not None:
+                    completed, failed, total = state.summary_selection_counts
+                    state.completed_segments = completed
+                    state.failed_segments = failed
+                    state.total_segments = total
+            else:
+                state.completed_segments = int(summary.get("completed", 0)) + int(
+                    summary.get("reused", 0)
+                )
+                state.failed_segments = int(summary.get("failed", 0))
+                if summary.get("selected") is not None:
+                    state.total_segments = int(summary["selected"])
             state.failure_counts = {
                 str(key): int(value)
                 for key, value in (summary.get("failure_counts") or {}).items()
             }
-            if summary.get("selected") is not None:
-                state.total_segments = int(summary["selected"])
             summary_usage = summary.get("usage")
             if isinstance(summary_usage, dict):
                 state.usage = summary_usage

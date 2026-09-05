@@ -6,10 +6,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.project import init_project
+from app.config import load_project_config
+from app.execution import create_run, segment_model_source
 from app.web_tasks import task_options
 from app.sqlite_storage import read_json, read_segments, record_header, write_content_summary
 from app.stage_terminology import _digest
-from app.execution import segment_model_source
 from app.web import create_app
 from app.summary_aggregation import aggregate_summaries
 from tests.test_foundation import make_app_root
@@ -120,14 +121,16 @@ def test_summary_routes_expose_selection_preflight_and_export(tmp_path):
     assert exported.json()["path"] == "notes/summary.md"
 
 
-def test_open_project_restores_only_missing_summary_prompt(tmp_path: Path):
+def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     project = _project(tmp_path)
     app_root = tmp_path / "app-root"
     missing = project / "prompts" / "content_summary.zh-CN.middle.txt"
+    missing_fragment = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
     existing = project / "prompts" / "content_summary.en.middle.txt"
     custom = "用户自定义概括提示词。"
     existing.write_text(custom, encoding="utf-8")
     missing.unlink()
+    missing_fragment.unlink()
 
     client = TestClient(create_app(projects_root=project.parent, app_root=app_root))
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
@@ -136,8 +139,18 @@ def test_open_project_restores_only_missing_summary_prompt(tmp_path: Path):
     assert missing.read_text(encoding="utf-8") == (
         app_root / "prompts" / missing.name
     ).read_text(encoding="utf-8")
+    assert missing_fragment.read_text(encoding="utf-8") == (
+        app_root / "prompts" / missing_fragment.name
+    ).read_text(encoding="utf-8")
     assert existing.read_text(encoding="utf-8") == custom
-    assert any("content_summary.zh-CN.middle.txt" in item for item in opened.json()["warnings"])
+    assert any(
+        "content_summary.zh-CN.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
+    assert any(
+        "fragment_summary.zh-CN.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
 
 
 def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):
@@ -191,3 +204,102 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
     )
     assert response.status_code == 400
     assert "summary_selection" in response.json()["error"]
+
+
+def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    from app.sqlite_storage import write_summary_participation
+
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    with_flag = client.get(
+        "/api/v1/projects/demo/task-options/terminology",
+        params={"include_summaries": "true"},
+    )
+    assert with_flag.status_code == 200
+    body = with_flag.json()
+    assert body["summary_selected_boundaries"] == 1
+    assert body["summary_only_work"] is False
+
+    without_flag = client.get(
+        "/api/v1/projects/demo/task-options/terminology"
+    )
+    assert "summary_selected_boundaries" not in without_flag.json()
+
+
+def test_terminology_start_reports_machine_readable_conflict_reasons(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    create_run(
+        project,
+        config=load_project_config(project, stage="terminology"),
+        stage="terminology",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    plain = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology"},
+    )
+    assert plain.status_code == 400
+    assert plain.json()["params"]["reason"] == "unfinished_run"
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology", "summary_selection": []},
+    )
+    assert response.status_code == 400
+    assert "summary_selection" in response.json()["error"]
+
+
+def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    create_run(
+        project,
+        config=load_project_config(project, stage="content_summary"),
+        stage="content_summary",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    second = client.post(
+        "/api/v1/projects/demo/summaries/aggregate",
+        json={"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
+    )
+    assert second.status_code == 400
+    assert second.json()["code"] == "usage_error"
+    assert second.json()["params"]["reason"] == "unfinished_run"

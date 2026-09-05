@@ -101,7 +101,13 @@ def _project_context(
     list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
-    config = load_project_config(project, stage=stage)
+    # ``fragment_summary`` is a Prompt resource used by terminology runs,
+    # rather than an independent model stage with its own Preset.  Reuse the
+    # terminology model configuration while still asking adapters for the
+    # resource-specific requirements below.
+    config = load_project_config(
+        project, stage="terminology" if stage == "fragment_summary" else stage
+    )
     metadata = read_json(project, project / "project.json")
     files = load_source_files(project)
     segments = load_segments(project)
@@ -304,13 +310,16 @@ def _create_or_continue_run(
     scope: Scope,
     config: dict[str, Any],
     fingerprint: str,
-    prompt: str,
+    prompt: str | None,
     resume_run_id: str | None,
     selected_count: int,
     requested_count: int,
     reused_count: int,
     details: dict[str, Any] | None,
     warnings: list[str],
+    prompt_variants: dict[str, str] | None = None,
+    prompt_variant_requirements: dict[str, tuple[str, ...]] | None = None,
+    primary_mode: str | None = None,
 ) -> tuple[
     str | None,
     Path | None,
@@ -333,6 +342,10 @@ def _create_or_continue_run(
                 selected_count=selected_count,
                 requested_count=requested_count,
                 reused_count=reused_count,
+                prompt_variants=prompt_variants,
+                prompt_variant_requirements=prompt_variant_requirements,
+                prompt_languages=(details or {}).get("prompt_languages"),
+                primary_mode=(details or {}).get("primary_mode"),
             )
         else:
             run_id, run_dir = create_run(
@@ -345,6 +358,9 @@ def _create_or_continue_run(
                 requested_count=requested_count,
                 reused_count=reused_count,
                 details=details,
+                prompt_variants=prompt_variants,
+                prompt_variant_requirements=prompt_variant_requirements,
+                primary_mode=primary_mode,
             )
 
     def fail_planning(error: BaseException) -> None:
@@ -981,10 +997,19 @@ def _request_estimate(
 
 def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
     """Resolve the run prompt language, falling back to zh-CN."""
+    return _prompt_language_for_stages(project, requested, (stage,))
+
+
+def _prompt_language_for_stages(
+    project: Path,
+    requested: str | None,
+    stages: tuple[str, ...],
+) -> str:
+    """Resolve one language only when every required Prompt is available."""
     value = requested or resolve_language()
-    if (
-        value in SUPPORTED_LANGUAGES
-        and (project / "prompts" / prompt_file(stage, value)).is_file()
+    if value in SUPPORTED_LANGUAGES and all(
+        (project / "prompts" / prompt_file(stage, value)).is_file()
+        for stage in stages
     ):
         return value
     return "zh-CN"
@@ -1011,20 +1036,57 @@ def _prompt_factory(
     language: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
 ) -> Callable[[Iterable[str]], str]:
-    language = _prompt_language(project, stage, language)
-    name = prompt_file(stage, language)
+    try:
+        parsed_mode = (
+            TerminologyResponseMode(response_mode)
+            if response_mode is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        parsed_mode = None
+
+    summary_only = (
+        stage == "terminology"
+        and parsed_mode is TerminologyResponseMode.SUMMARY_ONLY
+    )
+    summary_mode = (
+        stage == "terminology"
+        and response_mode is not None
+        and parsed_mode is not TerminologyResponseMode.TERMS_ONLY
+    )
+    required_stages = (
+        ("fragment_summary",)
+        if summary_only
+        else ("terminology", "fragment_summary")
+        if summary_mode
+        else (stage,)
+    )
+    language = _prompt_language_for_stages(project, language, required_stages)
+    prompt_stage = "fragment_summary" if summary_only else stage
+    name = prompt_file(prompt_stage, language)
     try:
         middle = (project / "prompts" / name).read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
 
+    fragment_summary_middle: str | None = None
+    if summary_mode and not summary_only:
+        fragment_name = prompt_file("fragment_summary", language)
+        try:
+            fragment_summary_middle = (
+                project / "prompts" / fragment_name
+            ).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise StorageError(f"无法读取 Prompt：{fragment_name}: {exc}") from exc
+
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(
-            stage,
+            prompt_stage,
             middle,
             language,
             document_requirements=requirements,
-            response_mode=response_mode,
+            response_mode=None if summary_only else response_mode,
+            fragment_summary_middle=fragment_summary_middle,
         )
 
     return build

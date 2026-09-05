@@ -91,8 +91,16 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
-    async def get_task_options(name: str, stage: str) -> dict[str, Any]:
-        return task_options(project(name), stage)
+    async def get_task_options(
+        name: str,
+        stage: str,
+        include_summaries: bool = False,
+    ) -> dict[str, Any]:
+        return task_options(
+            project(name),
+            stage,
+            include_summaries=include_summaries,
+        )
 
     @app.get("/api/v1/tasks/active")
     async def active_tasks() -> dict[str, Any]:

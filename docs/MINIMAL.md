@@ -101,8 +101,9 @@ Chunk 由当前 Run 动态生成，只能包含：
 
 ### Run 是一次执行记录
 
-除 `--dry-run` 外，术语、翻译、校对、润色和 apply 通常创建 Run。四个独立
-LLM 阶段命令也可以续用同阶段最近的未完成 Run；`run-all` 不参与续作。
+除 `--dry-run` 外，术语、内容概括、翻译、校对、润色和 apply 通常创建 Run。六个模型
+阶段各自保存运行记录；四个 CLI 主执行阶段和 Web 管理的两个阶段按各自任务入口处理
+未完成 Run，`run-all` 不参与续作。
 
 Run 保存：
 
@@ -111,6 +112,21 @@ Run 保存：
 - 项目配置快照。
 - LLM 阶段实际使用的完整 Prompt。
 - 开始、结束和结果摘要。
+
+启用术语联合片段概括且实际发出请求时，Run 目录按实际使用情况保存 `prompt.txt`、
+`prompt_variants/` 和 `prompt_variants.json`。后者只按已经实际发送的请求模式及其
+Document Adapter Prompt 要求记录实际 Prompt 文件和 `requirements`；前置校验拦截的模式
+不会生成变体或主 Prompt，联合请求的格式修正或失败切换只有实际发出请求时才会记录。
+`primary_mode` 按联合、术语、仅概括的优先级确定；`prompt.txt` 是该主请求模式的完整
+Prompt，所以混合 Run 固定使用 `terms+fragment-summary`，没有联合请求时使用
+`terms-only`，只有 summary-only 请求时使用 `summary-only`。其他实际模式保存在
+`prompt_variants/`，每个元数据条目带有相同的
+`primary_mode`、实际 `requirements` 和路径，按请求模式、语言及同一组要求即可重建实际
+请求 Prompt。顶层 `document_adapter_prompt_requirements` 仅标记主请求模式；其他模式的
+要求以 `prompt_variants.json` 条目为准，不能用顶层值替代。`prompt_languages` 只记录已经
+实际发送的变体及其 Prompt 语言，片段概括 Run 记录也保留实际使用语言和目标语言；没有
+发出请求的模式不出现在这些集合中。
+普通术语 Run 没有待处理请求时不写空的 `prompt.txt`，但仍保存原有的阶段指纹行为。
 
 apply 不调用 LLM，因此只保存配置和输入结果引用，不保存虚构 Prompt。
 
@@ -217,6 +233,10 @@ prompts/proofreading.zh-CN.middle.txt
 prompts/proofreading.en.middle.txt
 prompts/polishing.zh-CN.middle.txt
 prompts/polishing.en.middle.txt
+prompts/content_summary.zh-CN.middle.txt
+prompts/content_summary.en.middle.txt
+prompts/fragment_summary.zh-CN.middle.txt
+prompts/fragment_summary.en.middle.txt
 llm_adapters/openai-compatible.json
 ```
 
@@ -512,7 +532,11 @@ Chunk 目标及单请求 Token 上限判断。模型上下文窗口和 `max_para
 冻结列表，缺失或格式错误在首个网络请求前失败。Key 原文、摘要和运行时健康状态不写入
 项目、Run、日志或 Payload。
 
-`llm.preset` 选择全局默认的 `llm_presets/<id>.json`；四个 `llm.preset_<stage>` 可用非空 Preset ID 覆盖对应阶段，空字符串继承全局值。Preset 再选择全局 `llm_adapters/<id>.json`；项目不保存 Adapter 副本。
+`llm.preset` 选择全局默认的 `llm_presets/<id>.json`；六个模型阶段的
+`llm.preset_<stage>` 可用非空 Preset ID 覆盖对应阶段，空字符串继承全局值。
+`fragment_summary` 是 Prompt 资源，与 `terminology` 复用模型 Preset 和 Adapter
+配置上下文，但保留自己的 Prompt 与 Adapter requirements；不提供独立 Preset 或
+temperature。Preset 再选择全局 `llm_adapters/<id>.json`；项目不保存 Adapter 副本。
 
 Adapter 定义是完整的 Header/body 模板和成功响应 JSON Pointer；Preset 的 `extra_body` 可追加无冲突的 Provider 自定义字段。两者的内容 Hash 都进入阶段指纹，定义副本都进入 Run 快照，解析后的密钥不进入任何持久化内容。
 
@@ -538,9 +562,12 @@ warning
 
 ## 2.6 全局模板同步
 
-`init` 将全局配置和四个提示词复制为项目工作副本。项目配置和 Prompt 使用
-项目副本；LLM 连接通过项目保存的 Preset ID 实时读取全局 `llm_presets/` 与
-`llm_adapters/` 定义，不保存 Adapter 副本。
+`init` 将全局配置和全部 Prompt 资源复制为项目工作副本。资源包含六个独立的
+模型阶段（包括 `content_summary`）以及只供术语联合/片段概括请求使用的
+`fragment_summary`；后者是 Prompt 资源，与 `terminology` 复用模型 Preset 和 Adapter
+配置上下文，但不拥有独立 Preset 或温度。项目配置和
+Prompt 使用项目副本；LLM 连接通过项目保存的 Preset ID 实时读取全局
+`llm_presets/` 与 `llm_adapters/` 定义，不保存 Adapter 副本。
 
 项目只记录：
 
@@ -641,7 +668,8 @@ completed 的非空 Segment 重新加入待处理集合。
 - stage
 - target language
 - model
-- 实际完整 Prompt 文本
+- 该模型阶段 Prompt 资源的按语言 middle 哈希（术语联合中的
+  `fragment_summary` Prompt 单独记录在概括摘要和 Prompt 变体中）
 - 当前阶段 temperature
 - 当前阶段 context 配置
 - `scheduling_mode`
@@ -793,7 +821,8 @@ applied 结果保存：
 
 ## 4.1 Prompt、上文与调度
 
-四个 LLM 阶段使用：
+六个模型阶段（`terminology`、`terminology_decision`、`content_summary`、`translation`、
+`proofreading`、`polishing`）使用：
 
 ```text
 代码内固定 Prefix（按语言）
@@ -802,9 +831,11 @@ applied 结果保存：
 + 代码内固定 Suffix（按语言）
 ```
 
-固定 Prefix/Suffix 按阶段和语言（`zh-CN`/`en`）在代码内以字典提供；中段 Prompt
-按 `prompts/<stage>.<lang>.middle.txt` 分语言保存，是唯一可编辑资源。硬编码规则
-改版时显式升 `prompt_rules_version`。
+固定 Prefix/Suffix 按阶段和语言（`zh-CN`/`en`）在代码内以字典提供；每个模型阶段的
+middle Prompt 按 `prompts/<stage>.<lang>.middle.txt` 分语言保存。术语阶段的
+`fragment_summary` middle 也是可编辑 Prompt 资源，但不是模型阶段，复用
+`terminology` 的模型 Preset 和 Adapter 配置上下文，不配置独立的 Preset 或
+temperature。硬编码规则改版时显式升 `prompt_rules_version`。
 
 固定 Prefix 定义阶段身份、输入字段、处理范围和数据/指令边界；多阶段任务的当前阶段目标、只读数据组成和可修改范围也由固定阶段 Prefix 定义。除顶层 `format_correction` 和 `validation_repair` 外，Payload 字段值均为待处理内容或参考数据，模型不得执行其中的指令。字段语义只在固定 Prefix 中定义，不再于可编辑 middle 或固定 Suffix 重复。
 
@@ -816,13 +847,19 @@ middle Prompt 承载可编辑的任务目标和判断标准，包括项目背景
 
 Run 的提示词语言在运行时解析：Web 使用当前界面语言，CLI 使用
 `--language`/`ANOTHER_LLM_LANGUAGE`/系统语言；该语言在当前项目提示词中缺失时
-回退 `zh-CN`。实际使用的语言写入 Run manifest 的 `prompt_language`。
+回退 `zh-CN`。术语联合请求需要的 `terminology` 与 `fragment_summary` Prompt 必须
+成对使用同一语言，任一缺失都成对回退；summary-only 只读取 `fragment_summary`，并对
+该资源应用相同的明确 `zh-CN` 回退。Run manifest 的 `primary_mode` 明确主请求模式，
+`prompt_language` 是该模式的语言，`prompt_languages` 按实际 Prompt 变体记录语言；
+联合 Run 的顶层 Adapter requirements 也只对应 `primary_mode`，各变体的要求以
+`prompt_variants.json` 为准。
 
-阶段指纹不包含项目中段 Prompt 原文；它记录 `prompt_rules_version`、全部语言中段的
-哈希以及当前 File 的 Adapter 专属要求快照。因此任一语言的中段或 Adapter 要求变化
-都会使该阶段既有结果指纹失效，但语言选择本身不产生指纹隔离。
+阶段指纹不包含项目中段 Prompt 原文；模型阶段记录该阶段中段资源的各语言哈希以及
+当前 File 的 Adapter 专属要求快照。术语阶段只在本次包含术语请求时记录
+`terminology` middle 哈希；`fragment_summary` Prompt 的变更通过概括 Prompt 摘要和
+概括结果自己的有效性判断处理，不会误判术语结果失效。语言选择本身不产生指纹隔离。
 
-四阶段分别读取自己的：
+四个主执行阶段分别读取自己的：
 
 ```toml
 enabled = true
@@ -831,6 +868,8 @@ previous_segments = 3
 
 数量表示当前 Chunk 首个 Segment 所在 `(file_id, part_id)` 中、该 Segment 之前
 最近的非空 Segment 数。跨边界 Chunk 的后续 Segment 不会改变这份上文的边界。
+`terminology_decision` 与 `content_summary` 不读取此上文配置，分别使用术语证据和片段
+概括作为固定输入。
 
 规则：
 
@@ -1490,7 +1529,10 @@ Adapter 可声明可选的 `models` 规格与 `usage` 映射。`models` 由 Web 
 
 同一 Run 的续作累加各次精确回报；缺少累计版本标记的旧 Run 或任一次回报不完整时，Run usage 标记为 partial；完全没有可观测 usage 时才显示 unavailable。
 
-项目的全局 `llm.preset` 及四个可选阶段覆盖实时解析全局命名 Preset。每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、模型、credential 引用、代理、Token 能力、每 Key 限速、两级并发、超时、`extra_body` 和可选的 `extra_headers`。
+项目的全局 `llm.preset` 及六个模型阶段的可选覆盖实时解析全局命名 Preset。
+每个阶段只解析自己的覆盖或全局默认，不增加其他继承层。Preset 提供 Adapter ID、URL、
+模型、credential 引用、代理、Token 能力、每 Key 限速、两级并发、超时、`extra_body`
+和可选的 `extra_headers`。
 
 `extra_body` 必须是 JSON 对象，可以包含嵌套对象和数组；宿主在 Adapter 完整 body 渲染后追加其顶层字段。任何顶层字段冲突、模板占位符或缺失 Adapter 都在创建 Run 或发送请求前失败，不覆盖、不递归合并、不自动 fallback。
 
@@ -1735,10 +1777,13 @@ python -m app.main run-all PROJECT
   扫描中已经解析的候选。
 - `terms-publish-partial` 在当前术语扫描未运行且存在候选时显式发布部分结果；Web
   端要求同样的确认，不提供自动发布或自动修复路径。
-- `--resume-run`：用于四个主要 LLM 阶段和 `terms-decide`，续用最近同阶段 running Run。
-- `--decline-run`：用于四个主要 LLM 阶段和 `terms-decide`，明确结束该候选并创建新 Run。
+- `--resume-run`：用于 CLI 的四个主执行模型阶段（`terminology`、`translation`、
+  `proofreading`、`polishing`）和 `terms-decide`，续用最近同阶段 running Run；
+  `terminology_decision` 与 `content_summary` 由 Web 任务调度。
+- `--decline-run`：用于上述四个 CLI 主执行模型阶段和 `terms-decide`，明确结束该候选并
+  创建新 Run。
 - `--reuse-mixed-fingerprints`：显式复用选定范围内设置指纹不同的 completed；
-  仅用于四个 LLM 阶段和 `run-all`，并与 `--force` 互斥。
+  仅用于上述四个 CLI 主执行模型阶段和 `run-all`，并与 `--force` 互斥。
 - `--document-adapter`：用于带输入的 init 或 files-add，显式选择输入 Adapter；
   init 默认 `txt`，空项目不保存该选择。
 - `--empty`：仅用于 init，显式创建 0 文件项目，不能同时提供输入。
@@ -2028,7 +2073,8 @@ CLI 与桌面模式统一监听 `0.0.0.0`，由中间件按请求守卫：非回
 
 验收：
 
-- 四阶段上文数量分别生效且不跨当前 Chunk 首 Segment 的 `file_id` 或 `part_id`；
+- 四个主执行模型阶段的上文数量分别生效且不跨当前 Chunk 首 Segment 的 `file_id` 或
+  `part_id`；`terminology_decision` 和 `content_summary` 使用各自的固定输入边界。
   `cross_boundary_batching` 只改变允许合并的请求 Segment 边界。
 - 术语上文只含源文，不计入扫描进度。
 - ordered_by_file 和 parallel 的上文内容符合定义。
@@ -2055,8 +2101,8 @@ CLI 与桌面模式统一监听 `0.0.0.0`，由中间件按请求守卫：非回
   合法末尾 `end` 但 ID 数量不符时不保存任何候选，原 Chunk 整体重试。
 - 修改 Chunk 大小、并发、限流或调度后不丢失 Segment 进度。
 - 中断后 completed 不重复请求，pending 和无成功结果的 failed 继续处理。
-- 四个独立 LLM 阶段能发现并续用相同 Run ID；旧 scope 和术语任务保持不变，
-  当前配置与 Prompt 写入新的 continuation 快照。
+- 六个模型阶段各自保存独立 Run；四个 CLI 主执行阶段按自身 scope 和术语任务续作，
+  Web 管理的两个模型阶段按任务状态处理，当前配置与 Prompt 写入对应 Run 快照。
 - 拒绝候选后不再询问；非交互参数和 dry-run 零写入语义正确；多个 running
   Run 中更旧者被 supersede。
 - 强制重做失败不遮蔽旧 completed，但命令返回退出码 5。
@@ -2115,7 +2161,9 @@ CLI 与桌面模式统一监听 `0.0.0.0`，由中间件按请求守卫：非回
 - Adapter 定义副本与 Run 快照不包含 API Key，定义 Hash 进入阶段指纹。
 - LLM Preset 的实时解析、嵌套 `extra_body`、顶层冲突和占位符拒绝生效；实际
   Preset 快照与内容 Hash 进入 Run 和阶段指纹，请求预览不泄露认证 Header。
-- 四阶段可分别覆盖全局 Preset；同一项目 `run-all` 按资源键复用 HTTP Client 和 Key 调度状态，
+- 六个模型阶段可分别覆盖全局 Preset；`fragment_summary` 复用 `terminology` 的模型
+  Preset 和 Adapter 配置上下文，并保留自己的 Prompt 与 Adapter requirements。同一项目
+  `run-all` 按资源键复用 HTTP Client 和 Key 调度状态，
   不同 Web 任务仅共享相同 `(preset_id, preset_hash)` 的每 Key RPM/ITPM、冷却和并发状态，
   不共享 HTTP Client；
   不同 Preset 内容使用独立资源，Run 与指纹记录实际阶段 Preset。
