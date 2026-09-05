@@ -20,6 +20,7 @@ from app.errors import (
 )
 from app.execution import CJK_RE, ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
 from app.llm_client import LLMClient, SlidingWindowLimiter
+from app.llm_keys import KeyPool
 from app.llm_adapter import load_json_adapter
 from app.project import init_project
 from app.sqlite_storage import (
@@ -1210,7 +1211,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    limiter = SlidingWindowLimiter(100, 100000)
+    limiter = SlidingWindowLimiter(0, 0)
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1270,7 +1271,7 @@ async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
     try:
         async with LLMClient(
             current,
-            SlidingWindowLimiter(0, 0),
+            KeyPool(0, 0, 1, 1),
             run_dir=tmp_path,
             project_id="PRJ",
             run_id="RUN",
@@ -1395,7 +1396,7 @@ async def test_llm_client_bounds_all_key_429_by_retry_rounds(tmp_path: Path) -> 
         with pytest.raises(ExternalError, match="限流"):
             async with LLMClient(
                 current,
-                SlidingWindowLimiter(0, 0),
+                KeyPool(0, 0, 4, 4),
                 run_dir=tmp_path,
                 project_id="PRJ",
                 run_id="RUN",
