@@ -207,8 +207,8 @@ def test_project_prompt_sync_uses_language_fallback(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     value = response.json()
-    assert value["language"] == "en"
-    assert value["global_sync"]["language"] == "en"
+    assert value["language"] == "zh-CN"
+    assert value["global_sync"]["language"] == "zh-CN"
     assert value["global_sync"]["same"] is True
 
 
