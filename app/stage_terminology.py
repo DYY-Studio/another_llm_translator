@@ -39,6 +39,7 @@ from .llm_response import (
 )
 from .logging_utils import get_logger
 from .sqlite_storage import (
+    atomic_write_json,
     append_jsonl,
     read_content_summaries,
     read_json,
@@ -873,6 +874,25 @@ async def run_terminology(
     part_original = preflight.part_original
     original_parts = preflight.original_parts
     preflight_failed = preflight.preflight_failed
+    if include_summaries:
+        actual_modes = {
+            mode_for_item(
+                item, default=TerminologyResponseMode.TERMS_ONLY
+            )
+            for item in request_segments
+        }
+        prompt_mode = next(
+            (
+                mode
+                for mode in (
+                    TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+                    TerminologyResponseMode.TERMS_ONLY,
+                    TerminologyResponseMode.SUMMARY_ONLY,
+                )
+                if mode in actual_modes
+            ),
+            None,
+        )
     logger.info(
         "stage preparation preflight complete elapsed=%.3fs requested=%d failed=%d fast=%d exact=%d",
         time.perf_counter() - preparation_started_at,
@@ -951,6 +971,43 @@ async def run_terminology(
         }
 
     assert run_id is not None and run_dir is not None
+    if include_summaries:
+        snapshot_dir = (
+            run_dir / "continuations" / f"{continuation_index:04d}"
+            if continuation_index
+            else run_dir
+        )
+        manifest = read_json(project, run_dir / "manifest.json")
+        if continuation_index:
+            continuations = manifest.get("continuations")
+            if (
+                not isinstance(continuations, list)
+                or len(continuations) < continuation_index
+                or not isinstance(continuations[continuation_index - 1], dict)
+            ):
+                raise StorageError(f"Run 缺少续作快照：{run_id}")
+            primary_snapshot = continuations[continuation_index - 1]
+        else:
+            primary_snapshot = manifest
+        primary_requirements = (
+            prompt_requirements_for_mode(prompt_mode)
+            if prompt_mode is not None
+            else {}
+        )
+        primary_snapshot.pop("primary_mode", None)
+        primary_snapshot.pop("prompt_language", None)
+        if prompt_mode is not None:
+            primary_snapshot["primary_mode"] = prompt_mode.value
+            primary_snapshot["prompt_language"] = prompt_language_for_mode(
+                prompt_mode
+            )
+        if not continuation_index:
+            manifest["document_adapter_prompt_requirements"] = primary_requirements
+        atomic_write_json(
+            snapshot_dir / "document_adapter_prompt_requirements.json",
+            primary_requirements,
+        )
+        write_json(project, run_dir / "manifest.json", manifest)
     write_lock = asyncio.Lock()
 
     def prompt_variant_name(

@@ -718,6 +718,88 @@ async def test_preflight_interception_does_not_create_unused_prompt_variants(
 
 
 @pytest.mark.asyncio
+async def test_preflight_interception_selects_primary_mode_from_actual_requests(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path, ("Alice " * 5000).strip())
+    second = tmp_path / "second.txt"
+    second.write_text("Bob waved.", encoding="utf-8")
+    add_project_files(project, [str(second)])
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    from app import config as config_module
+
+    preset_path = config_module.APP_ROOT / "llm_presets" / "default.json"
+    preset = json.loads(preset_path.read_text(encoding="utf-8"))
+    preset["context_window_tokens"] = 4096
+    preset["context_safety_margin_tokens"] = 0
+    preset["max_output_tokens"] = 1
+    preset_path.write_text(json.dumps(preset), encoding="utf-8")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "allow_split_oversized_segment = true",
+            "allow_split_oversized_segment = false",
+        ),
+        encoding="utf-8",
+    )
+    request_modes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system_prompt = body["messages"][0]["content"]
+        request_modes.append(
+            "joint" if 'type="summary"' in system_prompt else "terms-only"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "term",
+                                        "source": "Bob",
+                                        "category": "人物",
+                                    }
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert request_modes == ["terms-only"]
+    assert result["failed"] == 1
+    run_dir = project / "runs" / result["run_id"]
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["primary_mode"] == "terms-only"
+    metadata = json.loads((run_dir / "prompt_variants.json").read_text("utf-8"))
+    assert set(metadata) == {"terms-only"}
+    assert metadata["terms-only"]["primary_mode"] == "terms-only"
+    assert (run_dir / "prompt.txt").read_text("utf-8") == (
+        run_dir / metadata["terms-only"]["path"]
+    ).read_text("utf-8")
+
+
+@pytest.mark.asyncio
 async def test_ordinary_terminology_without_pending_work_does_not_write_empty_prompt(
     tmp_path: Path,
 ) -> None:
