@@ -509,11 +509,17 @@ def register_resource_routes(
         return prompt_view(
             stage,
             language,
-            lambda value: effective_prompt_file(root, stage, value),
-            prompt_languages_for(root)[stage],
+            lambda value: root / "prompts" / prompt_file(stage, value),
+            [
+                value
+                for value in PROMPT_LANGUAGES
+                if (root / "prompts" / prompt_file(stage, value)).is_file()
+            ],
             global_file_for=lambda value: global_prompt_file(stage, value),
             fragment_summary_file_for=(
-                lambda value: effective_prompt_file(root, "fragment_summary", value)
+                lambda value: root
+                / "prompts"
+                / prompt_file("fragment_summary", value)
             )
             if stage == "terminology"
             else None,

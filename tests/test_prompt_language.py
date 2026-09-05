@@ -753,7 +753,7 @@ def test_project_terms_only_prompt_preview_survives_missing_fragment_prompt(
     assert "summary-only" not in value["assembled_modes"]
 
 
-def test_project_prompt_languages_include_effective_global_resources(
+def test_project_prompt_languages_exclude_missing_project_resources(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -764,10 +764,10 @@ def test_project_prompt_languages_include_effective_global_resources(
     response = client.get("/api/v1/projects/sample/prompts/fragment_summary")
 
     assert response.status_code == 200
-    assert set(response.json()["languages"]) == {"zh-CN", "en"}
+    assert response.json()["languages"] == ["zh-CN"]
 
 
-def test_project_prompt_preview_uses_global_fallback_for_summary_modes(
+def test_project_prompt_preview_matches_runtime_project_language_fallback(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -793,18 +793,18 @@ def test_project_prompt_preview_uses_global_fallback_for_summary_modes(
 
     assert terminology.status_code == 200
     terminology_value = terminology.json()
-    assert terminology_value["language"] == "en"
+    assert terminology_value["language"] == "zh-CN"
     assert terminology_value["assembled_mode_languages"] == {
-        "terms-only": "en",
-        "terms+fragment-summary": "en",
-        "summary-only": "en",
+        "terms-only": "zh-CN",
+        "terms+fragment-summary": "zh-CN",
+        "summary-only": "zh-CN",
     }
-    assert "__GLOBAL_TERMINOLOGY__" in terminology_value["assembled_modes"]["terms-only"]
-    assert "__GLOBAL_FRAGMENT__" in terminology_value["assembled_modes"]["terms+fragment-summary"]
-    assert "__GLOBAL_FRAGMENT__" in terminology_value["assembled_modes"]["summary-only"]
+    assert "__GLOBAL_TERMINOLOGY__" not in terminology_value["assembled_modes"]["terms-only"]
+    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["terms+fragment-summary"]
+    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["summary-only"]
     assert fragment.status_code == 200
-    assert fragment.json()["language"] == "en"
-    assert "__GLOBAL_FRAGMENT__" in fragment.json()["assembled"]
+    assert fragment.json()["language"] == "zh-CN"
+    assert "__GLOBAL_FRAGMENT__" not in fragment.json()["assembled"]
 
 
 def test_project_summary_preview_uses_requested_fragment_language_independently(
