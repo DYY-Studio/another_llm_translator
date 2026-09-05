@@ -53,3 +53,11 @@ test("project refresh publishes the list before guarding automatic selection", (
   assert.ok(projectGuardIndex > syncIndex);
   assert.ok(setProjectIndex > projectGuardIndex);
 });
+
+test("summary workspace displays conflict and dialog errors inside modals and distinguishes success text", () => {
+  assert.match(summarySource, /conflictError && <p className="error-text summary-message">\{conflictError\}<\/p>/);
+  assert.match(summarySource, /setConflictError\(errText\)/);
+  assert.match(summarySource, /error && <p className="error-text summary-message">\{error\}<\/p>/);
+  assert.match(summarySource, /setDialogError\(errText\)/);
+  assert.match(summarySource, /className=\{`inline-message \$\{message\.type === "success" \? "success-text" : "error-text"\}`\}/);
+});

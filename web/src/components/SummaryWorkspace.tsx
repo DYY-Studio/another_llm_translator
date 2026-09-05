@@ -316,6 +316,7 @@ function SelectionDialog({
   names,
   language,
   path,
+  error,
   onPath,
   onSelection,
   onClose,
@@ -327,6 +328,7 @@ function SelectionDialog({
   names: Map<string, string>;
   language: Language;
   path?: string;
+  error?: string;
   onPath?: (next: string) => void;
   onSelection: (next: Set<string>) => void;
   onClose: () => void;
@@ -357,6 +359,7 @@ function SelectionDialog({
         </label>
       )}
       {!hasSelection && <p className="error-text summary-message">{translate(mode === "aggregate" ? "terms.summaryAggregateEmpty" : "terms.summaryExportEmpty", language)}</p>}
+      {error && <p className="error-text summary-message">{error}</p>}
       <div className="button-group summary-dialog-actions">
         <button className="quiet-button" type="button" onClick={onClose}>{translate("common.cancel", language)}</button>
         <button className="primary-button" type="button" disabled={!hasSelection} onClick={onConfirm}>{translate(mode === "aggregate" ? "terms.summaryAggregate" : "terms.summaryExport", language)}</button>
@@ -378,7 +381,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [dialog, setDialog] = useState<"aggregate" | "export" | null>(null);
   const [dialogSelection, setDialogSelection] = useState<Set<string>>(new Set());
   const [exportPath, setExportPath] = useState("summary.md");
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [listOpen, setListOpen] = useState(true);
@@ -393,6 +396,8 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [conflictResume, setConflictResume] = useState(false);
   const [conflictReuse, setConflictReuse] = useState(false);
   const [conflictForce, setConflictForce] = useState(false);
+  const [conflictError, setConflictError] = useState("");
+  const [dialogError, setDialogError] = useState("");
   workspaceProjectRef.current = project;
 
   const names = useMemo(() => new Map(overview.files.map((file) => [file.file_id, file.name])), [overview.files]);
@@ -444,7 +449,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     } catch (error) {
       if (requestId !== loadRequestRef.current) return;
       setLoading(false);
-      setMessage(errorMessage(error, language));
+      setMessage({ text: errorMessage(error, language), type: "error" });
     }
   }
 
@@ -462,7 +467,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setParticipation(new Set());
     setParticipationSaving(false);
     setLoading(true);
-    setMessage("");
+    setMessage(null);
     void loadData(project);
     return () => { loadRequestRef.current += 1; };
   }, [project]);
@@ -513,7 +518,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     const version = started.version;
     setParticipation(new Set(started.state.displayed));
     setParticipationSaving(true);
-    setMessage("");
+    setMessage(null);
     participationQueueRef.current = participationQueueRef.current.then(async () => {
       if (workspaceProjectRef.current !== targetProject) return;
       try {
@@ -532,7 +537,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         if (workspaceProjectRef.current === targetProject && version === participationStateRef.current.version) {
           participationStateRef.current = rejectSummaryParticipationPut(participationStateRef.current, version);
           setParticipation(new Set(participationStateRef.current.displayed));
-          setMessage(errorMessage(error, language));
+          setMessage({ text: errorMessage(error, language), type: "error" });
         }
       } finally {
         if (workspaceProjectRef.current === targetProject
@@ -544,11 +549,12 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
 
   async function startSummaries(decision: { resume: boolean; reuse: boolean; force: boolean }) {
     if (!participation.size) {
-      setMessage(translate("terms.summarySelectionEmpty", language));
+      setMessage({ text: translate("terms.summarySelectionEmpty", language), type: "error" });
       return;
     }
     setBusy(true);
-    setMessage("");
+    setMessage(null);
+    setConflictError("");
     try {
       const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
@@ -572,7 +578,11 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         setConflictForce(reason === "mismatched_fingerprint");
         return;
       }
-      setMessage(errorMessage(error, language));
+      const errText = errorMessage(error, language);
+      if (conflict) {
+        setConflictError(errText);
+      }
+      setMessage({ text: errText, type: "error" });
     } finally {
       setBusy(false);
     }
@@ -580,11 +590,11 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
 
   async function generateSummaries() {
     if (!participation.size) {
-      setMessage(translate("terms.summarySelectionEmpty", language));
+      setMessage({ text: translate("terms.summarySelectionEmpty", language), type: "error" });
       return;
     }
     setBusy(true);
-    setMessage("");
+    setMessage(null);
     try {
       const options = await api<TaskOptions & { summary_selected_boundaries?: number; summary_only_work?: boolean }>(
         `/api/v1/projects/${project}/task-options/terminology?include_summaries=true`,
@@ -594,7 +604,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         conflict: Boolean(options.summary_only_work),
       });
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setMessage({ text: errorMessage(error, language), type: "error" });
     } finally {
       setBusy(false);
     }
@@ -603,7 +613,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   async function launchGenerate() {
     setPreflight(null);
     setBusy(true);
-    setMessage("");
+    setMessage(null);
     try {
       const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
@@ -619,7 +629,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         setConflictForce(reason === "mismatched_fingerprint");
         return;
       }
-      setMessage(errorMessage(error, language));
+      setMessage({ text: errorMessage(error, language), type: "error" });
     } finally {
       setBusy(false);
     }
@@ -628,16 +638,19 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   async function aggregate() {
     if (!dialogSelection.size) return;
     setBusy(true);
-    setMessage(translate("terms.summaryPreflight", language));
+    setMessage(null);
+    setDialogError("");
     try {
       const selected = selectionItems(dialogSelection, boundaries);
       await api(`/api/v1/projects/${project}/summaries/aggregation-preflight`, { method: "POST", body: JSON.stringify({ boundaries: selected }) });
       const next = await api<TaskState>(`/api/v1/projects/${project}/summaries/aggregate`, { method: "POST", body: JSON.stringify({ boundaries: selected }) });
       onTask(next);
       setDialog(null);
-      setMessage(translate("terms.summaryAggregateDone", language));
+      setMessage({ text: translate("terms.summaryAggregateDone", language), type: "success" });
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      const errText = errorMessage(error, language);
+      setDialogError(errText);
+      setMessage({ text: errText, type: "error" });
     } finally {
       setBusy(false);
     }
@@ -647,17 +660,20 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     if (!dialogSelection.size) return;
     const trimmed = exportPath.trim() || "summary.md";
     setBusy(true);
-    setMessage("");
+    setMessage(null);
+    setDialogError("");
     try {
       const result = await api<{ path: string }>(`/api/v1/projects/${project}/summaries/export`, {
         method: "POST",
         body: JSON.stringify({ boundaries: selectionItems(dialogSelection, boundaries), path: trimmed }),
       });
       setDialog(null);
-      setMessage(translate("terms.summaryExportDone", language, { path: result.path }));
+      setMessage({ text: translate("terms.summaryExportDone", language, { path: result.path }), type: "success" });
       downloadExportMarkdown(result.path);
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      const errText = errorMessage(error, language);
+      setDialogError(errText);
+      setMessage({ text: errText, type: "error" });
     } finally {
       setBusy(false);
     }
@@ -668,8 +684,8 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     const url = `/api/v1/projects/${project}/exports/download`;
     if (nativeBridgeAvailable()) {
       void saveExport(url, filename, JSON.stringify({ file: path }))
-        .then((saved) => { if (saved) setMessage(translate("terms.summaryExportSaved", language, { path: saved })); })
-        .catch((reason) => setMessage(errorMessage(reason, language)));
+        .then((saved) => { if (saved) setMessage({ text: translate("terms.summaryExportSaved", language, { path: saved }), type: "success" }); })
+        .catch((reason) => setMessage({ text: errorMessage(reason, language), type: "error" }));
       return;
     }
     void fetch(url, {
@@ -686,7 +702,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(objectUrl);
-    }).catch((reason) => setMessage(errorMessage(reason, language)));
+    }).catch((reason) => setMessage({ text: errorMessage(reason, language), type: "error" }));
   }
 
   return (
@@ -746,7 +762,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         </aside>
         <main className="summary-content" ref={contentRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
           {activeSummaryTask && <div className="summary-progress"><strong>{translate("terms.summaryTaskRunning", language)}</strong><span>{task?.summary_selection_progress ? translate("terms.summaryTaskBoundaryProgress", language, { done: task.summary_selection_progress.completed, total: task.summary_selection_progress.total }) : translate("terms.summaryProgress", language, summaryProgressValue)}</span></div>}
-          {message && <p className="inline-message error-text">{message}</p>}
+          {message && <p className={`inline-message ${message.type === "success" ? "success-text" : "error-text"}`}>{message.text}</p>}
           {loading ? <p className="summary-empty">{translate("common.loading", language)}</p> : !focused ? <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p> : <>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>
@@ -756,8 +772,8 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         </main>
         {sourceOpen && <SourcePanel project={project} boundary={focused} language={language} focusSegmentIds={sourceSegmentIds} onClose={() => setSourceOpen(false)} />}
       </div>
-      {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void aggregate()} />}
-      {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} onPath={setExportPath} onSelection={setDialogSelection} onClose={() => setDialog(null)} onConfirm={() => void exportMarkdown()} />}
+      {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} error={dialogError} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void aggregate()} />}
+      {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
       {preflight && (
         <Modal ariaLabel={translate("terms.summaryPreflightTitle", language)}>
           <div className="summary-dialog-heading">
@@ -776,26 +792,27 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         <Modal ariaLabel={translate("terms.summaryConflictTitle", language)}>
           <div className="summary-dialog-heading">
             <div><h2>{translate("terms.summaryConflictTitle", language)}</h2><p>{translate(conflict === "unfinished_run" ? "terms.summaryConflictUnfinished" : "terms.summaryConflictFingerprint", language)}</p></div>
-            <button className="quiet-button" type="button" onClick={() => setConflict(null)}>×</button>
+            <button className="quiet-button" type="button" onClick={() => { setConflict(null); setConflictError(""); }}>×</button>
           </div>
           {conflict === "unfinished_run" && (
             <label className="radio-option decision-option">
-              <input type="radio" checked={conflictResume} onChange={() => { setConflictResume(true); setConflictForce(false); }} />
+              <input type="radio" checked={conflictResume} onChange={() => { setConflictResume(true); setConflictForce(false); setConflictError(""); }} />
               <span><strong>{translate("terms.summaryConflictResume", language)}</strong><small>{translate("terms.summaryConflictResumeHint", language)}</small></span>
             </label>
           )}
           {conflict === "mismatched_fingerprint" && (
             <label className="radio-option decision-option">
-              <input type="radio" checked={conflictReuse} onChange={() => { setConflictReuse(true); setConflictForce(false); }} />
+              <input type="radio" checked={conflictReuse} onChange={() => { setConflictReuse(true); setConflictForce(false); setConflictError(""); }} />
               <span><strong>{translate("terms.summaryConflictReuse", language)}</strong><small>{translate("terms.summaryConflictReuseHint", language)}</small></span>
             </label>
           )}
           <label className="radio-option decision-option">
-            <input type="radio" checked={conflictForce} onChange={() => { setConflictForce(true); setConflictResume(false); setConflictReuse(false); }} />
+            <input type="radio" checked={conflictForce} onChange={() => { setConflictForce(true); setConflictResume(false); setConflictReuse(false); setConflictError(""); }} />
             <span><strong>{translate("terms.summaryConflictForce", language)}</strong><small>{translate("terms.summaryConflictForceHint", language)}</small></span>
           </label>
+          {conflictError && <p className="error-text summary-message">{conflictError}</p>}
           <div className="button-group summary-dialog-actions">
-            <button className="quiet-button" type="button" disabled={busy} onClick={() => setConflict(null)}>{translate("common.cancel", language)}</button>
+            <button className="quiet-button" type="button" disabled={busy} onClick={() => { setConflict(null); setConflictError(""); }}>{translate("common.cancel", language)}</button>
             <button className="primary-button" type="button" disabled={busy || (!conflictResume && !conflictReuse && !conflictForce)} onClick={() => void startSummaries({ resume: conflictResume, reuse: conflictReuse, force: conflictForce })}>{translate("terms.summaryConflictRun", language)}</button>
           </div>
         </Modal>
