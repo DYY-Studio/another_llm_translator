@@ -866,7 +866,7 @@ function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, on
   const origin = artifact.provenance?.origin === "adopted" || artifact.provenance?.origin === "adopted_fragment" ? "terms.summaryOriginAdopted" : "terms.summaryOriginLlm";
   const refs = summaryArtifactSegmentIds(artifact);
   const labels = refs.length
-    ? refs.map((segmentId) => translate("terms.summaryReferenceLabel", language, { file: artifact.file_id, part: artifact.part_id, segment: segmentId }))
-    : (artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { file: artifact.file_id, part: artifact.part_id, segment: ref }));
+    ? refs.map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
+    : (artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
   return <article className="summary-artifact-card"><div className="summary-artifact-meta"><span>{translate(origin, language)}</span><small>{artifact.model}</small></div><p className="summary-artifact-text">{artifact.text || empty}</p><div className="summary-artifact-footer"><span>{labels.length ? translate("terms.summaryReferenceList", language, { refs: labels.join(translate("terms.summaryReferenceSeparator", language)) }) : ""}</span><button className="quiet-button" type="button" onClick={() => onSource(refs)}>{translate("terms.summarySource", language)}</button></div></article>;
 }

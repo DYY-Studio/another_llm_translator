@@ -29,7 +29,9 @@ from app.sqlite_storage import (
     write_summary_participation,
 )
 from app.stage_terminology import _digest, run_terminology
+from app.summary_aggregation import export_summary_markdown
 from app.term_library import load_terms, publish_partial_terms
+from app.web_tasks import task_options
 from tests.helpers import llm_jsonl
 from tests.test_document_adapter_contract import (
     RecordDocumentAdapter,
@@ -162,11 +164,389 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
     assert all(item["source_digest"].startswith("sha256:") for item in slices)
     assert all(item["model_text_digest"].startswith("sha256:") for item in slices)
     assert all("CHK-" not in item["slice_id"] for item in slices)
+    full = read_content_summaries(project, kind="full", status="completed")
+    assert len(full) == 1
+    assert full[0]["text"] == summaries[0]["text"]
+    assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
+    assert full[0]["provenance"] == {
+        "origin": "adopted_fragment",
+        "artifact_ids": [summaries[0]["record_id"]],
+        "source_ranges": [summaries[0]["source_range"]],
+    }
+    assert task_options(project, "content_summary")["completed"] == 1
+    exported = export_summary_markdown(
+        project,
+        [{"file_id": "F0001", "part_id": "document"}],
+        "auto-summary.md",
+    )
+    assert exported.read_text(encoding="utf-8").startswith("# 内容概括")
     manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
     assert manifest["summary_participation"] == [
         {"file_id": "F0001", "part_id": "document", "selected": True}
     ]
     assert load_terms(project)["terms"]
+
+
+@pytest.mark.asyncio
+async def test_joint_partitioned_summaries_persist_separate_fragments(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        records = [
+            {"type": "summary", "text": "Alice 进入。", "refs": ["1"]},
+            {"type": "summary", "text": "Bob 挥手。", "refs": ["2"]},
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] == 0
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    summaries.sort(key=lambda item: item["source_range"]["segment_ids"][0])
+    assert [item["text"] for item in summaries] == ["Alice 进入。", "Bob 挥手。"]
+    assert [item["refs"] for item in summaries] == [["1"], ["1"]]
+    assert [
+        item["source_range"]["segment_ids"] for item in summaries
+    ] == [["F0001-S000001"], ["F0001-S000002"]]
+    assert read_content_summaries(project, kind="full", status="completed") == []
+
+
+@pytest.mark.asyncio
+async def test_forced_full_cover_summary_replaces_auto_adopted_full(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    def forced_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        source_segments = payload["source_segments"]
+        records: list[dict[str, object]] = [
+            {
+                "type": "summary",
+                "text": "强制重做后的概括。",
+                "refs": [str(index) for index in range(1, len(source_segments) + 1)],
+            }
+        ]
+        for source in ("Alice", "Bob"):
+            if any(source in value for value in source_segments):
+                records.append({"type": "term", "source": source, "category": "人物"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(force=True),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] == 0
+    full = read_content_summaries(project, kind="full")
+    assert [(item["status"], item["text"]) for item in full] == [
+        ("stale", "人物依次出现并行动。"),
+        ("completed", "强制重做后的概括。"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_forced_summary_redo_clears_old_fragments_before_partitioned_response(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    old = read_content_summaries(project, kind="fragment", status="completed")
+    assert [item["text"] for item in old] == ["人物依次出现并行动。"]
+
+    modes: list[str] = []
+
+    def forced_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        prompt = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        source_segments = payload["source_segments"]
+        joint = 'type="summary"' in prompt
+        modes.append("joint" if joint else "terms-only")
+        records: list[dict[str, object]] = []
+        if joint:
+            records.extend(
+                [
+                    {"type": "summary", "text": "Alice 新概括。", "refs": ["1"]},
+                    {"type": "summary", "text": "Bob 新概括。", "refs": ["2"]},
+                ]
+            )
+        for source in ("Alice", "Bob"):
+            if any(source in value for value in source_segments):
+                records.append({"type": "term", "source": source, "category": "人物"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(force=True),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] == 0
+    assert "joint" in modes
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert {item["text"] for item in summaries} == {"Alice 新概括。", "Bob 新概括。"}
+
+
+@pytest.mark.asyncio
+async def test_forced_summary_redo_clears_only_selected_boundaries(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("Alice entered.", encoding="utf-8-sig")
+    second.write_text("Bob waved.", encoding="utf-8-sig")
+    project, _ = init_project(
+        [str(first), str(second)],
+        name="demo",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    os.environ["LLM_API_KEY"] = "test"
+    write_summary_participation(
+        project,
+        [
+            {"file_id": "F0001", "part_id": "document", "selected": True},
+            {"file_id": "F0002", "part_id": "document", "selected": True},
+        ],
+    )
+
+    def initial_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        source_segments = payload["source_segments"]
+        records: list[dict[str, object]] = [
+            {
+                "type": "summary",
+                "text": "旧概括。",
+                "refs": [str(index) for index in range(1, len(source_segments) + 1)],
+            }
+        ]
+        for source in ("Alice", "Bob"):
+            if any(source in value for value in source_segments):
+                records.append({"type": "term", "source": source, "category": "人物"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(initial_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+
+    write_summary_participation(
+        project,
+        [
+            {"file_id": "F0001", "part_id": "document", "selected": True},
+            {"file_id": "F0002", "part_id": "document", "selected": False},
+        ],
+    )
+
+    def forced_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        prompt = body["messages"][0]["content"]
+        payload = json.loads(body["messages"][1]["content"])
+        source_segments = payload["source_segments"]
+        if 'type="summary"' in prompt:
+            records: list[dict[str, object]] = [
+                {"type": "summary", "text": "新概括。", "refs": ["1"]}
+            ]
+        else:
+            records = []
+        for source in ("Alice", "Bob"):
+            if any(source in value for value in source_segments):
+                records.append({"type": "term", "source": source, "category": "人物"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(force=True),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] == 0
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert {
+        (item["file_id"], item["part_id"], item["text"])
+        for item in summaries
+    } == {
+        ("F0001", "document", "新概括。"),
+        ("F0002", "document", "旧概括。"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    def invalid_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl([{"type": "end"}])}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(invalid_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(force=True),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["failed"] > 0
+    assert read_content_summaries(
+        project,
+        kind="fragment",
+        status="completed",
+    ) == []
+    failed = read_content_summaries(project, kind="fragment", status="failed")
+    assert failed
+    assert all(item.get("text") is None for item in failed)
+
+
+@pytest.mark.asyncio
+async def test_forced_summary_dry_run_keeps_existing_fragments(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("dry-run 不应调用模型")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
+    try:
+        await run_terminology(
+            project,
+            Scope(force=True, dry_run=True),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert [item["text"] for item in summaries] == ["人物依次出现并行动。"]
 
 
 @pytest.mark.asyncio
@@ -1415,7 +1795,7 @@ async def test_joint_partial_response_retries_only_failed_class(
         if 'type="summary"' in prompt and 'type="term"' in prompt:
             modes.append("joint")
             records = [
-                {"type": "summary", "text": "Alice 进入。", "refs": ["1"]},
+                {"type": "summary", "text": "Alice 进入。"},
                 {"type": "term", "source": "Missing", "category": "无效"},
             ]
         else:
@@ -1441,7 +1821,9 @@ async def test_joint_partial_response_retries_only_failed_class(
     assert modes == ["joint", "terms-only"]
     assert result["failed"] == 0
     assert result["published"] is True
-    assert len(read_content_summaries(project, status="completed")) == 1
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert len(summaries) == 1
+    assert summaries[0]["refs"] == ["1"]
     metadata = json.loads(
         (
             project

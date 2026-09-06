@@ -109,8 +109,6 @@ def _fragment(
 
 
 def _summary_response(request: httpx.Request) -> httpx.Response:
-    payload = json.loads(request.content)["messages"][1]["content"]
-    summaries = json.loads(payload)["summaries"]
     return httpx.Response(
         200,
         json={
@@ -122,10 +120,6 @@ def _summary_response(request: httpx.Request) -> httpx.Response:
                                 {
                                     "type": "summary",
                                     "text": "整合后的内容概括。",
-                                    "refs": [
-                                        str(index + 1)
-                                        for index in range(len(summaries))
-                                    ],
                                 }
                             ]
                         )
@@ -176,7 +170,13 @@ def test_multiple_fragments_are_aggregated_and_keep_references(tmp_path: Path) -
     project = _project(tmp_path)
     _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="Alice 出现。")
     _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="Bob 挥手。")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _summary_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -194,6 +194,43 @@ def test_multiple_fragments_are_aggregated_and_keep_references(tmp_path: Path) -
     assert full[0]["text"] == "整合后的内容概括。"
     assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
     assert len(full[0]["provenance"]["source_ranges"]) == 2
+    payload = json.loads(requests[0]["messages"][1]["content"])
+    assert payload["summaries"] == [
+        {"id": "1", "text": "Alice 出现。"},
+        {"id": "2", "text": "Bob 挥手。"},
+    ]
+
+
+def test_aggregation_rejects_multiple_summary_records(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="Alice 出现。")
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="Bob 挥手。")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        records = [
+            {"type": "summary", "text": "Alice 出现。", "refs": ["1"]},
+            {"type": "summary", "text": "Bob 挥手。", "refs": ["2"]},
+        ]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UsageError, match="聚合失败：只允许一条 summary"):
+            asyncio.run(
+                aggregate_summaries(
+                    project,
+                    [{"file_id": "F0001", "part_id": "document"}],
+                    http_client=client,
+                )
+            )
+    finally:
+        asyncio.run(client.aclose())
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert read_content_summaries(project, kind="full", status="completed") == []
 
 
 def test_multiple_boundaries_publish_full_results_atomically(tmp_path: Path) -> None:
@@ -433,10 +470,12 @@ def test_large_fragment_set_uses_reduction_checkpoints(tmp_path: Path) -> None:
     _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 7500)
     _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 7500)
     calls = 0
+    requests: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        requests.append(json.loads(request.content))
         return _summary_response(request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -454,6 +493,11 @@ def test_large_fragment_set_uses_reduction_checkpoints(tmp_path: Path) -> None:
     assert calls >= 3
     assert result["boundaries"][0]["origin"] == "llm"
     assert len(read_content_summaries(project, kind="reduction", status="completed")) >= 2
+    assert all(
+        "refs" not in summary
+        for request in requests
+        for summary in json.loads(request["messages"][1]["content"])["summaries"]
+    )
 
 
 def test_minimal_aggregation_request_over_budget_fails_without_full_result(

@@ -406,6 +406,15 @@ async def aggregate_summaries(
             client=http_client,
         ) as llm:
 
+            def aggregation_summaries(children: list[dict[str, Any]]) -> list[dict[str, str]]:
+                return [
+                    {
+                        "id": str(index + 1),
+                        "text": item["text"],
+                    }
+                    for index, item in enumerate(children)
+                ]
+
             async def summarize(
                 boundary: tuple[str, str],
                 current: list[dict[str, Any]],
@@ -414,17 +423,9 @@ async def aggregate_summaries(
                 kind: str,
             ) -> dict[str, Any]:
                 nonlocal calls
-                summaries = [
-                    {
-                        "id": str(index + 1),
-                        "text": item["text"],
-                        "refs": item.get("refs", []),
-                    }
-                    for index, item in enumerate(children)
-                ]
                 payload = {
                     "target_language": config["project"]["target_language"],
-                    "summaries": summaries,
+                    "summaries": aggregation_summaries(children),
                 }
                 messages = render_messages(prompt, payload)
                 estimated = estimate_messages(
@@ -461,6 +462,8 @@ async def aggregate_summaries(
                     raise UsageError(
                         "聚合失败：LLM 响应缺少有效 summary 或 end"
                     )
+                if len(parsed.summaries) != 1:
+                    raise UsageError("聚合失败：只允许一条 summary")
                 refs = list(parsed.summaries[0]["refs"])
                 if set(refs) != {str(index + 1) for index in range(len(children))}:
                     raise UsageError("聚合失败：summary 未覆盖全部输入概括")
@@ -521,10 +524,7 @@ async def aggregate_summaries(
                 def estimate(children: list[dict[str, Any]]) -> int:
                     payload = {
                         "target_language": config["project"]["target_language"],
-                        "summaries": [
-                            {"id": str(index + 1), "text": item["text"], "refs": item.get("refs", [])}
-                            for index, item in enumerate(children)
-                        ],
+                        "summaries": aggregation_summaries(children),
                     }
                     return estimate_messages(
                         render_messages(prompt, payload),

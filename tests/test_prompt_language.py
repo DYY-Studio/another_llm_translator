@@ -110,12 +110,21 @@ def test_terminology_prompt_declares_summary_mode_protocol(
     )
 
     assert summary_marker in prompt
-    assert "refs" in prompt
+    assert "one or more" in prompt
+    assert "A single summary may omit refs" in prompt
+    assert "If outputting multiple summaries" in prompt
     assert term_marker in prompt
     if mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
         assert "source and aliases must be source forms" in prompt
         assert "preferred_translation" in prompt
         assert 'Output one type="term" record per term' in prompt
+
+
+def test_content_summary_prompt_stays_single_summary_without_refs_requirement() -> None:
+    prompt = full_prompt("content_summary", "Project policy.", "en")
+
+    assert 'Output exactly one type="summary"' in prompt
+    assert "refs" not in prompt
 
 
 def test_summary_response_modes_require_independent_prompt_middle() -> None:
