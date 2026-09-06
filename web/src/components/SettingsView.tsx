@@ -724,6 +724,9 @@ interface PromptView {
   language: string;
   assembled: string;
   assembled_phases?: Record<string, string>;
+  assembled_modes?: Record<string, string>;
+  assembled_mode_languages?: Record<string, string>;
+  assembled_mode_errors?: Record<string, string>;
   languages: string[];
   global_sync?: {
     available: boolean;
@@ -739,6 +742,10 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
   const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
+  const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
+  const [assembledModeLanguages, setAssembledModeLanguages] = useState<Record<string, string>>({});
+  const [assembledModeErrors, setAssembledModeErrors] = useState<Record<string, string>>({});
+  const [previewMode, setPreviewMode] = useState("terms-only");
   const [previewPhase, setPreviewPhase] = useState("adjudication");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
   const [globalSync, setGlobalSync] = useState<PromptView["global_sync"]>(undefined);
@@ -758,6 +765,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     setSavedContent(value.content);
     setAssembled(value.assembled);
     setAssembledPhases(value.assembled_phases ?? {});
+    setAssembledModes(value.assembled_modes ?? {});
+    setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+    setAssembledModeErrors(value.assembled_mode_errors ?? {});
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
     setLanguages(value.languages);
@@ -818,6 +828,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       setContent(value.content);
       setAssembled(value.assembled);
       setAssembledPhases(value.assembled_phases ?? {});
+      setAssembledModes(value.assembled_modes ?? {});
+      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+      setAssembledModeErrors(value.assembled_mode_errors ?? {});
       setPromptLanguage(value.language);
       setLoadedGlobalDraft(true);
       setMessage(translate("settings.promptGlobalLoaded", language));
@@ -831,6 +844,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       setContent(value.content);
       setAssembled(value.assembled);
       setAssembledPhases(value.assembled_phases ?? {});
+      setAssembledModes(value.assembled_modes ?? {});
+      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+      setAssembledModeErrors(value.assembled_mode_errors ?? {});
       setSelectedLibraryEntry(promptId);
       setLoadedGlobalDraft(false);
       setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
@@ -872,6 +888,20 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
 
   const draftDirty = content !== savedContent;
   const showSyncCard = scope === "project" && globalSync;
+  const previewModes = stage === "terminology"
+    ? [
+      ["terms-only", translate("settings.promptModeTermsOnly", language)],
+      ["terms+fragment-summary", translate("settings.promptModeTermsAndSummary", language)],
+      ["summary-only", translate("settings.promptModeSummaryOnly", language)],
+    ] as const
+    : stage === "fragment_summary"
+      ? [["summary-only", translate("settings.promptModeSummaryOnly", language)]] as const
+      : [];
+  const activeMode = previewModes.some(([mode]) => mode === previewMode)
+    ? previewMode
+    : previewModes[0]?.[0] ?? "";
+  const modeError = activeMode ? assembledModeErrors[activeMode] : undefined;
+  const modePreview = activeMode ? assembledModes[activeMode] : undefined;
   return <section className="text-settings">
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
@@ -880,7 +910,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
         <button className="primary-button" onClick={() => void save()}>{translate("common.validateSave", language)}</button>
       </div>
     </div>
-    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="terminology_decision">{translate("stage.terminologyDecision", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
+    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="terminology_decision">{translate("stage.terminologyDecision", language)}</option><option value="content_summary">{translate("stage.contentSummary", language)}</option><option value="fragment_summary">{translate("stage.fragmentSummary", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
     {showSyncCard && <div className={`prompt-sync-card ${globalSync.available && globalSync.same && !draftDirty ? "synced" : "out-of-sync"}`}>
       <div><strong>{!globalSync.available ? translate("settings.promptGlobalUnavailable", language) : draftDirty ? translate("settings.promptUnsaved", language) : globalSync.same ? translate("settings.promptSynced", language) : translate("settings.promptOutOfSync", language)}</strong><small>{!globalSync.available ? translate("settings.promptSyncLanguage", language, { language: globalSync.language }) : loadedGlobalDraft ? translate("settings.promptGlobalLoadedHint", language) : translate("settings.promptSyncLanguage", language, { language: globalSync.language })}</small></div>
@@ -906,6 +936,11 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>
+      {previewModes.length > 0 && <>
+        <label className="stage-select">{translate("settings.promptPreviewMode", language)}<select value={activeMode} onChange={(event) => setPreviewMode(event.target.value)}>{previewModes.map(([mode, label]) => <option key={mode} value={mode} disabled={!assembledModes[mode] && !assembledModeErrors[mode]}>{label}</option>)}</select></label>
+        {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}
+        {modeError && <p className="error-text">{translate("settings.promptModeError", language, { error: modeError })}</p>}
+      </>}
       {stage === "terminology_decision" && Object.keys(assembledPhases).length > 0 && <>
         <p className="prompt-preview-hint">{translate("settings.promptPhaseHint", language)}</p>
         <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptPhaseHint", language)}>
@@ -913,7 +948,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
           <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
         </div>
       </>}
-      <pre>{(assembledPhases[previewPhase] ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
+      <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
     </div>
   </section>;
 }

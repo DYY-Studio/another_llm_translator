@@ -9,7 +9,13 @@ from app.project import init_project
 from app.config import load_project_config
 from app.execution import create_run, segment_model_source
 from app.web_tasks import task_options
-from app.sqlite_storage import read_json, read_segments, record_header, write_content_summary
+from app.sqlite_storage import (
+    read_json,
+    read_segments,
+    record_header,
+    write_content_summary,
+    write_summary_participation,
+)
 from app.stage_terminology import _digest
 from app.web import create_app
 from app.summary_aggregation import aggregate_summaries
@@ -126,11 +132,13 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     app_root = tmp_path / "app-root"
     missing = project / "prompts" / "content_summary.zh-CN.middle.txt"
     missing_fragment = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
+    missing_terminology = project / "prompts" / "terminology.en.middle.txt"
     existing = project / "prompts" / "content_summary.en.middle.txt"
     custom = "用户自定义概括提示词。"
     existing.write_text(custom, encoding="utf-8")
     missing.unlink()
     missing_fragment.unlink()
+    missing_terminology.unlink()
 
     client = TestClient(create_app(projects_root=project.parent, app_root=app_root))
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
@@ -142,6 +150,9 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     assert missing_fragment.read_text(encoding="utf-8") == (
         app_root / "prompts" / missing_fragment.name
     ).read_text(encoding="utf-8")
+    assert missing_terminology.read_text(encoding="utf-8") == (
+        app_root / "prompts" / missing_terminology.name
+    ).read_text(encoding="utf-8")
     assert existing.read_text(encoding="utf-8") == custom
     assert any(
         "content_summary.zh-CN.middle.txt" in item
@@ -149,6 +160,10 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     )
     assert any(
         "fragment_summary.zh-CN.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
+    assert any(
+        "terminology.en.middle.txt" in item
         for item in opened.json()["warnings"]
     )
 
@@ -230,6 +245,53 @@ def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
         "/api/v1/projects/demo/task-options/terminology"
     )
     assert "summary_selected_boundaries" not in without_flag.json()
+
+
+def test_terminology_task_options_report_missing_same_language_summary_prompt(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.get(
+        "/api/v1/projects/demo/task-options/terminology",
+        params={"include_summaries": "true", "language": "en"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary_prompt_preflight"] == {
+        "ok": False,
+        "language": "en",
+        "required_stages": ["terminology", "fragment_summary"],
+        "missing": ["fragment_summary.en.middle.txt"],
+    }
+
+
+def test_terminology_start_blocks_missing_same_language_summary_prompt(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology", "language": "en", "include_summaries": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["params"]["reason"] == "summary_prompt_missing"
+    assert "fragment_summary.en.middle.txt" in response.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
 
 
 def test_terminology_start_reports_machine_readable_conflict_reasons(

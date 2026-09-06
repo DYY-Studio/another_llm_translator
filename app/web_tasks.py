@@ -49,7 +49,7 @@ from .stages import run_all
 from .stage_review import run_review
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
-from .stage_runtime import prompt_middle_digests
+from .stage_runtime import prompt_middle_digests, prompt_preflight
 from .summary_aggregation import aggregate_summaries, aggregation_preflight
 from .term_library import load_terms
 from .term_decision import STAGE as TERMINOLOGY_DECISION_STAGE
@@ -193,6 +193,7 @@ def task_options(
     stage: str,
     *,
     include_summaries: bool = False,
+    prompt_language: str | None = None,
 ) -> dict[str, Any]:
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
@@ -333,6 +334,13 @@ def task_options(
         result["summary_selected_boundaries"] = selected_boundaries
         result["summary_only_work"] = (
             "terminology" in config["chunking"]["cross_boundary_batching"]
+        )
+        result["summary_prompt_preflight"] = prompt_preflight(
+            project,
+            prompt_language,
+            ("terminology", "fragment_summary")
+            if selected_boundaries
+            else ("terminology",),
         )
     return result
 
@@ -929,6 +937,24 @@ class WebTaskManager:
             selection_snapshots = ((stage, selection),)
             if include_summaries:
                 summary_participation = _summary_participation_snapshot(project)
+                required_prompt_stages = (
+                    ("terminology", "fragment_summary")
+                    if any(item[2] for item in summary_participation)
+                    else ("terminology",)
+                )
+                preflight = prompt_preflight(
+                    project,
+                    prompt_language,
+                    required_prompt_stages,
+                )
+                if not bool(preflight["ok"]):
+                    missing = ", ".join(
+                        str(item) for item in preflight["missing"]
+                    )
+                    raise UsageError(
+                        f"混合模式缺少 {preflight['language']} Prompt：{missing}",
+                        reason="summary_prompt_missing",
+                    )
             running_run = options["running_run"]
             if running_run is not None:
                 running_run_id = str(running_run["run_id"])

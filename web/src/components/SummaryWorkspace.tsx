@@ -7,6 +7,8 @@ import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, Summar
 interface SummaryPreflight {
   selected: number;
   conflict: boolean;
+  promptOk: boolean;
+  missing: string[];
 }
 import {
   boundarySelectionState,
@@ -596,12 +598,15 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setBusy(true);
     setMessage(null);
     try {
-      const options = await api<TaskOptions & { summary_selected_boundaries?: number; summary_only_work?: boolean }>(
-        `/api/v1/projects/${project}/task-options/terminology?include_summaries=true`,
+      const options = await api<TaskOptions>(
+        `/api/v1/projects/${project}/task-options/terminology?include_summaries=true&language=${encodeURIComponent(language)}`,
       );
+      const promptPreflight = options.summary_prompt_preflight;
       setPreflight({
         selected: options.summary_selected_boundaries ?? 0,
         conflict: Boolean(options.summary_only_work),
+        promptOk: promptPreflight?.ok ?? true,
+        missing: promptPreflight?.missing ?? [],
       });
     } catch (error) {
       setMessage({ text: errorMessage(error, language), type: "error" });
@@ -611,6 +616,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   }
 
   async function launchGenerate() {
+    if (!preflight?.promptOk || !preflight.selected) return;
     setPreflight(null);
     setBusy(true);
     setMessage(null);
@@ -781,10 +787,14 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
             <button className="quiet-button" type="button" onClick={() => setPreflight(null)}>×</button>
           </div>
           {preflight.conflict && <p className="error-text">{translate("terms.summaryPreflightConflict", language)}</p>}
+          {!preflight.promptOk && <div className="error-text summary-message">
+            <p>{translate("terms.summaryPromptMissing", language, { language })}</p>
+            <ul>{preflight.missing.map((name) => <li key={name}><code>{name}</code></li>)}</ul>
+          </div>}
           {!preflight.selected && <p className="error-text">{translate("terms.summarySelectionEmpty", language)}</p>}
           <div className="button-group summary-dialog-actions">
             <button className="quiet-button" type="button" disabled={busy} onClick={() => setPreflight(null)}>{translate("common.cancel", language)}</button>
-            <button className="primary-button" type="button" disabled={busy || !preflight.selected} onClick={() => void launchGenerate()}>{translate("terms.summaryConflictRun", language)}</button>
+            <button className="primary-button" type="button" disabled={busy || !preflight.promptOk || !preflight.selected} onClick={() => void launchGenerate()}>{translate("terms.summaryConflictRun", language)}</button>
           </div>
         </Modal>
       )}

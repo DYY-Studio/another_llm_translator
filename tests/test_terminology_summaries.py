@@ -1134,7 +1134,7 @@ async def test_terms_only_run_does_not_read_fragment_prompt(
 
 
 @pytest.mark.asyncio
-async def test_summary_format_correction_uses_paired_fallback_language(
+async def test_summary_format_correction_uses_requested_language(
     tmp_path: Path,
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
@@ -1173,7 +1173,6 @@ async def test_summary_format_correction_uses_paired_fallback_language(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
-    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
     calls = 0
 
     def summary_handler(request: httpx.Request) -> httpx.Response:
@@ -1235,7 +1234,7 @@ async def test_summary_format_correction_uses_paired_fallback_language(
             project,
             Scope(),
             http_client=client,
-            prompt_language="en",
+            prompt_language="zh-CN",
             reuse_mixed_fingerprints=True,
             include_summaries=True,
         )

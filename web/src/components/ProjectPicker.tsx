@@ -17,7 +17,7 @@ export function ProjectBar({
   projects: ProjectSummary[];
   project: string;
   runningProjectIds: ReadonlySet<string>;
-  onProject: (value: string) => void;
+  onProject: (value: ProjectSummary) => void;
   onCreate: () => void;
   language: Language;
 }) {
@@ -39,7 +39,7 @@ export function ProjectPicker({
   projects: ProjectSummary[];
   project: string;
   runningProjectIds: ReadonlySet<string>;
-  onProject: (value: string) => void;
+  onProject: (value: ProjectSummary) => void;
   language: Language;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -84,7 +84,7 @@ export function ProjectPicker({
   }
 
   function choose(item: ProjectSummary) {
-    onProject(item.selector);
+    onProject(item);
     closePicker();
   }
 

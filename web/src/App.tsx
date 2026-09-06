@@ -90,6 +90,7 @@ export default function App() {
   const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [projectWarnings, setProjectWarnings] = useState<string[]>([]);
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
@@ -113,6 +114,7 @@ export default function App() {
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
   const syncingTasksRef = useRef(false);
+  const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const selectedProject = projects.find((item) => item.selector === project) ?? null;
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
@@ -137,6 +139,39 @@ export default function App() {
       return { ...current, [next.project_id]: next };
     });
   }, [selectedProject]);
+
+  const openProject = useCallback(async (summary: ProjectSummary, force = false) => {
+    const current = projectActivationRef.current.get(summary.path);
+    if (!force && current === "opened") {
+      setProject(summary.selector);
+      return;
+    }
+    if (!force && (current === "opening" || current === "failed")) return;
+    projectActivationRef.current.set(summary.path, "opening");
+    try {
+      const value = await api<{ path: string; warnings: string[] }>(
+        "/api/v1/projects/open",
+        { method: "POST", body: JSON.stringify({ path: summary.path }) },
+      );
+      projectActivationRef.current.set(summary.path, "opened");
+      projectActivationRef.current.set(value.path, "opened");
+      setProjectWarnings(value.warnings);
+      rememberProjectPath(value.path);
+      setProject(summary.selector);
+    } catch (reason) {
+      projectActivationRef.current.set(summary.path, "failed");
+      setError(reason);
+    }
+  }, []);
+
+  const selectProject = useCallback((summary: ProjectSummary) => {
+    void openProject(summary, true);
+  }, [openProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    void openProject(selectedProject);
+  }, [openProject, selectedProject]);
 
   const syncActiveTasks = useCallback(async () => {
     if (syncingTasksRef.current) return;
@@ -265,16 +300,21 @@ export default function App() {
 
   useEffect(() => {
     const paths = readRecentProjectPaths();
-    void Promise.allSettled(paths.map((path) => api<{ path: string }>(
+    void Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
       "/api/v1/projects/open",
       { method: "POST", body: JSON.stringify({ path }) },
     ))).then(async (results) => {
       const validPaths = results.flatMap((result) => (
         result.status === "fulfilled" ? [result.value.path] : []
       ));
+      const warnings = results.flatMap((result) => (
+        result.status === "fulfilled" ? result.value.warnings : []
+      ));
+      for (const path of validPaths) projectActivationRef.current.set(path, "opened");
       writeRecentProjectPaths(validPaths);
       const failures = results.length - validPaths.length;
       if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
+      if (warnings.length) setProjectWarnings(warnings);
       await loadProjects();
     }).catch((value) => setError(value));
   }, []);
@@ -386,7 +426,7 @@ export default function App() {
       setError(translate("run.projectUnavailable", language));
       return;
     }
-    setProject(summary.selector);
+    await openProject(summary, true);
     const destination = next.stage === "content_summary" || next.stage === "terminology_decision"
       ? "terminology"
       : ["terminology", "translation", "proofreading", "polishing"].includes(next.stage)
@@ -452,7 +492,7 @@ export default function App() {
       projects={projects}
       project={project}
       value={overview}
-      onProject={setProject}
+      onProject={selectProject}
       runningProjectIds={runningProjectIds}
       onCreate={() => setCreateOpen(true)}
       onFilesChanged={refreshProject}
@@ -514,10 +554,13 @@ export default function App() {
         {serverStatus?.lan.enabled && !serverStatus.auth.required && !warningDismissed && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setWarningDismissed(true)}>{translate("server.warningEnabled", language)}</button>
         )}
+        {projectWarnings.length > 0 && (
+          <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
+        )}
         {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
         {content}
       </AppShell>
-      {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); await loadProjects(); setProject(selector); }} />}
+      {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) await openProject(created, true); else setProject(selector); }} />}
       {welcomeOpen && (
         <div className="welcome-overlay" role="dialog" aria-modal="true">
           <div className="welcome-card">

@@ -144,7 +144,7 @@ def test_summary_only_factory_does_not_read_terminology_prompt(tmp_path: Path) -
     assert 'type="term"' not in prompt
 
 
-def test_joint_factory_falls_back_to_one_prompt_language_pair(tmp_path: Path) -> None:
+def test_joint_factory_rejects_missing_requested_prompt_language(tmp_path: Path) -> None:
     project = create_project_sync(tmp_path)
     (project / "prompts" / "terminology.zh-CN.middle.txt").write_text(
         "__ZH_TERMINOLOGY__", encoding="utf-8"
@@ -160,27 +160,21 @@ def test_joint_factory_falls_back_to_one_prompt_language_pair(tmp_path: Path) ->
     )
     (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
 
-    prompt = _prompt_factory(
-        project,
-        "terminology",
-        "en",
-        response_mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-    )([])
+    with pytest.raises(UsageError, match="fragment_summary.en.middle.txt"):
+        _prompt_factory(
+            project,
+            "terminology",
+            "en",
+            response_mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+        )([])
 
-    assert "__ZH_TERMINOLOGY__" in prompt
-    assert "__ZH_FRAGMENT__" in prompt
-    assert "__EN_TERMINOLOGY__" not in prompt
-    assert "__EN_FRAGMENT__" not in prompt
-
-    summary_only = _prompt_factory(
-        project,
-        "terminology",
-        "en",
-        response_mode=TerminologyResponseMode.SUMMARY_ONLY,
-    )([])
-    assert "__ZH_FRAGMENT__" in summary_only
-    assert "__EN_FRAGMENT__" not in summary_only
-    assert "__ZH_TERMINOLOGY__" not in summary_only
+    with pytest.raises(UsageError, match="fragment_summary.en.middle.txt"):
+        _prompt_factory(
+            project,
+            "terminology",
+            "en",
+            response_mode=TerminologyResponseMode.SUMMARY_ONLY,
+        )([])
 
 
 def test_terms_only_prompt_keeps_existing_contract() -> None:
@@ -558,16 +552,16 @@ def test_full_prompt_rejects_unknown_language() -> None:
         full_prompt("translation", "middle", "fr")
 
 
-def test_prompt_language_resolution_falls_back_to_zh_cn(
+def test_prompt_language_resolution_rejects_missing_requested_language(
     tmp_path: Path,
 ) -> None:
     project = create_project_sync(tmp_path)
     en_file = project / "prompts" / "translation.en.middle.txt"
     en_file.unlink()
-    assert _prompt_language(project, "translation", "en") == "zh-CN"
-    prompt = _prompt(project, "translation", "en")
-    assert "用户消息为 JSON" in prompt
-    assert "忠实翻译" in prompt
+    with pytest.raises(UsageError) as error:
+        _prompt_language(project, "translation", "en")
+    assert error.value.params["reason"] == "prompt_language_missing"
+    assert "translation.en.middle.txt" in str(error.value)
 
 
 def test_fingerprint_is_language_agnostic_and_tracks_any_language_change(
@@ -767,7 +761,7 @@ def test_project_prompt_languages_exclude_missing_project_resources(
     assert response.json()["languages"] == ["zh-CN"]
 
 
-def test_project_prompt_preview_matches_runtime_project_language_fallback(
+def test_project_prompt_preview_rejects_missing_requested_language(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -791,23 +785,15 @@ def test_project_prompt_preview_matches_runtime_project_language_fallback(
         params={"language": "en"},
     )
 
-    assert terminology.status_code == 200
-    terminology_value = terminology.json()
-    assert terminology_value["language"] == "zh-CN"
-    assert terminology_value["assembled_mode_languages"] == {
-        "terms-only": "zh-CN",
-        "terms+fragment-summary": "zh-CN",
-        "summary-only": "zh-CN",
-    }
-    assert "__GLOBAL_TERMINOLOGY__" not in terminology_value["assembled_modes"]["terms-only"]
-    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["terms+fragment-summary"]
-    assert "__GLOBAL_FRAGMENT__" not in terminology_value["assembled_modes"]["summary-only"]
-    assert fragment.status_code == 200
-    assert fragment.json()["language"] == "zh-CN"
-    assert "__GLOBAL_FRAGMENT__" not in fragment.json()["assembled"]
+    assert terminology.status_code == 400
+    assert terminology.json()["params"]["reason"] == "prompt_language_missing"
+    assert "terminology.en.middle.txt" in terminology.json()["error"]
+    assert fragment.status_code == 400
+    assert fragment.json()["params"]["reason"] == "prompt_language_missing"
+    assert "fragment_summary.en.middle.txt" in fragment.json()["error"]
 
 
-def test_project_summary_preview_uses_requested_fragment_language_independently(
+def test_project_summary_preview_rejects_missing_requested_terms_language(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -829,15 +815,9 @@ def test_project_summary_preview_uses_requested_fragment_language_independently(
         params={"language": "en"},
     )
 
-    assert response.status_code == 200
-    summary = response.json()["assembled_modes"]["summary-only"]
-    assert response.json()["assembled_mode_languages"] == {
-        "terms-only": "zh-CN",
-        "terms+fragment-summary": "zh-CN",
-        "summary-only": "en",
-    }
-    assert "__EN_FRAGMENT__" in summary
-    assert "__ZH_FRAGMENT__" not in summary
+    assert response.status_code == 400
+    assert response.json()["params"]["reason"] == "prompt_language_missing"
+    assert "terminology.en.middle.txt" in response.json()["error"]
 
 
 def test_prompt_library_supports_fragment_summary_resource(

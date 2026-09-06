@@ -61,3 +61,10 @@ test("summary workspace displays conflict and dialog errors inside modals and di
   assert.match(summarySource, /setDialogError\(errText\)/);
   assert.match(summarySource, /className=\{`inline-message \$\{message\.type === "success" \? "success-text" : "error-text"\}`\}/);
 });
+
+test("summary generation preflights exact-language prompts before launch", () => {
+  assert.match(summarySource, /include_summaries=true&language=/);
+  assert.match(summarySource, /summary_prompt_preflight/);
+  assert.match(summarySource, /preflight\.promptOk/);
+  assert.match(summarySource, /preflight\.missing/);
+});

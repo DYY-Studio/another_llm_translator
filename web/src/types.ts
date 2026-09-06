@@ -332,6 +332,14 @@ export interface TaskOptions {
   has_pending_draft?: boolean;
   estimated_requests?: number;
   estimated_input_tokens?: number;
+  summary_selected_boundaries?: number;
+  summary_only_work?: boolean;
+  summary_prompt_preflight?: {
+    ok: boolean;
+    language: string;
+    required_stages: string[];
+    missing: string[];
+  };
   overflow_policy?: {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
