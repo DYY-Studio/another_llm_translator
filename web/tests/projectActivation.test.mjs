@@ -21,3 +21,16 @@ test("project picker passes the selected project summary to activation", () => {
   assert.match(pickerSource, /onProject: \(value: ProjectSummary\) => void/);
   assert.match(pickerSource, /onProject\(item\)/);
 });
+
+test("task activation stops navigation when project opening fails", () => {
+  const taskActivationIndex = appSource.indexOf("async function openTaskProject");
+  const guardIndex = appSource.indexOf(
+    "if (!(await openProject(summary, true))) return;",
+    taskActivationIndex,
+  );
+  const navigationIndex = appSource.indexOf("setStage(destination);", taskActivationIndex);
+
+  assert.ok(taskActivationIndex >= 0);
+  assert.ok(guardIndex > taskActivationIndex);
+  assert.ok(navigationIndex > guardIndex);
+});

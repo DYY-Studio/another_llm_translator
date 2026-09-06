@@ -291,6 +291,18 @@ async def run_terminology(
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
+    if include_summaries and any(
+        value is not None
+        for value in (
+            scope.from_file,
+            scope.only_file,
+            scope.only_segment,
+            scope.segment_ids,
+        )
+    ):
+        raise UsageError(
+            "include_summaries 要求完整项目范围，不支持部分 Scope"
+        )
     config, metadata, files, segments = _project_context(project, stage="terminology")
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",

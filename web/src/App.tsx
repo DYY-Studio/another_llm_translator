@@ -140,13 +140,13 @@ export default function App() {
     });
   }, [selectedProject]);
 
-  const openProject = useCallback(async (summary: ProjectSummary, force = false) => {
+  const openProject = useCallback(async (summary: ProjectSummary, force = false): Promise<boolean> => {
     const current = projectActivationRef.current.get(summary.path);
     if (!force && current === "opened") {
       setProject(summary.selector);
-      return;
+      return true;
     }
-    if (!force && (current === "opening" || current === "failed")) return;
+    if (!force && (current === "opening" || current === "failed")) return false;
     projectActivationRef.current.set(summary.path, "opening");
     try {
       const value = await api<{ path: string; warnings: string[] }>(
@@ -158,9 +158,11 @@ export default function App() {
       setProjectWarnings(value.warnings);
       rememberProjectPath(value.path);
       setProject(summary.selector);
+      return true;
     } catch (reason) {
       projectActivationRef.current.set(summary.path, "failed");
       setError(reason);
+      return false;
     }
   }, []);
 
@@ -426,7 +428,7 @@ export default function App() {
       setError(translate("run.projectUnavailable", language));
       return;
     }
-    await openProject(summary, true);
+    if (!(await openProject(summary, true))) return;
     const destination = next.stage === "content_summary" || next.stage === "terminology_decision"
       ? "terminology"
       : ["terminology", "translation", "proofreading", "polishing"].includes(next.stage)

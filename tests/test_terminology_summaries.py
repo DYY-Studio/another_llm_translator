@@ -195,6 +195,46 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
 
 
 @pytest.mark.asyncio
+async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        first = await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    assert first["failed"] == 0
+    before = read_content_summaries(project, kind="fragment")
+    selected_segment = "F0001-S000001"
+    second_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_joint_handler)
+    )
+    try:
+        with pytest.raises(UsageError, match="完整项目范围"):
+            await run_terminology(
+                project,
+                Scope(only_segment=selected_segment),
+                http_client=second_client,
+                include_summaries=True,
+            )
+    finally:
+        await second_client.aclose()
+
+    assert read_content_summaries(project, kind="fragment") == before
+
+
+@pytest.mark.asyncio
 async def test_joint_partitioned_summaries_persist_separate_fragments(
     tmp_path: Path,
 ) -> None:
@@ -1279,104 +1319,6 @@ async def test_ordinary_terminology_without_pending_work_does_not_write_empty_pr
 
 @pytest.mark.asyncio
 async def test_summary_only_run_does_not_read_missing_terminology_prompt(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "term",
-                                        "source": "Alice",
-                                        "category": "人物",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
-    try:
-        first = await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    assert first["failed"] == 0
-
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    for language in ("zh-CN", "en"):
-        (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
-    seen_prompts: list[str] = []
-
-    def summary_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        seen_prompts.append(body["messages"][0]["content"])
-        assert 'type="term"' not in seen_prompts[-1]
-        source_segments = json.loads(body["messages"][1]["content"])[
-            "source_segments"
-        ]
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "summary",
-                                        "text": "Alice 进入。",
-                                        "refs": [
-                                            str(i)
-                                            for i in range(1, len(source_segments) + 1)
-                                        ],
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            reuse_mixed_fingerprints=True,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert result["failed"] == 0
-    assert seen_prompts
-    assert read_content_summaries(project, kind="fragment", status="completed")
-    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
-    assert set(manifest["prompt_variants"]) == {"summary-only"}
-    assert manifest["prompt_languages"] == {"summary-only": "zh-CN"}
-
-
-@pytest.mark.asyncio
-async def test_summary_only_backfill_does_not_read_existing_terminology_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
@@ -1414,6 +1356,8 @@ async def test_summary_only_backfill_does_not_read_existing_terminology_prompt(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
+    for language in ("zh-CN", "en"):
+        (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
 
     original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
@@ -1484,6 +1428,8 @@ async def test_terms_only_run_does_not_read_fragment_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
+    for language in ("zh-CN", "en"):
+        (project / "prompts" / f"fragment_summary.{language}.middle.txt").unlink()
     original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
 
@@ -1658,98 +1604,6 @@ async def test_summary_format_correction_uses_requested_language(
 
 
 @pytest.mark.asyncio
-async def test_summary_backfill_does_not_touch_terminology_records(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-
-    def terms_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "term",
-                                        "source": "Alice",
-                                        "category": "人物",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
-    try:
-        await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    before_scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
-    before_candidates = read_jsonl(
-        project, project / "terminology" / "candidates.jsonl"
-    )
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-
-    def summary_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        assert 'type="summary"' in body["messages"][0]["content"]
-        assert 'type="term"' not in body["messages"][0]["content"]
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "summary",
-                                        "text": "Alice 进入。",
-                                        "refs": ["1"],
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
-    os.environ["LLM_API_KEY"] = "test"
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert result["published"] is False
-    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == before_scans
-    assert (
-        read_jsonl(project, project / "terminology" / "candidates.jsonl")
-        == before_candidates
-    )
-    assert load_terms(project)["terms"][0]["source"] == "Alice"
-    assert read_summary_participation(project)[0]["selected"] is True
-    assert read_content_summaries(project, kind="fragment")[0]["status"] == "completed"
-
-
-@pytest.mark.asyncio
 async def test_summary_opt_in_rejects_cross_boundary_batching(
     tmp_path: Path,
 ) -> None:
@@ -1806,8 +1660,12 @@ async def test_standard_terminology_keeps_cross_boundary_batching(
 
 
 @pytest.mark.asyncio
-async def test_joint_partial_response_retries_only_failed_class(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("failed_class", "retry_mode"),
+    [("term", "terms-only"), ("summary", "summary-only")],
+)
+async def test_joint_response_retries_failed_class_and_tracks_prompt_digest(
+    tmp_path: Path, failed_class: str, retry_mode: str
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
     write_summary_participation(
@@ -1815,76 +1673,30 @@ async def test_joint_partial_response_retries_only_failed_class(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
     modes: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        prompt = body["messages"][0]["content"]
-        if 'type="summary"' in prompt and 'type="term"' in prompt:
-            modes.append("joint")
-            records = [
-                {"type": "summary", "text": "Alice 进入。"},
-                {"type": "term", "source": "Missing", "category": "无效"},
-            ]
-        else:
-            modes.append("terms-only")
-            records = [{"type": "term", "source": "Alice", "category": "人物"}]
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert modes == ["joint", "terms-only"]
-    assert result["failed"] == 0
-    assert result["published"] is True
-    summaries = read_content_summaries(project, kind="fragment", status="completed")
-    assert len(summaries) == 1
-    assert summaries[0]["refs"] == ["1"]
-    metadata = json.loads(
-        (
-            project
-            / "runs"
-            / result["run_id"]
-            / "prompt_variants.json"
-        ).read_text(encoding="utf-8")
-    )
-    assert {key.split("__", 1)[0] for key in metadata} == {
-        "terms+fragment-summary",
-        "terms-only",
-    }
-
-
-@pytest.mark.asyncio
-async def test_joint_summary_retry_updates_summary_run_prompt_digest(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
     prompts: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         prompt_text = body["messages"][0]["content"]
         if 'type="summary"' in prompt_text and 'type="term"' in prompt_text:
+            modes.append("joint")
             prompts["joint"] = prompt_text
-            records = [{"type": "term", "source": "Alice", "category": "人物"}]
+            records = (
+                [
+                    {"type": "summary", "text": "Alice 进入。"},
+                    {"type": "term", "source": "Missing", "category": "无效"},
+                ]
+                if failed_class == "term"
+                else [{"type": "term", "source": "Alice", "category": "人物"}]
+            )
         else:
-            prompts["summary-only"] = prompt_text
-            records = [{"type": "summary", "text": "Alice 进入。", "refs": ["1"]}]
+            modes.append(retry_mode)
+            prompts[retry_mode] = prompt_text
+            records = (
+                [{"type": "term", "source": "Alice", "category": "人物"}]
+                if failed_class == "term"
+                else [{"type": "summary", "text": "Alice 进入。", "refs": ["1"]}]
+            )
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
@@ -1900,14 +1712,28 @@ async def test_joint_summary_retry_updates_summary_run_prompt_digest(
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
 
+    assert modes == ["joint", retry_mode]
     assert result["failed"] == 0
-    assert prompts["joint"] != prompts["summary-only"]
+    assert result["published"] is True
+    summaries = read_content_summaries(project, kind="fragment", status="completed")
+    assert len(summaries) == 1
+    assert summaries[0]["refs"] == ["1"]
+    metadata = json.loads(
+        (project / "runs" / result["run_id"] / "prompt_variants.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {key.split("__", 1)[0] for key in metadata} == {
+        "terms+fragment-summary",
+        retry_mode,
+    }
     run = next(
         item
         for item in read_summary_runs(project)
         if item["run_id"] == result["run_id"]
     )
-    assert run["prompt_digest"] == _digest(prompts["summary-only"])
+    if failed_class == "summary":
+        assert run["prompt_digest"] == _digest(prompts[retry_mode])
 
 
 @pytest.mark.asyncio
@@ -2066,8 +1892,15 @@ async def test_summary_reuse_includes_project_target_language(
     )
 
 
-def test_source_changes_keep_summary_artifacts_but_mark_deleted_boundary_stale(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("mutation", "expected_stale"),
+    [
+        ("remove", {"SUMMARY-FIRST": False, "SUMMARY-SECOND": True}),
+        ("reorder", {"SUMMARY-FIRST": True, "SUMMARY-SECOND": True}),
+    ],
+)
+def test_source_changes_mark_summary_boundaries_stale(
+    tmp_path: Path, mutation: str, expected_stale: dict[str, bool]
 ) -> None:
     project = _project(tmp_path, "first")
     _write_summary(project, "F0001", "SUMMARY-FIRST")
@@ -2076,26 +1909,15 @@ def test_source_changes_keep_summary_artifacts_but_mark_deleted_boundary_stale(
     add_project_files(project, [str(second)])
     _write_summary(project, "F0002", "SUMMARY-SECOND")
 
-    remove_project_files(project, ["F0002"])
+    if mutation == "remove":
+        remove_project_files(project, ["F0002"])
+    else:
+        reorder_project_files(project, ["F0002", "F0001"])
     summaries = {item["record_id"]: item for item in read_content_summaries(project)}
-    assert summaries["SUMMARY-FIRST"]["source_changed"] is False
-    assert summaries["SUMMARY-SECOND"]["source_changed"] is True
-
-
-def test_reordering_files_marks_existing_summary_boundaries_stale(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "first")
-    second = tmp_path / "second.txt"
-    second.write_text("second", encoding="utf-8")
-    add_project_files(project, [str(second)])
-    _write_summary(project, "F0001", "SUMMARY-FIRST")
-    _write_summary(project, "F0002", "SUMMARY-SECOND")
-
-    reorder_project_files(project, ["F0002", "F0001"])
-    summaries = {item["record_id"]: item for item in read_content_summaries(project)}
-    assert summaries["SUMMARY-FIRST"]["source_changed"] is True
-    assert summaries["SUMMARY-SECOND"]["source_changed"] is True
+    assert {
+        record_id: summaries[record_id]["source_changed"]
+        for record_id in expected_stale
+    } == expected_stale
 
 
 @pytest.mark.asyncio
@@ -2524,7 +2346,7 @@ async def test_joint_external_failure_is_counted_once_per_requested_segment(
 
 
 @pytest.mark.asyncio
-async def test_partial_published_summary_backfill_reuses_existing_term_task(
+async def test_summary_backfill_preserves_terminology_state(
     tmp_path: Path,
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
@@ -2563,6 +2385,7 @@ async def test_partial_published_summary_backfill_reuses_existing_term_task(
     write_json(project, project / "terminology" / "active_task.json", active)
     published = publish_partial_terms(project)
     active_before = read_json(project, project / "terminology" / "active_task.json")
+    scans_before = read_jsonl(project, project / "terminology" / "scans.jsonl")
     candidates_before = read_jsonl(
         project, project / "terminology" / "candidates.jsonl"
     )
@@ -2615,11 +2438,14 @@ async def test_partial_published_summary_backfill_reuses_existing_term_task(
     assert 'type="summary"' in modes[0]
     assert 'type="term"' not in modes[0]
     assert result["failed"] == 0
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == scans_before
     assert (
         read_jsonl(project, project / "terminology" / "candidates.jsonl")
         == candidates_before
     )
     assert load_terms(project) == terms_before
+    assert read_summary_participation(project)[0]["selected"] is True
+    assert read_content_summaries(project, kind="fragment")[0]["status"] == "completed"
 
 
 @pytest.mark.asyncio

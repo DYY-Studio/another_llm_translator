@@ -262,6 +262,26 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
     assert "summary_selection" in response.json()["error"]
 
 
+def test_terminology_summary_start_rejects_partial_scope_before_queueing(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={
+            "stage": "terminology",
+            "include_summaries": True,
+            "only_segment": "F0001-S000001",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "完整项目范围" in response.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
 def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
     project = _project(tmp_path)
     _full_fragment(project)
@@ -288,7 +308,7 @@ def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
     assert "summary_selected_boundaries" not in without_flag.json()
 
 
-def test_terminology_task_options_report_missing_same_language_summary_prompt(
+def test_terminology_summary_prompt_preflight_and_start_fail_consistently(
     tmp_path: Path,
 ):
     project = _project(tmp_path)
@@ -299,40 +319,47 @@ def test_terminology_task_options_report_missing_same_language_summary_prompt(
     )
     client = TestClient(create_app(projects_root=project.parent))
 
-    response = client.get(
+    options = client.get(
         "/api/v1/projects/demo/task-options/terminology",
         params={"include_summaries": "true", "language": "en"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["summary_prompt_preflight"] == {
+    assert options.status_code == 200
+    assert options.json()["summary_prompt_preflight"] == {
         "ok": False,
         "language": "en",
         "required_stages": ["terminology", "fragment_summary"],
         "missing": ["fragment_summary.en.middle.txt"],
     }
 
-
-def test_terminology_start_blocks_missing_same_language_summary_prompt(
-    tmp_path: Path,
-):
-    project = _project(tmp_path)
-    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    client = TestClient(create_app(projects_root=project.parent))
-
-    response = client.post(
+    started = client.post(
         "/api/v1/projects/demo/tasks",
         json={"stage": "terminology", "language": "en", "include_summaries": True},
     )
 
-    assert response.status_code == 400
-    assert response.json()["params"]["reason"] == "summary_prompt_missing"
-    assert "fragment_summary.en.middle.txt" in response.json()["error"]
+    assert started.status_code == 400
+    assert started.json()["params"]["reason"] == "summary_prompt_missing"
+    assert "fragment_summary.en.middle.txt" in started.json()["error"]
     assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
+def test_summary_participation_rejects_duplicate_boundaries(tmp_path: Path):
+    project = _project(tmp_path)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={
+            "boundaries": [
+                {"file_id": "F0001", "part_id": "document"},
+                {"file_id": "F0001", "part_id": "document"},
+            ],
+            "selected": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "不能重复" in response.json()["error"]
 
 
 def test_terminology_start_reports_machine_readable_conflict_reasons(
@@ -375,40 +402,7 @@ def test_terminology_start_reports_machine_readable_conflict_reasons(
     assert "summary_selection" in response.json()["error"]
 
 
-def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
-    project = _project(tmp_path)
-    _full_fragment(project)
-    create_run(
-        project,
-        config=load_project_config(project, stage="content_summary"),
-        stage="content_summary",
-        fingerprint="old",
-        prompt="old prompt",
-        selected_count=1,
-        requested_count=1,
-        reused_count=0,
-        details={
-            "scope": {
-                "all_nonempty": True,
-                "from_file": None,
-                "only_file": None,
-                "only_segment": None,
-                "force": False,
-            }
-        },
-    )
-    client = TestClient(create_app(projects_root=project.parent))
-
-    second = client.post(
-        "/api/v1/projects/demo/summaries/aggregate",
-        json={"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
-    )
-    assert second.status_code == 400
-    assert second.json()["code"] == "usage_error"
-    assert second.json()["params"]["reason"] == "unfinished_run"
-
-
-def test_content_summary_task_options_mark_unfinished_run_non_resumable(
+def test_content_summary_task_options_and_start_report_unfinished_run(
     tmp_path: Path,
 ):
     project = _project(tmp_path)
@@ -432,7 +426,14 @@ def test_content_summary_task_options_mark_unfinished_run_non_resumable(
             }
         },
     )
-
     options = task_options(project, "content_summary")
-
     assert options["running_run"]["resume_compatible"] is False
+
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
+        "/api/v1/projects/demo/summaries/aggregate",
+        json={"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
+    )
+    assert started.status_code == 400
+    assert started.json()["code"] == "usage_error"
+    assert started.json()["params"]["reason"] == "unfinished_run"

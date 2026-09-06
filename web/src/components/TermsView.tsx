@@ -982,13 +982,16 @@ export function TermsView({
                 <summary className="quiet-button">{translate("terms.moreActions", language)}</summary>
                 <div className="term-actions-popover">
                   <div className="term-actions-group">
-                    <strong>{translate("terms.autoDecision", language)}</strong>
-                    <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => { setTermActionsOpen(false); openDecision("proposals"); }}>{translate("terms.autoDecision", language)}</button>
+                    <strong>{translate("terms.experiments", language)}</strong>
+                    <div className="term-actions-experiment-entry">
+                      <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => { setTermActionsOpen(false); openDecision("proposals"); }}>{translate("terms.autoDecision", language)}</button>
+                      <small>{translate("terms.autoDecisionDescription", language)}</small>
+                    </div>
                     {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => { setTermActionsOpen(false); openDecision("manual"); }}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
-                  </div>
-                  <div className="term-actions-group">
-                    <strong>{translate("terms.summaryMenuGroup", language)}</strong>
-                    <button className="quiet-button" onClick={() => { setTermActionsOpen(false); openSummary(); }}>{translate("terms.summary", language)}</button>
+                    <div className="term-actions-experiment-entry">
+                      <button className="quiet-button" onClick={() => { setTermActionsOpen(false); openSummary(); }}>{translate("terms.summary", language)}</button>
+                      <small>{translate("terms.summaryDescription", language)}</small>
+                    </div>
                   </div>
                   <button
                     className="danger-button"

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -335,6 +335,7 @@ async def aggregate_summaries(
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     prompt_language: str | None = None,
     on_progress: Any = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     boundaries = _boundaries(selected)
     grouped = _current_segments(project)
@@ -405,6 +406,8 @@ async def aggregate_summaries(
     pending_full: list[dict[str, Any]] = []
     calls = 0
     completed = 0
+    usage: dict[str, Any] | None = None
+    active_llm: LLMClient | None = None
     try:
         async with LLMClient(
             config,
@@ -414,7 +417,9 @@ async def aggregate_summaries(
             run_id=run_id or f"SUMMARY-{uuid.uuid4().hex[:12].upper()}",
             stage="content_summary",
             client=http_client,
+            on_usage=on_usage,
         ) as llm:
+            active_llm = llm
 
             def aggregation_summaries(children: list[dict[str, Any]]) -> list[dict[str, str]]:
                 return [
@@ -580,8 +585,10 @@ async def aggregate_summaries(
                 completed += 1
                 if on_progress is not None:
                     on_progress(completed, 0, len(checked))
+        usage = active_llm.usage_summary() if active_llm is not None else None
         publish_content_summary_fulls(project, pending_full)
     except asyncio.CancelledError:
+        usage = active_llm.usage_summary() if active_llm is not None else None
         if run_id is not None:
             write_summary_run(
                 project,
@@ -606,10 +613,11 @@ async def aggregate_summaries(
                     completed=completed,
                     failed=0,
                     warnings=["任务已由用户取消"],
-                    usage=None,
+                    usage=usage,
                 )
         raise
     except Exception as exc:
+        usage = active_llm.usage_summary() if active_llm is not None else None
         if run_id is not None:
             write_summary_run(
                 project,
@@ -635,7 +643,7 @@ async def aggregate_summaries(
                     completed=completed,
                     failed=len(checked) - completed,
                     warnings=[str(exc)],
-                    usage=None,
+                    usage=usage,
                 )
         if isinstance(exc, UsageError):
             raise
@@ -669,7 +677,7 @@ async def aggregate_summaries(
                 completed=len(checked),
                 failed=0,
                 warnings=[],
-                usage=None,
+                usage=usage,
             )
     return {
         "run_id": run_id,
@@ -678,6 +686,7 @@ async def aggregate_summaries(
         "failed": 0,
         "pending": 0,
         "calls": calls,
+        "usage": usage,
         "boundaries": [
             {
                 "file_id": str(artifact["file_id"]),

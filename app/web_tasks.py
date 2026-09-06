@@ -851,6 +851,18 @@ class WebTaskManager:
                 "include_summaries 只允许术语阶段的摘要子页面入口",
                 reason="include_summaries_outside_terminology",
             )
+        if include_summaries and any(
+            value is not None
+            for value in (
+                scope.from_file,
+                scope.only_file,
+                scope.only_segment,
+                scope.segment_ids,
+            )
+        ):
+            raise UsageError(
+                "include_summaries 要求完整项目范围，不支持部分 Scope"
+            )
         force = scope.force
         if force and reuse_mixed_fingerprints:
             raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
@@ -1267,6 +1279,7 @@ class WebTaskManager:
                         limiter=next(iter(shared_limiters.values())),
                         prompt_language=prompt_language,
                         on_progress=boundary_progress,
+                        on_usage=usage_changed,
                     )
                 elif state.stage == TERMINOLOGY_DECISION_STAGE:
                     summary = await run_terminology_decision(

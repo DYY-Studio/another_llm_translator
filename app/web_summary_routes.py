@@ -27,6 +27,7 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
     if not isinstance(values, list):
         raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
     result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for value in values:
         if not isinstance(value, dict):
             raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
@@ -36,6 +37,10 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
             raise UsageError("boundary 缺少 file_id")
         if not isinstance(part_id, str) or not part_id:
             raise UsageError("boundary 缺少 part_id")
+        boundary = (file_id, part_id)
+        if boundary in seen:
+            raise UsageError(f"boundary 不能重复：{file_id}/{part_id}")
+        seen.add(boundary)
         result.append({"file_id": file_id, "part_id": part_id})
     return result
 

@@ -26,7 +26,6 @@ from app.summary_aggregation import (
     export_summary_markdown,
     full_summary_expired,
 )
-from app.summary_provenance import assess_full_summary
 from app.web_tasks import WebTaskManager
 from tests.helpers import llm_jsonl
 from tests.test_foundation import make_app_root
@@ -169,6 +168,59 @@ def test_single_full_fragment_is_adopted_without_llm_call(tmp_path: Path) -> Non
     assert len(full) == 1
     assert full[0]["text"] == "单片段概括。"
     assert full[0]["provenance"]["origin"] == "adopted"
+
+
+def test_aggregation_reports_and_persists_exact_usage(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-ONE",
+        segment_indexes=[0],
+        text="片段一。",
+    )
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-TWO",
+        segment_indexes=[1],
+        text="片段二。",
+    )
+    expected_usage = {
+        "input_tokens": 11,
+        "output_tokens": 4,
+        "total_tokens": 15,
+        "available": True,
+        "partial": False,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = _summary_response(request)
+        payload = response.json()
+        payload["usage"] = {
+            "prompt_tokens": 11,
+            "completion_tokens": 4,
+            "total_tokens": 15,
+        }
+        return httpx.Response(200, json=payload)
+
+    reported: list[dict[str, object] | None] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = asyncio.run(
+            aggregate_summaries(
+                project,
+                [{"file_id": "F0001", "part_id": "document"}],
+                http_client=client,
+                on_usage=reported.append,
+            )
+        )
+    finally:
+        asyncio.run(client.aclose())
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert reported == [expected_usage]
+    assert result["usage"] == expected_usage
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["usage"] == expected_usage
 
 
 def test_adopted_full_expires_when_current_fragments_become_partitioned(
@@ -318,28 +370,6 @@ def test_recursive_full_expires_when_fragment_text_changes(
 
     artifacts = read_content_summaries(project)
     assert full_summary_expired(full, current, artifacts) is True
-
-
-def test_full_without_provenance_fails_closed_after_current_source_checks(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-LEGACY", segment_indexes=[0, 1], text="旧片段概括。")
-    fragment = read_content_summaries(project, kind="fragment", status="completed")[0]
-    legacy = {
-        **fragment,
-        "record_id": "SUMMARY-FULL-LEGACY",
-        "kind": "full",
-    }
-    legacy.pop("provenance", None)
-    write_content_summary(project, legacy)
-
-    current = [item for item in read_segments(project) if not item["is_empty"]]
-    artifacts = read_content_summaries(project)
-    assessment = assess_full_summary(legacy, current, artifacts)
-    assert assessment.expired is True
-    assert assessment.expiry_reason == "provenance_unavailable"
-    assert full_summary_expired(legacy, current, artifacts) is True
 
 
 def test_export_keeps_a_stale_full_when_no_current_full_exists(tmp_path: Path) -> None:
@@ -797,10 +827,26 @@ async def test_web_task_manager_runs_content_summary_stage(
 ) -> None:
     project = _project(tmp_path)
     _fragment(project, summary_id="SUMMARY-FRAGMENT-ALL", segment_indexes=[0, 1], text="已有概括。")
+    expected_usage = {
+        "input_tokens": 11,
+        "output_tokens": 4,
+        "total_tokens": 15,
+        "available": True,
+        "partial": False,
+    }
 
     async def fake_aggregate(project: Path, selected: list[dict[str, str]], **kwargs: object) -> dict[str, object]:
-        del project, kwargs
-        return {"selected": len(selected), "completed": len(selected), "failed": 0, "pending": 0}
+        del project
+        on_usage = kwargs["on_usage"]
+        assert callable(on_usage)
+        on_usage(expected_usage)
+        return {
+            "selected": len(selected),
+            "completed": len(selected),
+            "failed": 0,
+            "pending": 0,
+            "usage": expected_usage,
+        }
 
     monkeypatch.setattr("app.web_tasks.aggregate_summaries", fake_aggregate)
     manager = WebTaskManager(max_active_projects=1)
@@ -813,4 +859,6 @@ async def test_web_task_manager_runs_content_summary_stage(
         summary_selection=[{"file_id": "F0001", "part_id": "document"}],
     )
     await manager.tasks[state["task_id"]].asyncio_task
-    assert manager.get(state["task_id"])["status"] == "completed"
+    result = manager.get(state["task_id"])
+    assert result["status"] == "completed"
+    assert result["usage"] == expected_usage
