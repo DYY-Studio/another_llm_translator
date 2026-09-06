@@ -197,7 +197,7 @@ def test_prompt_api_reports_sync_and_keeps_library_separate(
     assert "prompt_library" not in metadata
 
 
-def test_project_prompt_sync_uses_language_fallback(tmp_path: Path) -> None:
+def test_project_prompt_sync_rejects_missing_requested_language(tmp_path: Path) -> None:
     app_root, projects_root, project = make_project(tmp_path)
     (project / "prompts" / "translation.en.middle.txt").unlink()
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
@@ -205,11 +205,9 @@ def test_project_prompt_sync_uses_language_fallback(tmp_path: Path) -> None:
         "/api/v1/projects/sample/prompts/translation",
         params={"language": "en"},
     )
-    assert response.status_code == 200
-    value = response.json()
-    assert value["language"] == "zh-CN"
-    assert value["global_sync"]["language"] == "zh-CN"
-    assert value["global_sync"]["same"] is True
+    assert response.status_code == 400
+    assert response.json()["params"]["reason"] == "prompt_language_missing"
+    assert "translation.en.middle.txt" in response.json()["error"]
 
 
 def test_project_prompt_reports_unavailable_global_prompt(tmp_path: Path) -> None:

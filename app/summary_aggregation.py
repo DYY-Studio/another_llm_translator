@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from .sqlite_storage import (
     write_content_summary,
     write_summary_run,
 )
+from .summary_provenance import assess_full_summary, build_provenance
 
 MAX_REDUCTION_DEPTH = 8
 
@@ -100,6 +101,15 @@ def _range_segments(artifact: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(values, list):
         return []
     return [value for value in values if isinstance(value, dict)]
+
+
+def full_summary_expired(
+    artifact: dict[str, Any],
+    current_segments: list[dict[str, Any]],
+    summary_artifacts: list[dict[str, Any]],
+) -> bool:
+    """Return whether a full summary should be shown with an expiry warning."""
+    return assess_full_summary(artifact, current_segments, summary_artifacts).expired
 
 
 def _validate_fragments(
@@ -255,10 +265,13 @@ def _refs_for_children(children: list[dict[str, Any]], refs: Iterable[str]) -> l
 def _children_from_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
+            "record_id": str(artifact["record_id"]),
             "summary_id": str(artifact["record_id"]),
+            "kind": str(artifact["kind"]),
             "text": str(artifact.get("text") or ""),
             "refs": list(artifact.get("refs") or []),
             "source_range": artifact["source_range"],
+            "source_digest": artifact["source_digest"],
         }
         for artifact in artifacts
     ]
@@ -266,10 +279,13 @@ def _children_from_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, 
 
 def _child_from_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
     return {
+        "record_id": str(artifact["record_id"]),
         "summary_id": str(artifact["record_id"]),
+        "kind": str(artifact["kind"]),
         "text": str(artifact.get("text") or ""),
         "refs": list(artifact.get("refs") or []),
         "source_range": artifact["source_range"],
+        "source_digest": artifact["source_digest"],
     }
 
 
@@ -288,9 +304,7 @@ def _make_artifact(
     origin: str,
 ) -> dict[str, Any]:
     source_digest = _digest(source_range.get("segments", []))
-    input_digest = _digest(
-        [{"summary_id": item["summary_id"], "text": item["text"]} for item in children]
-    )
+    provenance, input_digest = build_provenance(origin, children)
     summary_id = f"SUMMARY-{kind.upper()}-{_digest([boundary, source_digest, input_digest, prompt_digest, text])[7:31].upper()}"
     record = record_header(
         "content_summary",
@@ -308,11 +322,7 @@ def _make_artifact(
         prompt_digest=prompt_digest,
         model=str(config["llm"]["model"]),
         run_id=run_id,
-        provenance={
-            "origin": origin,
-            "artifact_ids": [str(item["summary_id"]) for item in children],
-            "source_ranges": [item["source_range"] for item in children],
-        },
+        provenance=provenance,
     )
     return record
 
@@ -325,6 +335,7 @@ async def aggregate_summaries(
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     prompt_language: str | None = None,
     on_progress: Any = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     boundaries = _boundaries(selected)
     grouped = _current_segments(project)
@@ -395,6 +406,8 @@ async def aggregate_summaries(
     pending_full: list[dict[str, Any]] = []
     calls = 0
     completed = 0
+    usage: dict[str, Any] | None = None
+    active_llm: LLMClient | None = None
     try:
         async with LLMClient(
             config,
@@ -404,7 +417,18 @@ async def aggregate_summaries(
             run_id=run_id or f"SUMMARY-{uuid.uuid4().hex[:12].upper()}",
             stage="content_summary",
             client=http_client,
+            on_usage=on_usage,
         ) as llm:
+            active_llm = llm
+
+            def aggregation_summaries(children: list[dict[str, Any]]) -> list[dict[str, str]]:
+                return [
+                    {
+                        "id": str(index + 1),
+                        "text": item["text"],
+                    }
+                    for index, item in enumerate(children)
+                ]
 
             async def summarize(
                 boundary: tuple[str, str],
@@ -414,17 +438,9 @@ async def aggregate_summaries(
                 kind: str,
             ) -> dict[str, Any]:
                 nonlocal calls
-                summaries = [
-                    {
-                        "id": str(index + 1),
-                        "text": item["text"],
-                        "refs": item.get("refs", []),
-                    }
-                    for index, item in enumerate(children)
-                ]
                 payload = {
                     "target_language": config["project"]["target_language"],
-                    "summaries": summaries,
+                    "summaries": aggregation_summaries(children),
                 }
                 messages = render_messages(prompt, payload)
                 estimated = estimate_messages(
@@ -461,6 +477,8 @@ async def aggregate_summaries(
                     raise UsageError(
                         "聚合失败：LLM 响应缺少有效 summary 或 end"
                     )
+                if len(parsed.summaries) != 1:
+                    raise UsageError("聚合失败：只允许一条 summary")
                 refs = list(parsed.summaries[0]["refs"])
                 if set(refs) != {str(index + 1) for index in range(len(children))}:
                     raise UsageError("聚合失败：summary 未覆盖全部输入概括")
@@ -521,10 +539,7 @@ async def aggregate_summaries(
                 def estimate(children: list[dict[str, Any]]) -> int:
                     payload = {
                         "target_language": config["project"]["target_language"],
-                        "summaries": [
-                            {"id": str(index + 1), "text": item["text"], "refs": item.get("refs", [])}
-                            for index, item in enumerate(children)
-                        ],
+                        "summaries": aggregation_summaries(children),
                     }
                     return estimate_messages(
                         render_messages(prompt, payload),
@@ -570,8 +585,10 @@ async def aggregate_summaries(
                 completed += 1
                 if on_progress is not None:
                     on_progress(completed, 0, len(checked))
+        usage = active_llm.usage_summary() if active_llm is not None else None
         publish_content_summary_fulls(project, pending_full)
     except asyncio.CancelledError:
+        usage = active_llm.usage_summary() if active_llm is not None else None
         if run_id is not None:
             write_summary_run(
                 project,
@@ -596,10 +613,11 @@ async def aggregate_summaries(
                     completed=completed,
                     failed=0,
                     warnings=["任务已由用户取消"],
-                    usage=None,
+                    usage=usage,
                 )
         raise
     except Exception as exc:
+        usage = active_llm.usage_summary() if active_llm is not None else None
         if run_id is not None:
             write_summary_run(
                 project,
@@ -625,7 +643,7 @@ async def aggregate_summaries(
                     completed=completed,
                     failed=len(checked) - completed,
                     warnings=[str(exc)],
-                    usage=None,
+                    usage=usage,
                 )
         if isinstance(exc, UsageError):
             raise
@@ -659,7 +677,7 @@ async def aggregate_summaries(
                 completed=len(checked),
                 failed=0,
                 warnings=[],
-                usage=None,
+                usage=usage,
             )
     return {
         "run_id": run_id,
@@ -668,6 +686,7 @@ async def aggregate_summaries(
         "failed": 0,
         "pending": 0,
         "calls": calls,
+        "usage": usage,
         "boundaries": [
             {
                 "file_id": str(artifact["file_id"]),
@@ -686,36 +705,30 @@ def _latest_full(
     boundary: tuple[str, str],
     current: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    candidates = read_content_summaries(
+    artifacts = read_content_summaries(
         project,
         file_id=boundary[0],
         part_id=boundary[1],
-        kind="full",
-        status="completed",
     )
-    current_ids = {str(item["segment_id"]): item for item in current}
-    for artifact in reversed(candidates):
-        if artifact.get("source_changed"):
-            continue
-        ranges = _range_segments(artifact)
-        ids = {
-            str(value.get("original_segment_id") or value.get("segment_id"))
-            for value in ranges
-        }
-        if ids != set(current_ids):
-            continue
-        if all(
-            value.get("original_source_digest", value.get("source_digest"))
-            == _digest(str(current_ids[stable_id]["source"]))
-            for value in ranges
-            if (stable_id := str(value.get("original_segment_id") or value.get("segment_id"))) in current_ids
-        ) and all(
-            value.get("original_model_text_digest", value.get("model_text_digest"))
-            == _digest(segment_model_source(current_ids[stable_id]))
-            for value in ranges
-            if (stable_id := str(value.get("original_segment_id") or value.get("segment_id"))) in current_ids
-        ):
+    candidates = [item for item in artifacts if item.get("kind") == "full"]
+    usable = [
+        item
+        for item in candidates
+        if item.get("status") in {"completed", "stale"}
+        and item.get("text") is not None
+    ]
+    usable.sort(
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("updated_at") or ""),
+            str(item.get("record_id") or ""),
+        )
+    )
+    for artifact in reversed(usable):
+        if not assess_full_summary(artifact, current, artifacts).expired:
             return artifact
+    if usable:
+        return usable[-1]
     raise ExportError(
         f"{boundary[0]}/{boundary[1]} 缺少完整或有效的内容概括",
         reason="missing_or_stale_summary",

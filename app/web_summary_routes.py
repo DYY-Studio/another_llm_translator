@@ -19,6 +19,7 @@ from .summary_aggregation import (
     aggregation_preflight,
     export_summary_markdown,
 )
+from .summary_provenance import assess_full_summary
 
 
 def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -26,6 +27,7 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
     if not isinstance(values, list):
         raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
     result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for value in values:
         if not isinstance(value, dict):
             raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
@@ -35,6 +37,10 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
             raise UsageError("boundary 缺少 file_id")
         if not isinstance(part_id, str) or not part_id:
             raise UsageError("boundary 缺少 part_id")
+        boundary = (file_id, part_id)
+        if boundary in seen:
+            raise UsageError(f"boundary 不能重复：{file_id}/{part_id}")
+        seen.add(boundary)
         result.append({"file_id": file_id, "part_id": part_id})
     return result
 
@@ -62,6 +68,37 @@ def register_summary_routes(
             key = (str(segment["file_id"]), str(segment["part_id"]))
             boundaries[key] = boundaries.get(key, 0) + 1
         artifacts = read_content_summaries(root)
+        current_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for segment in load_segments(root):
+            if segment.get("is_empty"):
+                continue
+            boundary = (str(segment["file_id"]), str(segment["part_id"]))
+            current_by_boundary.setdefault(boundary, []).append(segment)
+        artifacts_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for artifact in artifacts:
+            boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
+            artifacts_by_boundary.setdefault(boundary, []).append(artifact)
+        visible_artifacts = []
+        for artifact in artifacts:
+            boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
+            assessment = (
+                assess_full_summary(
+                    artifact,
+                    current_by_boundary.get(boundary, []),
+                    artifacts_by_boundary.get(boundary, []),
+                )
+                if artifact.get("kind") == "full"
+                else None
+            )
+            visible_artifacts.append(
+                {
+                    **artifact,
+                    "expired": assessment.expired if assessment is not None else False,
+                    "expiry_reason": (
+                        assessment.expiry_reason if assessment is not None else None
+                    ),
+                }
+            )
         return {
             "participation": [
                 {
@@ -79,7 +116,7 @@ def register_summary_routes(
                 }
                 for (file_id, part_id), count in sorted(boundaries.items())
             ],
-            "artifacts": artifacts,
+            "artifacts": visible_artifacts,
         }
 
     @app.put("/api/v1/projects/{name}/summaries/participation")

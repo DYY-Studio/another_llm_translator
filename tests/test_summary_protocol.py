@@ -94,6 +94,103 @@ def test_summary_only_allows_empty_terms_and_requires_summary() -> None:
     assert parsed.terms == ()
 
 
+def test_summary_without_refs_is_normalized_to_full_source_refs() -> None:
+    parsed = parse_terminology_response(
+        '{"type":"summary","text":"Covers both inputs."}\n'
+        '{"type":"end"}',
+        mode=TerminologyResponseMode.SUMMARY_ONLY,
+        source_refs=("1", "2"),
+        source_texts=("First input.", "Second input."),
+    )
+
+    assert parsed.complete is True
+    assert parsed.summaries[0]["refs"] == ["1", "2"]
+
+
+def test_summary_refs_must_cover_all_source_refs() -> None:
+    parsed = parse_terminology_response(
+        '{"type":"summary","text":"Only one input.","refs":["1"]}\n'
+        '{"type":"end"}',
+        mode=TerminologyResponseMode.SUMMARY_ONLY,
+        source_refs=("1", "2"),
+        source_texts=("First input.", "Second input."),
+    )
+
+    assert parsed.complete is False
+    assert parsed.summary_complete is False
+    assert parsed.summaries == ()
+    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
+
+
+def test_multiple_summary_records_partition_source_refs_and_keep_term_order() -> None:
+    response = (
+        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+        '{"type":"summary","text":"Bob waves.","refs":["2"]}\n'
+        '{"type":"term","source":"Alice","category":"person"}\n'
+        '{"type":"end"}'
+    )
+
+    parsed = parse_terminology_response(
+        response,
+        mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+        source_refs=("1", "2"),
+        source_texts=("Alice enters.", "Bob waves."),
+    )
+
+    assert parsed.complete is True
+    assert [summary["refs"] for summary in parsed.summaries] == [["1"], ["2"]]
+    assert [record["type"] for record in parsed.records] == [
+        "summary",
+        "summary",
+        "term",
+    ]
+
+
+def test_multiple_summary_records_require_refs_on_each_record() -> None:
+    parsed = parse_terminology_response(
+        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+        '{"type":"summary","text":"Bob waves."}\n'
+        '{"type":"end"}',
+        mode=TerminologyResponseMode.SUMMARY_ONLY,
+        source_refs=("1", "2"),
+        source_texts=("Alice enters.", "Bob waves."),
+    )
+
+    assert parsed.complete is False
+    assert parsed.summary_complete is False
+    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
+
+
+def test_multiple_summary_records_reject_overlapping_refs() -> None:
+    parsed = parse_terminology_response(
+        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+        '{"type":"summary","text":"Alice and Bob.","refs":["1","2"]}\n'
+        '{"type":"end"}',
+        mode=TerminologyResponseMode.SUMMARY_ONLY,
+        source_refs=("1", "2"),
+        source_texts=("Alice enters.", "Bob waves."),
+    )
+
+    assert parsed.complete is False
+    assert parsed.summary_complete is False
+    assert parsed.error_codes_by_type["summary"] == ("duplicate_reference",)
+
+
+def test_multiple_summary_records_reject_incomplete_coverage() -> None:
+    parsed = parse_terminology_response(
+        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+        '{"type":"summary","text":"Bob waves.","refs":["2"]}\n'
+        '{"type":"end"}',
+        mode=TerminologyResponseMode.SUMMARY_ONLY,
+        source_refs=("1", "2", "3"),
+        source_texts=("Alice enters.", "Bob waves.", "Carol smiles."),
+    )
+
+    assert parsed.complete is False
+    assert parsed.summary_complete is False
+    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
+
+
 def test_joint_response_rejects_duplicate_or_out_of_source_terms() -> None:
     response = (
         '{"type":"summary","text":"A summary.","refs":["1","1"]}\n'

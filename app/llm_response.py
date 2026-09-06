@@ -259,12 +259,18 @@ def _validate_summary_record(
     record: dict[str, Any],
     *,
     source_refs: tuple[str, ...],
+    allow_omitted_refs: bool,
 ) -> tuple[str | None, dict[str, Any] | None]:
     allowed = {"type", "text", "refs"}
     if set(record) - allowed:
         return "unknown_field", None
     text = record.get("text")
-    refs = record.get("refs")
+    if "refs" not in record:
+        if not allow_omitted_refs:
+            return "invalid_reference", None
+        refs = list(source_refs)
+    else:
+        refs = record.get("refs")
     if not isinstance(text, str) or not text.strip():
         return "invalid_text", None
     if not isinstance(refs, list) or not refs or not all(
@@ -273,7 +279,7 @@ def _validate_summary_record(
         return "invalid_reference", None
     if len(set(refs)) != len(refs):
         return "duplicate_reference", None
-    if source_refs and any(ref not in source_refs for ref in refs):
+    if any(ref not in source_refs for ref in refs):
         return "invalid_reference", None
     return None, {"type": "summary", "text": text.strip(), "refs": list(refs)}
 
@@ -315,23 +321,43 @@ def parse_terminology_response(
 
     if "summary" in allowed_types:
         summary_rows = raw_by_type.get("summary", ())
-        if len(summary_rows) > 1:
-            errors_by_type["summary"].append("summary 记录只能有一条")
-            error_codes_by_type["summary"].append("duplicate_summary")
         if summary_rows:
-            error, validated = _validate_summary_record(
-                summary_rows[0], source_refs=expected_refs
-            )
-            if error is None and validated is not None:
-                summaries.append(validated)
-            else:
-                errors_by_type["summary"].append(
-                    f"summary 记录字段或引用无效：{error}"
+            seen_refs: set[str] = set()
+            for row in summary_rows:
+                error, validated = _validate_summary_record(
+                    row,
+                    source_refs=expected_refs,
+                    allow_omitted_refs=len(summary_rows) == 1,
                 )
-                error_codes_by_type["summary"].append(error or "invalid_summary")
+                if error is None and validated is not None:
+                    refs = set(validated["refs"])
+                    if seen_refs.intersection(refs):
+                        errors_by_type["summary"].append(
+                            "summary 记录之间的引用不能重复"
+                        )
+                        error_codes_by_type["summary"].append(
+                            "duplicate_reference"
+                        )
+                    seen_refs.update(refs)
+                    summaries.append(validated)
+                else:
+                    errors_by_type["summary"].append(
+                        f"summary 记录字段或引用无效：{error}"
+                    )
+                    error_codes_by_type["summary"].append(error or "invalid_summary")
+            if (
+                not error_codes_by_type["summary"]
+                and seen_refs != set(expected_refs)
+            ):
+                errors_by_type["summary"].append(
+                    "summary 记录引用未覆盖全部 source_refs"
+                )
+                error_codes_by_type["summary"].append("invalid_reference")
         else:
             errors_by_type["summary"].append("响应缺少 summary 记录")
             error_codes_by_type["summary"].append("missing_summary")
+        if error_codes_by_type["summary"]:
+            summaries.clear()
 
     if "term" in allowed_types:
         for row in raw_by_type.get("term", ()):

@@ -996,7 +996,7 @@ def _request_estimate(
 
 
 def _prompt_language(project: Path, stage: str, requested: str | None) -> str:
-    """Resolve the run prompt language, falling back to zh-CN."""
+    """Resolve the run prompt language without crossing languages."""
     return _prompt_language_for_stages(project, requested, (stage,))
 
 
@@ -1006,13 +1006,14 @@ def _prompt_language_for_stages(
     stages: tuple[str, ...],
 ) -> str:
     """Resolve one language only when every required Prompt is available."""
-    value = requested or resolve_language()
-    if value in SUPPORTED_LANGUAGES and all(
-        (project / "prompts" / prompt_file(stage, value)).is_file()
-        for stage in stages
-    ):
-        return value
-    return "zh-CN"
+    result = prompt_preflight(project, requested, stages)
+    missing = result["missing"]
+    if missing:
+        raise UsageError(
+            f"缺少 {result['language']} Prompt：{', '.join(str(item) for item in missing)}",
+            reason="prompt_language_missing",
+        )
+    return str(result["language"])
 
 
 def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
@@ -1028,6 +1029,27 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
 def _prompt(project: Path, stage: str, language: str | None = None) -> str:
     factory = _prompt_factory(project, stage, language)
     return factory(())
+
+
+def prompt_preflight(
+    project: Path,
+    requested: str | None,
+    stages: tuple[str, ...],
+) -> dict[str, object]:
+    language = requested or resolve_language()
+    if language not in SUPPORTED_LANGUAGES:
+        raise UsageError(f"不支持的 Prompt 语言：{language}", reason="prompt_language_missing")
+    missing = [
+        prompt_file(stage, language)
+        for stage in stages
+        if not (project / "prompts" / prompt_file(stage, language)).is_file()
+    ]
+    return {
+        "ok": not missing,
+        "language": language,
+        "required_stages": list(stages),
+        "missing": missing,
+    }
 
 
 def _prompt_factory(

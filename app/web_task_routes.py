@@ -95,11 +95,13 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         name: str,
         stage: str,
         include_summaries: bool = False,
+        language: str | None = None,
     ) -> dict[str, Any]:
         return task_options(
             project(name),
             stage,
             include_summaries=include_summaries,
+            prompt_language=(validate_language(language) if language is not None else None),
         )
 
     @app.get("/api/v1/tasks/active")

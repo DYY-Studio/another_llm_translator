@@ -1286,6 +1286,35 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
         connection.close()
 
 
+def mark_content_summary_fragments_stale(
+    project: Path,
+    boundaries: Iterable[tuple[str, str]],
+) -> int:
+    boundary_values = {(str(file_id), str(part_id)) for file_id, part_id in boundaries}
+    if not boundary_values:
+        return 0
+    connection = _with_db(project)
+    deleted = 0
+    try:
+        with connection:
+            for file_id, part_id in boundary_values:
+                cursor = connection.execute(
+                    """
+                    UPDATE content_summaries
+                       SET status = 'stale', updated_at = ?
+                     WHERE kind = 'fragment' AND status = 'completed'
+                       AND file_id = ? AND part_id = ?
+                    """,
+                    (utc_now(), file_id, part_id),
+                )
+                deleted += max(0, int(cursor.rowcount))
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法标记片段概括过期：{project}: {exc}") from exc
+    finally:
+        connection.close()
+    return deleted
+
+
 def publish_content_summary_fulls(
     project: Path, values: Iterable[dict[str, Any]]
 ) -> None:

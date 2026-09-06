@@ -244,11 +244,12 @@ def register_resource_routes(
         global_file_for: Callable[[str], Path] | None = None,
         fragment_summary_file_for: Callable[[str], Path] | None = None,
     ) -> dict[str, Any]:
-        resolved = (
-            language
-            if language in available and file_for(language).is_file()
-            else "zh-CN"
-        )
+        if language not in available or not file_for(language).is_file():
+            raise UsageError(
+                f"缺少 {language} Prompt：{prompt_file(stage, language)}",
+                reason="prompt_language_missing",
+            )
+        resolved = language
         path = file_for(resolved)
         content = path.read_text(encoding="utf-8")
         result: dict[str, Any] = {
@@ -273,10 +274,7 @@ def register_resource_routes(
             mode_errors: dict[str, str] = {}
             if fragment_summary_file_for is not None:
                 def mode_language(required_stages: tuple[str, ...]) -> str | None:
-                    candidates = [language, resolved]
-                    if "zh-CN" not in candidates:
-                        candidates.append("zh-CN")
-                    for candidate in candidates:
+                    for candidate in (language,):
                         paths = {
                             "terminology": file_for(candidate),
                             "fragment_summary": fragment_summary_file_for(candidate),

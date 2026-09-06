@@ -43,7 +43,7 @@ export function Overview({
   project: string;
   runningProjectIds: ReadonlySet<string>;
   value: ProjectOverview | null;
-  onProject: (value: string) => void;
+  onProject: (value: ProjectSummary) => void;
   onCreate: () => void;
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
@@ -96,7 +96,7 @@ export function Overview({
     setReplacementTarget(item);
   }
 
-  function changeProject(nextProject: string) {
+  function changeProject(nextProject: ProjectSummary) {
     closeAddFiles();
     setButtonReorder(null);
     setDraggedFileIds([]);

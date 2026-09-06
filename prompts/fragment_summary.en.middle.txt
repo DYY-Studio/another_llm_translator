@@ -1,1 +1,1 @@
-Summarize the core content of the current source_segments faithfully and concisely. Do not add facts unsupported by the input; cover every source_segment and use request-local refs to identify the source_segments actually covered. Do not use reference_context as summary content or extract terminology from the summary.
+Summarize the core content of the current source_segments faithfully and concisely. Do not add facts unsupported by the input; cover every source_segment. Do not use reference_context as summary content or extract terminology from the summary.

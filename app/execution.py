@@ -266,7 +266,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-PROMPT_RULES_VERSION = 12
+PROMPT_RULES_VERSION = 13
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -459,29 +459,25 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     "content_summary": {
         "zh-CN": (
             '只输出恰好一条 type="summary" 记录和最后的 end。summary 仅含 type、'
-            "非空 text 和 refs；refs 是 summaries 的从 1 开始的请求内短 id 数组，"
-            "不得重复或超出范围，并应覆盖本次全部 summaries。"
+            "非空 text，并应覆盖本次全部 summaries。"
         ),
         "en": (
             'Output exactly one type="summary" record followed by the final end. '
-            "A summary contains only type, non-empty text, and refs; refs is a "
-            "non-repeating array of 1-based request-local ids into summaries and "
-            "must cover all summaries."
+            "A summary contains only type and non-empty text and must cover all "
+            "summaries."
         ),
     },
     "fragment_summary": {
         "zh-CN": (
-            '只输出恰好一条 type="summary" 记录和最后的 end，不输出 term。summary '
-            "仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的"
-            "请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有"
-            "source_segments。"
+            '输出一条或多条 type="summary" 记录，最后输出 end，不输出 term。'
+            "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
         ),
         "en": (
-            'Output exactly one type="summary" record and end last; output no term '
-            "records. A summary contains only type, non-empty text, and refs; refs is "
-            "a non-repeating array of 1-based request-local references into source_segments, "
-            "and every reference must be in range. The summary must cover all "
-            "source_segments."
+            'Output one or more type="summary" records and end last; output no term '
+            "records. A summary contains type and non-empty text. A single summary may "
+            "omit refs. If outputting multiple summaries, each must include refs; refs "
+            "must not overlap and must collectively cover all source_segments."
         ),
     },
 }
@@ -491,10 +487,9 @@ _TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
         "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"]
         + " "
         + (
-            '先输出恰好一条 type="summary" 记录，再输出术语记录，最后输出 end。'
-            'summary 仅含 type、非空 text 和 refs；refs 是 source_segments 的从 1 开始的'
-            '请求内短引用数组，不能重复或引用范围外编号。summary 必须概括本次所有'
-            "source_segments。"
+            '先输出一条或多条 type="summary" 记录，再输出术语记录，最后输出 end。'
+            "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
         ),
         "summary-only": _STAGE_SUFFIX["fragment_summary"]["zh-CN"],
     },
@@ -502,10 +497,10 @@ _TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
         "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"]
         + " "
         + (
-            'Output exactly one type="summary" record first, then term records, and end last. '
-            'A summary contains only type, non-empty text, and refs; refs is a non-repeating '
-            'array of 1-based request-local references into source_segments, and every reference '
-            'must be in range. The summary must cover all source_segments.'
+            'Output one or more type="summary" records first, then term records, and end last. '
+            'A summary contains type and non-empty text. A single summary may omit refs. '
+            'If outputting multiple summaries, each must include refs; refs must not overlap '
+            'and must collectively cover all source_segments.'
         ),
         "summary-only": _STAGE_SUFFIX["fragment_summary"]["en"],
     },

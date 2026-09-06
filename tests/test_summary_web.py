@@ -9,7 +9,14 @@ from app.project import init_project
 from app.config import load_project_config
 from app.execution import create_run, segment_model_source
 from app.web_tasks import task_options
-from app.sqlite_storage import read_json, read_segments, record_header, write_content_summary
+from app.sqlite_storage import (
+    read_content_summaries,
+    read_json,
+    read_segments,
+    record_header,
+    write_content_summary,
+    write_summary_participation,
+)
 from app.stage_terminology import _digest
 from app.web import create_app
 from app.summary_aggregation import aggregate_summaries
@@ -126,11 +133,13 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     app_root = tmp_path / "app-root"
     missing = project / "prompts" / "content_summary.zh-CN.middle.txt"
     missing_fragment = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
+    missing_terminology = project / "prompts" / "terminology.en.middle.txt"
     existing = project / "prompts" / "content_summary.en.middle.txt"
     custom = "用户自定义概括提示词。"
     existing.write_text(custom, encoding="utf-8")
     missing.unlink()
     missing_fragment.unlink()
+    missing_terminology.unlink()
 
     client = TestClient(create_app(projects_root=project.parent, app_root=app_root))
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
@@ -142,6 +151,9 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     assert missing_fragment.read_text(encoding="utf-8") == (
         app_root / "prompts" / missing_fragment.name
     ).read_text(encoding="utf-8")
+    assert missing_terminology.read_text(encoding="utf-8") == (
+        app_root / "prompts" / missing_terminology.name
+    ).read_text(encoding="utf-8")
     assert existing.read_text(encoding="utf-8") == custom
     assert any(
         "content_summary.zh-CN.middle.txt" in item
@@ -151,9 +163,13 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
         "fragment_summary.zh-CN.middle.txt" in item
         for item in opened.json()["warnings"]
     )
+    assert any(
+        "terminology.en.middle.txt" in item
+        for item in opened.json()["warnings"]
+    )
 
 
-def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):
+def test_summary_task_options_keep_source_changed_full_usable(tmp_path: Path):
     project = _project(tmp_path)
     _full_fragment(project)
     metadata = read_json(project, project / "project.json")
@@ -189,7 +205,47 @@ def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):
         ),
     )
     options = task_options(project, "content_summary")
-    assert options["completed"] == 0
+    assert options["completed"] == 1
+
+    client = TestClient(create_app(projects_root=project.parent))
+    listing = client.get("/api/v1/projects/demo/summaries")
+    assert listing.status_code == 200
+    full = [
+        item
+        for item in listing.json()["artifacts"]
+        if item["kind"] == "full"
+    ]
+    assert full[0]["expired"] is True
+    assert full[0]["expiry_reason"] == "source_changed"
+
+
+def test_summary_route_marks_llm_full_expired_after_fragment_text_changes(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    fragment = read_content_summaries(project, kind="fragment", status="completed")[0]
+    legacy_full = {
+        **fragment,
+        "record_id": "SUMMARY-FULL-LLM-WEB",
+        "kind": "full",
+        "input_digest": _digest(
+            [{"summary_id": fragment["record_id"], "text": fragment["text"]}]
+        ),
+        "provenance": {
+            "origin": "llm",
+            "artifact_ids": [fragment["record_id"]],
+            "source_ranges": [fragment["source_range"]],
+        },
+    }
+    write_content_summary(project, legacy_full)
+    fragment["text"] = "片段文本已重新生成。"
+    write_content_summary(project, fragment)
+
+    client = TestClient(create_app(projects_root=project.parent))
+    response = client.get("/api/v1/projects/demo/summaries")
+    assert response.status_code == 200
+    full = [item for item in response.json()["artifacts"] if item["record_id"] == "SUMMARY-FULL-LLM-WEB"]
+    assert full[0]["expired"] is True
+    assert full[0]["expiry_reason"] == "provenance_unavailable"
 
 
 def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
@@ -204,6 +260,26 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
     )
     assert response.status_code == 400
     assert "summary_selection" in response.json()["error"]
+
+
+def test_terminology_summary_start_rejects_partial_scope_before_queueing(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={
+            "stage": "terminology",
+            "include_summaries": True,
+            "only_segment": "F0001-S000001",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "完整项目范围" in response.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
 
 
 def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
@@ -230,6 +306,60 @@ def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
         "/api/v1/projects/demo/task-options/terminology"
     )
     assert "summary_selected_boundaries" not in without_flag.json()
+
+
+def test_terminology_summary_prompt_preflight_and_start_fail_consistently(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    client = TestClient(create_app(projects_root=project.parent))
+
+    options = client.get(
+        "/api/v1/projects/demo/task-options/terminology",
+        params={"include_summaries": "true", "language": "en"},
+    )
+
+    assert options.status_code == 200
+    assert options.json()["summary_prompt_preflight"] == {
+        "ok": False,
+        "language": "en",
+        "required_stages": ["terminology", "fragment_summary"],
+        "missing": ["fragment_summary.en.middle.txt"],
+    }
+
+    started = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={"stage": "terminology", "language": "en", "include_summaries": True},
+    )
+
+    assert started.status_code == 400
+    assert started.json()["params"]["reason"] == "summary_prompt_missing"
+    assert "fragment_summary.en.middle.txt" in started.json()["error"]
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
+def test_summary_participation_rejects_duplicate_boundaries(tmp_path: Path):
+    project = _project(tmp_path)
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={
+            "boundaries": [
+                {"file_id": "F0001", "part_id": "document"},
+                {"file_id": "F0001", "part_id": "document"},
+            ],
+            "selected": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "不能重复" in response.json()["error"]
 
 
 def test_terminology_start_reports_machine_readable_conflict_reasons(
@@ -272,7 +402,9 @@ def test_terminology_start_reports_machine_readable_conflict_reasons(
     assert "summary_selection" in response.json()["error"]
 
 
-def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
+def test_content_summary_task_options_and_start_report_unfinished_run(
+    tmp_path: Path,
+):
     project = _project(tmp_path)
     _full_fragment(project)
     create_run(
@@ -294,12 +426,14 @@ def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
             }
         },
     )
-    client = TestClient(create_app(projects_root=project.parent))
+    options = task_options(project, "content_summary")
+    assert options["running_run"]["resume_compatible"] is False
 
-    second = client.post(
+    client = TestClient(create_app(projects_root=project.parent))
+    started = client.post(
         "/api/v1/projects/demo/summaries/aggregate",
         json={"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
     )
-    assert second.status_code == 400
-    assert second.json()["code"] == "usage_error"
-    assert second.json()["params"]["reason"] == "unfinished_run"
+    assert started.status_code == 400
+    assert started.json()["code"] == "usage_error"
+    assert started.json()["params"]["reason"] == "unfinished_run"

@@ -8,6 +8,10 @@ function overflowModeLabel(mode: "error" | "trim" | "compact", language: Languag
   return translate(`terms.decisionOverflow${mode[0].toUpperCase()}${mode.slice(1)}`, language);
 }
 
+function stageLabelKey(stage: TaskOptions["stage"]): string {
+  return stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`;
+}
+
 export function RunDialog({
   options,
   onClose,
@@ -30,8 +34,15 @@ export function RunDialog({
       : options.mismatched_fingerprint_completed ? null : "pending",
   );
   const decisionMode = options.stage === "terminology_decision";
+  const hybridSummary = options.stage === "terminology" && options.summary_selected_boundaries !== undefined;
+  const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
+  const summaryConfigurationBlocked = hybridSummary && (
+    !options.summary_selected_boundaries
+    || summaryPromptBlocked
+    || Boolean(options.summary_only_work)
+  );
   const resuming = runAction === "resume";
-  const ready = decisionMode
+  const ready = summaryConfigurationBlocked ? false : decisionMode
     ? !options.running_run || resuming || resultPolicy === "force"
     : resuming || resultPolicy !== null;
 
@@ -60,7 +71,7 @@ export function RunDialog({
       >
         <div className="page-heading">
           <div>
-            <h2 id="run-dialog-title">{translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(`stage.${options.stage}`, language) })}</h2>
+            <h2 id="run-dialog-title">{translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}</h2>
             <p>{decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}</p>
           </div>
         </div>
@@ -84,12 +95,21 @@ export function RunDialog({
           })}</span>}
         </div>}
 
+        {hybridSummary && <div className="run-decision-info">
+          <span>{translate("runDialog.summaryScope", language, { count: options.summary_selected_boundaries ?? 0 })}</span>
+          {options.summary_only_work && <div className="warning-banner run-warning">{translate("terms.summaryPreflightConflict", language)}</div>}
+          {summaryPromptBlocked && <div className="error-text summary-message">
+            <p>{translate("terms.summaryPromptMissing", language, { language: options.summary_prompt_preflight?.language ?? language })}</p>
+            <ul>{(options.summary_prompt_preflight?.missing ?? []).map((name) => <li key={name}><code>{name}</code></li>)}</ul>
+          </div>}
+        </div>}
+
         {options.running_run && (
           <fieldset className="decision-group">
             <legend>{translate("runDialog.unfinishedRun", language)}</legend>
             {options.running_run.resume_compatible === false && (
               <div className="warning-banner run-warning">
-                {translate("terms.decisionResumeIncompatible", language)} {options.running_run.resume_incompatibility_reason}
+                {translate(options.stage === "content_summary" ? "runDialog.resumeUnavailable" : "terms.decisionResumeIncompatible", language)} {options.running_run.resume_incompatibility_reason}
               </div>
             )}
             <label className="radio-option decision-option">

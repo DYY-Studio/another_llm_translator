@@ -49,7 +49,7 @@ from .stages import run_all
 from .stage_review import run_review
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
-from .stage_runtime import prompt_middle_digests
+from .stage_runtime import prompt_middle_digests, prompt_preflight
 from .summary_aggregation import aggregate_summaries, aggregation_preflight
 from .term_library import load_terms
 from .term_decision import STAGE as TERMINOLOGY_DECISION_STAGE
@@ -193,6 +193,7 @@ def task_options(
     stage: str,
     *,
     include_summaries: bool = False,
+    prompt_language: str | None = None,
 ) -> dict[str, Any]:
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
@@ -262,10 +263,17 @@ def task_options(
         full = {
             (str(item["file_id"]), str(item["part_id"]))
             for item in read_content_summaries(
-                project, kind="full", status="completed"
+                project, kind="full"
             )
-            if not bool(item.get("source_changed", False))
+            if item.get("status") in {"completed", "stale"}
+            and item.get("text") is not None
         }
+        running_run = _running_run(project, stage, config)
+        if running_run is not None:
+            running_run["resume_compatible"] = False
+            running_run["resume_incompatibility_reason"] = (
+                "内容概括聚合不支持续用；请结束旧 Run 并重新启动"
+            )
         return {
             "stage": stage,
             "preset": {
@@ -278,7 +286,7 @@ def task_options(
             "failed": 0,
             "current_fingerprint_completed": len(boundaries & full),
             "mismatched_fingerprint_completed": 0,
-            "running_run": _running_run(project, stage, config),
+            "running_run": running_run,
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
@@ -333,6 +341,13 @@ def task_options(
         result["summary_selected_boundaries"] = selected_boundaries
         result["summary_only_work"] = (
             "terminology" in config["chunking"]["cross_boundary_batching"]
+        )
+        result["summary_prompt_preflight"] = prompt_preflight(
+            project,
+            prompt_language,
+            ("terminology", "fragment_summary")
+            if selected_boundaries
+            else ("terminology",),
         )
     return result
 
@@ -836,6 +851,18 @@ class WebTaskManager:
                 "include_summaries 只允许术语阶段的摘要子页面入口",
                 reason="include_summaries_outside_terminology",
             )
+        if include_summaries and any(
+            value is not None
+            for value in (
+                scope.from_file,
+                scope.only_file,
+                scope.only_segment,
+                scope.segment_ids,
+            )
+        ):
+            raise UsageError(
+                "include_summaries 要求完整项目范围，不支持部分 Scope"
+            )
         force = scope.force
         if force and reuse_mixed_fingerprints:
             raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
@@ -929,6 +956,24 @@ class WebTaskManager:
             selection_snapshots = ((stage, selection),)
             if include_summaries:
                 summary_participation = _summary_participation_snapshot(project)
+                required_prompt_stages = (
+                    ("terminology", "fragment_summary")
+                    if any(item[2] for item in summary_participation)
+                    else ("terminology",)
+                )
+                preflight = prompt_preflight(
+                    project,
+                    prompt_language,
+                    required_prompt_stages,
+                )
+                if not bool(preflight["ok"]):
+                    missing = ", ".join(
+                        str(item) for item in preflight["missing"]
+                    )
+                    raise UsageError(
+                        f"混合模式缺少 {preflight['language']} Prompt：{missing}",
+                        reason="summary_prompt_missing",
+                    )
             running_run = options["running_run"]
             if running_run is not None:
                 running_run_id = str(running_run["run_id"])
@@ -1234,6 +1279,7 @@ class WebTaskManager:
                         limiter=next(iter(shared_limiters.values())),
                         prompt_language=prompt_language,
                         on_progress=boundary_progress,
+                        on_usage=usage_changed,
                     )
                 elif state.stage == TERMINOLOGY_DECISION_STAGE:
                     summary = await run_terminology_decision(

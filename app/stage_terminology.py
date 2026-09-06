@@ -39,8 +39,10 @@ from .llm_response import (
 )
 from .logging_utils import get_logger
 from .sqlite_storage import (
-    atomic_write_json,
     append_jsonl,
+    atomic_write_json,
+    mark_content_summary_fragments_stale,
+    publish_content_summary_fulls,
     read_content_summaries,
     read_json,
     read_jsonl,
@@ -72,6 +74,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
+from .summary_provenance import build_provenance
 from .term_library import _merge_and_publish_terms, load_terms
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
@@ -288,6 +291,18 @@ async def run_terminology(
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
+    if include_summaries and any(
+        value is not None
+        for value in (
+            scope.from_file,
+            scope.only_file,
+            scope.only_segment,
+            scope.segment_ids,
+        )
+    ):
+        raise UsageError(
+            "include_summaries 要求完整项目范围，不支持部分 Scope"
+        )
     config, metadata, files, segments = _project_context(project, stage="terminology")
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
@@ -610,6 +625,8 @@ async def run_terminology(
     summary_selection = (
         _summary_participation(project, selected) if include_summaries else set()
     )
+    if include_summaries and scope.force and not scope.dry_run:
+        mark_content_summary_fragments_stale(project, summary_selection)
     if include_summaries and resume_manifest is not None:
         saved_selection = resume_manifest.get("summary_participation")
         if isinstance(saved_selection, list):
@@ -1320,6 +1337,7 @@ async def run_terminology(
                     prompt_digest,
                     config["llm"]["model"],
                     config["project"]["target_language"],
+                    str(run_id),
                 ]
             )[7:31].upper()
         )
@@ -1346,6 +1364,59 @@ async def run_terminology(
             error_message=error_message,
         )
         write_content_summary(project, record)
+        if status == "completed":
+            current_fragments = [
+                item
+                for item in read_content_summaries(
+                    project,
+                    file_id=file_id,
+                    part_id=part_id,
+                    kind="fragment",
+                    status="completed",
+                )
+                if not bool(item.get("source_changed", False))
+            ]
+            current_segment_ids = {
+                str(item["segment_id"])
+                for item in segments
+                if not item["is_empty"]
+                and str(item["file_id"]) == file_id
+                and str(item["part_id"]) == part_id
+            }
+            source_segment_ids = list(
+                dict.fromkeys(
+                    str(value.get("original_segment_id") or value.get("segment_id"))
+                    for value in values
+                    if value.get("original_segment_id") or value.get("segment_id")
+                )
+            )
+            if (
+                len(current_fragments) == 1
+                and current_fragments[0].get("record_id") == record["record_id"]
+                and set(source_segment_ids) == current_segment_ids
+            ):
+                provenance, input_digest = build_provenance(
+                    "adopted_fragment", [record]
+                )
+                full_record = {
+                    **record,
+                    "record_id": (
+                        "SUMMARY-FULL-"
+                        + _digest(
+                            [
+                                file_id,
+                                part_id,
+                                record["record_id"],
+                                record.get("text"),
+                            ]
+                        )[7:31].upper()
+                    ),
+                    "kind": "full",
+                    "refs": source_segment_ids,
+                    "input_digest": input_digest,
+                    "provenance": provenance,
+                }
+                publish_content_summary_fulls(project, [full_record])
         return record
 
     def mark_failed(
@@ -1485,14 +1556,25 @@ async def run_terminology(
                         ),
                     )
                 if summary_ok and parsed.summaries:
-                    summary = parsed.summaries[0]
-                    summary_artifact(
-                        unresolved,
-                        status="completed",
-                        run_request_id=request_id,
-                        text=str(summary["text"]),
-                        refs=list(summary["refs"]),
-                    )
+                    items_by_ref = {
+                        str(index): item
+                        for index, item in enumerate(unresolved, start=1)
+                    }
+                    for summary in parsed.summaries:
+                        summary_items = [
+                            items_by_ref[ref]
+                            for ref in sorted(summary["refs"], key=int)
+                        ]
+                        summary_artifact(
+                            summary_items,
+                            status="completed",
+                            run_request_id=request_id,
+                            text=str(summary["text"]),
+                            refs=[
+                                str(index)
+                                for index in range(1, len(summary_items) + 1)
+                            ],
+                        )
                 elif failed_class is not TerminologyResponseMode.TERMS_ONLY:
                     summary_artifact(
                         unresolved,

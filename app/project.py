@@ -517,11 +517,11 @@ def _copy_bundle(source_root: Path, target: Path) -> None:
 def ensure_missing_summary_prompts(
     project: Path, *, app_root: Path = APP_ROOT
 ) -> list[str]:
-    """Restore missing summary prompts while preserving project edits."""
+    """Restore missing prompt resources while preserving project edits."""
     bundle = _bundle_source(app_root)
     missing: list[tuple[Path, Path]] = []
     for language in PROMPT_LANGUAGES:
-        for stage in ("fragment_summary", "content_summary"):
+        for stage in PROMPT_RESOURCE_STAGES:
             relative = Path("prompts") / prompt_file(stage, language)
             source = bundle[relative]
             if not source.is_file():
