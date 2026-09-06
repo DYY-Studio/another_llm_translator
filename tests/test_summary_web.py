@@ -10,6 +10,7 @@ from app.config import load_project_config
 from app.execution import create_run, segment_model_source
 from app.web_tasks import task_options
 from app.sqlite_storage import (
+    read_content_summaries,
     read_json,
     read_segments,
     record_header,
@@ -168,7 +169,7 @@ def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     )
 
 
-def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):
+def test_summary_task_options_keep_source_changed_full_usable(tmp_path: Path):
     project = _project(tmp_path)
     _full_fragment(project)
     metadata = read_json(project, project / "project.json")
@@ -204,7 +205,47 @@ def test_summary_task_options_exclude_source_changed_full(tmp_path: Path):
         ),
     )
     options = task_options(project, "content_summary")
-    assert options["completed"] == 0
+    assert options["completed"] == 1
+
+    client = TestClient(create_app(projects_root=project.parent))
+    listing = client.get("/api/v1/projects/demo/summaries")
+    assert listing.status_code == 200
+    full = [
+        item
+        for item in listing.json()["artifacts"]
+        if item["kind"] == "full"
+    ]
+    assert full[0]["expired"] is True
+    assert full[0]["expiry_reason"] == "source_changed"
+
+
+def test_summary_route_marks_llm_full_expired_after_fragment_text_changes(tmp_path: Path):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    fragment = read_content_summaries(project, kind="fragment", status="completed")[0]
+    legacy_full = {
+        **fragment,
+        "record_id": "SUMMARY-FULL-LLM-WEB",
+        "kind": "full",
+        "input_digest": _digest(
+            [{"summary_id": fragment["record_id"], "text": fragment["text"]}]
+        ),
+        "provenance": {
+            "origin": "llm",
+            "artifact_ids": [fragment["record_id"]],
+            "source_ranges": [fragment["source_range"]],
+        },
+    }
+    write_content_summary(project, legacy_full)
+    fragment["text"] = "片段文本已重新生成。"
+    write_content_summary(project, fragment)
+
+    client = TestClient(create_app(projects_root=project.parent))
+    response = client.get("/api/v1/projects/demo/summaries")
+    assert response.status_code == 200
+    full = [item for item in response.json()["artifacts"] if item["record_id"] == "SUMMARY-FULL-LLM-WEB"]
+    assert full[0]["expired"] is True
+    assert full[0]["expiry_reason"] == "provenance_unavailable"
 
 
 def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
@@ -365,3 +406,33 @@ def test_content_summary_start_reports_unfinished_run_reason(tmp_path: Path):
     assert second.status_code == 400
     assert second.json()["code"] == "usage_error"
     assert second.json()["params"]["reason"] == "unfinished_run"
+
+
+def test_content_summary_task_options_mark_unfinished_run_non_resumable(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    create_run(
+        project,
+        config=load_project_config(project, stage="content_summary"),
+        stage="content_summary",
+        fingerprint="old",
+        prompt="old prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": True,
+                "from_file": None,
+                "only_file": None,
+                "only_segment": None,
+                "force": False,
+            }
+        },
+    )
+
+    options = task_options(project, "content_summary")
+
+    assert options["running_run"]["resume_compatible"] is False

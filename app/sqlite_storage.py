@@ -1286,7 +1286,7 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
         connection.close()
 
 
-def delete_content_summary_fragments(
+def mark_content_summary_fragments_stale(
     project: Path,
     boundaries: Iterable[tuple[str, str]],
 ) -> int:
@@ -1300,14 +1300,16 @@ def delete_content_summary_fragments(
             for file_id, part_id in boundary_values:
                 cursor = connection.execute(
                     """
-                    DELETE FROM content_summaries
-                     WHERE kind = 'fragment' AND file_id = ? AND part_id = ?
+                    UPDATE content_summaries
+                       SET status = 'stale', updated_at = ?
+                     WHERE kind = 'fragment' AND status = 'completed'
+                       AND file_id = ? AND part_id = ?
                     """,
-                    (file_id, part_id),
+                    (utc_now(), file_id, part_id),
                 )
                 deleted += max(0, int(cursor.rowcount))
     except sqlite3.Error as exc:
-        raise StorageError(f"无法清理片段概括：{project}: {exc}") from exc
+        raise StorageError(f"无法标记片段概括过期：{project}: {exc}") from exc
     finally:
         connection.close()
     return deleted

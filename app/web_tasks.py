@@ -263,10 +263,17 @@ def task_options(
         full = {
             (str(item["file_id"]), str(item["part_id"]))
             for item in read_content_summaries(
-                project, kind="full", status="completed"
+                project, kind="full"
             )
-            if not bool(item.get("source_changed", False))
+            if item.get("status") in {"completed", "stale"}
+            and item.get("text") is not None
         }
+        running_run = _running_run(project, stage, config)
+        if running_run is not None:
+            running_run["resume_compatible"] = False
+            running_run["resume_incompatibility_reason"] = (
+                "内容概括聚合不支持续用；请结束旧 Run 并重新启动"
+            )
         return {
             "stage": stage,
             "preset": {
@@ -279,7 +286,7 @@ def task_options(
             "failed": 0,
             "current_fingerprint_completed": len(boundaries & full),
             "mismatched_fingerprint_completed": 0,
-            "running_run": _running_run(project, stage, config),
+            "running_run": running_run,
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")

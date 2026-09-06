@@ -14,6 +14,13 @@ export interface SummaryBoundary {
   segment_count: number;
 }
 
+export type SummaryExpiryReason =
+  | "stale_status"
+  | "source_changed"
+  | "dependency_changed"
+  | "provenance_unavailable"
+  | string;
+
 export interface SummaryArtifact {
   record_type: "content_summary";
   record_id: string;
@@ -28,10 +35,18 @@ export interface SummaryArtifact {
   refs?: string[];
   source_range: Record<string, unknown>;
   source_changed: boolean;
+  expired: boolean;
+  expiry_reason: SummaryExpiryReason | null;
   provenance?: {
     origin?: string;
     artifact_ids?: string[];
     source_ranges?: Array<Record<string, unknown>>;
+    dependencies?: Array<{
+      record_id: string;
+      kind: "fragment" | "reduction";
+      text_digest: string;
+      source_digest: string;
+    }>;
     [key: string]: unknown;
   };
   source_digest: string;
@@ -64,6 +79,8 @@ export type LLMStage =
   | "translation"
   | "proofreading"
   | "polishing";
+
+export type RunStage = LLMStage | "content_summary";
 
 export interface ResultView {
   record_id: string;
@@ -317,7 +334,7 @@ export interface ModelRow {
 }
 
 export interface TaskOptions {
-  stage: LLMStage;
+  stage: RunStage;
   preset: {
     id: string;
     model: string;

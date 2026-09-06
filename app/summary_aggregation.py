@@ -34,6 +34,7 @@ from .sqlite_storage import (
     write_content_summary,
     write_summary_run,
 )
+from .summary_provenance import assess_full_summary, build_provenance
 
 MAX_REDUCTION_DEPTH = 8
 
@@ -100,6 +101,15 @@ def _range_segments(artifact: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(values, list):
         return []
     return [value for value in values if isinstance(value, dict)]
+
+
+def full_summary_expired(
+    artifact: dict[str, Any],
+    current_segments: list[dict[str, Any]],
+    summary_artifacts: list[dict[str, Any]],
+) -> bool:
+    """Return whether a full summary should be shown with an expiry warning."""
+    return assess_full_summary(artifact, current_segments, summary_artifacts).expired
 
 
 def _validate_fragments(
@@ -255,10 +265,13 @@ def _refs_for_children(children: list[dict[str, Any]], refs: Iterable[str]) -> l
 def _children_from_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
+            "record_id": str(artifact["record_id"]),
             "summary_id": str(artifact["record_id"]),
+            "kind": str(artifact["kind"]),
             "text": str(artifact.get("text") or ""),
             "refs": list(artifact.get("refs") or []),
             "source_range": artifact["source_range"],
+            "source_digest": artifact["source_digest"],
         }
         for artifact in artifacts
     ]
@@ -266,10 +279,13 @@ def _children_from_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, 
 
 def _child_from_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
     return {
+        "record_id": str(artifact["record_id"]),
         "summary_id": str(artifact["record_id"]),
+        "kind": str(artifact["kind"]),
         "text": str(artifact.get("text") or ""),
         "refs": list(artifact.get("refs") or []),
         "source_range": artifact["source_range"],
+        "source_digest": artifact["source_digest"],
     }
 
 
@@ -288,9 +304,7 @@ def _make_artifact(
     origin: str,
 ) -> dict[str, Any]:
     source_digest = _digest(source_range.get("segments", []))
-    input_digest = _digest(
-        [{"summary_id": item["summary_id"], "text": item["text"]} for item in children]
-    )
+    provenance, input_digest = build_provenance(origin, children)
     summary_id = f"SUMMARY-{kind.upper()}-{_digest([boundary, source_digest, input_digest, prompt_digest, text])[7:31].upper()}"
     record = record_header(
         "content_summary",
@@ -308,11 +322,7 @@ def _make_artifact(
         prompt_digest=prompt_digest,
         model=str(config["llm"]["model"]),
         run_id=run_id,
-        provenance={
-            "origin": origin,
-            "artifact_ids": [str(item["summary_id"]) for item in children],
-            "source_ranges": [item["source_range"] for item in children],
-        },
+        provenance=provenance,
     )
     return record
 
@@ -686,36 +696,30 @@ def _latest_full(
     boundary: tuple[str, str],
     current: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    candidates = read_content_summaries(
+    artifacts = read_content_summaries(
         project,
         file_id=boundary[0],
         part_id=boundary[1],
-        kind="full",
-        status="completed",
     )
-    current_ids = {str(item["segment_id"]): item for item in current}
-    for artifact in reversed(candidates):
-        if artifact.get("source_changed"):
-            continue
-        ranges = _range_segments(artifact)
-        ids = {
-            str(value.get("original_segment_id") or value.get("segment_id"))
-            for value in ranges
-        }
-        if ids != set(current_ids):
-            continue
-        if all(
-            value.get("original_source_digest", value.get("source_digest"))
-            == _digest(str(current_ids[stable_id]["source"]))
-            for value in ranges
-            if (stable_id := str(value.get("original_segment_id") or value.get("segment_id"))) in current_ids
-        ) and all(
-            value.get("original_model_text_digest", value.get("model_text_digest"))
-            == _digest(segment_model_source(current_ids[stable_id]))
-            for value in ranges
-            if (stable_id := str(value.get("original_segment_id") or value.get("segment_id"))) in current_ids
-        ):
+    candidates = [item for item in artifacts if item.get("kind") == "full"]
+    usable = [
+        item
+        for item in candidates
+        if item.get("status") in {"completed", "stale"}
+        and item.get("text") is not None
+    ]
+    usable.sort(
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("updated_at") or ""),
+            str(item.get("record_id") or ""),
+        )
+    )
+    for artifact in reversed(usable):
+        if not assess_full_summary(artifact, current, artifacts).expired:
             return artifact
+    if usable:
+        return usable[-1]
     raise ExportError(
         f"{boundary[0]}/{boundary[1]} 缺少完整或有效的内容概括",
         reason="missing_or_stale_summary",

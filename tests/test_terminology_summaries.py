@@ -168,11 +168,18 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
     assert len(full) == 1
     assert full[0]["text"] == summaries[0]["text"]
     assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
-    assert full[0]["provenance"] == {
-        "origin": "adopted_fragment",
-        "artifact_ids": [summaries[0]["record_id"]],
-        "source_ranges": [summaries[0]["source_range"]],
-    }
+    assert full[0]["provenance"]["origin"] == "adopted_fragment"
+    assert full[0]["provenance"]["artifact_ids"] == [summaries[0]["record_id"]]
+    assert full[0]["provenance"]["source_ranges"] == [summaries[0]["source_range"]]
+    assert full[0]["provenance"]["dependencies"] == [
+        {
+            "record_id": summaries[0]["record_id"],
+            "kind": "fragment",
+            "text_digest": _digest(summaries[0]["text"]),
+            "source_digest": summaries[0]["source_digest"],
+        }
+    ]
+    assert full[0]["input_digest"] == _digest(full[0]["provenance"]["dependencies"])
     assert task_options(project, "content_summary")["completed"] == 1
     exported = export_summary_markdown(
         project,
@@ -284,14 +291,14 @@ async def test_forced_full_cover_summary_replaces_auto_adopted_full(
 
     assert result["failed"] == 0
     full = read_content_summaries(project, kind="full")
-    assert [(item["status"], item["text"]) for item in full] == [
+    assert {(item["status"], item["text"]) for item in full} == {
         ("stale", "人物依次出现并行动。"),
         ("completed", "强制重做后的概括。"),
-    ]
+    }
 
 
 @pytest.mark.asyncio
-async def test_forced_summary_redo_clears_old_fragments_before_partitioned_response(
+async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_response(
     tmp_path: Path,
 ) -> None:
     project = _project(tmp_path)
@@ -353,8 +360,14 @@ async def test_forced_summary_redo_clears_old_fragments_before_partitioned_respo
 
     assert result["failed"] == 0
     assert "joint" in modes
-    summaries = read_content_summaries(project, kind="fragment", status="completed")
-    assert {item["text"] for item in summaries} == {"Alice 新概括。", "Bob 新概括。"}
+    summaries = read_content_summaries(project, kind="fragment")
+    assert {item["text"] for item in summaries if item["status"] == "completed"} == {
+        "Alice 新概括。",
+        "Bob 新概括。",
+    }
+    assert [item["status"] for item in summaries if item["record_id"] == old[0]["record_id"]] == [
+        "stale"
+    ]
 
 
 @pytest.mark.asyncio
@@ -462,8 +475,9 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
 async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
-    tmp_path: Path,
+    tmp_path: Path, cancelled: bool
 ) -> None:
     project = _project(tmp_path)
     write_summary_participation(
@@ -482,6 +496,8 @@ async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
         await first_client.aclose()
 
     def invalid_handler(_request: httpx.Request) -> httpx.Response:
+        if cancelled:
+            raise asyncio.CancelledError
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([{"type": "end"}])}}]},
@@ -489,25 +505,36 @@ async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(invalid_handler))
     try:
-        result = await run_terminology(
-            project,
-            Scope(force=True),
-            http_client=client,
-            include_summaries=True,
-        )
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await run_terminology(
+                    project,
+                    Scope(force=True),
+                    http_client=client,
+                    include_summaries=True,
+                )
+        else:
+            result = await run_terminology(
+                project,
+                Scope(force=True),
+                http_client=client,
+                include_summaries=True,
+            )
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
 
-    assert result["failed"] > 0
-    assert read_content_summaries(
-        project,
-        kind="fragment",
-        status="completed",
-    ) == []
+    if not cancelled:
+        assert result["failed"] > 0
+    assert read_content_summaries(project, kind="fragment", status="completed") == []
+    old_fragments = read_content_summaries(project, kind="fragment", status="stale")
+    assert old_fragments
     failed = read_content_summaries(project, kind="fragment", status="failed")
-    assert failed
-    assert all(item.get("text") is None for item in failed)
+    if cancelled:
+        assert failed == []
+    else:
+        assert failed
+        assert all(item.get("text") is None for item in failed)
 
 
 @pytest.mark.asyncio

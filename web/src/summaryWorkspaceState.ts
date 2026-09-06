@@ -75,6 +75,9 @@ export function rejectSummaryParticipationPut(
 interface SummaryArtifactLike {
   kind?: string;
   status?: string;
+  text?: string | null;
+  expired?: boolean;
+  expiry_reason?: string | null;
   source_changed?: boolean;
   refs?: string[];
   source_range?: unknown;
@@ -121,6 +124,24 @@ export function summaryArtifactHasCompleteCoverage(artifact: SummaryArtifactLike
   return segmentCount > 0 && ids.size === segmentCount;
 }
 
+export function summaryArtifactIsExpired(artifact: SummaryArtifactLike): boolean {
+  return Boolean(artifact.expired || artifact.source_changed || artifact.status === "stale");
+}
+
+export function summaryArtifactExpiryReason(artifact: SummaryArtifactLike): string | null {
+  if (!summaryArtifactIsExpired(artifact)) return null;
+  if (artifact.expiry_reason) return artifact.expiry_reason;
+  if (artifact.source_changed) return "source_changed";
+  if (artifact.status === "stale") return "stale_status";
+  return "dependency_changed";
+}
+
+export function summaryArtifactHasUsableFull(artifact: SummaryArtifactLike, segmentCount: number): boolean {
+  if (artifact.kind !== "full" || artifact.text == null || artifact.status === "failed") return false;
+  return summaryArtifactIsExpired(artifact)
+    || summaryArtifactHasCompleteCoverage(artifact, segmentCount);
+}
+
 export function summaryProgress(
   boundaries: SummaryProgressBoundary[],
   selected: Set<string>,
@@ -130,7 +151,7 @@ export function summaryProgress(
   const done = selectedBoundaries.filter((boundary) => artifacts.some((artifact) => (
     artifact.file_id === boundary.fileId
     && artifact.part_id === boundary.partId
-    && summaryArtifactHasCompleteCoverage(artifact, boundary.segmentCount)
+    && summaryArtifactHasUsableFull(artifact, boundary.segmentCount)
   ))).length;
   return { done, total: selectedBoundaries.length };
 }

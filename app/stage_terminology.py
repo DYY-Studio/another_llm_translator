@@ -41,7 +41,7 @@ from .logging_utils import get_logger
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_json,
-    delete_content_summary_fragments,
+    mark_content_summary_fragments_stale,
     publish_content_summary_fulls,
     read_content_summaries,
     read_json,
@@ -74,6 +74,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
+from .summary_provenance import build_provenance
 from .term_library import _merge_and_publish_terms, load_terms
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
@@ -613,7 +614,7 @@ async def run_terminology(
         _summary_participation(project, selected) if include_summaries else set()
     )
     if include_summaries and scope.force and not scope.dry_run:
-        delete_content_summary_fragments(project, summary_selection)
+        mark_content_summary_fragments_stale(project, summary_selection)
     if include_summaries and resume_manifest is not None:
         saved_selection = resume_manifest.get("summary_participation")
         if isinstance(saved_selection, list):
@@ -1324,6 +1325,7 @@ async def run_terminology(
                     prompt_digest,
                     config["llm"]["model"],
                     config["project"]["target_language"],
+                    str(run_id),
                 ]
             )[7:31].upper()
         )
@@ -1381,6 +1383,9 @@ async def run_terminology(
                 and current_fragments[0].get("record_id") == record["record_id"]
                 and set(source_segment_ids) == current_segment_ids
             ):
+                provenance, input_digest = build_provenance(
+                    "adopted_fragment", [record]
+                )
                 full_record = {
                     **record,
                     "record_id": (
@@ -1396,11 +1401,8 @@ async def run_terminology(
                     ),
                     "kind": "full",
                     "refs": source_segment_ids,
-                    "provenance": {
-                        "origin": "adopted_fragment",
-                        "artifact_ids": [str(record["record_id"])],
-                        "source_ranges": [source_range],
-                    },
+                    "input_digest": input_digest,
+                    "provenance": provenance,
                 }
                 publish_content_summary_fulls(project, [full_record])
         return record

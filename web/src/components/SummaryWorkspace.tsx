@@ -1,15 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, apiErrorFromResponse, usageErrorReason } from "../api";
+import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { nativeBridgeAvailable, saveExport } from "../native";
-import type { ProjectOverview, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskState, TaskOptions } from "../types";
-
-interface SummaryPreflight {
-  selected: number;
-  conflict: boolean;
-  promptOk: boolean;
-  missing: string[];
-}
+import { useClassicSelection } from "../useClassicSelection";
+import type { ProjectOverview, RunDecision, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskOptions, TaskState } from "../types";
 import {
   boundarySelectionState,
   fileSelectionState,
@@ -26,6 +20,9 @@ import {
   rejectSummaryParticipationPut,
   resolveSummaryParticipationPut,
   summaryArtifactHasCompleteCoverage,
+  summaryArtifactHasUsableFull,
+  summaryArtifactExpiryReason,
+  summaryArtifactIsExpired,
   summaryArtifactSegmentIds,
   summaryProgress,
   updateSummaryWorkspaceState,
@@ -33,6 +30,7 @@ import {
   type SummaryWorkspaceState,
 } from "../summaryWorkspaceState";
 import { Modal } from "./Modal";
+import { RunDialog } from "./RunDialog";
 
 interface SummaryWorkspaceProps {
   project: string;
@@ -68,13 +66,21 @@ function artifactFor(
     && item.part_id === boundary.part_id
     && item.kind === kind
   ));
+  if (kind === "full") {
+    const current = values.filter((item) => (
+      !summaryArtifactIsExpired(item)
+      && summaryArtifactHasUsableFull(item, boundary.segment_count)
+    ));
+    return current[current.length - 1] ?? values[values.length - 1] ?? null;
+  }
   return values[values.length - 1] ?? null;
 }
 
 function hasUsableArtifact(artifacts: SummaryArtifact[], boundary: SummaryBoundary, kind: SummaryArtifact["kind"]): boolean {
   const artifact = artifactFor(artifacts, boundary, kind);
-  if (!artifact || artifact.status !== "completed" || artifact.source_changed) return false;
-  return kind === "full" ? summaryArtifactHasCompleteCoverage(artifact, boundary.segment_count) : true;
+  if (!artifact) return false;
+  if (kind === "full") return summaryArtifactHasUsableFull(artifact, boundary.segment_count);
+  return artifact.status === "completed" && !artifact.source_changed;
 }
 
 function boundaryText(boundary: SummaryBoundary, names: Map<string, string>, language: Language): string {
@@ -147,6 +153,7 @@ function SelectionControls({
 }) {
   const selectionBoundaries = useMemo(() => boundaries.map(asSelectionBoundary), [boundaries]);
   const normalized = search.trim().toLocaleLowerCase();
+  const hasFilter = normalized.length > 0;
   const visible = useMemo(() => boundaries.filter((item) => (
     !normalized
     || boundaryText(item, names, language).toLocaleLowerCase().includes(normalized)
@@ -166,12 +173,8 @@ function SelectionControls({
     return value;
   }, [boundaries]);
 
-  function changeAll(checked: boolean) {
-    onSelection(toggleFilteredSelection(selectionBoundaries, selected, null, checked));
-  }
-
-  function changeVisible(checked: boolean) {
-    onSelection(toggleFilteredSelection(selectionBoundaries, selected, visibleSelection, checked));
+  function changeScope(checked: boolean) {
+    onSelection(toggleFilteredSelection(selectionBoundaries, selected, hasFilter ? visibleSelection : null, checked));
   }
 
   function changeFile(fileId: string, checked: boolean) {
@@ -188,10 +191,8 @@ function SelectionControls({
         placeholder={translate("terms.summarySearch", language)}
       />
       <div className="summary-selection-actions">
-        <button className="quiet-button" type="button" onClick={() => changeAll(true)} disabled={disabled}>{translate("terms.summarySelectAll", language)}</button>
-        <button className="quiet-button" type="button" onClick={() => changeAll(false)} disabled={disabled}>{translate("terms.summaryDeselectAll", language)}</button>
-        <button className="quiet-button" type="button" onClick={() => changeVisible(true)} disabled={disabled || !visible.length}>{translate("terms.summarySelectFiltered", language)}</button>
-        <button className="quiet-button" type="button" onClick={() => changeVisible(false)} disabled={disabled || !visible.length}>{translate("terms.summaryDeselectFiltered", language)}</button>
+        <button className="quiet-button" type="button" onClick={() => changeScope(true)} disabled={disabled || (hasFilter && !visible.length)}>{translate(hasFilter ? "terms.summarySelectFiltered" : "terms.summarySelectAll", language)}</button>
+        <button className="quiet-button" type="button" onClick={() => changeScope(false)} disabled={disabled || (hasFilter && !visible.length)}>{translate(hasFilter ? "terms.summaryDeselectFiltered" : "terms.summaryDeselectAll", language)}</button>
       </div>
       <div className="summary-selection-count" aria-live="polite">
         <span>{translate("terms.summarySelectedCount", language, { selected: summary.selectedCount, total: boundaries.length })}</span>
@@ -312,7 +313,6 @@ function SourcePanel({
 }
 
 function SelectionDialog({
-  mode,
   boundaries,
   selected,
   names,
@@ -324,7 +324,6 @@ function SelectionDialog({
   onClose,
   onConfirm,
 }: {
-  mode: "aggregate" | "export";
   boundaries: SummaryBoundary[];
   selected: Set<string>;
   names: Map<string, string>;
@@ -339,9 +338,9 @@ function SelectionDialog({
   const [search, setSearch] = useState("");
   const hasSelection = selected.size > 0;
   return (
-    <Modal ariaLabel={translate(mode === "aggregate" ? "terms.summaryChooseAggregate" : "terms.summaryChooseExport", language)}>
+    <Modal ariaLabel={translate("terms.summaryChooseExport", language)}>
       <div className="summary-dialog-heading">
-        <div><h2>{translate(mode === "aggregate" ? "terms.summaryChooseAggregate" : "terms.summaryChooseExport", language)}</h2><p>{translate("terms.summaryAggregateHint", language)}</p></div>
+        <div><h2>{translate("terms.summaryChooseExport", language)}</h2><p>{translate("terms.summaryExportHint", language)}</p></div>
         <button className="quiet-button" type="button" onClick={onClose}>×</button>
       </div>
       <SelectionControls
@@ -354,17 +353,17 @@ function SelectionDialog({
         language={language}
         emptyMessage={translate("terms.summaryNoMatch", language)}
       />
-      {mode === "export" && onPath !== undefined && (
+      {onPath !== undefined && (
         <label>
           {translate("terms.summaryExportPath", language)}
           <input value={path ?? ""} onChange={(event) => onPath(event.target.value)} />
         </label>
       )}
-      {!hasSelection && <p className="error-text summary-message">{translate(mode === "aggregate" ? "terms.summaryAggregateEmpty" : "terms.summaryExportEmpty", language)}</p>}
+      {!hasSelection && <p className="error-text summary-message">{translate("terms.summaryExportEmpty", language)}</p>}
       {error && <p className="error-text summary-message">{error}</p>}
       <div className="button-group summary-dialog-actions">
         <button className="quiet-button" type="button" onClick={onClose}>{translate("common.cancel", language)}</button>
-        <button className="primary-button" type="button" disabled={!hasSelection} onClick={onConfirm}>{translate(mode === "aggregate" ? "terms.summaryAggregate" : "terms.summaryExport", language)}</button>
+        <button className="primary-button" type="button" disabled={!hasSelection} onClick={onConfirm}>{translate("terms.summaryExport", language)}</button>
       </div>
     </Modal>
   );
@@ -380,8 +379,10 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [sourceSegmentIds, setSourceSegmentIds] = useState<string[]>([]);
   const [scrollTop, setScrollTop] = useState(initial.scrollTop);
   const [participation, setParticipation] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<"aggregate" | "export" | null>(null);
+  const [dialog, setDialog] = useState<"export" | null>(null);
   const [dialogSelection, setDialogSelection] = useState<Set<string>>(new Set());
+  const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
+  const [runKind, setRunKind] = useState<"fragment" | "full" | null>(null);
   const [exportPath, setExportPath] = useState("summary.md");
   const [message, setMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -393,13 +394,8 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const participationStateRef = useRef(createSummaryParticipationState());
   const participationQueueRef = useRef(Promise.resolve());
   const [participationSaving, setParticipationSaving] = useState(false);
-  const [preflight, setPreflight] = useState<SummaryPreflight | null>(null);
-  const [conflict, setConflict] = useState<"unfinished_run" | "mismatched_fingerprint" | null>(null);
-  const [conflictResume, setConflictResume] = useState(false);
-  const [conflictReuse, setConflictReuse] = useState(false);
-  const [conflictForce, setConflictForce] = useState(false);
-  const [conflictError, setConflictError] = useState("");
   const [dialogError, setDialogError] = useState("");
+  const partSelection = useClassicSelection();
   workspaceProjectRef.current = project;
 
   const names = useMemo(() => new Map(overview.files.map((file) => [file.file_id, file.name])), [overview.files]);
@@ -412,6 +408,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     || item.file_id.toLocaleLowerCase().includes(normalized)
     || item.part_id.toLocaleLowerCase().includes(normalized)
   )), [boundaries, language, names, normalized]);
+  const visibleBoundaryKeys = visible.map((item) => boundaryKey(item.file_id, item.part_id));
   const focused = boundaries.find((item) => boundaryKey(item.file_id, item.part_id) === focusedBoundary) ?? visible[0] ?? boundaries[0] ?? null;
   const full = artifactFor(data?.artifacts ?? [], focused, "full");
   const fragments = (data?.artifacts ?? []).filter((item) => item.file_id === focused?.file_id && item.part_id === focused?.part_id && item.kind === "fragment").slice().reverse();
@@ -458,6 +455,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   useEffect(() => {
     workspaceProjectRef.current = project;
     participationQueueRef.current = Promise.resolve();
+    partSelection.reset();
     const restored = restoreSummaryWorkspaceState(workspaceCache, project);
     setSearch(restored.search);
     setFocusedBoundary(restored.focusedBoundary);
@@ -549,48 +547,15 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     });
   }
 
-  async function startSummaries(decision: { resume: boolean; reuse: boolean; force: boolean }) {
-    if (!participation.size) {
-      setMessage({ text: translate("terms.summarySelectionEmpty", language), type: "error" });
-      return;
-    }
-    setBusy(true);
-    setMessage(null);
-    setConflictError("");
-    try {
-      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
-        method: "POST",
-        body: JSON.stringify({
-          stage: "terminology",
-          language,
-          include_summaries: true,
-          run_action: decision.resume ? "resume" : decision.force ? "decline" : null,
-          reuse_mixed_fingerprints: decision.reuse,
-          force: decision.force,
-        }),
-      });
-      onTask(next);
-      setConflict(null);
-    } catch (error) {
-      const reason = usageErrorReason(error);
-      if (reason === "unfinished_run" || reason === "mismatched_fingerprint") {
-        setConflict(reason);
-        setConflictResume(reason === "unfinished_run");
-        setConflictReuse(false);
-        setConflictForce(reason === "mismatched_fingerprint");
-        return;
-      }
-      const errText = errorMessage(error, language);
-      if (conflict) {
-        setConflictError(errText);
-      }
-      setMessage({ text: errText, type: "error" });
-    } finally {
-      setBusy(false);
-    }
+  function participationTargets(key: string): SelectionBoundary[] {
+    const selectedVisibleKeys = visibleBoundaryKeys.filter((value) => partSelection.selectedKeys.has(value));
+    const targetKeys = partSelection.selectedKeys.has(key) && selectedVisibleKeys.length > 1
+      ? new Set(selectedVisibleKeys)
+      : new Set([key]);
+    return selectionBoundaries.filter((item) => targetKeys.has(item.key));
   }
 
-  async function generateSummaries() {
+  async function openSummaryRun(kind: "fragment" | "full") {
     if (!participation.size) {
       setMessage({ text: translate("terms.summarySelectionEmpty", language), type: "error" });
       return;
@@ -599,15 +564,29 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setMessage(null);
     try {
       const options = await api<TaskOptions>(
-        `/api/v1/projects/${project}/task-options/terminology?include_summaries=true&language=${encodeURIComponent(language)}`,
+        kind === "fragment"
+          ? `/api/v1/projects/${project}/task-options/terminology?include_summaries=true&language=${encodeURIComponent(language)}`
+          : `/api/v1/projects/${project}/task-options/content_summary`,
       );
-      const promptPreflight = options.summary_prompt_preflight;
-      setPreflight({
-        selected: options.summary_selected_boundaries ?? 0,
-        conflict: Boolean(options.summary_only_work),
-        promptOk: promptPreflight?.ok ?? true,
-        missing: promptPreflight?.missing ?? [],
-      });
+      if (kind === "full") {
+        const selectedBoundaries = boundaries.filter((item) => participation.has(boundaryKey(item.file_id, item.part_id)));
+        const artifacts = data?.artifacts ?? [];
+        const completed = selectedBoundaries.filter((item) => hasUsableArtifact(artifacts, item, "full")).length;
+        const failed = selectedBoundaries.filter((item) => {
+          const latest = artifactFor(artifacts, item, "full") ?? artifactFor(artifacts, item, "fragment");
+          return latest?.status === "failed";
+        }).length;
+        setRunOptions({
+          ...options,
+          selected: selectedBoundaries.length,
+          completed,
+          failed,
+          pending: selectedBoundaries.length - completed - failed,
+        });
+      } else {
+        setRunOptions(options);
+      }
+      setRunKind(kind);
     } catch (error) {
       setMessage({ text: errorMessage(error, language), type: "error" });
     } finally {
@@ -615,48 +594,35 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     }
   }
 
-  async function launchGenerate() {
-    if (!preflight?.promptOk || !preflight.selected) return;
-    setPreflight(null);
+  async function startSummaryRun(decision: RunDecision) {
+    if (!runKind || !runOptions) return;
+    const kind = runKind;
+    const selected = selectionItems(participation, boundaries);
+    if (!selected.length) {
+      setRunOptions(null);
+      setRunKind(null);
+      setMessage({ text: translate("terms.summarySelectionEmpty", language), type: "error" });
+      return;
+    }
+    setRunOptions(null);
+    setRunKind(null);
     setBusy(true);
     setMessage(null);
     try {
       const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
         method: "POST",
-        body: JSON.stringify({ stage: "terminology", language, include_summaries: true }),
+        body: JSON.stringify({
+          stage: kind === "fragment" ? "terminology" : "content_summary",
+          language,
+          ...(kind === "fragment"
+            ? { include_summaries: true }
+            : { summary_selection: selected }),
+          ...decision,
+        }),
       });
       onTask(next);
     } catch (error) {
-      const reason = usageErrorReason(error);
-      if (reason === "unfinished_run" || reason === "mismatched_fingerprint") {
-        setConflict(reason);
-        setConflictResume(reason === "unfinished_run");
-        setConflictReuse(false);
-        setConflictForce(reason === "mismatched_fingerprint");
-        return;
-      }
       setMessage({ text: errorMessage(error, language), type: "error" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function aggregate() {
-    if (!dialogSelection.size) return;
-    setBusy(true);
-    setMessage(null);
-    setDialogError("");
-    try {
-      const selected = selectionItems(dialogSelection, boundaries);
-      await api(`/api/v1/projects/${project}/summaries/aggregation-preflight`, { method: "POST", body: JSON.stringify({ boundaries: selected }) });
-      const next = await api<TaskState>(`/api/v1/projects/${project}/summaries/aggregate`, { method: "POST", body: JSON.stringify({ boundaries: selected }) });
-      onTask(next);
-      setDialog(null);
-      setMessage({ text: translate("terms.summaryAggregateDone", language), type: "success" });
-    } catch (error) {
-      const errText = errorMessage(error, language);
-      setDialogError(errText);
-      setMessage({ text: errText, type: "error" });
     } finally {
       setBusy(false);
     }
@@ -721,8 +687,8 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         </div>
         <div className="button-group summary-heading-actions">
           <button className="quiet-button" type="button" onClick={() => setListOpen((value) => !value)}>{listOpen ? "←" : "→"} {translate(listOpen ? "terms.summaryHideList" : "terms.summaryShowList", language)}</button>
-          <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void generateSummaries()}>{translate("terms.summaryGenerate", language)}</button>
-          <button className="quiet-button" type="button" disabled={busy || activeSummaryTask} onClick={() => { setDialogSelection(new Set()); setDialog("aggregate"); }}>{translate("terms.summaryAggregate", language)}</button>
+          <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("fragment")}>{translate("terms.summaryGenerate", language)}</button>
+          <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("full")}>{translate("terms.summaryAggregate", language)}</button>
           <button className="quiet-button" type="button" disabled={busy} onClick={() => { setDialogSelection(new Set()); setDialog("export"); }}>{translate("terms.summaryExport", language)}</button>
         </div>
       </header>
@@ -752,14 +718,15 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
               const latestArtifact = fullArtifact ?? fragmentArtifact;
               const done = hasUsableArtifact(data?.artifacts ?? [], boundary, "full");
               const failed = latestArtifact?.status === "failed";
-              const stale = latestArtifact?.status === "stale" || Boolean(latestArtifact?.source_changed);
+              const stale = Boolean(latestArtifact && summaryArtifactIsExpired(latestArtifact));
+              const rowSelected = partSelection.selectedKeys.has(key);
               return (
-                <div className={`summary-boundary-row${key === focusedBoundary ? " focused" : ""}`} key={key}>
-                  <button type="button" className="summary-boundary-row-main" aria-current={key === focusedBoundary ? "true" : undefined} onClick={() => focusBoundary(boundary)}>
-                    <span className={`summary-boundary-status${done ? " done" : failed ? " failed" : stale ? " stale" : ""}`} />
+                <div className={`summary-boundary-row${rowSelected ? " selected" : ""}${key === focusedBoundary ? " focused" : ""}`} key={key}>
+                  <button type="button" className="summary-boundary-row-main" aria-current={key === focusedBoundary ? "true" : undefined} onClick={(event) => { partSelection.select(key, visibleBoundaryKeys, event); focusBoundary(boundary); }}>
+                    <span className={`summary-boundary-status${done ? " done" : failed ? " failed" : ""}${stale ? " stale" : ""}`} />
                     <span><strong>{boundary.part_id}</strong><small>{translate("terms.summaryBoundaryStats", language, { file: names.get(boundary.file_id) ?? boundary.file_id, count: boundary.segment_count })}</small></span>
                   </button>
-                  <input type="checkbox" aria-label={boundaryText(boundary, names, language)} checked={participation.has(key)} disabled={participationSaving} onChange={(event) => saveParticipation(toggleFilteredSelection(selectionBoundaries, participationStateRef.current.displayed, [asSelectionBoundary(boundary)], event.target.checked))} />
+                  <input type="checkbox" aria-label={boundaryText(boundary, names, language)} checked={participation.has(key)} disabled={participationSaving} onChange={(event) => saveParticipation(toggleFilteredSelection(selectionBoundaries, participationStateRef.current.displayed, participationTargets(key), event.target.checked))} />
                 </div>
               );
             })}
@@ -772,61 +739,20 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
           {loading ? <p className="summary-empty">{translate("common.loading", language)}</p> : !focused ? <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p> : <>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>
-              {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void generateSummaries()} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void generateSummaries()} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
+              {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
             </div>
           </>}
         </main>
         {sourceOpen && <SourcePanel project={project} boundary={focused} language={language} focusSegmentIds={sourceSegmentIds} onClose={() => setSourceOpen(false)} />}
       </div>
-      {dialog === "aggregate" && <SelectionDialog mode="aggregate" boundaries={boundaries} selected={dialogSelection} names={names} language={language} error={dialogError} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void aggregate()} />}
-      {dialog === "export" && <SelectionDialog mode="export" boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
-      {preflight && (
-        <Modal ariaLabel={translate("terms.summaryPreflightTitle", language)}>
-          <div className="summary-dialog-heading">
-            <div><h2>{translate("terms.summaryPreflightTitle", language)}</h2><p>{translate("terms.summaryPreflightConfirm", language, { count: preflight.selected })}</p></div>
-            <button className="quiet-button" type="button" onClick={() => setPreflight(null)}>×</button>
-          </div>
-          {preflight.conflict && <p className="error-text">{translate("terms.summaryPreflightConflict", language)}</p>}
-          {!preflight.promptOk && <div className="error-text summary-message">
-            <p>{translate("terms.summaryPromptMissing", language, { language })}</p>
-            <ul>{preflight.missing.map((name) => <li key={name}><code>{name}</code></li>)}</ul>
-          </div>}
-          {!preflight.selected && <p className="error-text">{translate("terms.summarySelectionEmpty", language)}</p>}
-          <div className="button-group summary-dialog-actions">
-            <button className="quiet-button" type="button" disabled={busy} onClick={() => setPreflight(null)}>{translate("common.cancel", language)}</button>
-            <button className="primary-button" type="button" disabled={busy || !preflight.promptOk || !preflight.selected} onClick={() => void launchGenerate()}>{translate("terms.summaryConflictRun", language)}</button>
-          </div>
-        </Modal>
-      )}
-      {conflict && (
-        <Modal ariaLabel={translate("terms.summaryConflictTitle", language)}>
-          <div className="summary-dialog-heading">
-            <div><h2>{translate("terms.summaryConflictTitle", language)}</h2><p>{translate(conflict === "unfinished_run" ? "terms.summaryConflictUnfinished" : "terms.summaryConflictFingerprint", language)}</p></div>
-            <button className="quiet-button" type="button" onClick={() => { setConflict(null); setConflictError(""); }}>×</button>
-          </div>
-          {conflict === "unfinished_run" && (
-            <label className="radio-option decision-option">
-              <input type="radio" checked={conflictResume} onChange={() => { setConflictResume(true); setConflictForce(false); setConflictError(""); }} />
-              <span><strong>{translate("terms.summaryConflictResume", language)}</strong><small>{translate("terms.summaryConflictResumeHint", language)}</small></span>
-            </label>
-          )}
-          {conflict === "mismatched_fingerprint" && (
-            <label className="radio-option decision-option">
-              <input type="radio" checked={conflictReuse} onChange={() => { setConflictReuse(true); setConflictForce(false); setConflictError(""); }} />
-              <span><strong>{translate("terms.summaryConflictReuse", language)}</strong><small>{translate("terms.summaryConflictReuseHint", language)}</small></span>
-            </label>
-          )}
-          <label className="radio-option decision-option">
-            <input type="radio" checked={conflictForce} onChange={() => { setConflictForce(true); setConflictResume(false); setConflictReuse(false); setConflictError(""); }} />
-            <span><strong>{translate("terms.summaryConflictForce", language)}</strong><small>{translate("terms.summaryConflictForceHint", language)}</small></span>
-          </label>
-          {conflictError && <p className="error-text summary-message">{conflictError}</p>}
-          <div className="button-group summary-dialog-actions">
-            <button className="quiet-button" type="button" disabled={busy} onClick={() => { setConflict(null); setConflictError(""); }}>{translate("common.cancel", language)}</button>
-            <button className="primary-button" type="button" disabled={busy || (!conflictResume && !conflictReuse && !conflictForce)} onClick={() => void startSummaries({ resume: conflictResume, reuse: conflictReuse, force: conflictForce })}>{translate("terms.summaryConflictRun", language)}</button>
-          </div>
-        </Modal>
-      )}
+      {dialog === "export" && <SelectionDialog boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
+      {runOptions && runKind && <RunDialog
+        key={`${runKind}-${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
+        options={runOptions}
+        language={language}
+        onClose={() => { setRunOptions(null); setRunKind(null); }}
+        onStart={(decision) => { void startSummaryRun(decision); }}
+      />}
     </section>
   );
 }
@@ -840,33 +766,54 @@ function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, on
   onRetry: () => void;
   retryDisabled?: boolean;
 }) {
-  const retryable = Boolean(artifact && (artifact.status !== "completed" || artifact.source_changed
-    || (artifact.kind === "full" && !summaryArtifactHasCompleteCoverage(artifact, boundary.segment_count))));
-  if (!artifact || retryable) {
+  const expired = Boolean(artifact && summaryArtifactIsExpired(artifact));
+  const failed = Boolean(artifact && artifact.status === "failed");
+  const incomplete = Boolean(artifact && artifact.kind === "full" && !expired
+    && !summaryArtifactHasCompleteCoverage(artifact, boundary.segment_count));
+  const retryable = Boolean(artifact && (expired || failed || incomplete));
+  if (!artifact || failed || incomplete) {
     const detail = !artifact
       ? empty
-      : artifact.source_changed
-        ? translate("terms.summarySourceChanged", language)
-        : artifact.status === "failed"
-          ? translate("terms.summaryArtifactReason", language, { status: translate("terms.summaryArtifactFailed", language), reason: artifact.error_message || artifact.error || artifact.error_class || "" })
-          : artifact.status === "stale"
-            ? translate("terms.summaryArtifactReason", language, { status: translate("terms.summaryArtifactStale", language), reason: artifact.error_message || artifact.error || artifact.error_class || "" })
-            : artifact.kind === "full"
-              ? translate("terms.summaryArtifactIncomplete", language)
-              : empty;
+      : artifact.status === "failed"
+        ? translate("terms.summaryArtifactReason", language, { status: translate("terms.summaryArtifactFailed", language), reason: artifact.error_message || artifact.error || artifact.error_class || "" })
+        : artifact.kind === "full"
+          ? translate("terms.summaryArtifactIncomplete", language)
+          : empty;
     return <div className={`summary-empty-card${retryable ? " summary-artifact-failure" : ""}`}>
       <p>{detail}</p>
-      {retryable && retryDisabled && <small>{translate("terms.summaryRetrySelect", language)}</small>}
       <div className="summary-artifact-actions">
         <button className="quiet-button" type="button" onClick={() => onSource(artifact ? summaryArtifactSegmentIds(artifact) : [])}>{translate("terms.summarySource", language)}</button>
         {retryable && <button className="quiet-button" type="button" disabled={retryDisabled} onClick={onRetry}>{translate("terms.summaryRetry", language)}</button>}
       </div>
+      {retryable && retryDisabled && <small>{translate("terms.summaryRetrySelect", language)}</small>}
     </div>;
   }
   const origin = artifact.provenance?.origin === "adopted" || artifact.provenance?.origin === "adopted_fragment" ? "terms.summaryOriginAdopted" : "terms.summaryOriginLlm";
+  const expiryReason = artifact ? summaryArtifactExpiryReason(artifact) : null;
+  const warning = expiryReason === "source_changed"
+    ? translate("terms.summarySourceChanged", language)
+    : expiryReason === "dependency_changed"
+      ? translate("terms.summaryDependencyChanged", language)
+      : expiryReason === "provenance_unavailable"
+        ? translate("terms.summaryProvenanceUnavailable", language)
+        : expiryReason === "stale_status"
+          ? translate("terms.summaryArtifactStale", language)
+          : translate("terms.summaryArtifactExpired", language);
   const refs = summaryArtifactSegmentIds(artifact);
   const labels = refs.length
     ? refs.map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
     : (artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
-  return <article className="summary-artifact-card"><div className="summary-artifact-meta"><span>{translate(origin, language)}</span><small>{artifact.model}</small></div><p className="summary-artifact-text">{artifact.text || empty}</p><div className="summary-artifact-footer"><span>{labels.length ? translate("terms.summaryReferenceList", language, { refs: labels.join(translate("terms.summaryReferenceSeparator", language)) }) : ""}</span><button className="quiet-button" type="button" onClick={() => onSource(refs)}>{translate("terms.summarySource", language)}</button></div></article>;
+  return <article className={`summary-artifact-card${expired ? " summary-artifact-warning" : ""}`}>
+    {expired && <p className="summary-artifact-warning-message">{warning}</p>}
+    <div className="summary-artifact-meta"><span>{translate(origin, language)}</span><small>{artifact.model}</small></div>
+    <p className="summary-artifact-text">{artifact.text || empty}</p>
+    <div className="summary-artifact-footer">
+      <span>{labels.length ? translate("terms.summaryReferenceList", language, { refs: labels.join(translate("terms.summaryReferenceSeparator", language)) }) : ""}</span>
+      <div className="summary-artifact-actions">
+        <button className="quiet-button" type="button" onClick={() => onSource(refs)}>{translate("terms.summarySource", language)}</button>
+        {expired && <button className="quiet-button" type="button" disabled={retryDisabled} onClick={onRetry}>{translate("terms.summaryRetry", language)}</button>}
+      </div>
+    </div>
+    {expired && retryDisabled && <small>{translate("terms.summaryRetrySelect", language)}</small>}
+  </article>;
 }

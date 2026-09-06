@@ -9,6 +9,8 @@ import {
   rejectSummaryParticipationPut,
   resolveSummaryParticipationPut,
   restoreSummaryWorkspaceState,
+  summaryArtifactExpiryReason,
+  summaryArtifactIsExpired,
   summaryArtifactSegmentIds,
   summaryProgress,
   termsSubpageForTask,
@@ -60,12 +62,36 @@ test("counts only selected boundaries with complete full-summary coverage", () =
     { key: "F0002:p1", fileId: "F0002", partId: "p1", segmentCount: 1 },
   ];
   const artifacts = [
-    { kind: "full", status: "completed", source_changed: false, file_id: "F0001", part_id: "p1", source_range: { segments: [{ segment_id: "F0001-S1" }, { segment_id: "F0001-S2" }] } },
+    { kind: "full", status: "completed", source_changed: false, file_id: "F0001", part_id: "p1", text: "当前完整概括。", source_range: { segments: [{ segment_id: "F0001-S1" }, { segment_id: "F0001-S2" }] } },
     { kind: "fragment", status: "completed", source_changed: false, file_id: "F0001", part_id: "p2", source_range: { segments: [{ segment_id: "F0001-S3" }] } },
     { kind: "full", status: "completed", source_changed: true, file_id: "F0002", part_id: "p1", source_range: { segments: [{ segment_id: "F0002-S1" }] } },
   ];
 
   assert.deepEqual(summaryProgress(boundaries, new Set(["F0001:p1", "F0001:p2"]), artifacts), { done: 1, total: 2 });
+});
+
+test("counts an expired full summary as usable progress and exposes its warning state", () => {
+  const boundaries = [
+    { key: "F0001:p1", fileId: "F0001", partId: "p1", segmentCount: 2 },
+  ];
+  const artifact = {
+    kind: "full",
+    status: "completed",
+    expired: true,
+    file_id: "F0001",
+    part_id: "p1",
+    text: "仍可使用的过期概括。",
+    source_range: { segments: [{ segment_id: "F0001-S1" }, { segment_id: "F0001-S2" }] },
+  };
+
+  assert.equal(summaryArtifactIsExpired(artifact), true);
+  assert.deepEqual(summaryProgress(boundaries, new Set(["F0001:p1"]), [artifact]), { done: 1, total: 1 });
+});
+
+test("keeps server expiry reasons available for source and provenance warnings", () => {
+  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "source_changed" }), "source_changed");
+  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "dependency_changed" }), "dependency_changed");
+  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "provenance_unavailable" }), "provenance_unavailable");
 });
 
 test("resolves numeric summary references to stable source segment ids", () => {
