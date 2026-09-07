@@ -472,6 +472,7 @@ allow_split_oversized_segment = true
 [context.translation]
 enabled = true
 previous_segments = 3
+previous_summaries = false
 
 [context.proofreading]
 enabled = true
@@ -681,6 +682,9 @@ completed 的非空 Segment 重新加入待处理集合。
 翻译还包含启用的文字校验器 ID、插件及 Validator 版本和 `exhausted_mode`。
 最大校验重试次数只影响执行，不进入指纹。
 
+固定 Prompt 规则（包括翻译的 `summary_context` 语义）版本变化会更新阶段指纹；
+`context.translation.previous_summaries` 本身也属于翻译阶段上下文配置。
+
 上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹
 只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
 
@@ -870,6 +874,16 @@ previous_segments = 3
 最近的非空 Segment 数。跨边界 Chunk 的后续 Segment 不会改变这份上文的边界。
 `terminology_decision` 与 `content_summary` 不读取此上文配置，分别使用术语证据和片段
 概括作为固定输入。
+
+翻译的 `previous_summaries` 独立于 `context.translation.enabled`，默认关闭；当
+`translation` 出现在 `chunking.cross_boundary_batching` 时，即使开启也不注入概括。
+开启后，Part 起始 Chunk 只读取全项目源文顺序中上一 Part 的最新有效 `full` 概括；
+同一 Part 的后续 Chunk 只读取该 Part 内起点最靠后的最新有效 `fragment` 概括，摘要
+范围可以覆盖当前 Chunk 的 Segment。有效摘要必须是 `completed`、非空、
+`source_changed = false`，且其 `source_range` 仍与当前源文匹配；`full` 与 `fragment`
+不会互相替代。翻译 Payload 新增 `summary_context` 文本数组，无可用摘要时发送空数组；
+`reference_context` 的结构和边界规则不变。该字段参与 dry-run、Token 估算、格式修正
+和上下文拆分。
 
 规则：
 
