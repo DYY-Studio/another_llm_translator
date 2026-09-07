@@ -266,7 +266,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-PROMPT_RULES_VERSION = 13
+PROMPT_RULES_VERSION = 14
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -351,12 +351,16 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
+            "summary_context 是已校验概括，仅供理解，可覆盖当前 segments，"
+            "不得翻译或输出。"
             "validation_repair 仅按 validation_matches 修复 failed_candidate。"
         ),
         "en": (
             "Translate segments[].source into target_language; terms is relevant "
-            "terminology. On validation_repair, revise failed_candidate only for "
-            "validation_matches."
+            "terminology. summary_context contains validated summaries for context "
+            "only; it may cover current segments and is not to be translated or "
+            "output. On validation_repair, revise "
+            "failed_candidate only for validation_matches."
         ),
     },
     "proofreading": {

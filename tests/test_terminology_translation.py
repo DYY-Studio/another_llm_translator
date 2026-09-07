@@ -10,12 +10,25 @@ import httpx
 import pytest
 
 from app.errors import FatalExternalError, RequestSizeError
-from app.execution import Scope, latest_completed_by_segment, load_stage_history
+from app.execution import (
+    Scope,
+    latest_completed_by_segment,
+    load_stage_history,
+    segment_model_source,
+)
 from app.project import add_project_files, init_project
-from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
+from app.sqlite_storage import (
+    read_json,
+    read_jsonl,
+    read_segments,
+    record_header,
+    write_content_summary,
+    write_json,
+)
 from app.stage_runtime import _restore_leading_whitespace
 from app.stage_terminology import run_terminology
 from app.stage_translation import run_translation
+from app.summary_provenance import digest
 from app.term_library import TermNormalization, load_terms
 from app.term_matching import _TermMatchCache, match_term_validation, match_terms
 from tests.helpers import llm_jsonl, use_llm_preset
@@ -37,6 +50,101 @@ async def create_project(
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
     return project
+
+
+def write_test_summary(
+    project: Path,
+    *,
+    summary_id: str,
+    kind: str,
+    file_id: str,
+    part_id: str,
+    segment_indexes: list[int],
+    text: str,
+    source_changed: bool = False,
+    status: str = "completed",
+    source_mismatch: bool = False,
+    updated_at: str | None = None,
+) -> None:
+    metadata = read_json(project, project / "project.json")
+    boundary_segments = [
+        segment
+        for segment in read_segments(project)
+        if segment["file_id"] == file_id
+        and segment["part_id"] == part_id
+        and not segment["is_empty"]
+    ]
+    selected = [boundary_segments[index] for index in segment_indexes]
+    ranges = []
+    for index, segment in enumerate(selected):
+        source = str(segment["source"])
+        model_text = segment_model_source(segment)
+        ranges.append(
+            {
+                "segment_id": str(segment["segment_id"]),
+                "original_segment_id": str(segment["segment_id"]),
+                "slice_id": f"{segment['segment_id']}#slice-0000",
+                "slice_index": index,
+                "source": source,
+                "source_digest": digest(source),
+                "original_source_digest": (
+                    "sha256:wrong" if source_mismatch else digest(source)
+                ),
+                "model_text": model_text,
+                "model_text_digest": digest(model_text),
+                "original_model_text_digest": digest(model_text),
+            }
+        )
+    record = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id=summary_id,
+        kind=kind,
+        file_id=file_id,
+        part_id=part_id,
+        status=status,
+        text=text,
+        source_range={
+            "file_id": file_id,
+            "part_id": part_id,
+            "segment_ids": [item["segment_id"] for item in ranges],
+            "segments": ranges,
+        },
+        source_digest=digest(ranges),
+        input_digest=digest([item["segment_id"] for item in ranges]),
+        prompt_digest="sha256:test-prompt",
+        model="test-model",
+        source_changed=source_changed,
+    )
+    if updated_at is not None:
+        record["updated_at"] = updated_at
+    write_content_summary(project, record)
+
+
+def translation_response(request: httpx.Request) -> httpx.Response:
+    payload = json.loads(request.content)
+    body = json.loads(payload["messages"][1]["content"])
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": llm_jsonl(
+                            [
+                                {
+                                    "type": "segment",
+                                    "id": item["id"],
+                                    "translation": f"译文:{item['source']}",
+                                }
+                                for item in body["segments"]
+                            ]
+                        )
+                    }
+                }
+            ]
+        },
+    )
 
 
 def terminology_response(source: str) -> httpx.Response:
@@ -176,6 +284,7 @@ async def test_terminology_publishes_and_translation_uses_terms(
     assert translation_progress[-1] == (2, 0, 2)
     assert live_usage[-1]["available"] is True
     assert seen_translation_payload is not None
+    assert seen_translation_payload["summary_context"] == []
     assert seen_translation_payload["terms"][0]["source"] == "Alice"
     expected_usage = {
         "input_tokens": 10,
@@ -191,6 +300,229 @@ async def test_terminology_publishes_and_translation_uses_terms(
             (project / "runs" / run_id / "manifest.json").read_text("utf-8")
         )
         assert manifest["usage"] == expected_usage
+
+
+@pytest.mark.asyncio
+async def test_translation_injects_previous_part_full_summary(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "previous")
+    next_source = tmp_path / "next.txt"
+    next_source.write_text("current", encoding="utf-8")
+    add_project_files(project, [str(next_source)])
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FULL-PREVIOUS",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[0],
+        text="上一 Part 概括",
+    )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(json.loads(body["messages"][1]["content"]))
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(only_file="F0002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert seen["reference_context"] == []
+    assert seen["summary_context"] == ["上一 Part 概括"]
+
+
+@pytest.mark.asyncio
+async def test_translation_selects_latest_fragment_by_start_and_allows_current_segment(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "first\nsecond\nthird")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FRAGMENT-OLD",
+        kind="fragment",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[0],
+        text="旧片段概括",
+        updated_at="2026-01-02T00:00:00+08:00",
+    )
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FRAGMENT-CURRENT",
+        kind="fragment",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[1, 2],
+        text="当前起点概括",
+        updated_at="2026-01-01T00:00:00+08:00",
+    )
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(json.loads(body["messages"][1]["content"]))
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(only_segment="F0001-S000002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert seen["summary_context"] == ["当前起点概括"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "source_changed", "source_mismatch"),
+    [
+        ("full", True, False),
+        ("full", False, True),
+        ("fragment", False, False),
+    ],
+)
+async def test_translation_does_not_fallback_from_invalid_or_wrong_summary(
+    tmp_path: Path,
+    kind: str,
+    source_changed: bool,
+    source_mismatch: bool,
+) -> None:
+    project = await create_project(tmp_path, "previous")
+    next_source = tmp_path / "next.txt"
+    next_source.write_text("current", encoding="utf-8")
+    add_project_files(project, [str(next_source)])
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-WRONG-PREVIOUS",
+        kind=kind,
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[0],
+        text="不可用概括",
+        source_changed=source_changed,
+        source_mismatch=source_mismatch,
+    )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(json.loads(body["messages"][1]["content"]))
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(only_file="F0002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert seen["summary_context"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_enabled", "cross_boundary", "expected_summary"),
+    [
+        (False, False, ["上一 Part 概括"]),
+        (True, True, []),
+    ],
+)
+async def test_translation_summary_switch_is_independent_from_context_and_cross_boundary(
+    tmp_path: Path,
+    context_enabled: bool,
+    cross_boundary: bool,
+    expected_summary: list[str],
+) -> None:
+    project = await create_project(tmp_path, "previous")
+    next_source = tmp_path / "next.txt"
+    next_source.write_text("current", encoding="utf-8")
+    add_project_files(project, [str(next_source)])
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FULL-PREVIOUS",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[0],
+        text="上一 Part 概括",
+    )
+    config_text = project.joinpath("config.toml").read_text(encoding="utf-8")
+    config_text = config_text.replace(
+        "previous_summaries = false", "previous_summaries = true"
+    ).replace(
+        "enabled = true\n# 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。\nprevious_segments = 3",
+        "enabled = " + str(context_enabled).lower()
+        + "\n# 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。\nprevious_segments = 3",
+    )
+    if cross_boundary:
+        config_text = config_text.replace(
+            "cross_boundary_batching = []",
+            'cross_boundary_batching = ["translation"]',
+        )
+    project.joinpath("config.toml").write_text(config_text, encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(json.loads(body["messages"][1]["content"]))
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(only_file="F0002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert seen["reference_context"] == []
+    assert seen["summary_context"] == expected_summary
 
 
 @pytest.mark.asyncio

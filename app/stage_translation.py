@@ -4,6 +4,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import httpx
@@ -35,8 +36,10 @@ from .plugins import (
 from .sqlite_storage import (
     append_jsonl,
     latest_stage_states,
+    read_content_summaries,
     record_header,
 )
+from .summary_provenance import digest
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,
@@ -93,6 +96,172 @@ def _map_local_translation_response(
         result.complete,
         result.has_valid_end,
         result.ids_complete,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _TranslationSummaryContext:
+    part_first_ids: dict[tuple[str, str], str]
+    previous_parts: dict[tuple[str, str], tuple[str, str] | None]
+    full_text: dict[tuple[str, str], str]
+    fragments: dict[tuple[str, str], tuple[tuple[int, str, str], ...]]
+
+    @classmethod
+    def empty(cls) -> _TranslationSummaryContext:
+        return cls({}, {}, {}, {})
+
+    def for_items(self, items: list[dict[str, Any]]) -> list[str]:
+        if not items:
+            return []
+        first = items[0]
+        boundary = (str(first["file_id"]), str(first["part_id"]))
+        if self.part_first_ids.get(boundary) == str(first["segment_id"]):
+            previous = self.previous_parts.get(boundary)
+            text = self.full_text.get(previous) if previous is not None else None
+            return [text] if text is not None else []
+
+        first_line = int(first["line_index"])
+        candidates = [
+            item
+            for item in self.fragments.get(boundary, ())
+            if item[0] <= first_line
+        ]
+        if not candidates:
+            return []
+        latest_start = max(item[0] for item in candidates)
+        latest = max(
+            (item for item in candidates if item[0] == latest_start),
+            key=lambda item: (item[1], item[2]),
+        )
+        return [latest[2]]
+
+
+def _translation_summary_context(
+    project: Path,
+    segments: list[dict[str, Any]],
+) -> _TranslationSummaryContext:
+    file_order: dict[str, int] = {}
+    for item in segments:
+        file_order.setdefault(str(item["file_id"]), len(file_order))
+    ordered = sorted(
+        (item for item in segments if not item["is_empty"]),
+        key=lambda item: (
+            file_order[str(item["file_id"])],
+            int(item["line_index"]),
+            str(item["segment_id"]),
+        ),
+    )
+    boundary_segments: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    part_order: list[tuple[str, str]] = []
+    for item in ordered:
+        boundary = (str(item["file_id"]), str(item["part_id"]))
+        if boundary not in boundary_segments:
+            boundary_segments[boundary] = []
+            part_order.append(boundary)
+        boundary_segments[boundary].append(item)
+
+    current_by_id = {
+        str(item["segment_id"]): item
+        for item in ordered
+    }
+    valid_full: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+    valid_fragments: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    for summary in read_content_summaries(project, status="completed"):
+        if summary.get("status") != "completed":
+            continue
+        text = summary.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if bool(summary.get("source_changed")):
+            continue
+        kind = summary.get("kind")
+        if kind not in {"full", "fragment"}:
+            continue
+        boundary = (str(summary.get("file_id", "")), str(summary.get("part_id", "")))
+        current = boundary_segments.get(boundary)
+        source_range = summary.get("source_range")
+        values = source_range.get("segments") if isinstance(source_range, dict) else None
+        if (
+            not current
+            or not isinstance(source_range, dict)
+            or source_range.get("file_id") != boundary[0]
+            or source_range.get("part_id") != boundary[1]
+            or not isinstance(values, list)
+            or not values
+        ):
+            continue
+
+        stable_ids: list[str] = []
+        valid_range = True
+        for value in values:
+            if not isinstance(value, dict):
+                valid_range = False
+                break
+            stable_id = value.get("original_segment_id") or value.get("segment_id")
+            if not isinstance(stable_id, str) or not stable_id:
+                valid_range = False
+                break
+            item = current_by_id.get(stable_id)
+            if item is None or (
+                str(item["file_id"]), str(item["part_id"])
+            ) != boundary:
+                valid_range = False
+                break
+            if value.get(
+                "original_source_digest", value.get("source_digest")
+            ) != digest(str(item["source"])):
+                valid_range = False
+                break
+            if value.get(
+                "original_model_text_digest", value.get("model_text_digest")
+            ) != digest(segment_model_source(item)):
+                valid_range = False
+                break
+            stable_ids.append(stable_id)
+        if not valid_range:
+            continue
+
+        current_ids = [str(item["segment_id"]) for item in current]
+        unique_ids = list(dict.fromkeys(stable_ids))
+        positions = [current_ids.index(stable_id) for stable_id in unique_ids]
+        if positions != sorted(positions):
+            continue
+        if kind == "full" and unique_ids != current_ids:
+            continue
+
+        updated = str(
+            summary.get("updated_at") or summary.get("created_at") or ""
+        )
+        record_id = str(summary.get("record_id", ""))
+        if kind == "full":
+            valid_full.setdefault(boundary, []).append((updated, record_id, text))
+        else:
+            start = min(int(current_by_id[stable_id]["line_index"]) for stable_id in unique_ids)
+            valid_fragments.setdefault(boundary, []).append(
+                (start, updated + "\x00" + record_id, text)
+            )
+
+    full_text = {
+        boundary: max(values, key=lambda item: (item[0], item[1]))[2]
+        for boundary, values in valid_full.items()
+    }
+    fragments = {
+        boundary: tuple(values)
+        for boundary, values in valid_fragments.items()
+    }
+    part_first_ids = {
+        boundary: str(values[0]["segment_id"])
+        for boundary, values in boundary_segments.items()
+    }
+    previous_parts = {
+        boundary: (part_order[index - 1] if index else None)
+        for index, boundary in enumerate(part_order)
+    }
+    return _TranslationSummaryContext(
+        part_first_ids=part_first_ids,
+        previous_parts=previous_parts,
+        full_text=full_text,
+        fragments=fragments,
     )
 
 async def run_translation(
@@ -186,6 +355,12 @@ async def run_translation(
     }
     context_config = config["context"]["translation"]
     context_index = PreviousContextIndex(segments)
+    summary_context_index = _TranslationSummaryContext.empty()
+    if (
+        context_config["previous_summaries"]
+        and "translation" not in config["chunking"]["cross_boundary_batching"]
+    ):
+        summary_context_index = _translation_summary_context(project, segments)
     term_match_cache = _TermMatchCache(
         library,
         term_normalization(config),
@@ -212,6 +387,7 @@ async def run_translation(
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
+            "summary_context": summary_context_index.for_items(items),
             "terms": _segment_model_payload_value(
                 items[0], term_match_cache.for_items(items)
             ),
