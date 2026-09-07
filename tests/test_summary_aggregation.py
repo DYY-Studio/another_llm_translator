@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.errors import ExportError, UsageError
+from app.errors import ExportError, FatalExternalError, UsageError
 from app.execution import Scope, segment_model_source
 from app.llm_client import SlidingWindowLimiter
 from app.llm_keys import KeyPool
@@ -137,7 +137,10 @@ def _summary_response(request: httpx.Request) -> httpx.Response:
 
 
 def _patch_max_parallel(
-    monkeypatch: pytest.MonkeyPatch, value: int = 2
+    monkeypatch: pytest.MonkeyPatch,
+    value: int = 2,
+    *,
+    http_attempts: int | None = None,
 ) -> None:
     original_load = __import__(
         "app.summary_aggregation", fromlist=["load_project_config"]
@@ -147,6 +150,8 @@ def _patch_max_parallel(
         config = original_load(project, stage=stage)
         config["execution"]["max_parallel"] = value
         config["execution"]["max_parallel_per_key"] = value
+        if http_attempts is not None:
+            config["retry"]["http_max_attempts"] = http_attempts
         return config
 
     monkeypatch.setattr("app.summary_aggregation.load_project_config", load)
@@ -282,6 +287,140 @@ async def test_recursive_reduction_runs_left_and_right_subtrees_concurrently(
     assert maximum == 2
     assert result["completed"] == 1
     assert result["calls"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_shared_request_limit_covers_recursive_requests_across_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _two_boundary_project(tmp_path)
+    _patch_max_parallel(monkeypatch)
+    for file_id, text in (("F0001", "甲"), ("F0002", "乙")):
+        _fragment(
+            project,
+            summary_id=f"{file_id}-1",
+            segment_indexes=[0],
+            file_id=file_id,
+            text=text * 7500,
+        )
+        _fragment(
+            project,
+            summary_id=f"{file_id}-2",
+            segment_indexes=[1],
+            file_id=file_id,
+            text=text * 7500,
+        )
+    active = 0
+    maximum = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.03)
+        active -= 1
+        return _summary_response(request)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await aggregate_summaries(
+                project,
+                [
+                    {"file_id": "F0001", "part_id": "document"},
+                    {"file_id": "F0002", "part_id": "document"},
+                ],
+                http_client=client,
+                limiter=SlidingWindowLimiter(0, 0),
+            )
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert maximum == 2
+    assert result["completed"] == 2
+    assert result["calls"] == 6
+    assert all(
+        boundary["calls"] == result["calls"]
+        for boundary in result["boundaries"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fatal_recursive_child_cancels_sibling_before_it_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project(tmp_path)
+    _patch_max_parallel(monkeypatch)
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-LEFT",
+        segment_indexes=[0],
+        text="LEFT" * 7500,
+    )
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-RIGHT",
+        segment_indexes=[1],
+        text="RIGHT" * 7500,
+    )
+    left_started = asyncio.Event()
+    right_started = asyncio.Event()
+    fatal_seen = asyncio.Event()
+    allow_left_response = asyncio.Event()
+    allow_right_response = asyncio.Event()
+    right_cancelled = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8")
+        if "LEFT" in body:
+            left_started.set()
+            await allow_left_response.wait()
+            fatal_seen.set()
+            return httpx.Response(401)
+        right_started.set()
+        try:
+            await allow_right_response.wait()
+            return _summary_response(request)
+        finally:
+            right_cancelled.set()
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task = asyncio.create_task(
+        aggregate_summaries(
+            project,
+            [{"file_id": "F0001", "part_id": "document"}],
+            http_client=client,
+            limiter=SlidingWindowLimiter(0, 0),
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(left_started.wait(), right_started.wait()),
+            timeout=1,
+        )
+        allow_left_response.set()
+        await asyncio.wait_for(fatal_seen.wait(), timeout=1)
+        try:
+            await asyncio.wait_for(right_cancelled.wait(), timeout=0.2)
+        except TimeoutError:
+            allow_right_response.set()
+            with pytest.raises(FatalExternalError):
+                await task
+            pytest.fail("致命递归子任务未及时取消兄弟任务")
+        with pytest.raises(FatalExternalError):
+            await task
+    finally:
+        allow_left_response.set()
+        allow_right_response.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
 
 
 def test_single_full_fragment_is_adopted_without_llm_call(tmp_path: Path) -> None:
@@ -621,7 +760,10 @@ def test_aggregation_counts_multiple_summary_records_as_boundary_failure(
     assert read_content_summaries(project, kind="full", status="completed") == []
 
 
-def test_multiple_boundaries_isolate_publication_and_failures(tmp_path: Path) -> None:
+def test_multiple_boundaries_isolate_publication_and_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("Alice entered.\nAlice left.", encoding="utf-8")
@@ -634,6 +776,7 @@ def test_multiple_boundaries_isolate_publication_and_failures(tmp_path: Path) ->
     )
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
+    _patch_max_parallel(monkeypatch, http_attempts=1)
     for file_id in ("F0001", "F0002"):
         _fragment(project, summary_id=f"{file_id}-1", segment_indexes=[0], file_id=file_id, text="片段一。")
         _fragment(project, summary_id=f"{file_id}-2", segment_indexes=[1], file_id=file_id, text="片段二。")
@@ -666,10 +809,7 @@ def test_multiple_boundaries_isolate_publication_and_failures(tmp_path: Path) ->
 
     def fail_on_second_boundary(request: httpx.Request) -> httpx.Response:
         if "F0002" in request.content.decode("utf-8"):
-            return httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
-            )
+            return httpx.Response(500)
         return _summary_response(request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(fail_on_second_boundary))

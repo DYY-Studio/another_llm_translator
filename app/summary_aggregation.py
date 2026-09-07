@@ -570,6 +570,11 @@ async def aggregate_summaries(
                         config["execution"]["token_safety_factor"],
                     )
 
+                def is_global_error(error: BaseException) -> bool:
+                    return isinstance(
+                        error, (asyncio.CancelledError, FatalExternalError)
+                    ) or not isinstance(error, (UsageError, ExternalError))
+
                 async def fit(
                     children: list[dict[str, Any]],
                     final: bool,
@@ -591,24 +596,38 @@ async def aggregate_summaries(
                             "聚合失败：递归压缩不收敛，最小请求仍超过模型上下文预算"
                         )
                     midpoint = len(children) // 2
-                    left_task = asyncio.create_task(
-                        fit(children[:midpoint], False)
-                    )
-                    right_task = asyncio.create_task(
-                        fit(children[midpoint:], False)
-                    )
+                    child_tasks = [
+                        asyncio.create_task(fit(children[:midpoint], False)),
+                        asyncio.create_task(fit(children[midpoint:], False)),
+                    ]
                     try:
+                        done, _ = await asyncio.wait(
+                            child_tasks,
+                            return_when=asyncio.FIRST_EXCEPTION,
+                        )
+                        for task in done:
+                            error = (
+                                asyncio.CancelledError()
+                                if task.cancelled()
+                                else task.exception()
+                            )
+                            if error is not None and is_global_error(error):
+                                for child_task in child_tasks:
+                                    child_task.cancel()
+                                await asyncio.gather(
+                                    *child_tasks,
+                                    return_exceptions=True,
+                                )
+                                raise error
                         left, right = await asyncio.gather(
-                            left_task,
-                            right_task,
+                            *child_tasks,
                             return_exceptions=True,
                         )
                     except asyncio.CancelledError:
-                        left_task.cancel()
-                        right_task.cancel()
+                        for child_task in child_tasks:
+                            child_task.cancel()
                         await asyncio.gather(
-                            left_task,
-                            right_task,
+                            *child_tasks,
                             return_exceptions=True,
                         )
                         raise
@@ -618,9 +637,7 @@ async def aggregate_summaries(
                         if isinstance(result, BaseException)
                     ]
                     for error in reduction_errors:
-                        if isinstance(
-                            error, (asyncio.CancelledError, FatalExternalError)
-                        ) or not isinstance(error, (UsageError, ExternalError)):
+                        if is_global_error(error):
                             raise error
                     if reduction_errors:
                         raise reduction_errors[0]
