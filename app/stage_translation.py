@@ -39,7 +39,7 @@ from .sqlite_storage import (
     read_content_summaries,
     record_header,
 )
-from .summary_provenance import digest
+from .summary_provenance import digest, full_summary_context_usable
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,
@@ -179,6 +179,8 @@ def _translation_summary_context(
             continue
         boundary = (str(summary.get("file_id", "")), str(summary.get("part_id", "")))
         current = boundary_segments.get(boundary)
+        if kind == "full" and not full_summary_context_usable(summary, current or []):
+            continue
         source_range = summary.get("source_range")
         values = source_range.get("segments") if isinstance(source_range, dict) else None
         if (

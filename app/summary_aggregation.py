@@ -42,7 +42,11 @@ from .sqlite_storage import (
     write_content_summary,
     write_summary_run,
 )
-from .summary_provenance import assess_full_summary, build_provenance
+from .summary_provenance import (
+    assess_full_summary,
+    build_provenance,
+    full_summary_context_usable,
+)
 
 MAX_REDUCTION_DEPTH = 8
 
@@ -833,6 +837,9 @@ def _latest_full(
             str(item.get("record_id") or ""),
         )
     )
+    for artifact in reversed(usable):
+        if full_summary_context_usable(artifact, current):
+            return artifact
     for artifact in reversed(usable):
         if not assess_full_summary(artifact, current, artifacts).expired:
             return artifact

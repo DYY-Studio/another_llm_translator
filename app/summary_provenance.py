@@ -138,6 +138,20 @@ def _current_segments_match(
     return True
 
 
+def full_summary_context_usable(
+    artifact: dict[str, Any], current_segments: list[dict[str, Any]]
+) -> bool:
+    """Return whether a completed full summary can provide current context."""
+    return (
+        artifact.get("kind") == "full"
+        and artifact.get("status") == "completed"
+        and isinstance(artifact.get("text"), str)
+        and bool(str(artifact["text"]).strip())
+        and not bool(artifact.get("source_changed"))
+        and _current_segments_match(artifact, current_segments)
+    )
+
+
 def _boundary(artifact: dict[str, Any]) -> tuple[str, str] | None:
     file_id = artifact.get("file_id")
     part_id = artifact.get("part_id")
