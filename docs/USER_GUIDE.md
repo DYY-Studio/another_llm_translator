@@ -244,7 +244,9 @@ provenance 按无法验证处理并过期，不会静默复用。旧的 `adopted
 `context.translation.previous_summaries`。Part 的第一个 Chunk 会收到全项目源文顺序中
 上一 Part 的完整概括；同一 Part 的后续 Chunk 会收到当前 Part 中起点最靠后的有效片段
 概括。摘要只在已完成、非空、未标记 `source_changed` 且源文范围仍匹配时使用，范围可以
-包含当前 Chunk 的 Segment；完整概括和片段概括不会互相替代。该开关独立于
+包含当前 Chunk 的 Segment。请求会同时明确摘要与当前 Chunk 的关系：纯粹前文、部分重叠，
+或摘要包含当前 Chunk 的全部 Segment；没有可用摘要时关系为空。完整概括和片段概括不会互相替代。
+该开关独立于
 `context.translation.enabled`，但 `translation` 加入 `chunking.cross_boundary_batching`
 后不会注入摘要。没有可用摘要时请求仍发送空的 `summary_context`，原有
 `reference_context` 不变。

@@ -882,9 +882,12 @@ previous_segments = 3
 范围可以覆盖当前 Chunk 的 Segment。有效摘要必须是 `completed`、非空、
 `source_changed = false`，且其 `source_range` 仍与当前源文匹配；`full` 与 `fragment`
 不会互相替代。`full` 的 provenance 依赖变化可以显示刷新警告，但在上述条件满足时仍可
-作为上下文使用；源文变化仍会禁止注入。翻译 Payload 新增 `summary_context` 文本数组，无可用摘要时发送空数组；
-`reference_context` 的结构和边界规则不变。该字段参与 dry-run、Token 估算、格式修正
-和上下文拆分。
+作为上下文使用；源文变化仍会禁止注入。翻译 Payload 新增 `summary_context` 文本数组和
+`summary_context_relation`。后者按已校验的稳定 Segment ID 与当前请求的 `segments` 判定：
+`previous_only` 表示摘要与当前 Segments 无交集、仅为前文；`partial_overlap` 表示有交集
+但摘要未覆盖当前请求的全部 Segments；`contains_all_current` 表示摘要来源范围包含当前
+请求的全部 Segments。无可用摘要时发送空数组和 `null`。`reference_context` 的结构和
+边界规则不变。两个摘要字段参与 dry-run、Token 估算、格式修正和上下文拆分。
 
 规则：
 
