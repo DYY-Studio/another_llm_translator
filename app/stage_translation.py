@@ -104,21 +104,23 @@ class _TranslationSummaryContext:
     part_first_ids: dict[tuple[str, str], str]
     previous_parts: dict[tuple[str, str], tuple[str, str] | None]
     full_text: dict[tuple[str, str], str]
-    fragments: dict[tuple[str, str], tuple[tuple[int, str, str], ...]]
+    fragments: dict[
+        tuple[str, str], tuple[tuple[int, str, str, frozenset[str]], ...]
+    ]
 
     @classmethod
     def empty(cls) -> _TranslationSummaryContext:
         return cls({}, {}, {}, {})
 
-    def for_items(self, items: list[dict[str, Any]]) -> list[str]:
+    def for_items(self, items: list[dict[str, Any]]) -> tuple[list[str], str | None]:
         if not items:
-            return []
+            return [], None
         first = items[0]
         boundary = (str(first["file_id"]), str(first["part_id"]))
         if self.part_first_ids.get(boundary) == str(first["segment_id"]):
             previous = self.previous_parts.get(boundary)
             text = self.full_text.get(previous) if previous is not None else None
-            return [text] if text is not None else []
+            return ([text], "previous_only") if text is not None else ([], None)
 
         first_line = int(first["line_index"])
         candidates = [
@@ -127,13 +129,21 @@ class _TranslationSummaryContext:
             if item[0] <= first_line
         ]
         if not candidates:
-            return []
+            return [], None
         latest_start = max(item[0] for item in candidates)
         latest = max(
             (item for item in candidates if item[0] == latest_start),
             key=lambda item: (item[1], item[2]),
         )
-        return [latest[2]]
+        current_ids = {str(item["segment_id"]) for item in items}
+        summary_ids = latest[3]
+        if not summary_ids.intersection(current_ids):
+            relation = "previous_only"
+        elif current_ids.issubset(summary_ids):
+            relation = "contains_all_current"
+        else:
+            relation = "partial_overlap"
+        return [latest[2]], relation
 
 
 def _translation_summary_context(
@@ -165,7 +175,9 @@ def _translation_summary_context(
         for item in ordered
     }
     valid_full: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
-    valid_fragments: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    valid_fragments: dict[
+        tuple[str, str], list[tuple[int, str, str, frozenset[str]]]
+    ] = {}
     for summary in read_content_summaries(project, status="completed"):
         if summary.get("status") != "completed":
             continue
@@ -240,7 +252,7 @@ def _translation_summary_context(
         else:
             start = min(int(current_by_id[stable_id]["line_index"]) for stable_id in unique_ids)
             valid_fragments.setdefault(boundary, []).append(
-                (start, updated + "\x00" + record_id, text)
+                (start, updated + "\x00" + record_id, text, frozenset(unique_ids))
             )
 
     full_text = {
@@ -386,10 +398,12 @@ async def run_translation(
         )
         if config["execution"]["scheduling_mode"] == "parallel":
             context = [item["source"] for item in context]
+        summary_context, summary_context_relation = summary_context_index.for_items(items)
         return {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
-            "summary_context": summary_context_index.for_items(items),
+            "summary_context": summary_context,
+            "summary_context_relation": summary_context_relation,
             "terms": _segment_model_payload_value(
                 items[0], term_match_cache.for_items(items)
             ),

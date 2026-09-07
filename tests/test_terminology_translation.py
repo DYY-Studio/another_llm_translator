@@ -347,6 +347,7 @@ async def test_translation_injects_previous_part_full_summary(
 
     assert seen["reference_context"] == []
     assert seen["summary_context"] == ["上一 Part 概括"]
+    assert seen["summary_context_relation"] == "previous_only"
 
 
 @pytest.mark.asyncio
@@ -401,6 +402,51 @@ async def test_translation_selects_latest_fragment_by_start_and_allows_current_s
         os.environ.pop("LLM_API_KEY", None)
 
     assert seen["summary_context"] == ["当前起点概括"]
+    assert seen["summary_context_relation"] == "contains_all_current"
+
+
+@pytest.mark.asyncio
+async def test_translation_marks_partially_overlapping_summary_context(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "first\nsecond\nthird")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FRAGMENT-PARTIAL",
+        kind="fragment",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[1],
+        text="第二段概括",
+    )
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(json.loads(body["messages"][1]["content"]))
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_translation(
+            project,
+            Scope(segment_ids=("F0001-S000002", "F0001-S000003")),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert seen["summary_context"] == ["第二段概括"]
+    assert seen["summary_context_relation"] == "partial_overlap"
 
 
 @pytest.mark.asyncio
@@ -460,14 +506,20 @@ async def test_translation_does_not_fallback_from_invalid_or_wrong_summary(
         os.environ.pop("LLM_API_KEY", None)
 
     assert seen["summary_context"] == []
+    assert seen["summary_context_relation"] is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("context_enabled", "cross_boundary", "expected_summary"),
+    (
+        "context_enabled",
+        "cross_boundary",
+        "expected_summary",
+        "expected_relation",
+    ),
     [
-        (False, False, ["上一 Part 概括"]),
-        (True, True, []),
+        (False, False, ["上一 Part 概括"], "previous_only"),
+        (True, True, [], None),
     ],
 )
 async def test_translation_summary_switch_is_independent_from_context_and_cross_boundary(
@@ -475,6 +527,7 @@ async def test_translation_summary_switch_is_independent_from_context_and_cross_
     context_enabled: bool,
     cross_boundary: bool,
     expected_summary: list[str],
+    expected_relation: str | None,
 ) -> None:
     project = await create_project(tmp_path, "previous")
     next_source = tmp_path / "next.txt"
@@ -523,6 +576,7 @@ async def test_translation_summary_switch_is_independent_from_context_and_cross_
 
     assert seen["reference_context"] == []
     assert seen["summary_context"] == expected_summary
+    assert seen["summary_context_relation"] == expected_relation
 
 
 @pytest.mark.asyncio
