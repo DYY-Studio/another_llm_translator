@@ -617,6 +617,52 @@ async def test_forced_summary_dry_run_keeps_existing_fragments(
 
 
 @pytest.mark.asyncio
+async def test_forced_summary_prompt_preflight_failure_keeps_existing_fragments(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    before_fragments = read_content_summaries(project, kind="fragment")
+    before_full = read_content_summaries(project, kind="full")
+    (project / "prompts" / "terminology.en.middle.txt").unlink()
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: pytest.fail("Prompt 预检失败时不应调用模型")
+        )
+    )
+    try:
+        with pytest.raises(UsageError, match="缺少 en Prompt"):
+            await run_terminology(
+                project,
+                Scope(force=True),
+                http_client=client,
+                include_summaries=True,
+                prompt_language="en",
+            )
+    finally:
+        await client.aclose()
+
+    assert read_content_summaries(project, kind="fragment") == before_fragments
+    assert read_content_summaries(project, kind="full") == before_full
+
+
+@pytest.mark.asyncio
 async def test_epub_summary_only_uses_fragment_adapter_requirements(
     tmp_path: Path,
 ) -> None:

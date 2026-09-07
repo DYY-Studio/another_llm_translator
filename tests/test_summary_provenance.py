@@ -12,6 +12,7 @@ from app.summary_provenance import (
     assess_full_summary,
     build_provenance,
     digest,
+    full_summary_context_usable,
 )
 
 
@@ -159,6 +160,32 @@ def test_normal_full_and_recursive_reduction_are_valid() -> None:
 
     assert assessment.expired is False
     assert assessment.expiry_reason is None
+
+
+def test_completed_full_remains_usable_while_fragment_refresh_is_pending() -> None:
+    first = _segment("F0001-S-1", "Alice")
+    second = _segment("F0001-S-2", "Bob")
+    fragment_one = _fragment(_source_range(first), record_id="FRAGMENT-1", text="甲")
+    fragment_two = _fragment(_source_range(second), record_id="FRAGMENT-2", text="乙")
+    full = _full([first, second], [fragment_one, fragment_two])
+    stale_fragment = deepcopy(fragment_one)
+    stale_fragment["status"] = "stale"
+    artifacts = [full, stale_fragment, fragment_two]
+
+    assessment = _assessment(full, [first, second], artifacts)
+
+    assert assessment.expired is True
+    assert assessment.expiry_reason == DEPENDENCY_CHANGED
+    assert full_summary_context_usable(full, [first, second]) is True
+
+
+def test_source_changed_full_is_not_usable_context() -> None:
+    segment = _segment("F0001-S-1", "Alice")
+    fragment = _fragment(_source_range(segment), record_id="FRAGMENT-1", text="甲")
+    full = _full([segment], [fragment])
+    full["source_changed"] = True
+
+    assert full_summary_context_usable(full, [segment]) is False
 
 
 @pytest.mark.parametrize(
