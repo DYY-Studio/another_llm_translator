@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, SettingsField, TranslationValidatorSummary } from "../types";
+import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -197,9 +197,10 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
     ["proofreading", translate("stage.proofreading", language)],
     ["polishing", translate("stage.polishing", language)],
   ];
-  const modelStages: Array<[LLMStage, string]> = [
+  const modelStages: Array<[RunStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["terminology_decision", translate("stage.terminologyDecision", language)],
+    ["content_summary", translate("stage.contentSummary", language)],
     ["translation", translate("stage.translation", language)],
     ["proofreading", translate("stage.proofreading", language)],
     ["polishing", translate("stage.polishing", language)],
@@ -234,10 +235,11 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <Field label={translate("settings.fallbackEncoding", language)} help={translate("settings.fallbackEncodingHint", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.llmSampling", language)} description={translate("settings.llmSamplingHint", language)}>
-          <Field label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          <Field className="grid-span" label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
           {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
           <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
           <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
+          <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
           <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
           <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
@@ -250,6 +252,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         </ConfigSection>
         <ConfigSection title={translate("settings.referenceContext", language)} description={translate("settings.referenceContextHint", language)}>
           {contextLabels.map(([stage, label]) => <div className="context-config-row" key={stage}><ToggleField label={translate("settings.contextEnabled", language, { stage: label })} checked={config.context[stage].enabled} onChange={(value) => update((draft) => { draft.context[stage].enabled = value; })} /><NumberField label={translate("settings.previousSegments", language)} value={config.context[stage].previous_segments} min={0} step={1} onChange={(value) => update((draft) => { draft.context[stage].previous_segments = value; })} />{(!config.context[stage].enabled || config.context[stage].previous_segments === 0) && <p className="muted context-risk-note">{translate("settings.contextDisabledRisk", language, { stage: label })}</p>}</div>)}
+          <ToggleField className="grid-span" label={translate("settings.summaryContext", language)} checked={config.context.translation.previous_summaries} help={translate("settings.summaryContextHint", language)} onChange={(value) => update((draft) => { draft.context.translation.previous_summaries = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.terminology", language)} description={translate("settings.terminologyHint", language)}>
           <Field label={translate("settings.unicodeNormalization", language)} help={translate("settings.unicodeHint", language)}><select value={config.terminology.unicode_normalization} onChange={(event) => update((draft) => { draft.terminology.unicode_normalization = event.target.value as ProjectConfig["terminology"]["unicode_normalization"]; })}><option value="">{translate("settings.unicodeNone", language)}</option><option value="NFC">NFC</option><option value="NFD">NFD</option><option value="NFKC">NFKC</option><option value="NFKD">NFKD</option></select></Field>
@@ -715,9 +718,9 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
 }
 
 function ConfigSection({ title, description, warning = false, children }: { title: string; description: string; warning?: boolean; children: ReactNode }) { return <fieldset className={`config-section${warning ? " warning" : ""}`}><legend>{title}</legend><p>{description}</p><div className="config-grid">{children}</div></fieldset>; }
-function Field({ label, help, children }: { label: string; help?: string; children: ReactNode }) { return <label className="config-field"><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
+function Field({ label, help, children, className = "" }: { label: string; help?: string; children: ReactNode; className?: string }) { return <label className={`config-field${className ? ` ${className}` : ""}`}><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
 function NumberField({ label, value, onChange, help, min, max, step }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number }) { return <Field label={label} help={help}><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
-function ToggleField({ label, checked, onChange, help, disabled = false }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean }) { return <label className="config-toggle"><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
+function ToggleField({ label, checked, onChange, help, disabled = false, className = "" }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean; className?: string }) { return <label className={`config-toggle${className ? ` ${className}` : ""}`}><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
 interface PromptView {
   content: string;

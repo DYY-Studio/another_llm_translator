@@ -573,11 +573,13 @@ export interface ProjectConfig {
     preset: string;
     preset_terminology: string;
     preset_terminology_decision: string;
+    preset_content_summary: string;
     preset_translation: string;
     preset_proofreading: string;
     preset_polishing: string;
     temperature_terminology: number;
     temperature_terminology_decision: number;
+    temperature_content_summary: number;
     temperature_translation: number;
     temperature_proofreading: number;
     temperature_polishing: number;
@@ -593,7 +595,13 @@ export interface ProjectConfig {
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
     previous_segments: number;
-  }>;
+  }> & {
+    translation: {
+      enabled: boolean;
+      previous_segments: number;
+      previous_summaries: boolean;
+    };
+  };
   terminology: {
     unicode_normalization: "" | "NFC" | "NFD" | "NFKC" | "NFKD";
     case_insensitive: boolean;

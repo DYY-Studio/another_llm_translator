@@ -8,6 +8,7 @@ const hintKeys = [
   "settings.encodingThresholdHint",
   "settings.fallbackEncodingHint",
   "settings.temperatureHint",
+  "settings.summaryContextHint",
   "settings.schedulingModeHint",
   "settings.targetChunkTokensHint",
   "settings.splitOversizedHint",
