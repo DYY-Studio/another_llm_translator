@@ -11,13 +11,21 @@ from typing import Any
 import httpx
 
 from .config import load_project_config
-from .errors import AppError, ContextLengthError, ExportError, UsageError
+from .errors import (
+    AppError,
+    ContextLengthError,
+    ExportError,
+    ExternalError,
+    FatalExternalError,
+    UsageError,
+)
 from .execution import (
     create_run,
     estimate_messages,
     finalize_run,
     full_prompt,
     render_messages,
+    run_bounded,
     segment_model_source,
 )
 from .llm_client import LLMClient, SlidingWindowLimiter
@@ -394,6 +402,11 @@ async def aggregate_summaries(
             ),
         )
 
+    if on_progress is not None:
+        on_progress(0, 0, len(checked))
+
+    max_parallel = int(config["execution"]["max_parallel"])
+    request_semaphore = asyncio.Semaphore(max_parallel)
     if limiter is None:
         execution = config["execution"]
         limiter = KeyPool(
@@ -406,8 +419,18 @@ async def aggregate_summaries(
     pending_full: list[dict[str, Any]] = []
     calls = 0
     completed = 0
+    failed = 0
+    boundary_warnings: dict[tuple[str, str], str] = {}
     usage: dict[str, Any] | None = None
     active_llm: LLMClient | None = None
+
+    def ordered_boundary_warnings() -> list[str]:
+        return [
+            boundary_warnings[boundary]
+            for boundary, _, _ in checked
+            if boundary in boundary_warnings
+        ]
+
     try:
         async with LLMClient(
             config,
@@ -456,16 +479,17 @@ async def aggregate_summaries(
                         request_id=f"PRECHECK-{uuid.uuid4().hex[:10].upper()}",
                     )
                 request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-                response, _ = await llm.chat(
-                    messages=messages,
-                    temperature=config["llm"]["temperature_content_summary"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    segment_id_map={
-                        str(index + 1): str(item["summary_id"])
-                        for index, item in enumerate(children)
-                    },
-                )
+                async with request_semaphore:
+                    response, _ = await llm.chat(
+                        messages=messages,
+                        temperature=config["llm"]["temperature_content_summary"],
+                        estimated_input_tokens=estimated,
+                        request_id=request_id,
+                        segment_id_map={
+                            str(index + 1): str(item["summary_id"])
+                            for index, item in enumerate(children)
+                        },
+                    )
                 calls += 1
                 parsed = parse_terminology_response(
                     response.content,
@@ -567,8 +591,39 @@ async def aggregate_summaries(
                             "聚合失败：递归压缩不收敛，最小请求仍超过模型上下文预算"
                         )
                     midpoint = len(children) // 2
-                    left = await fit(children[:midpoint], False)
-                    right = await fit(children[midpoint:], False)
+                    left_task = asyncio.create_task(
+                        fit(children[:midpoint], False)
+                    )
+                    right_task = asyncio.create_task(
+                        fit(children[midpoint:], False)
+                    )
+                    try:
+                        left, right = await asyncio.gather(
+                            left_task,
+                            right_task,
+                            return_exceptions=True,
+                        )
+                    except asyncio.CancelledError:
+                        left_task.cancel()
+                        right_task.cancel()
+                        await asyncio.gather(
+                            left_task,
+                            right_task,
+                            return_exceptions=True,
+                        )
+                        raise
+                    reduction_errors = [
+                        result
+                        for result in (left, right)
+                        if isinstance(result, BaseException)
+                    ]
+                    for error in reduction_errors:
+                        if isinstance(
+                            error, (asyncio.CancelledError, FatalExternalError)
+                        ) or not isinstance(error, (UsageError, ExternalError)):
+                            raise error
+                    if reduction_errors:
+                        raise reduction_errors[0]
                     reduced = [_child_from_artifact(left), _child_from_artifact(right)]
                     after_estimate = estimate(reduced)
                     before_digest = _digest([str(item["text"]) for item in children])
@@ -579,16 +634,46 @@ async def aggregate_summaries(
 
                 return await fit(original, True)
 
-            for boundary, current, fragments in checked:
-                artifact = await reduce_boundary(boundary, current, fragments)
-                pending_full.append(artifact)
+            async def boundary_worker(
+                item: tuple[
+                    tuple[str, str],
+                    list[dict[str, Any]],
+                    list[dict[str, Any]],
+                ]
+            ) -> dict[str, Any] | None:
+                nonlocal completed, failed
+                boundary, current, fragments = item
+                try:
+                    artifact = await reduce_boundary(boundary, current, fragments)
+                    publish_content_summary_fulls(project, [artifact])
+                except FatalExternalError:
+                    raise
+                except (UsageError, ExternalError) as exc:
+                    warning = f"{boundary[0]}/{boundary[1]}：{exc}"
+                    boundary_warnings[boundary] = warning
+                    failed += 1
+                    if on_progress is not None:
+                        on_progress(completed, failed, len(checked))
+                    return None
                 completed += 1
                 if on_progress is not None:
-                    on_progress(completed, 0, len(checked))
+                    on_progress(completed, failed, len(checked))
+                return artifact
+
+            results = await run_bounded(
+                checked,
+                boundary_worker,
+                max_parallel=max_parallel,
+            )
+            pending_full = [
+                artifact
+                for artifact in results
+                if artifact is not None
+            ]
         usage = active_llm.usage_summary() if active_llm is not None else None
-        publish_content_summary_fulls(project, pending_full)
     except asyncio.CancelledError:
         usage = active_llm.usage_summary() if active_llm is not None else None
+        warnings = [*ordered_boundary_warnings(), "任务已由用户取消"]
         if run_id is not None:
             write_summary_run(
                 project,
@@ -603,6 +688,7 @@ async def aggregate_summaries(
                     input_digest=_digest(source_ranges),
                     prompt_digest=prompt_digest,
                     model=str(config["llm"]["model"]),
+                    warnings=warnings,
                 ),
             )
             if run_dir is not None:
@@ -611,13 +697,14 @@ async def aggregate_summaries(
                     run_dir,
                     status="interrupted",
                     completed=completed,
-                    failed=0,
-                    warnings=["任务已由用户取消"],
+                    failed=failed,
+                    warnings=warnings,
                     usage=usage,
                 )
         raise
     except Exception as exc:
         usage = active_llm.usage_summary() if active_llm is not None else None
+        warnings = [*ordered_boundary_warnings(), str(exc)]
         if run_id is not None:
             write_summary_run(
                 project,
@@ -633,6 +720,7 @@ async def aggregate_summaries(
                     prompt_digest=prompt_digest,
                     model=str(config["llm"]["model"]),
                     error=str(exc),
+                    warnings=warnings,
                 ),
             )
             if run_dir is not None:
@@ -642,7 +730,7 @@ async def aggregate_summaries(
                     status="failed",
                     completed=completed,
                     failed=len(checked) - completed,
-                    warnings=[str(exc)],
+                    warnings=warnings,
                     usage=usage,
                 )
         if isinstance(exc, UsageError):
@@ -653,6 +741,8 @@ async def aggregate_summaries(
             raise
         raise UsageError(f"聚合失败：{exc}") from exc
 
+    warnings = ordered_boundary_warnings()
+    status = "failed" if failed else "completed"
     if run_id is not None:
         write_summary_run(
             project,
@@ -662,31 +752,33 @@ async def aggregate_summaries(
                 record_id=run_id,
                 run_id=run_id,
                 mode="aggregation",
-                status="completed",
+                status=status,
                 source_ranges=source_ranges,
                 input_digest=_digest(source_ranges),
                 prompt_digest=prompt_digest,
                 model=str(config["llm"]["model"]),
+                warnings=warnings,
             ),
         )
         if run_dir is not None:
             finalize_run(
                 project,
                 run_dir,
-                status="completed",
-                completed=len(checked),
-                failed=0,
-                warnings=[],
+                status=status,
+                completed=completed,
+                failed=failed,
+                warnings=warnings,
                 usage=usage,
             )
     return {
         "run_id": run_id,
         "selected": len(checked),
-        "completed": len(pending_full),
-        "failed": 0,
+        "completed": completed,
+        "failed": failed,
         "pending": 0,
         "calls": calls,
         "usage": usage,
+        "warnings": warnings,
         "boundaries": [
             {
                 "file_id": str(artifact["file_id"]),
