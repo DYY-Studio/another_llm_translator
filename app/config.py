@@ -45,7 +45,11 @@ SCHEMA: dict[str, Any] = {
         "cross_boundary_batching": None,
     },
     "context": {
-        "translation": {"enabled": None, "previous_segments": None},
+        "translation": {
+            "enabled": None,
+            "previous_segments": None,
+            "previous_summaries": None,
+        },
         "proofreading": {"enabled": None, "previous_segments": None},
         "polishing": {"enabled": None, "previous_segments": None},
         "terminology": {"enabled": None, "previous_segments": None},
@@ -352,6 +356,10 @@ def validate_config(config: dict[str, Any]) -> None:
             or context["previous_segments"] < 0
         ):
             raise ConfigError(f"context.{stage}.previous_segments 必须是非负整数")
+        if stage == "translation" and not isinstance(
+            context["previous_summaries"], bool
+        ):
+            raise ConfigError("context.translation.previous_summaries 必须是布尔值")
 
 
 def dump_config(config: dict[str, Any]) -> str:
@@ -413,6 +421,12 @@ def load_config(path: Path) -> dict[str, Any]:
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
+    context = config.get("context")
+    translation_context = (
+        context.get("translation") if isinstance(context, dict) else None
+    )
+    if isinstance(translation_context, dict):
+        translation_context.setdefault("previous_summaries", False)
     project = config.get("project")
     if isinstance(project, dict):
         project.setdefault("target_language_tag", "")
