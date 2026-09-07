@@ -877,11 +877,12 @@ previous_segments = 3
 
 翻译的 `previous_summaries` 独立于 `context.translation.enabled`，默认关闭；当
 `translation` 出现在 `chunking.cross_boundary_batching` 时，即使开启也不注入概括。
-开启后，Part 起始 Chunk 只读取全项目源文顺序中上一 Part 的最新有效 `full` 概括；
+开启后，Part 起始 Chunk 只读取全项目源文顺序中上一 Part 的最新可用 `full` 概括；
 同一 Part 的后续 Chunk 只读取该 Part 内起点最靠后的最新有效 `fragment` 概括，摘要
 范围可以覆盖当前 Chunk 的 Segment。有效摘要必须是 `completed`、非空、
 `source_changed = false`，且其 `source_range` 仍与当前源文匹配；`full` 与 `fragment`
-不会互相替代。翻译 Payload 新增 `summary_context` 文本数组，无可用摘要时发送空数组；
+不会互相替代。`full` 的 provenance 依赖变化可以显示刷新警告，但在上述条件满足时仍可
+作为上下文使用；源文变化仍会禁止注入。翻译 Payload 新增 `summary_context` 文本数组，无可用摘要时发送空数组；
 `reference_context` 的结构和边界规则不变。该字段参与 dry-run、Token 估算、格式修正
 和上下文拆分。
 
@@ -1183,10 +1184,12 @@ Anchor 使用 `compact` 策略时只移除样本，不改变按 Segment 计算�
 不可归属到某一种类型的 JSONL 外壳、未知记录或缺失末尾 `end` 会使对应请求重新验证，
 不能静默接受。取消、网络或格式错误会明确显示并写入 Run；已成功的片段仍可读取，
 之后普通再次启动只处理缺失或失败范围，并复用仍有效的片段。显式强制重做且启用片段
-概括时，宿主会在计算覆盖范围和发起请求前，把本次参与选择中各边界的已完成
-`fragment` 标记为 `stale`，保留历史记录；新 Run 生成的 fragment ID 含 Run 标识，
-因此失败或取消不会覆盖、恢复或伪装成旧片段。未选边界、`full`/`reduction` 结果和 Run
-审计记录不受影响；失败状态由当前任务明确显示，dry-run 不修改数据库记录。
+概括时，宿主先完成 Prompt、配置和请求预检；只有确实存在新的摘要请求、即将开始执行时，
+才把本次参与选择中对应边界的已完成 `fragment` 标记为 `stale`，保留历史记录。预检直接阻止
+运行或没有新的摘要请求时，旧片段状态不变；若部分请求已通过预检并进入执行，则仍需先
+排除对应边界的旧片段。新 Run 生成的 fragment ID 含 Run 标识，因此失败
+或取消不会覆盖、恢复或伪装成旧片段。未选边界、`full`/`reduction` 结果和 Run 审计记录
+不受影响；失败状态由当前任务明确显示，dry-run 不修改数据库记录。
 Prompt、Preset、Adapter 或其他设置不匹配时，通用运行弹窗会展示差异并要求用户决定；
 `summary-only` 回填不创建新的术语任务、不改候选、不重新发布术语库。
 
@@ -1198,8 +1201,11 @@ part_id)`、源文/模型输入摘要、Prompt/模型信息、原始 Segment 范
 源文被替换、删除或重排时，历史概括不删除，但与当前边界或摘要指纹不再一致的
 完整概括会标记为过期并在页面显示警告。只要仍保存了完整文本，它仍可查看、完成任务
 统计和导出；页面优先使用当前未过期结果，并建议重新生成。片段概括仍必须覆盖当前
-Segment 才能参与新的聚合。Prompt、Preset 或其他设置不匹配时由通用运行弹窗明确展示
-并要求用户决定；概括页不会在非 force 启动时静默清空结果。
+Segment 才能参与新的聚合。已发布的 `full` 是独立缓存：片段刷新尚未成功发布新的
+`full` 前，只要源文未变化且范围仍匹配，旧 `full` 仍可作为翻译上下文；递归 provenance
+失效表示需要刷新，不等同于上下文不可用。`source_changed`、范围不匹配或非 completed
+的摘要仍不得注入翻译。Prompt、Preset 或其他设置不匹配时由通用运行弹窗明确展示并要求
+用户决定；概括页不会在非 force 启动时静默清空结果。
 
 聚合产生的完整概括会沿着 `full`/`reduction` 到 `fragment` 的持久化 provenance
 递归校验子摘要文本、源文摘要、范围、状态、边界和当前 fragment 叶集合；任一已保存
