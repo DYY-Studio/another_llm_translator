@@ -320,7 +320,9 @@ export function SegmentWorkspace({
     }
   }, [project, projectId, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
 
-  useEffect(() => { void reloadIndex(preserveFocusRef.current, true); }, [reloadIndex]);
+  useEffect(() => {
+    void reloadIndex(preserveFocusRef.current, true);
+  }, [reloadIndex, readRetry]);
 
   const virtualizer = useVirtualizer({
     count: orderedIds.length,
@@ -385,6 +387,7 @@ export function SegmentWorkspace({
             requestGeneration !== pageGenerationRef.current
             || requestQuery !== activePageQueryRef.current
           ) return;
+          setListError("");
           pageCacheRef.current.add(pageKey);
           setRecords((current) => {
             const next = { ...current };
@@ -432,6 +435,7 @@ export function SegmentWorkspace({
     void api<SegmentDetail>(`/api/v1/projects/${project}/segments/${focusedId}`)
       .then((item) => {
         if (!active) return;
+        setListError("");
         setRecords((current) => ({ ...current, [item.segment_id]: item }));
         setFocusedDetail(item);
       })

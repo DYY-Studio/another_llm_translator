@@ -608,10 +608,12 @@ export default function App() {
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
-        {(error ?? queryError) != null ? (
+        {error != null ? (
+          <button className="error-banner" type="button" onClick={() => setError(null)}>{errorMessage(error, language)}</button>
+        ) : queryError != null ? (
           <div className="error-banner error-banner-global" role="alert">
-            <span>{errorMessage(error ?? queryError, language)}</span>
-            {queryError ? <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button> : <button className="quiet-button" type="button" onClick={() => setError(null)}>{translate("common.dismiss", language)}</button>}
+            <span>{errorMessage(queryError, language)}</span>
+            <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button>
           </div>
         ) : null}
         {content}
