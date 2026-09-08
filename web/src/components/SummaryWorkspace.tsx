@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { nativeBridgeAvailable, saveExport } from "../native";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview, RunDecision, Segment, SummaryArtifact, SummaryBoundary, SummariesResponse, TaskOptions, TaskState } from "../types";
+import type { ProjectOverview, RunDecision, Segment, SummaryArtifact, SummaryBoundary, TaskOptions, TaskState } from "../types";
+import { fetchSummaries, queryKeys } from "../queries";
 import {
   boundarySelectionState,
   fileSelectionState,
@@ -371,7 +373,6 @@ function SelectionDialog({
 
 export function SummaryWorkspace({ project, overview, language, task, onTask, onClose }: SummaryWorkspaceProps) {
   const initial = restoreSummaryWorkspaceState(workspaceCache, project);
-  const [data, setData] = useState<SummariesResponse | null>(null);
   const [search, setSearch] = useState(initial.search);
   const [focusedBoundary, setFocusedBoundary] = useState(initial.focusedBoundary);
   const [tab, setTab] = useState<SummaryTab>(initial.tab);
@@ -385,11 +386,9 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [runKind, setRunKind] = useState<"fragment" | "full" | null>(null);
   const [exportPath, setExportPath] = useState("summary.md");
   const [message, setMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [listOpen, setListOpen] = useState(true);
   const contentRef = useRef<HTMLDivElement>(null);
-  const loadRequestRef = useRef(0);
   const workspaceProjectRef = useRef(project);
   const participationStateRef = useRef(createSummaryParticipationState());
   const participationQueueRef = useRef(Promise.resolve());
@@ -397,6 +396,41 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [dialogError, setDialogError] = useState("");
   const partSelection = useClassicSelection();
   workspaceProjectRef.current = project;
+
+  const activeSummaryTask = Boolean(
+    task && (task.stage === "content_summary" || (task.stage === "terminology" && task.include_summaries))
+    && ["queued", "running", "cancelling"].includes(task.status),
+  );
+  const summariesQuery = useQuery({
+    queryKey: queryKeys.summaries(project),
+    queryFn: async ({ signal }) => {
+      const targetProject = project;
+      const participationVersionAtStart = participationStateRef.current.version;
+      const participationDirtyAtStart = participationStateRef.current.dirty;
+      const value = await fetchSummaries(targetProject, signal);
+      if (workspaceProjectRef.current === targetProject) {
+        const currentParticipationState = participationStateRef.current;
+        const nextParticipationState = applySummaryParticipationFetch(
+          currentParticipationState,
+          participationVersionAtStart,
+          participationDirtyAtStart,
+          value.participation,
+        );
+        participationStateRef.current = nextParticipationState;
+        if (nextParticipationState !== currentParticipationState) {
+          setParticipation(new Set(nextParticipationState.displayed));
+        }
+      }
+      return value;
+    },
+    refetchInterval: activeSummaryTask ? 1200 : false,
+  });
+  const data = summariesQuery.data ?? null;
+  const loading = summariesQuery.isPending;
+  const displayedMessage = summariesQuery.error ? {
+    text: errorMessage(summariesQuery.error, language),
+    type: "error" as const,
+  } : message;
 
   const names = useMemo(() => new Map(overview.files.map((file) => [file.file_id, file.name])), [overview.files]);
   const boundaries = data?.boundaries ?? [];
@@ -420,38 +454,6 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     segmentCount: item.segment_count,
   })), [boundaries]);
   const summaryProgressValue = summaryProgress(progressBoundaries, participation, data?.artifacts ?? []);
-  const activeSummaryTask = Boolean(
-    task && (task.stage === "content_summary" || (task.stage === "terminology" && task.include_summaries))
-    && ["queued", "running", "cancelling"].includes(task.status),
-  );
-
-  async function loadData(targetProject = project) {
-    const requestId = ++loadRequestRef.current;
-    const participationVersionAtStart = participationStateRef.current.version;
-    const participationDirtyAtStart = participationStateRef.current.dirty;
-    try {
-      const value = await api<SummariesResponse>(`/api/v1/projects/${targetProject}/summaries`);
-      if (requestId !== loadRequestRef.current) return;
-      setData(value);
-      const currentParticipationState = participationStateRef.current;
-      const nextParticipationState = applySummaryParticipationFetch(
-        currentParticipationState,
-        participationVersionAtStart,
-        participationDirtyAtStart,
-        value.participation,
-      );
-      participationStateRef.current = nextParticipationState;
-      if (nextParticipationState !== currentParticipationState) {
-        setParticipation(new Set(nextParticipationState.displayed));
-      }
-      setLoading(false);
-    } catch (error) {
-      if (requestId !== loadRequestRef.current) return;
-      setLoading(false);
-      setMessage({ text: errorMessage(error, language), type: "error" });
-    }
-  }
-
   useEffect(() => {
     workspaceProjectRef.current = project;
     participationQueueRef.current = Promise.resolve();
@@ -462,28 +464,16 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setTab(restored.tab);
     setSourceOpen(restored.sourceOpen);
     setScrollTop(restored.scrollTop);
-    setData(null);
     participationStateRef.current = createSummaryParticipationState();
     setParticipation(new Set());
     setParticipationSaving(false);
-    setLoading(true);
     setMessage(null);
-    void loadData(project);
-    return () => { loadRequestRef.current += 1; };
   }, [project]);
 
   useEffect(() => {
-    if (!activeSummaryTask) return;
-    const timer = window.setInterval(() => {
-      void loadData(project);
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [activeSummaryTask, language, project]);
-
-  useEffect(() => {
     if (task?.stage !== "content_summary" && !(task?.stage === "terminology" && task.include_summaries)) return;
-    if (["completed", "failed", "cancelled"].includes(task.status)) void loadData(project);
-  }, [task?.task_id, task?.status, task?.stage, task?.include_summaries, language]);
+    if (["completed", "failed", "cancelled"].includes(task.status)) void summariesQuery.refetch();
+  }, [task?.task_id, task?.status, task?.stage, task?.include_summaries, project, summariesQuery.refetch]);
 
   useEffect(() => {
     if (loading) return;
@@ -735,7 +725,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         </aside>
         <main className="summary-content" ref={contentRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
           {activeSummaryTask && <div className="summary-progress"><strong>{translate("terms.summaryTaskRunning", language)}</strong><span>{task?.summary_selection_progress ? translate("terms.summaryTaskBoundaryProgress", language, { done: task.summary_selection_progress.completed, total: task.summary_selection_progress.total }) : translate("terms.summaryProgress", language, summaryProgressValue)}</span></div>}
-          {message && <p className={`inline-message ${message.type === "success" ? "success-text" : "error-text"}`}>{message.text}</p>}
+          {displayedMessage && <p className={`inline-message ${displayedMessage.type === "success" ? "success-text" : "error-text"}`}>{displayedMessage.text}</p>}
           {loading ? <p className="summary-empty">{translate("common.loading", language)}</p> : !focused ? <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p> : <>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
@@ -12,7 +13,6 @@ import { RunDialog } from "./components/RunDialog";
 import { DiagnosticsView } from "./components/DiagnosticsView";
 import type {
   LLMStage,
-  ProjectOverview,
   ProjectSummary,
   RunDecision,
   ServerStatus,
@@ -23,10 +23,11 @@ import type {
   ThemeMode,
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
-import { canAutoSelectProject, isCurrentProjectRequest } from "./requestState";
+import { canAutoSelectProject } from "./requestState";
 import { STORAGE_KEYS } from "./storageKeys";
 import { termsSubpageForTask } from "./summaryWorkspaceState";
 import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
+import { fetchOverview, fetchProjects, queryKeys } from "./queries";
 import "./styles.css";
 
 const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
@@ -76,7 +77,6 @@ function readSelectedProjectId(): string {
 }
 
 export default function App() {
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState("");
   const [stage, setStage] = useState<Stage>("overview");
   const [termsSubpage, setTermsSubpage] = useState<TermsSubpage>("library");
@@ -84,7 +84,6 @@ export default function App() {
     search: string;
     segmentId: string;
   } | null>(null);
-  const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [tasks, setTasks] = useState<Record<string, TaskState>>({});
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
@@ -109,12 +108,23 @@ export default function App() {
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const tasksRef = useRef<Record<string, TaskState>>({});
-  const projectsRequestRef = useRef(0);
-  const overviewRequestRef = useRef(0);
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
   const syncingTasksRef = useRef(false);
   const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
+  const queryClient = useQueryClient();
+  const projectsQuery = useQuery({
+    queryKey: queryKeys.projects(),
+    queryFn: ({ signal }) => fetchProjects(signal),
+  });
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.overview(project),
+    queryFn: ({ signal }) => fetchOverview(project, signal),
+    enabled: Boolean(project),
+  });
+  const projects = projectsQuery.data ?? [];
+  const overview = overviewQuery.data ?? null;
+  const queryError = projectsQuery.error ?? overviewQuery.error;
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const selectedProject = projects.find((item) => item.selector === project) ?? null;
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
@@ -264,37 +274,34 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
-    const requestId = ++projectsRequestRef.current;
+    const result = await projectsQuery.refetch();
+    return result.data ?? [];
+  }, [projectsQuery.refetch]);
+
+  useEffect(() => {
+    if (!projectsQuery.data) return;
     const requestProject = activeProjectRef.current;
-    const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects");
-    if (requestId !== projectsRequestRef.current) return value.projects;
-    setProjects(value.projects);
-    await syncActiveTasks();
-    if (requestId !== projectsRequestRef.current || !canAutoSelectProject(requestProject, activeProjectRef.current)) return value.projects;
-    const storedProjectId = readSelectedProjectId();
-    setProject((current) => {
-      if (!canAutoSelectProject(requestProject, activeProjectRef.current)) return current;
-      if (current && value.projects.some((item) => item.selector === current)) return current;
-      return value.projects.find((item) => item.project_id === storedProjectId)?.selector
-        ?? value.projects[0]?.selector
-        ?? "";
+    let active = true;
+    void syncActiveTasks().then(() => {
+      if (!active || !canAutoSelectProject(requestProject, activeProjectRef.current)) return;
+      const storedProjectId = readSelectedProjectId();
+      setProject((current) => {
+        if (!canAutoSelectProject(requestProject, activeProjectRef.current)) return current;
+        if (current && projectsQuery.data.some((item) => item.selector === current)) return current;
+        return projectsQuery.data.find((item) => item.project_id === storedProjectId)?.selector
+          ?? projectsQuery.data[0]?.selector
+          ?? "";
+      });
+    }).catch((value) => {
+      if (active) setError(value);
     });
-    return value.projects;
-  }, [syncActiveTasks]);
+    return () => { active = false; };
+  }, [projectsQuery.data, syncActiveTasks]);
 
   const refresh = useCallback(async () => {
-    const targetProject = project;
-    const requestId = ++overviewRequestRef.current;
-    if (!targetProject) {
-      if (isCurrentProjectRequest(requestId, overviewRequestRef.current, targetProject, activeProjectRef.current)) setOverview(null);
-      return;
-    }
-    // The shell only needs project totals and file metadata. Segment rows are
-    // loaded by SegmentWorkspace in bounded windows, so do not fetch a second
-    // full page just to refresh the summary after an edit.
-    const value = await api<ProjectOverview>(`/api/v1/projects/${targetProject}?offset=0&limit=1`);
-    if (isCurrentProjectRequest(requestId, overviewRequestRef.current, targetProject, activeProjectRef.current)) setOverview(value);
-  }, [project]);
+    if (!project) return;
+    await overviewQuery.refetch();
+  }, [overviewQuery.refetch, project]);
 
   const refreshProject = useCallback(async () => {
     await Promise.all([loadProjects(), refresh()]);
@@ -320,19 +327,14 @@ export default function App() {
       await loadProjects();
     }).catch((value) => setError(value));
   }, []);
-  useEffect(() => {
-    overviewRequestRef.current += 1;
-    setOverview(null);
-  }, [project]);
-  useEffect(() => { void refresh().catch((value) => setError(value)); }, [refresh]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
   useEffect(() => {
     if (!project) return;
-    prefetchTerms(project);
+    prefetchTerms(project, queryClient);
     prefetchWorkspace(project);
-  }, [project]);
+  }, [project, queryClient]);
   useEffect(() => {
     let active = true;
     const poll = () => {
@@ -446,7 +448,6 @@ export default function App() {
   async function handleProjectDeleted(path: string) {
     writeRecentProjectPaths(readRecentProjectPaths().filter((value) => value !== path));
     setProject("");
-    setOverview(null);
     if (selectedProject) {
       setTasks((current) => {
         const updated = { ...current };
@@ -559,7 +560,7 @@ export default function App() {
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
-        {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
+        {(error ?? queryError) != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error ?? queryError, language)}</button> : null}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) await openProject(created, true); else setProject(selector); }} />}

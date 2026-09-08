@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { isCurrentProjectRequest } from "../requestState";
-import type { ProjectOverview, RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
+import type { ProjectOverview, RelatedTerm, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
+import { fetchRelatedTerms, fetchTermHits, fetchTerms, queryKeys } from "../queries";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
@@ -27,7 +29,6 @@ const emptyForm: TermForm = {
 };
 
 interface TermsCacheEntry {
-  data: TermsResponse;
   search: string;
   onlyConflicts: boolean;
   showDisabled: boolean;
@@ -42,9 +43,8 @@ const emptyManualReview: TermDecisionReviewState["manual_review"] = {
   remaining: 0,
 };
 
-// Survives tab switches so returning renders the term list instantly. Keyed
-// by project; cleared when the project changes so cached data never leaks
-// across projects.
+// Survives tab switches so returning restores the view state instantly. The
+// server data itself is owned by the React Query cache.
 const termsCache = new Map<string, TermsCacheEntry>();
 const termsProjectRef = { current: "" };
 
@@ -57,25 +57,14 @@ export function openTermsSubpage(project: string, subpage: TermsSubpage) {
   for (const listener of termsSubpageListeners) listener(project, subpage);
 }
 
-// Warms the cache when a project is opened so the first visit to the
-// terminology page renders instantly. Best-effort: failures are left to the
-// view, which fetches and surfaces them on visit; the write guard keeps a
-// mounted view's fresher entry (with its filters and scroll state) intact.
-export function prefetchTerms(project: string) {
-  if (termsCache.has(project)) return;
-  void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
-    .then((data) => {
-      if (termsCache.has(project)) return;
-      termsCache.set(project, {
-        data,
-        search: "",
-        onlyConflicts: false,
-        showDisabled: false,
-        focusedKey: "",
-        scrollTop: 0,
-      });
-    })
-    .catch(() => {});
+// Warms the query cache when a project is opened so the first visit to the
+// terminology page renders instantly. A failed prefetch remains an error in
+// the query cache and is surfaced when the view mounts.
+export function prefetchTerms(project: string, queryClient: QueryClient) {
+  void queryClient.prefetchQuery({
+    queryKey: queryKeys.terms(project),
+    queryFn: ({ signal }) => fetchTerms(project, signal),
+  }).catch(() => {});
 }
 
 function formFor(term: Term): TermForm {
@@ -122,7 +111,6 @@ export function TermsView({
   onTask: (task: TaskState) => void;
   onSubpageChange?: (subpage: TermsSubpage) => void;
 }) {
-  const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
   const [onlyConflicts, setOnlyConflicts] = useState(false);
@@ -148,19 +136,9 @@ export function TermsView({
   const [showScanFailures, setShowScanFailures] = useState(false);
   const [editorTab, setEditorTab] = useState<"edit" | "group" | "hits">("edit");
   const [pendingPrimary, setPendingPrimary] = useState<string | null>(null);
-  const [hits, setHits] = useState<TermHitsResponse | null>(null);
-  const [hitsLoading, setHitsLoading] = useState(false);
-  const [hitsError, setHitsError] = useState("");
-  const hitsRequestRef = useRef(0);
-  const [related, setRelated] = useState<RelatedTermsResponse | null>(null);
-  const [relatedLoading, setRelatedLoading] = useState(false);
-  const [relatedError, setRelatedError] = useState("");
-  const relatedRequestRef = useRef(0);
-  const termsRequestRef = useRef(0);
   const decisionPrefetchRequestRef = useRef(0);
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
-  const relatedCacheRef = useRef(new Map<string, RelatedTermsResponse>());
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
   const [pendingGroupMemberAlias, setPendingGroupMemberAlias] = useState<Term | null>(null);
@@ -172,6 +150,13 @@ export function TermsView({
   const suppressFocusScrollForDataRef = useRef<TermsResponse | null>(null);
   const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
+  const queryClient = useQueryClient();
+  const termsQuery = useQuery({
+    queryKey: queryKeys.terms(project),
+    queryFn: ({ signal }) => fetchTerms(project, signal),
+    enabled: Boolean(project),
+  });
+  const data = termsQuery.data ?? null;
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
@@ -195,7 +180,10 @@ export function TermsView({
   const selectedIsDisabled = Boolean(selected?.disabled);
 
   function setCurrentData(value: TermsResponse) {
-    if (activeProjectRef.current === project) setData(value);
+    if (activeProjectRef.current !== project) return;
+    queryClient.setQueryData(queryKeys.terms(project), value);
+    void queryClient.invalidateQueries({ queryKey: ["term-hits", project] }).catch(() => {});
+    void queryClient.invalidateQueries({ queryKey: ["related-terms", project] }).catch(() => {});
   }
 
   useEffect(() => {
@@ -213,18 +201,10 @@ export function TermsView({
     return () => { termsSubpageListeners.delete(listener); };
   }, [onSubpageChange, project]);
 
-  // Restore a cached view synchronously during render so the browser never
-  // paints an empty frame. This runs on the first mount too: prefetchTerms
-  // warms the cache when the project is opened, so entering the terminology
-  // page renders instantly. Switching projects drops every entry except the
-  // current project's (including its prefetched entry), so cached data never
-  // leaks across projects; the load effect refreshes in the background.
+  // Restore view state synchronously during render so switching projects does
+  // not briefly reuse the previous project's filters or focus.
   if (termsProjectRef.current !== project) {
     termsProjectRef.current = project;
-    for (const key of [...termsCache.keys()]) {
-      if (key !== project) termsCache.delete(key);
-    }
-    setData(null);
     selection.reset();
     setManualFocusId(null);
     termsRestoredRef.current = false;
@@ -233,31 +213,19 @@ export function TermsView({
     termsRestoredRef.current = true;
     const cached = termsCache.get(project);
     if (cached) {
-      setData(cached.data);
       setSearch(cached.search);
       setOnlyConflicts(cached.onlyConflicts);
       setShowDisabled(cached.showDisabled);
       selection.reset(cached.focusedKey);
       restoredScrollRef.current = cached.scrollTop;
     } else {
-      setData(null);
       selection.reset();
     }
   }
 
   useEffect(() => {
-    const requestId = ++termsRequestRef.current;
-    const targetProject = project;
     setForm(emptyForm);
     setMessage("");
-    void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
-      .then((value) => {
-        if (isCurrentProjectRequest(requestId, termsRequestRef.current, targetProject, activeProjectRef.current)) setData(value);
-      })
-      .catch((error) => {
-        if (isCurrentProjectRequest(requestId, termsRequestRef.current, targetProject, activeProjectRef.current)) setMessage(errorMessage(error, language));
-      });
-    return () => { termsRequestRef.current += 1; };
   }, [project]);
 
   useEffect(() => {
@@ -284,7 +252,6 @@ export function TermsView({
   useEffect(() => {
     if (!data) return;
     termsCache.set(project, {
-      data,
       search,
       onlyConflicts,
       showDisabled,
@@ -304,109 +271,41 @@ export function TermsView({
   }, [focusFailures]);
 
   const hitsPageSize = 50;
-  function loadHits(normalized: string, offset: number) {
-    return api<TermHitsResponse>(
-      `/api/v1/projects/${project}/terms/hits`,
-      {
-        method: "POST",
-        body: JSON.stringify({ normalized, offset, limit: hitsPageSize }),
-      },
-    );
-  }
+  const hitsEnabled = editorTab === "hits" && Boolean(selected) && !selectedIsDisabled;
+  const hitsQuery = useInfiniteQuery({
+    queryKey: queryKeys.termHits(project, selected?.normalized ?? ""),
+    queryFn: ({ pageParam, signal }) => fetchTermHits(project, selected!.normalized, pageParam, signal, hitsPageSize),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => {
+      const nextOffset = lastPage.offset + lastPage.hits.length;
+      return nextOffset < lastPage.total ? nextOffset : undefined;
+    },
+    enabled: hitsEnabled,
+  });
+  const hits = useMemo<TermHitsResponse | null>(() => {
+    if (editorTab === "hits" && selected?.normalized && selectedIsDisabled) {
+      return { normalized: selected.normalized, source: selected.source, total: 0, offset: 0, limit: hitsPageSize, hits: [] };
+    }
+    if (!hitsEnabled || !hitsQuery.data?.pages.length) return null;
+    const [firstPage] = hitsQuery.data.pages;
+    return { ...firstPage, hits: hitsQuery.data.pages.flatMap((page) => page.hits) };
+  }, [editorTab, hitsEnabled, hitsQuery.data, selected, selectedIsDisabled]);
+  const hitsLoading = hitsEnabled && (hitsQuery.isPending || hitsQuery.isFetchingNextPage);
+  const hitsError = hitsEnabled && hitsQuery.error ? errorMessage(hitsQuery.error, language) : "";
 
-  // Hits are intentionally loaded only when the user opens the hits tab. A
-  // normal term selection must not scan every Segment in the project.
-  useEffect(() => {
-    const normalized = selected?.normalized ?? "";
-    const requestId = ++hitsRequestRef.current;
-    if (editorTab !== "hits" || !normalized || selectedIsDisabled) {
-      setHits(
-        editorTab === "hits" && normalized && selectedIsDisabled
-          ? { normalized, source: selected?.source ?? normalized, total: 0, offset: 0, limit: hitsPageSize, hits: [] }
-          : null,
-      );
-      setHitsLoading(false);
-      setHitsError("");
-      return;
-    }
-    setHitsLoading(true);
-    setHitsError("");
-    setHits(null);
-    void loadHits(normalized, 0)
-      .then((value) => {
-        if (requestId === hitsRequestRef.current) setHits(value);
-      })
-      .catch((error) => {
-        if (requestId === hitsRequestRef.current) setHitsError(errorMessage(error, language));
-      })
-      .finally(() => {
-        if (requestId === hitsRequestRef.current) setHitsLoading(false);
-      });
-  }, [editorTab, project, selectedIsDisabled, selectedMatchKey]);
-
-  // Related terms are cheap to compute but only useful on the group tab. Keep
-  // a small revision-aware cache so switching between tabs does not repeat
-  // the same library scan, while a save/removal naturally invalidates it.
-  useEffect(() => {
-    const normalized = selected?.normalized ?? "";
-    const requestId = ++relatedRequestRef.current;
-    if (editorTab !== "group" || !normalized || selectedIsDisabled) {
-      setRelated(null);
-      setRelatedLoading(false);
-      setRelatedError("");
-      return;
-    }
-    const cacheKey = `${project}:${data?.terms_revision ?? "none"}:${selectedMatchKey}`;
-    const cached = relatedCacheRef.current.get(cacheKey);
-    if (cached) {
-      setRelated(cached);
-      setRelatedLoading(false);
-      setRelatedError("");
-      return;
-    }
-    setRelated(null);
-    setRelatedLoading(true);
-    setRelatedError("");
-    void api<RelatedTermsResponse>(`/api/v1/projects/${project}/terms/related`, {
-      method: "POST",
-      body: JSON.stringify({ normalized, limit: 20 }),
-    })
-      .then((value) => {
-        if (requestId !== relatedRequestRef.current) return;
-        if (relatedCacheRef.current.size >= 50) relatedCacheRef.current.clear();
-        relatedCacheRef.current.set(cacheKey, value);
-        setRelated(value);
-      })
-      .catch((error) => {
-        if (requestId === relatedRequestRef.current) setRelatedError(errorMessage(error, language));
-      })
-      .finally(() => {
-        if (requestId === relatedRequestRef.current) setRelatedLoading(false);
-      });
-  }, [data?.terms_revision, editorTab, project, selectedIsDisabled, selectedMatchKey]);
+  const relatedEnabled = editorTab === "group" && Boolean(selected) && !selectedIsDisabled;
+  const relatedQuery = useQuery({
+    queryKey: queryKeys.relatedTerms(project, data?.terms_revision ?? null, selectedMatchKey),
+    queryFn: ({ signal }) => fetchRelatedTerms(project, selected!.normalized, signal),
+    enabled: relatedEnabled,
+  });
+  const related = relatedEnabled ? relatedQuery.data ?? null : null;
+  const relatedLoading = relatedEnabled && (relatedQuery.isPending || relatedQuery.isFetching);
+  const relatedError = relatedEnabled && relatedQuery.error ? errorMessage(relatedQuery.error, language) : "";
 
   function loadMoreHits() {
-    if (!selected || !hits) return;
-    const requestId = ++hitsRequestRef.current;
-    const targetProject = project;
-    const normalized = selected.normalized;
-    const offset = hits.hits.length;
-    setHitsLoading(true);
-    void loadHits(normalized, offset)
-      .then((value) => {
-        if (!isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) return;
-        setHits((current) => (
-          current && current.normalized === normalized
-            ? { ...value, hits: [...current.hits, ...value.hits] }
-            : current
-        ));
-      })
-      .catch((error) => {
-        if (isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) setHitsError(errorMessage(error, language));
-      })
-      .finally(() => {
-        if (isCurrentProjectRequest(requestId, hitsRequestRef.current, targetProject, activeProjectRef.current)) setHitsLoading(false);
-      });
+    if (!hitsEnabled || !hitsQuery.hasNextPage || hitsQuery.isFetchingNextPage) return;
+    void hitsQuery.fetchNextPage();
   }
 
   const visible = useMemo(() => {
@@ -653,12 +552,6 @@ export function TermsView({
       setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
-      setHits(null);
-      setHitsLoading(false);
-      setHitsError("");
-      setRelated(null);
-      setRelatedLoading(false);
-      setRelatedError("");
       setPendingPrimary(null);
       setPendingRelatedGroup(null);
       setPendingRelatedAlias(null);
@@ -668,9 +561,6 @@ export function TermsView({
       setRelatedPrimary("");
       setShowScanFailures(false);
       setPartialOpen(false);
-      hitsRequestRef.current += 1;
-      relatedRequestRef.current += 1;
-      relatedCacheRef.current.clear();
       setClearOpen(false);
       setMessage(translate("terms.stageCleared", language));
     } catch (error) {
@@ -1088,8 +978,9 @@ export function TermsView({
               );
             })}
           </div>
-          {data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
-          {!data && <div className="empty">{translate("terms.loading", language)}</div>}
+          {termsQuery.error && <div className="empty error-text">{errorMessage(termsQuery.error, language)}</div>}
+          {!termsQuery.error && data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
+          {!termsQuery.error && !data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
       </section>
       <section className="term-editor">
@@ -1136,8 +1027,8 @@ export function TermsView({
                     </button>
                   ))}
                 </div>
-                {hits.hits.length < hits.total && (
-                  <button className="quiet-button term-hits-more" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
+                {hitsQuery.hasNextPage && (
+                  <button className="quiet-button term-hits-more" disabled={hitsQuery.isFetchingNextPage} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
                 )}
               </>
             )}
