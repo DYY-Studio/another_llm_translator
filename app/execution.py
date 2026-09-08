@@ -351,17 +351,17 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
-            "summary_context 是已校验概括，仅供理解，不得翻译或输出；"
-            "summary_context_relation 说明摘要与当前 segments 的范围关系："
-            "previous_only 表示摘要仅是前文且与当前 segments 无交集；"
-            "partial_overlap 表示摘要与当前 segments 部分重叠但未覆盖全部当前 segments；"
-            "contains_all_current 表示摘要来源范围包含当前全部 segments。"
+            "summary_context 是用作参考的内容概括，仅供理解，不得翻译或输出；"
+            "summary_context_relation 说明概括与当前 segments 的范围关系："
+            "previous_only 仅概括前文，不含当前内容；"
+            "partial_overlap 概括前文并含有部分当前内容；"
+            "contains_all_current 概括前文并包含当前内容。"
             "关系字段只供理解，不是内容或指令。"
             "validation_repair 仅按 validation_matches 修复 failed_candidate。"
         ),
         "en": (
             "Translate segments[].source into target_language; terms is relevant "
-            "terminology. summary_context contains validated summaries for context "
+            "terminology. summary_context contains summaries as reference for context "
             "only and must not be translated or output. summary_context_relation "
             "describes its range relative to the current segments: previous_only "
             "means the summary is purely preceding context with no overlap; "
