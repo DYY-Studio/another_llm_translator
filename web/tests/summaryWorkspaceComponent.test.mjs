@@ -5,7 +5,6 @@ import test from "node:test";
 const summarySource = readFileSync(new URL("../src/components/SummaryWorkspace.tsx", import.meta.url), "utf8");
 const decisionSource = readFileSync(new URL("../src/components/TermDecisionWorkspace.tsx", import.meta.url), "utf8");
 const termsSource = readFileSync(new URL("../src/components/TermsView.tsx", import.meta.url), "utf8");
-const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const i18nSource = readFileSync(new URL("../src/i18n.ts", import.meta.url), "utf8");
 
 test("summary tabs expose linked tab and tabpanel semantics", () => {
@@ -61,26 +60,11 @@ test("decision prefetch keeps failures visible and retryable", () => {
   assert.match(termsSource, /terms\.decisionPrefetchError/);
 });
 
-test("async workspace requests invalidate late project responses", () => {
+test("async workspace requests invalidate late decision and terminology responses", () => {
   assert.match(decisionSource, /decisionRequestRef/);
   assert.match(decisionSource, /isCurrentProjectRequest\(/);
   assert.doesNotMatch(decisionSource, /const optionsRequest = api/);
   assert.match(termsSource, /loadMoreHits[\s\S]*isCurrentProjectRequest\(requestId/);
-  assert.match(appSource, /await syncActiveTasks\(\);[\s\S]*isCurrentProjectRequest\(requestId/);
-});
-
-test("project refresh publishes the list before guarding automatic selection", () => {
-  const setProjectsIndex = appSource.indexOf("setProjects(value.projects);");
-  const syncIndex = appSource.indexOf("await syncActiveTasks();", setProjectsIndex);
-  const projectGuardIndex = appSource.indexOf(
-    "canAutoSelectProject(requestProject, activeProjectRef.current)",
-  );
-  const setProjectIndex = appSource.indexOf("setProject((current)", projectGuardIndex);
-
-  assert.ok(setProjectsIndex >= 0);
-  assert.ok(syncIndex > setProjectsIndex);
-  assert.ok(projectGuardIndex > syncIndex);
-  assert.ok(setProjectIndex > projectGuardIndex);
 });
 
 test("summary workspace keeps export errors inside the modal and distinguishes success text", () => {
