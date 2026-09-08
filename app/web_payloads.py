@@ -35,7 +35,7 @@ class SegmentQueryPayload(SegmentFilterPayload):
     @classmethod
     def reject_boolean_window(cls, value: object) -> object:
         if isinstance(value, bool):
-            raise ValueError("窗口参数必须是整数")
+            raise ValueError("窗口参数必须是整数")  # noqa: TRY004
         return value
 
 

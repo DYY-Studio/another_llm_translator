@@ -252,6 +252,27 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert "input" not in payload["params"]
 
 
+def test_web_payload_validation_errors_do_not_echo_input_values(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    secret = "sk-local-validation-secret"
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": secret, "status": {"secret": secret}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset", "status"]},
+    }
+    assert secret not in response.text
+
+
 def test_web_epub_export_error_preserves_language_tag_guidance(
     tmp_path: Path,
 ) -> None:

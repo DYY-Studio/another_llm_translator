@@ -170,6 +170,7 @@ MVP 不实现：
 httpx
 chardet
 fastapi
+pydantic
 uvicorn
 python-multipart
 keyring
@@ -2022,6 +2023,8 @@ Web 只在当前浏览器的版本化 localStorage 保存最近外部项目路�
 Web 还提供全局配置、全局 Prompt 和 LLM Preset 管理；全局配置与 Prompt 只影响新项目或用户明确同步的项目，Preset 修改则立即影响引用项目。Web 还可运行/取消阶段任务、人工审校、apply 和 export。
 
 Web 与 CLI 使用同一 SQLite 项目数据库、应用内核和持久化记录。同一项目的写任务通过非阻塞文件锁互斥，冲突时明确失败。
+
+稳定的 Web 请求体端点使用 Pydantic 做边界结构和类型校验；缺失字段、错误类型和非法嵌套结构统一返回 `request_validation_error`，响应只包含安全的字段路径。跨字段关系、重复 boundary、文件/项目存在性、阶段限制、Scope、Prompt 和语言等业务条件继续返回 `usage_error`。这些请求模型忽略未知字段，不改变现有未知字段行为；响应 JSON 形状保持不变。
 
 服务器配置的 `[tasks] max_active_projects` 默认是 2，必须是非布尔正整数，可在全局设置或
 `PUT /api/v1/server/config` 修改；`GET /api/v1/server/status` 返回当前值。旧的
