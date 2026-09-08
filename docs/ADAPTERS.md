@@ -1,7 +1,11 @@
 # Adapter 契约
 
-本文区分已实现的契约与 provisional 设计。实现行为以测试和
-[`MINIMAL.md`](MINIMAL.md) 为准。
+本文是 LLM Adapter、Document Adapter、可信 Python 插件和 LLM Preset 协议的唯一权威文档。
+协议字段、版本、能力、错误边界和兼容范围只在此定义；测试用于验证本契约，不能以其他文档
+中的重复描述覆盖它。
+
+稳定产品语义见[最小产品规范](MINIMAL.md)，用户配置和操作见[用户指南](USER_GUIDE.md)，
+尚未实现的协议方向与稳定门槛见[产品路线图](ROADMAP.md)。
 
 ## 1. 声明式 JSON LLM Adapter（已实现）
 
@@ -511,18 +515,7 @@ class MyValidator:
 导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或
 运行期设置。不要依赖未文档化的内部对象。
 
-## 4. Python LLM Adapter（provisional，未实现）
-
-未来 Python LLM Adapter 仍只负责：
-
-- 将规范化 model/messages/temperature/max output/stream 转成 HTTP 请求规格；
-- 将宿主取得的响应转成 content 或规范错误类别。
-
-它不得自行创建 HTTP Client、发送请求、限速、重试、写 Run 或读取密钥存储。
-具体 Python 方法签名、错误类型和配置接口必须等待第一个 JSON 模板无法支持的
-真实端点，再与第二个实现共同验证；当前不提供动态加载器或兼容承诺。
-
-## 5. LLM Preset（已实现）
+## 4. LLM Preset（已实现）
 
 Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
