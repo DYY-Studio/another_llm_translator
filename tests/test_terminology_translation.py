@@ -532,6 +532,140 @@ async def test_translation_summary_switch_is_independent_from_context_and_cross_
 
 
 @pytest.mark.asyncio
+async def test_translation_preflight_split_preserves_previous_part_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "previous")
+    next_source = tmp_path / "next.txt"
+    next_source.write_text("ABCDEFGH", encoding="utf-8")
+    add_project_files(project, [str(next_source)])
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FULL-PREVIOUS",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[0],
+        text="上一 Part 概括",
+    )
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+
+    from app import stage_runtime
+
+    def split_long_segments(segment: dict, **_kwargs: object) -> bool:
+        if len(str(segment["source"])) > 4:
+            raise RequestSizeError("测试用预检拆分", reason="context")
+        return True
+
+    monkeypatch.setattr(
+        stage_runtime,
+        "estimate_single_segment_preflight",
+        split_long_segments,
+    )
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        payloads.append(payload)
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(
+            project,
+            Scope(only_file="F0002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert summary["completed"] == 1
+    assert payloads
+    assert sum(len(payload["segments"]) for payload in payloads) > 1
+    assert all(
+        payload["summary_context"] == ["上一 Part 概括"]
+        for payload in payloads
+    )
+    assert all(
+        payload["summary_context_relation"] == "previous_only"
+        for payload in payloads
+    )
+    assert all(
+        len(str(item["source"])) <= 4
+        for payload in payloads
+        for item in payload["segments"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_translation_runtime_split_classifies_fragment_by_original_id(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "prefix\nABCDEFGH")
+    config_path = project / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false",
+            "previous_summaries = true",
+        ),
+        encoding="utf-8",
+    )
+    write_test_summary(
+        project,
+        summary_id="SUMMARY-FRAGMENT-CURRENT",
+        kind="fragment",
+        file_id="F0001",
+        part_id="document",
+        segment_indexes=[1],
+        text="当前片段概括",
+    )
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        payloads.append(payload)
+        source = str(payload["segments"][0]["source"])
+        if len(source) > 3:
+            return httpx.Response(
+                400,
+                text="context_length_exceeded: maximum context tokens",
+            )
+        return translation_response(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        summary = await run_translation(
+            project,
+            Scope(only_segment="F0001-S000002"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert summary["completed"] == 1
+    assert len(payloads) > 1
+    child_payloads = payloads[1:]
+    assert all(
+        payload["summary_context"] == ["当前片段概括"]
+        for payload in child_payloads
+    )
+    assert all(
+        payload["summary_context_relation"] == "contains_all_current"
+        for payload in child_payloads
+    )
+
+
+@pytest.mark.asyncio
 async def test_case_insensitive_false_keeps_case_distinct_terms(
     tmp_path: Path,
 ) -> None:

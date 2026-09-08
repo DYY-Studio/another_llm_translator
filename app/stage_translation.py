@@ -47,6 +47,11 @@ from .translation_validation import (
 
 from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
 
+
+def _summary_segment_id(item: dict[str, Any]) -> str:
+    return str(item.get("_original_segment_id") or item["segment_id"])
+
+
 def _has_hard_validation_findings(findings: list[dict[str, Any]]) -> bool:
     return any(
         str(item.get("severity", "error")) == "error" for item in findings
@@ -117,7 +122,7 @@ class _TranslationSummaryContext:
             return [], None
         first = items[0]
         boundary = (str(first["file_id"]), str(first["part_id"]))
-        if self.part_first_ids.get(boundary) == str(first["segment_id"]):
+        if self.part_first_ids.get(boundary) == _summary_segment_id(first):
             previous = self.previous_parts.get(boundary)
             text = self.full_text.get(previous) if previous is not None else None
             return ([text], "previous_only") if text is not None else ([], None)
@@ -135,7 +140,7 @@ class _TranslationSummaryContext:
             (item for item in candidates if item[0] == latest_start),
             key=lambda item: (item[1], item[2]),
         )
-        current_ids = {str(item["segment_id"]) for item in items}
+        current_ids = {_summary_segment_id(item) for item in items}
         summary_ids = latest[3]
         if not summary_ids.intersection(current_ids):
             relation = "previous_only"
