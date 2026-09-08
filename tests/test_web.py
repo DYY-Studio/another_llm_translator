@@ -2786,7 +2786,11 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
         json={"stage": "translation", "force": "true"},
     )
     assert invalid_boolean.status_code == 400
-    assert "force 必须是布尔值" in invalid_boolean.json()["error"]
+    assert invalid_boolean.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["force"]},
+    }
     conflicting = client.post(
         "/api/v1/projects/sample/tasks",
         json={
@@ -2798,6 +2802,34 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert conflicting.status_code == 400
     assert "不能同时使用" in conflicting.json()["error"]
     assert app.state.tasks.tasks == {}
+
+
+def test_web_task_start_payload_schema_and_explicit_null_language(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    missing_stage = client.post("/api/v1/projects/sample/tasks", json={})
+    assert missing_stage.status_code == 400
+    assert missing_stage.json()["code"] == "request_validation_error"
+    assert missing_stage.json()["params"]["fields"] == ["stage"]
+
+    invalid_scope = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "only_segment": 1},
+    )
+    assert invalid_scope.status_code == 400
+    assert invalid_scope.json()["code"] == "request_validation_error"
+    assert invalid_scope.json()["params"]["fields"] == ["only_segment"]
+
+    explicit_null_language = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "language": None},
+    )
+    assert explicit_null_language.status_code == 400
+    assert explicit_null_language.json()["code"] == "usage_error"
+    assert "language" in explicit_null_language.json()["error"]
 
 
 def test_web_task_options_report_effective_stage_preset(

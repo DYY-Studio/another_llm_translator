@@ -10,6 +10,7 @@ from .execution import Scope
 from .project import (
     PROMPT_LANGUAGES,
 )
+from .web_payloads import TaskStartPayload
 from .web_tasks import task_options
 
 
@@ -28,65 +29,37 @@ def register_task_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
 
     @app.post("/api/v1/projects/{name}/tasks")
     async def start_task(
-        name: str, payload: dict[str, Any]
+        name: str, payload: TaskStartPayload
     ) -> dict[str, Any]:
-        stage = str(payload.get("stage", ""))
-
-        def boolean_option(key: str) -> bool:
-            value = payload.get(key, False)
-            if not isinstance(value, bool):
-                raise UsageError(f"{key} 必须是布尔值")
-            return value
-
-        force = boolean_option("force")
-        replace_draft = boolean_option("replace_draft")
-        acknowledge_manual_review = boolean_option("acknowledge_manual_review")
-        include_summaries = boolean_option("include_summaries")
-        reuse_mixed_fingerprints = boolean_option(
-            "reuse_mixed_fingerprints"
-        )
-        run_action = payload.get("run_action")
-        if run_action is not None and not isinstance(run_action, str):
-            raise UsageError("run_action 必须是字符串或 null")
+        stage = payload.stage
         scope = Scope(
-            from_file=payload.get("from_file"),
-            only_file=payload.get("only_file"),
-            only_segment=payload.get("only_segment"),
-            force=force,
+            from_file=payload.from_file,
+            only_file=payload.only_file,
+            only_segment=payload.only_segment,
+            force=payload.force,
             dry_run=False,
         )
         scope.validate()
-        summary_selection_provided = "summary_selection" in payload
-        summary_selection = payload.get("summary_selection", [])
-        if not isinstance(summary_selection, list):
-            raise UsageError("summary_selection 必须是 file_id/part_id 对象数组")
-        for value in summary_selection:
-            if (
-                not isinstance(value, dict)
-                or not isinstance(value.get("file_id"), str)
-                or not value["file_id"]
-                or not isinstance(value.get("part_id"), str)
-                or not value["part_id"]
-            ):
-                raise UsageError(
-                    "summary_selection 必须是 file_id/part_id 对象数组"
-                )
+        summary_selection_provided = "summary_selection" in payload.model_fields_set
+        summary_selection = [
+            value.model_dump() for value in payload.summary_selection
+        ]
         if summary_selection_provided and stage != "content_summary":
             raise UsageError("summary_selection 只允许内容概括阶段")
         return await app.state.tasks.start(
             project(name),
             stage,
             scope=scope,
-            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-            run_action=run_action,
+            reuse_mixed_fingerprints=payload.reuse_mixed_fingerprints,
+            run_action=payload.run_action,
             prompt_language=(
-                validate_language(payload.get("language"))
-                if "language" in payload
+                validate_language(payload.language)
+                if "language" in payload.model_fields_set
                 else None
             ),
-            replace_draft=replace_draft,
-            acknowledge_manual_review=acknowledge_manual_review,
-            include_summaries=include_summaries,
+            replace_draft=payload.replace_draft,
+            acknowledge_manual_review=payload.acknowledge_manual_review,
+            include_summaries=payload.include_summaries,
             summary_selection=summary_selection,
         )
 

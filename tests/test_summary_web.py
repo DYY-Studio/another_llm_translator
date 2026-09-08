@@ -301,6 +301,7 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
         },
     )
     assert response.status_code == 400
+    assert response.json()["code"] == "usage_error"
     assert "summary_selection" in response.json()["error"]
 
 
