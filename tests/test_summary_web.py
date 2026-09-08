@@ -130,6 +130,46 @@ def test_summary_routes_expose_selection_preflight_and_export(tmp_path):
     assert exported.json()["path"] == "notes/summary.md"
 
 
+def test_summary_payload_schema_aliases_and_safe_errors(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    client = TestClient(create_app(projects_root=project.parent))
+    boundary = {"file_id": "F0001", "part_id": "document"}
+
+    aliased = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={"selection": [boundary], "selected": False, "unknown": "ignored"},
+    )
+    assert aliased.status_code == 200
+    assert aliased.json()["participation"][0]["selected"] is False
+
+    missing = client.post(
+        "/api/v1/projects/demo/summaries/aggregation-preflight",
+        json={},
+    )
+    assert missing.status_code == 400
+    assert missing.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["boundaries"]},
+    }
+
+    malformed = client.post(
+        "/api/v1/projects/demo/summaries/aggregation-preflight",
+        json={"boundaries": [{"file_id": "F0001"}]},
+    )
+    assert malformed.status_code == 400
+    assert malformed.json()["code"] == "request_validation_error"
+    assert malformed.json()["params"]["fields"] == ["boundaries.0.part_id"]
+
+    invalid_selected = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={"boundaries": [boundary], "selected": "false"},
+    )
+    assert invalid_selected.status_code == 400
+    assert invalid_selected.json()["code"] == "request_validation_error"
+    assert invalid_selected.json()["params"]["fields"] == ["selected"]
+
+
 def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     project = _project(tmp_path)
     app_root = tmp_path / "app-root"
@@ -261,6 +301,7 @@ def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
         },
     )
     assert response.status_code == 400
+    assert response.json()["code"] == "usage_error"
     assert "summary_selection" in response.json()["error"]
 
 

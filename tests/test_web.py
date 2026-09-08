@@ -13,6 +13,7 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import app.web as web_module
 import app.web_store as web_store_module
@@ -41,6 +42,15 @@ from app.sqlite_storage import (
 from app.web import create_app
 from app.web_store import WebStore
 from app.web_tasks import SharedLimiterPool, WebTaskManager
+from app.web_payloads import (
+    BoundaryPayload,
+    SegmentFilterPayload,
+    SegmentQueryPayload,
+    SummaryExportPayload,
+    SummaryParticipationPayload,
+    SummarySelectionPayload,
+    TaskStartPayload,
+)
 from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
@@ -59,6 +69,45 @@ def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_web_payload_models_keep_stable_defaults_and_types() -> None:
+    boundary = BoundaryPayload(file_id="F0001", part_id="document")
+    assert boundary.model_dump() == {"file_id": "F0001", "part_id": "document"}
+
+    query = SegmentQueryPayload(offset="12", limit="7", unknown="ignored")
+    assert query.offset == 12
+    assert query.limit == 7
+    assert query.stage == "translation"
+    assert "unknown" not in query.model_dump()
+    assert SegmentFilterPayload(q="needle").q == "needle"
+
+    selection = SummarySelectionPayload(selection=[boundary])
+    assert selection.boundaries == [boundary]
+    assert SummaryParticipationPayload(boundaries=[boundary]).selected is True
+    assert SummaryExportPayload(boundaries=[boundary]).path == "summary.md"
+
+    task = TaskStartPayload(stage="translation")
+    assert task.force is False
+    assert task.replace_draft is False
+    assert task.summary_selection == []
+
+
+@pytest.mark.parametrize("value", [1, "true"])
+def test_web_payload_models_reject_boolean_option_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        TaskStartPayload(stage="translation", force=value)
+
+
+def test_web_payload_models_reject_invalid_structured_values() -> None:
+    with pytest.raises(ValidationError):
+        BoundaryPayload(file_id="", part_id="document")
+    with pytest.raises(ValidationError):
+        SegmentFilterPayload(file_id=123)
+    with pytest.raises(ValidationError):
+        SegmentQueryPayload(offset=True)
+    with pytest.raises(ValidationError):
+        SummarySelectionPayload(boundaries=[{"file_id": "F0001"}])
 
 
 def test_web_lists_project_edits_translation_and_rejects_remote_origin(
@@ -120,6 +169,46 @@ def test_web_segment_query_does_not_collect_project_storage(
     assert "files" in overview.json()
 
 
+def test_web_segment_payload_schema_and_business_errors(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    defaults = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": "1", "unknown": "ignored"},
+    )
+    assert defaults.status_code == 200
+    assert defaults.json()["offset"] == 1
+    assert defaults.json()["limit"] == 100
+    assert defaults.json()["stage"] == "translation"
+
+    invalid_offset = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": True},
+    )
+    assert invalid_offset.status_code == 400
+    assert invalid_offset.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset"]},
+    }
+
+    invalid_status = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"status": 1},
+    )
+    assert invalid_status.status_code == 400
+    assert invalid_status.json()["code"] == "request_validation_error"
+    assert invalid_status.json()["params"]["fields"] == ["status"]
+
+    mismatched_filter = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"file_id": "F0001"},
+    )
+    assert mismatched_filter.status_code == 400
+    assert mismatched_filter.json()["code"] == "usage_error"
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -161,6 +250,27 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert payload["code"] == "request_validation_error"
     assert payload["params"]["fields"] == ["name"]
     assert "input" not in payload["params"]
+
+
+def test_web_payload_validation_errors_do_not_echo_input_values(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    secret = "sk-local-validation-secret"
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": secret, "status": {"secret": secret}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset", "status"]},
+    }
+    assert secret not in response.text
 
 
 def test_web_epub_export_error_preserves_language_tag_guidance(
@@ -2697,7 +2807,11 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
         json={"stage": "translation", "force": "true"},
     )
     assert invalid_boolean.status_code == 400
-    assert "force 必须是布尔值" in invalid_boolean.json()["error"]
+    assert invalid_boolean.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["force"]},
+    }
     conflicting = client.post(
         "/api/v1/projects/sample/tasks",
         json={
@@ -2709,6 +2823,34 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert conflicting.status_code == 400
     assert "不能同时使用" in conflicting.json()["error"]
     assert app.state.tasks.tasks == {}
+
+
+def test_web_task_start_payload_schema_and_explicit_null_language(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    missing_stage = client.post("/api/v1/projects/sample/tasks", json={})
+    assert missing_stage.status_code == 400
+    assert missing_stage.json()["code"] == "request_validation_error"
+    assert missing_stage.json()["params"]["fields"] == ["stage"]
+
+    invalid_scope = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "only_segment": 1},
+    )
+    assert invalid_scope.status_code == 400
+    assert invalid_scope.json()["code"] == "request_validation_error"
+    assert invalid_scope.json()["params"]["fields"] == ["only_segment"]
+
+    explicit_null_language = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "language": None},
+    )
+    assert explicit_null_language.status_code == 400
+    assert explicit_null_language.json()["code"] == "usage_error"
+    assert "language" in explicit_null_language.json()["error"]
 
 
 def test_web_task_options_report_effective_stage_preset(
