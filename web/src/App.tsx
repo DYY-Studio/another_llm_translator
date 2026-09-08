@@ -41,6 +41,11 @@ const runnable: Partial<Record<Stage, LLMStage>> = {
   polishing: "polishing",
 };
 
+type RecentRestoreNotice = {
+  message: string;
+  retryable: boolean;
+};
+
 function readRecentProjectPaths(): string[] {
   try {
     const stored: unknown = JSON.parse(
@@ -113,6 +118,7 @@ export default function App() {
   const [authRequired, setAuthRequired] = useState(false);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [recentProjectsReady, setRecentProjectsReady] = useState(false);
+  const [recentRestoreNotice, setRecentRestoreNotice] = useState<RecentRestoreNotice | null>(null);
   const tasksRef = useRef<Record<string, TaskState>>({});
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
@@ -305,6 +311,7 @@ export default function App() {
 
   const restoreRecentProjects = useCallback(async (): Promise<boolean> => {
     const paths = readRecentProjectPaths();
+    setRecentRestoreNotice(null);
     setRecentProjectsReady(false);
     try {
       const results = await Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
@@ -339,9 +346,15 @@ export default function App() {
       if (pathResult.transientFailureCount) {
         recoveryMessages.push(translate("app.recentPathsTemporarilyUnavailable", languageRef.current, { count: pathResult.transientFailureCount }));
       }
-      if (recoveryMessages.length) setError(recoveryMessages.join("；"));
+      const recoveryNotice = recoveryMessages.length
+        ? {
+            message: recoveryMessages.join("；"),
+            retryable: pathResult.transientFailureCount > 0,
+          }
+        : null;
       if (warnings.length) setProjectWarnings(warnings);
       await loadProjects();
+      setRecentRestoreNotice(recoveryNotice);
       setRecentProjectsReady(true);
       return true;
     } catch (reason) {
@@ -645,6 +658,15 @@ export default function App() {
         )}
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
+        )}
+        {recentRestoreNotice != null && (
+          <div className="error-banner error-banner-global" role="alert">
+            <span>{recentRestoreNotice.message}</span>
+            {recentRestoreNotice.retryable && (
+              <button className="quiet-button" type="button" onClick={() => { void restoreRecentProjects(); }}>{translate("common.retry", language)}</button>
+            )}
+            <button className="quiet-button" type="button" aria-label={translate("common.dismiss", language)} onClick={() => setRecentRestoreNotice(null)}>×</button>
+          </div>
         )}
         {error != null && (
           <button className="error-banner" type="button" onClick={() => setError(null)}>{errorMessage(error, language)}</button>
