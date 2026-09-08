@@ -181,7 +181,9 @@ export function TermsView({
     : "";
   const selectedIsDisabled = Boolean(selected?.disabled);
 
-  function setCurrentData(value: TermsResponse) {
+  async function setCurrentData(value: TermsResponse) {
+    if (activeProjectRef.current !== projectId) return;
+    await queryClient.cancelQueries({ queryKey: queryKeys.terms({ projectId }) });
     if (activeProjectRef.current !== projectId) return;
     queryClient.setQueryData(queryKeys.terms({ projectId }), value);
     void queryClient.invalidateQueries({ queryKey: ["term-hits", projectId] }).catch(() => {});
@@ -484,7 +486,7 @@ export function TermsView({
       } else {
         suppressFocusScrollForDataRef.current = null;
       }
-      setCurrentData(value);
+      await setCurrentData(value);
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
@@ -507,7 +509,7 @@ export function TermsView({
           }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.removedCount", language, { count: value.removed }));
@@ -531,7 +533,7 @@ export function TermsView({
           }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
@@ -551,7 +553,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/clear`,
         { method: "POST", body: JSON.stringify({ confirm: true }) },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setPendingPrimary(null);
@@ -582,7 +584,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/materialize`,
         { method: "POST", body: JSON.stringify({ normalized: selectedNormalized, alias }) },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
       const restored = Boolean(data?.terms.find((term) => term.normalized === value.materialized)?.disabled);
       const groupPrimary = termByKey.get(selected.group_primary ?? selectedNormalized) ?? selected;
@@ -608,7 +610,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/set-primary`,
         { method: "POST", body: JSON.stringify({ normalized: pendingPrimary, confirm: true }) },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       selection.reset(pendingPrimary);
       const primary = value.terms.find((term) => term.normalized === pendingPrimary);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -673,7 +675,7 @@ export function TermsView({
           }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === relatedPrimary) ?? null;
       selection.reset(primary?.normalized ?? selectedNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -704,7 +706,7 @@ export function TermsView({
           }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       const target = value.terms.find((term) => term.normalized === selectedNormalized) ?? null;
       selection.reset(target?.normalized ?? "");
       setForm(target ? formFor(target) : emptyForm);
@@ -734,7 +736,7 @@ export function TermsView({
           }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === primaryNormalized) ?? null;
       selection.reset(primary?.normalized ?? primaryNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -761,7 +763,7 @@ export function TermsView({
           body: JSON.stringify({ normalized, confirm: true }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       const focused = value.terms.find((term) => term.normalized === focusedNormalized) ?? null;
       selection.reset(focused?.normalized ?? focusedNormalized);
       setForm(focused ? formFor(focused) : emptyForm);
@@ -786,7 +788,7 @@ export function TermsView({
           body: JSON.stringify({ normalized: [pendingRelatedRemoval.normalized] }),
         },
       );
-      setCurrentData(value);
+      await setCurrentData(value);
       setPendingRelatedRemoval(null);
       setMessage(translate("terms.relatedRemoved", language));
     } catch (error) {
@@ -1299,8 +1301,8 @@ export function TermsView({
           project={project}
           language={language}
           onClose={() => setImportOpen(false)}
-          onImported={(value) => {
-            setCurrentData(value);
+          onImported={async (value) => {
+            await setCurrentData(value);
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
@@ -1325,7 +1327,7 @@ export function TermsView({
           onClose={() => setPartialOpen(false)}
           onPublished={async () => {
             setPartialOpen(false);
-            setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
+            await setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
             setMessage(translate("terms.published", language));
           }}
         />

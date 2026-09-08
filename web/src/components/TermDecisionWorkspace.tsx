@@ -182,7 +182,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
   language: Language;
   task: TaskState | null;
   onTask: (task: TaskState) => void;
-  onTerms: (terms: TermsResponse) => void;
+  onTerms: (terms: TermsResponse) => void | Promise<void>;
   onClose: () => void;
   initialTab?: DecisionTab;
   onReviewState: (review: TermDecisionReviewState) => void;
@@ -344,7 +344,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     setMessage("");
     try {
       const result = await api<{ terms?: TermsResponse }>(`/api/v1/projects/${project}/terms/decision/${path}`, { method: "POST", body: JSON.stringify({ confirm: true }) });
-      if (result.terms) onTerms(result.terms);
+      if (result.terms) await onTerms(result.terms);
       const next = await load();
       if (!next) return;
       if (path === "apply") {
