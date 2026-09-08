@@ -1410,34 +1410,42 @@ def _prune_published_summary_history(
         visiting: set[str] = set()
         visited: set[str] = set()
 
-        def unavailable_provenance() -> None:
-            nonlocal unavailable
-            unavailable = True
+        prune_state = {"unavailable": False}
 
-        def visit(record_id: str) -> None:
-            if unavailable:
+        def visit(
+            record_id: str,
+            *,
+            _artifacts=artifacts,
+            _file_id=file_id,
+            _part_id=part_id,
+            _reachable=reachable,
+            _visiting=visiting,
+            _visited=visited,
+            _state=prune_state,
+        ) -> None:
+            if _state["unavailable"]:
                 return
-            if record_id in visiting:
-                unavailable_provenance()
+            if record_id in _visiting:
+                _state["unavailable"] = True
                 return
-            if record_id in visited:
+            if record_id in _visited:
                 return
-            node = artifacts.get(record_id)
+            node = _artifacts.get(record_id)
             if node is None:
-                unavailable_provenance()
+                _state["unavailable"] = True
                 return
             kind = node["kind"]
             if kind not in {"fragment", "reduction", "full"}:
-                unavailable_provenance()
+                _state["unavailable"] = True
                 return
-            visited.add(record_id)
-            reachable.add(record_id)
+            _visited.add(record_id)
+            _reachable.add(record_id)
             if kind == "fragment":
                 return
 
             provenance = node.get("provenance")
             if not isinstance(provenance, dict):
-                unavailable_provenance()
+                _state["unavailable"] = True
                 return
             origin = provenance.get("origin")
             raw_ids = provenance.get("artifact_ids")
@@ -1453,7 +1461,7 @@ def _prune_published_summary_history(
                 or len(source_ranges) != len(raw_ids)
                 or any(not isinstance(value, dict) for value in source_ranges)
             ):
-                unavailable_provenance()
+                _state["unavailable"] = True
                 return
 
             dependencies = provenance.get("dependencies")
@@ -1462,15 +1470,15 @@ def _prune_published_summary_history(
                     kind != "full"
                     or len(raw_ids) != 1
                     or len(source_ranges) != 1
-                    or raw_ids[0] not in artifacts
-                    or artifacts[raw_ids[0]]["kind"] != "fragment"
-                    or artifacts[raw_ids[0]]["source_range"] != source_ranges[0]
+                    or raw_ids[0] not in _artifacts
+                    or _artifacts[raw_ids[0]]["kind"] != "fragment"
+                    or _artifacts[raw_ids[0]]["source_range"] != source_ranges[0]
                 ):
-                    unavailable_provenance()
+                    _state["unavailable"] = True
                     return
-                visiting.add(record_id)
+                _visiting.add(record_id)
                 visit(raw_ids[0])
-                visiting.remove(record_id)
+                _visiting.remove(record_id)
                 return
 
             if (
@@ -1479,19 +1487,19 @@ def _prune_published_summary_history(
                 or any(not isinstance(value, dict) for value in dependencies)
                 or node.get("input_digest") != _summary_provenance_digest(dependencies)
             ):
-                unavailable_provenance()
+                _state["unavailable"] = True
                 return
 
-            visiting.add(record_id)
+            _visiting.add(record_id)
             for child_id, source_range, dependency in zip(
                 raw_ids, source_ranges, dependencies, strict=True
             ):
-                child = artifacts.get(child_id)
+                child = _artifacts.get(child_id)
                 if child is None or child["kind"] not in {"fragment", "reduction", "full"}:
-                    unavailable_provenance()
+                    _state["unavailable"] = True
                     break
-                if (child["file_id"], child["part_id"]) != (file_id, part_id):
-                    unavailable_provenance()
+                if (child["file_id"], child["part_id"]) != (_file_id, _part_id):
+                    _state["unavailable"] = True
                     break
                 if (
                     dependency.get("record_id") != child_id
@@ -1506,17 +1514,18 @@ def _prune_published_summary_history(
                     != _summary_provenance_digest(str(child["text"]))
                     or dependency["source_digest"] != child["source_digest"]
                 ):
-                    unavailable_provenance()
+                    _state["unavailable"] = True
                     break
                 visit(child_id)
-                if unavailable:
+                if _state["unavailable"]:
                     break
-            visiting.remove(record_id)
+            _visiting.remove(record_id)
 
         for root in kept_fulls:
             visit(str(root["record_id"]))
-            if unavailable:
+            if prune_state["unavailable"]:
                 break
+        unavailable = prune_state["unavailable"]
         if unavailable:
             report["skipped"].append(
                 {

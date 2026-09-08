@@ -24,12 +24,12 @@ from app.sqlite_storage import (
 )
 from app.stage_runtime import _project_context, prompt_middle_digests
 from app.stage_terminology import _digest
-from app.summary_provenance import build_provenance
 from app.summary_aggregation import (
     aggregate_summaries,
     export_summary_markdown,
     full_summary_expired,
 )
+from app.summary_provenance import build_provenance
 from app.web_tasks import WebTaskManager
 from tests.helpers import llm_jsonl
 from tests.test_document_adapter_contract import (
