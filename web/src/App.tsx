@@ -107,6 +107,7 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
+  const [recentProjectsReady, setRecentProjectsReady] = useState(false);
   const tasksRef = useRef<Record<string, TaskState>>({});
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
@@ -127,6 +128,19 @@ export default function App() {
   });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
+  const retryQuery = useCallback(async () => {
+    if (!queryError) return;
+    setError(null);
+    try {
+      if (projectsQuery.error) {
+        await projectsQuery.refetch({ throwOnError: true });
+      } else {
+        await overviewQuery.refetch({ throwOnError: true });
+      }
+    } catch (value) {
+      setError(value);
+    }
+  }, [overviewQuery.error, overviewQuery.refetch, projectsQuery.error, projectsQuery.refetch, queryError]);
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
@@ -275,12 +289,12 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
-    const result = await projectsQuery.refetch();
+    const result = await projectsQuery.refetch({ throwOnError: true });
     return result.data ?? [];
   }, [projectsQuery.refetch]);
 
   useEffect(() => {
-    if (!projectsQuery.data) return;
+    if (!projectsQuery.data || !recentProjectsReady) return;
     const requestProject = activeProjectRef.current;
     let active = true;
     void syncActiveTasks().then(() => {
@@ -297,12 +311,12 @@ export default function App() {
       if (active) setError(value);
     });
     return () => { active = false; };
-  }, [projectsQuery.data, syncActiveTasks]);
+  }, [projectsQuery.data, recentProjectsReady, syncActiveTasks]);
 
   const refresh = useCallback(async () => {
-    if (!project) return;
-    await overviewQuery.refetch();
-  }, [overviewQuery.refetch, project]);
+    if (!project || !selectedProjectId) return;
+    await overviewQuery.refetch({ throwOnError: true });
+  }, [overviewQuery.refetch, project, selectedProjectId]);
 
   const refreshProject = useCallback(async () => {
     await Promise.all([loadProjects(), refresh()]);
@@ -326,7 +340,7 @@ export default function App() {
       if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
       if (warnings.length) setProjectWarnings(warnings);
       await loadProjects();
-    }).catch((value) => setError(value));
+    }).catch((value) => setError(value)).finally(() => setRecentProjectsReady(true));
   }, []);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
@@ -562,7 +576,12 @@ export default function App() {
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
-        {(error ?? queryError) != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error ?? queryError, language)}</button> : null}
+        {(error ?? queryError) != null ? (
+          <div className="error-banner" role="alert">
+            <span>{errorMessage(error ?? queryError, language)}</span>
+            {queryError ? <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button> : <button className="quiet-button" type="button" onClick={() => setError(null)}>{translate("common.dismiss", language)}</button>}
+          </div>
+        ) : null}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) await openProject(created, true); else setProject(selector); }} />}
