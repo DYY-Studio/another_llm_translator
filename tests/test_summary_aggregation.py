@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from app.errors import ExportError, FatalExternalError, UsageError
-from app.execution import Scope, segment_model_source
+from app.execution import Scope, segment_model_source, stage_fingerprint
 from app.llm_client import SlidingWindowLimiter
 from app.llm_keys import KeyPool
 from app.project import init_project
@@ -22,6 +22,7 @@ from app.sqlite_storage import (
     record_header,
     write_content_summary,
 )
+from app.stage_runtime import _project_context, prompt_middle_digests
 from app.stage_terminology import _digest
 from app.summary_aggregation import (
     aggregate_summaries,
@@ -30,6 +31,11 @@ from app.summary_aggregation import (
 )
 from app.web_tasks import WebTaskManager
 from tests.helpers import llm_jsonl
+from tests.test_document_adapter_contract import (
+    RecordDocumentAdapter,
+    register_plugin,
+    write_record,
+)
 from tests.test_foundation import make_app_root
 
 
@@ -171,6 +177,92 @@ def _two_boundary_project(tmp_path: Path) -> Path:
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
     return project
+
+
+class SummaryRequirementAdapter(RecordDocumentAdapter):
+    def model_prompt_requirements(
+        self,
+        *,
+        stage: str,
+        language: str,
+        opaque_state: dict[str, object] | None,
+    ) -> str | None:
+        del opaque_state
+        if stage == "content_summary" and language == "en":
+            return "Preserve the source-boundary order in the consolidated summary."
+        return None
+
+
+def _record_summary_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    register_plugin(monkeypatch, SummaryRequirementAdapter())
+    source = tmp_path / "source.rec"
+    write_record(source, "Alice entered.\nBob waved.")
+    project, _ = init_project(
+        [str(source)],
+        name="demo",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="record",
+    )
+    assert project is not None
+    os.environ["LLM_API_KEY"] = "test"
+    return project
+
+
+@pytest.mark.asyncio
+async def test_aggregation_uses_requested_language_adapter_requirements_and_standard_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _record_summary_project(tmp_path, monkeypatch)
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-ONE",
+        segment_indexes=[0],
+        text="Alice 出现。",
+        part_id="a",
+    )
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-TWO",
+        segment_indexes=[1],
+        text="Bob 挥手。",
+        part_id="a",
+    )
+    (project / "prompts" / "content_summary.en.middle.txt").write_text(
+        "English aggregation instructions.", encoding="utf-8"
+    )
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _summary_response(request)
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await aggregate_summaries(
+                project,
+                [{"file_id": "F0001", "part_id": "a"}],
+                http_client=client,
+                prompt_language="en",
+            )
+    finally:
+        os.environ.pop("LLM_API_KEY", None)
+
+    config, _, _, _ = _project_context(project, stage="content_summary")
+    manifest = read_json(
+        project, project / "runs" / result["run_id"] / "manifest.json"
+    )
+    assert "English aggregation instructions." in requests[0]["messages"][0]["content"]
+    assert "Preserve the source-boundary order" in requests[0]["messages"][0]["content"]
+    assert manifest["document_adapter_prompt_requirements"]["F0001"]["en"] == (
+        "Preserve the source-boundary order in the consolidated summary."
+    )
+    assert manifest["stage_fingerprint"] == stage_fingerprint(
+        config,
+        "content_summary",
+        prompt_middle_digests(project, "content_summary"),
+    )
 
 
 @pytest.mark.asyncio
