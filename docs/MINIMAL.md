@@ -450,12 +450,14 @@ fallback_encoding = "utf-8"
 preset = "default"
 preset_terminology = ""
 preset_terminology_decision = ""
+preset_content_summary = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 temperature_terminology = 0.1
 temperature_terminology_decision = 0.1
+temperature_content_summary = 0.1
 temperature_translation = 0.2
 temperature_proofreading = 0.1
 temperature_polishing = 0.3
