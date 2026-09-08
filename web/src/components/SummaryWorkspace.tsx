@@ -566,7 +566,7 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
       const options = await api<TaskOptions>(
         kind === "fragment"
           ? `/api/v1/projects/${project}/task-options/terminology?include_summaries=true&language=${encodeURIComponent(language)}`
-          : `/api/v1/projects/${project}/task-options/content_summary`,
+          : `/api/v1/projects/${project}/task-options/content_summary?language=${encodeURIComponent(language)}`,
       );
       if (kind === "full") {
         const selectedBoundaries = boundaries.filter((item) => participation.has(boundaryKey(item.file_id, item.part_id)));

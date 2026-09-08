@@ -625,8 +625,6 @@ async def run_terminology(
     summary_selection = (
         _summary_participation(project, selected) if include_summaries else set()
     )
-    if include_summaries and scope.force and not scope.dry_run:
-        mark_content_summary_fragments_stale(project, summary_selection)
     if include_summaries and resume_manifest is not None:
         saved_selection = resume_manifest.get("summary_participation")
         if isinstance(saved_selection, list):
@@ -657,7 +655,9 @@ async def run_terminology(
         and (str(segment["file_id"]), str(segment["part_id"])) in summary_selection
     ]
     covered_summary_ids = (
-        _summary_covered_segments(
+        set()
+        if scope.force
+        else _summary_covered_segments(
             project,
             summary_candidates,
             prompt_digests=summary_prompt_digests,
@@ -918,6 +918,20 @@ async def run_terminology(
         preflight.fast_checked,
         preflight.exact_checked,
     )
+
+    if include_summaries and scope.force and not scope.dry_run:
+        summary_request_boundaries = {
+            (str(item["file_id"]), str(item["part_id"]))
+            for item in request_segments
+            if item.get(_SUMMARY_MODE_KEY)
+            in {
+                TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY.value,
+                TerminologyResponseMode.SUMMARY_ONLY.value,
+            }
+        }
+        refresh_boundaries = summary_selection & summary_request_boundaries
+        if refresh_boundaries:
+            mark_content_summary_fragments_stale(project, refresh_boundaries)
 
     selected_by_id = {str(item["segment_id"]): item for item in selected}
 
@@ -1201,6 +1215,7 @@ async def run_terminology(
                 for mode in sorted(summary_prompt_modes_used, key=lambda value: value.value)
             },
             "target_language": str(config["project"]["target_language"]),
+            "warnings": list(warnings),
             "updated_at": utc_now(),
         }
         write_summary_run(project, summary_run_record)
@@ -1416,7 +1431,14 @@ async def run_terminology(
                     "input_digest": input_digest,
                     "provenance": provenance,
                 }
-                publish_content_summary_fulls(project, [full_record])
+                cleanup_report = publish_content_summary_fulls(project, [full_record])
+                for skipped in cleanup_report["skipped"]:
+                    warning = (
+                        "内容概括历史清理已跳过："
+                        f"{skipped['file_id']}/{skipped['part_id']} 的 provenance 无法验证"
+                    )
+                    if warning not in warnings:
+                        warnings.append(warning)
         return record
 
     def mark_failed(

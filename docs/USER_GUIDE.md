@@ -226,12 +226,24 @@ Run 后重新启动。
 “导出 Markdown”单独选择边界并写入项目 `output` 目录，文件包含完整概括、File/part
 和原文 Segment 引用。缺少可用文本的完整概括或路径无效时导出失败。取消、网络失败和
 格式失败会保留已成功结果并显示状态，后续再次启动会继续缺少或失败部分；源文件变化后
-旧完整概括保留为历史并显示过期警告，但仍可查看、完成任务统计和导出，建议重新生成。
+旧完整概括在保留范围内会显示过期警告，仍可查看、完成任务统计和导出，建议重新生成。
 聚合形成的完整概括还会递归检查保存的 `full`/`reduction`/`fragment` provenance；
 旧片段文本、源文摘要、状态、范围或分区变化会触发过期警告。状态过期、源文变化、
 依赖变化和无法验证历史 provenance 会分别显示对应原因；缺少、损坏、循环或跨边界的
 provenance 按无法验证处理并过期，不会静默复用。旧的 `adopted_fragment` 记录仅按其
 单 fragment 依赖执行有限兼容校验。
+
+每个 `(file_id, part_id)` 最多保留最新 3 个 `full`，包括刚成功发布的版本；超出 3 版的
+旧 `full` 不再查看或导出。只有成功发布新 `full` 后才清理该边界，聚合和单 fragment 自动
+采用生成的 `full` 都使用同一规则。保留的 `full` 所引用的 provenance 链会保护其中的
+`full`、`reduction` 和 `fragment`；不可达的旧终止态 `full`、已完成/stale `reduction`，
+以及 stale 或 `source_changed` 的 `fragment` 会被回收。未标记过时的 completed fragment
+以及 failed、draft、running 记录不会删除。
+
+provenance 缺失、损坏、循环、重复引用、未知 kind 或跨边界而无法验证时，该边界会跳过
+清理并显示 warning，但新 `full` 仍会提交；其他已成功的边界不受阻止。失败、取消、预检
+失败和 `--dry-run` 不会触发清理。`summary_runs`、运行目录和 SQLite 物理文件大小不在
+本次清理范围内；未选边界的旧记录会等到该边界下一次成功发布新 `full` 时处理。
 
 概括页返回术语库后才离开子页。切换到其他阶段再回来，会保留当前项目的概括子页、筛选、
 边界、页签、滚动位置和来源面板状态。
@@ -239,6 +251,17 @@ provenance 按无法验证处理并过期，不会静默复用。旧的 `adopted
 ### 4.2 翻译
 
 进入“翻译”，选择运行范围并启动任务。已完成 Segment 默认复用；失败和未完成内容可以继续处理。
+
+如需让翻译参考内容概括，可在项目配置中开启
+`context.translation.previous_summaries`。Part 的第一个 Chunk 会收到全项目源文顺序中
+上一 Part 的完整概括；同一 Part 的后续 Chunk 会收到当前 Part 中起点最靠后的有效片段
+概括。摘要只在已完成、非空、未标记 `source_changed` 且源文范围仍匹配时使用，范围可以
+包含当前 Chunk 的 Segment。请求会同时明确摘要与当前 Chunk 的关系：纯粹前文、部分重叠，
+或摘要包含当前 Chunk 的全部 Segment；没有可用摘要时关系为空。完整概括和片段概括不会互相替代。
+该开关独立于
+`context.translation.enabled`，但 `translation` 加入 `chunking.cross_boundary_batching`
+后不会注入摘要。没有可用摘要时请求仍发送空的 `summary_context`，原有
+`reference_context` 不变。
 
 启动前，运行对话框会显示当前阶段实际生效的 Preset ID 和模型。如果某个阶段配置了专用
 Preset 覆盖值，请在确认运行前核对这些信息。

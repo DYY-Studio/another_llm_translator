@@ -99,7 +99,7 @@ test("summary fragment runs use task options and the standard run dialog", () =>
 
 test("summary runs reuse participation and the standard run dialog", () => {
   assert.match(summarySource, /import \{ RunDialog \} from "\.\/RunDialog"/);
-  assert.match(summarySource, /task-options\/content_summary/);
+  assert.match(summarySource, /task-options\/content_summary\?language=/);
   assert.match(summarySource, /summary_selection/);
   assert.match(summarySource, /include_summaries: true/);
   assert.match(summarySource, /<RunDialog/);

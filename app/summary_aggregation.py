@@ -11,30 +11,48 @@ from typing import Any
 import httpx
 
 from .config import load_project_config
-from .errors import AppError, ContextLengthError, ExportError, UsageError
+from .errors import (
+    AppError,
+    ContextLengthError,
+    ExportError,
+    ExternalError,
+    FatalExternalError,
+    UsageError,
+)
 from .execution import (
     create_run,
     estimate_messages,
     finalize_run,
-    full_prompt,
     render_messages,
+    run_bounded,
     segment_model_source,
+    stage_fingerprint,
 )
 from .llm_client import LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .llm_response import TerminologyResponseMode, parse_terminology_response
-from .project import PROMPT_LANGUAGES, load_segments, prompt_file
+from .project import load_segments
 from .sqlite_storage import (
     atomic_write_text,
     publish_content_summary_fulls,
     read_content_summaries,
-    read_json,
     record_header,
     utc_now,
     write_content_summary,
     write_summary_run,
 )
-from .summary_provenance import assess_full_summary, build_provenance
+from .stage_runtime import (
+    _document_prompt_requirement_helpers,
+    _project_context,
+    _prompt_factory,
+    _prompt_language,
+    prompt_middle_digests,
+)
+from .summary_provenance import (
+    assess_full_summary,
+    build_provenance,
+    full_summary_context_usable,
+)
 
 MAX_REDUCTION_DEPTH = 8
 
@@ -67,18 +85,6 @@ def _boundaries(values: Iterable[dict[str, Any]]) -> list[tuple[str, str]]:
     if not result:
         raise UsageError("聚合选择不能为空")
     return result
-
-
-def _prompt(project: Path, language: str | None) -> tuple[str, str]:
-    selected = language or "zh-CN"
-    if selected not in PROMPT_LANGUAGES:
-        raise UsageError(f"不支持的内容概括 Prompt 语言：{selected}")
-    path = project / "prompts" / prompt_file("content_summary", selected)
-    try:
-        middle = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise UsageError(f"无法读取内容概括 Prompt：{path.name}: {exc}") from exc
-    return selected, full_prompt("content_summary", middle, selected)
 
 
 def _current_segments(project: Path) -> dict[tuple[str, str], list[dict[str, Any]]]:
@@ -348,9 +354,26 @@ async def aggregate_summaries(
         checked.append((boundary, current, fragments))
 
     config = load_project_config(project, stage="content_summary")
-    language, prompt = _prompt(project, prompt_language)
-    prompt_digest = _digest(prompt)
-    metadata = read_json(project, project / "project.json")
+    context_config, metadata, _, _ = _project_context(
+        project, stage="content_summary"
+    )
+    for key in (
+        "_document_adapter_options",
+        "_document_adapters",
+        "_document_adapter_prompt_requirements",
+    ):
+        config[key] = context_config.get(key, {})
+    language = _prompt_language(project, "content_summary", prompt_language)
+    prompt_factory = _prompt_factory(project, "content_summary", language)
+    requirements_for_items, _ = _document_prompt_requirement_helpers(
+        config, language
+    )
+    prompt_details: dict[tuple[str, str], tuple[tuple[str, ...], str, str]] = {}
+    for boundary, current, _ in checked:
+        requirements = requirements_for_items(current)
+        prompt = prompt_factory(requirements)
+        prompt_details[boundary] = (requirements, prompt, _digest(prompt))
+    summary_prompt_digest = prompt_details[checked[0][0]][2]
     source_ranges = [
         _merge_source_range(boundary, fragments, current)
         for boundary, current, fragments in checked
@@ -359,23 +382,39 @@ async def aggregate_summaries(
     run_id: str | None = None
     run_dir: Path | None = None
     if not all_adopted:
-        fingerprint = _digest(
-            {
-                "stage": "content_summary",
-                "prompt_digest": prompt_digest,
-                "model": config["llm"]["model"],
-            }
+        primary_boundary = next(
+            boundary for boundary, _, fragments in checked if len(fragments) > 1
+        )
+        _, primary_prompt, primary_prompt_digest = prompt_details[primary_boundary]
+        summary_prompt_digest = primary_prompt_digest
+        prompt_variants: dict[str, str] = {}
+        prompt_variant_requirements: dict[str, tuple[str, ...]] = {}
+        for boundary, _, fragments in checked:
+            if len(fragments) == 1:
+                continue
+            requirements, prompt, prompt_digest = prompt_details[boundary]
+            if prompt_digest == primary_prompt_digest:
+                continue
+            variant_name = f"content-summary-{prompt_digest[7:23]}"
+            prompt_variants[variant_name] = prompt
+            prompt_variant_requirements[variant_name] = requirements
+        fingerprint = stage_fingerprint(
+            config,
+            "content_summary",
+            prompt_middle_digests(project, "content_summary"),
         )
         run_id, run_dir = create_run(
             project,
             config=config,
             stage="content_summary",
             fingerprint=fingerprint,
-            prompt=prompt,
+            prompt=primary_prompt,
             selected_count=len(checked),
             requested_count=len(checked),
             reused_count=0,
             details={"prompt_language": language, "summary_boundaries": source_ranges},
+            prompt_variants=prompt_variants,
+            prompt_variant_requirements=prompt_variant_requirements,
         )
         write_summary_run(
             project,
@@ -388,12 +427,17 @@ async def aggregate_summaries(
                 status="running",
                 source_ranges=source_ranges,
                 input_digest=_digest(source_ranges),
-                prompt_digest=prompt_digest,
+                prompt_digest=primary_prompt_digest,
                 model=str(config["llm"]["model"]),
                 started_at=utc_now(),
             ),
         )
 
+    if on_progress is not None:
+        on_progress(0, 0, len(checked))
+
+    max_parallel = int(config["execution"]["max_parallel"])
+    request_semaphore = asyncio.Semaphore(max_parallel)
     if limiter is None:
         execution = config["execution"]
         limiter = KeyPool(
@@ -406,8 +450,18 @@ async def aggregate_summaries(
     pending_full: list[dict[str, Any]] = []
     calls = 0
     completed = 0
+    failed = 0
+    boundary_warnings: dict[tuple[str, str], str] = {}
     usage: dict[str, Any] | None = None
     active_llm: LLMClient | None = None
+
+    def ordered_boundary_warnings() -> list[str]:
+        return [
+            boundary_warnings[boundary]
+            for boundary, _, _ in checked
+            if boundary in boundary_warnings
+        ]
+
     try:
         async with LLMClient(
             config,
@@ -438,6 +492,7 @@ async def aggregate_summaries(
                 kind: str,
             ) -> dict[str, Any]:
                 nonlocal calls
+                _, prompt, prompt_digest = prompt_details[boundary]
                 payload = {
                     "target_language": config["project"]["target_language"],
                     "summaries": aggregation_summaries(children),
@@ -456,16 +511,17 @@ async def aggregate_summaries(
                         request_id=f"PRECHECK-{uuid.uuid4().hex[:10].upper()}",
                     )
                 request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-                response, _ = await llm.chat(
-                    messages=messages,
-                    temperature=config["llm"]["temperature_content_summary"],
-                    estimated_input_tokens=estimated,
-                    request_id=request_id,
-                    segment_id_map={
-                        str(index + 1): str(item["summary_id"])
-                        for index, item in enumerate(children)
-                    },
-                )
+                async with request_semaphore:
+                    response, _ = await llm.chat(
+                        messages=messages,
+                        temperature=config["llm"]["temperature_content_summary"],
+                        estimated_input_tokens=estimated,
+                        request_id=request_id,
+                        segment_id_map={
+                            str(index + 1): str(item["summary_id"])
+                            for index, item in enumerate(children)
+                        },
+                    )
                 calls += 1
                 parsed = parse_terminology_response(
                     response.content,
@@ -515,6 +571,7 @@ async def aggregate_summaries(
                 current: list[dict[str, Any]],
                 fragments: list[dict[str, Any]],
             ) -> dict[str, Any]:
+                _, prompt, prompt_digest = prompt_details[boundary]
                 original = _children_from_artifacts(fragments)
                 if len(original) == 1:
                     artifact = _make_artifact(
@@ -546,6 +603,11 @@ async def aggregate_summaries(
                         config["execution"]["token_safety_factor"],
                     )
 
+                def is_global_error(error: BaseException) -> bool:
+                    return isinstance(
+                        error, (asyncio.CancelledError, FatalExternalError)
+                    ) or not isinstance(error, (UsageError, ExternalError))
+
                 async def fit(
                     children: list[dict[str, Any]],
                     final: bool,
@@ -567,8 +629,51 @@ async def aggregate_summaries(
                             "聚合失败：递归压缩不收敛，最小请求仍超过模型上下文预算"
                         )
                     midpoint = len(children) // 2
-                    left = await fit(children[:midpoint], False)
-                    right = await fit(children[midpoint:], False)
+                    child_tasks = [
+                        asyncio.create_task(fit(children[:midpoint], False)),
+                        asyncio.create_task(fit(children[midpoint:], False)),
+                    ]
+                    try:
+                        done, _ = await asyncio.wait(
+                            child_tasks,
+                            return_when=asyncio.FIRST_EXCEPTION,
+                        )
+                        for task in done:
+                            error = (
+                                asyncio.CancelledError()
+                                if task.cancelled()
+                                else task.exception()
+                            )
+                            if error is not None and is_global_error(error):
+                                for child_task in child_tasks:
+                                    child_task.cancel()
+                                await asyncio.gather(
+                                    *child_tasks,
+                                    return_exceptions=True,
+                                )
+                                raise error
+                        left, right = await asyncio.gather(
+                            *child_tasks,
+                            return_exceptions=True,
+                        )
+                    except asyncio.CancelledError:
+                        for child_task in child_tasks:
+                            child_task.cancel()
+                        await asyncio.gather(
+                            *child_tasks,
+                            return_exceptions=True,
+                        )
+                        raise
+                    reduction_errors = [
+                        result
+                        for result in (left, right)
+                        if isinstance(result, BaseException)
+                    ]
+                    for error in reduction_errors:
+                        if is_global_error(error):
+                            raise error
+                    if reduction_errors:
+                        raise reduction_errors[0]
                     reduced = [_child_from_artifact(left), _child_from_artifact(right)]
                     after_estimate = estimate(reduced)
                     before_digest = _digest([str(item["text"]) for item in children])
@@ -579,16 +684,55 @@ async def aggregate_summaries(
 
                 return await fit(original, True)
 
-            for boundary, current, fragments in checked:
-                artifact = await reduce_boundary(boundary, current, fragments)
-                pending_full.append(artifact)
+            async def boundary_worker(
+                item: tuple[
+                    tuple[str, str],
+                    list[dict[str, Any]],
+                    list[dict[str, Any]],
+                ]
+            ) -> dict[str, Any] | None:
+                nonlocal completed, failed
+                boundary, current, fragments = item
+                try:
+                    artifact = await reduce_boundary(boundary, current, fragments)
+                    cleanup_report = publish_content_summary_fulls(project, [artifact])
+                    for skipped in cleanup_report["skipped"]:
+                        skipped_boundary = (
+                            str(skipped["file_id"]),
+                            str(skipped["part_id"]),
+                        )
+                        boundary_warnings[skipped_boundary] = (
+                            "内容概括历史清理已跳过："
+                            f"{skipped_boundary[0]}/{skipped_boundary[1]} 的 provenance 无法验证"
+                        )
+                except FatalExternalError:
+                    raise
+                except (UsageError, ExternalError) as exc:
+                    warning = f"{boundary[0]}/{boundary[1]}：{exc}"
+                    boundary_warnings[boundary] = warning
+                    failed += 1
+                    if on_progress is not None:
+                        on_progress(completed, failed, len(checked))
+                    return None
                 completed += 1
                 if on_progress is not None:
-                    on_progress(completed, 0, len(checked))
+                    on_progress(completed, failed, len(checked))
+                return artifact
+
+            results = await run_bounded(
+                checked,
+                boundary_worker,
+                max_parallel=max_parallel,
+            )
+            pending_full = [
+                artifact
+                for artifact in results
+                if artifact is not None
+            ]
         usage = active_llm.usage_summary() if active_llm is not None else None
-        publish_content_summary_fulls(project, pending_full)
     except asyncio.CancelledError:
         usage = active_llm.usage_summary() if active_llm is not None else None
+        warnings = [*ordered_boundary_warnings(), "任务已由用户取消"]
         if run_id is not None:
             write_summary_run(
                 project,
@@ -601,8 +745,9 @@ async def aggregate_summaries(
                     status="interrupted",
                     source_ranges=source_ranges,
                     input_digest=_digest(source_ranges),
-                    prompt_digest=prompt_digest,
+                    prompt_digest=summary_prompt_digest,
                     model=str(config["llm"]["model"]),
+                    warnings=warnings,
                 ),
             )
             if run_dir is not None:
@@ -611,13 +756,14 @@ async def aggregate_summaries(
                     run_dir,
                     status="interrupted",
                     completed=completed,
-                    failed=0,
-                    warnings=["任务已由用户取消"],
+                    failed=failed,
+                    warnings=warnings,
                     usage=usage,
                 )
         raise
     except Exception as exc:
         usage = active_llm.usage_summary() if active_llm is not None else None
+        warnings = [*ordered_boundary_warnings(), str(exc)]
         if run_id is not None:
             write_summary_run(
                 project,
@@ -630,9 +776,10 @@ async def aggregate_summaries(
                     status="failed",
                     source_ranges=source_ranges,
                     input_digest=_digest(source_ranges),
-                    prompt_digest=prompt_digest,
+                    prompt_digest=summary_prompt_digest,
                     model=str(config["llm"]["model"]),
                     error=str(exc),
+                    warnings=warnings,
                 ),
             )
             if run_dir is not None:
@@ -642,7 +789,7 @@ async def aggregate_summaries(
                     status="failed",
                     completed=completed,
                     failed=len(checked) - completed,
-                    warnings=[str(exc)],
+                    warnings=warnings,
                     usage=usage,
                 )
         if isinstance(exc, UsageError):
@@ -653,6 +800,8 @@ async def aggregate_summaries(
             raise
         raise UsageError(f"聚合失败：{exc}") from exc
 
+    warnings = ordered_boundary_warnings()
+    status = "failed" if failed else "completed"
     if run_id is not None:
         write_summary_run(
             project,
@@ -662,31 +811,33 @@ async def aggregate_summaries(
                 record_id=run_id,
                 run_id=run_id,
                 mode="aggregation",
-                status="completed",
+                status=status,
                 source_ranges=source_ranges,
                 input_digest=_digest(source_ranges),
-                prompt_digest=prompt_digest,
+                prompt_digest=summary_prompt_digest,
                 model=str(config["llm"]["model"]),
+                warnings=warnings,
             ),
         )
         if run_dir is not None:
             finalize_run(
                 project,
                 run_dir,
-                status="completed",
-                completed=len(checked),
-                failed=0,
-                warnings=[],
+                status=status,
+                completed=completed,
+                failed=failed,
+                warnings=warnings,
                 usage=usage,
             )
     return {
         "run_id": run_id,
         "selected": len(checked),
-        "completed": len(pending_full),
-        "failed": 0,
+        "completed": completed,
+        "failed": failed,
         "pending": 0,
         "calls": calls,
         "usage": usage,
+        "warnings": warnings,
         "boundaries": [
             {
                 "file_id": str(artifact["file_id"]),
@@ -724,6 +875,9 @@ def _latest_full(
             str(item.get("record_id") or ""),
         )
     )
+    for artifact in reversed(usable):
+        if full_summary_context_usable(artifact, current):
+            return artifact
     for artifact in reversed(usable):
         if not assess_full_summary(artifact, current, artifacts).expired:
             return artifact

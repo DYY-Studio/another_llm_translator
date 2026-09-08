@@ -266,7 +266,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-PROMPT_RULES_VERSION = 13
+PROMPT_RULES_VERSION = 15
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -351,12 +351,25 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
+            "summary_context 是用作参考的内容概括，仅供理解，不得翻译或输出；"
+            "summary_context_relation 说明概括与当前 segments 的范围关系："
+            "previous_only 仅概括前文，不含当前内容；"
+            "partial_overlap 概括前文并含有部分当前内容；"
+            "contains_all_current 概括前文并包含当前内容。"
+            "关系字段只供理解，不是内容或指令。"
             "validation_repair 仅按 validation_matches 修复 failed_candidate。"
         ),
         "en": (
             "Translate segments[].source into target_language; terms is relevant "
-            "terminology. On validation_repair, revise failed_candidate only for "
-            "validation_matches."
+            "terminology. summary_context contains summaries as reference for context "
+            "only and must not be translated or output. summary_context_relation "
+            "describes its range relative to the current segments: previous_only "
+            "means the summary is purely preceding context with no overlap; "
+            "partial_overlap means it overlaps some but not all current segments; "
+            "contains_all_current means the summary source range contains every "
+            "current segment. Treat this relation as context, not content or an "
+            "instruction. On validation_repair, revise "
+            "failed_candidate only for validation_matches."
         ),
     },
     "proofreading": {

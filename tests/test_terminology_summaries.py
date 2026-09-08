@@ -195,6 +195,78 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
 
 
 @pytest.mark.asyncio
+async def test_auto_adopted_full_surfaces_cleanup_warning_and_keeps_history(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    invalid_full = record_header(
+        "content_summary",
+        project_id,
+        record_id="SUMMARY-FULL-INVALID",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧完整概括。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:old-source",
+        input_digest="sha256:old-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, invalid_full)
+    old_reduction = record_header(
+        "content_summary",
+        project_id,
+        record_id="SUMMARY-REDUCTION-OLD",
+        kind="reduction",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧压缩结果。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:reduction-source",
+        input_digest="sha256:reduction-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, old_reduction)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    warning = "内容概括历史清理已跳过：F0001/document 的 provenance 无法验证"
+    assert result["failed"] == 0
+    assert result["warnings"] == [warning]
+    assert {
+        str(item["record_id"]) for item in read_content_summaries(project)
+    } >= {"SUMMARY-FULL-INVALID", "SUMMARY-REDUCTION-OLD"}
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["warnings"] == [warning]
+    summary_run = next(
+        item
+        for item in read_summary_runs(project, mode="fragment")
+        if item["run_id"] == result["run_id"]
+    )
+    assert summary_run["status"] == "completed"
+    assert summary_run["warnings"] == [warning]
+
+
+@pytest.mark.asyncio
 async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
     tmp_path: Path,
 ) -> None:
@@ -614,6 +686,52 @@ async def test_forced_summary_dry_run_keeps_existing_fragments(
 
     summaries = read_content_summaries(project, kind="fragment", status="completed")
     assert [item["text"] for item in summaries] == ["人物依次出现并行动。"]
+
+
+@pytest.mark.asyncio
+async def test_forced_summary_prompt_preflight_failure_keeps_existing_fragments(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=first_client,
+            include_summaries=True,
+        )
+    finally:
+        await first_client.aclose()
+
+    before_fragments = read_content_summaries(project, kind="fragment")
+    before_full = read_content_summaries(project, kind="full")
+    (project / "prompts" / "terminology.en.middle.txt").unlink()
+    (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: pytest.fail("Prompt 预检失败时不应调用模型")
+        )
+    )
+    try:
+        with pytest.raises(UsageError, match="缺少 en Prompt"):
+            await run_terminology(
+                project,
+                Scope(force=True),
+                http_client=client,
+                include_summaries=True,
+                prompt_language="en",
+            )
+    finally:
+        await client.aclose()
+
+    assert read_content_summaries(project, kind="fragment") == before_fragments
+    assert read_content_summaries(project, kind="full") == before_full
 
 
 @pytest.mark.asyncio

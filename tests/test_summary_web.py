@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.project import init_project
 from app.config import load_project_config
+from app.errors import UsageError
 from app.execution import create_run, segment_model_source
-from app.web_tasks import task_options
+from app.project import init_project
 from app.sqlite_storage import (
     read_content_summaries,
     read_json,
@@ -18,8 +19,9 @@ from app.sqlite_storage import (
     write_summary_participation,
 )
 from app.stage_terminology import _digest
-from app.web import create_app
 from app.summary_aggregation import aggregate_summaries
+from app.web import create_app
+from app.web_tasks import task_options
 from tests.test_foundation import make_app_root
 
 
@@ -437,3 +439,55 @@ def test_content_summary_task_options_and_start_report_unfinished_run(
     assert started.status_code == 400
     assert started.json()["code"] == "usage_error"
     assert started.json()["params"]["reason"] == "unfinished_run"
+
+
+def test_content_summary_task_options_preflights_requested_prompt_language(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    (project / "prompts" / "content_summary.en.middle.txt").unlink()
+
+    with pytest.raises(UsageError, match="en Prompt"):
+        task_options(project, "content_summary", prompt_language="en")
+
+
+def test_content_summary_start_preflights_requested_prompt_language(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    (project / "prompts" / "content_summary.en.middle.txt").unlink()
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/demo/tasks",
+        json={
+            "stage": "content_summary",
+            "language": "en",
+            "summary_selection": [{"file_id": "F0001", "part_id": "document"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["params"]["reason"] == "prompt_language_missing"
+    assert client.get("/api/v1/tasks/active").json()["tasks"] == []
+
+
+def test_specialized_summary_aggregate_route_passes_prompt_language(
+    tmp_path: Path,
+):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    (project / "prompts" / "content_summary.en.middle.txt").unlink()
+    client = TestClient(create_app(projects_root=project.parent))
+
+    response = client.post(
+        "/api/v1/projects/demo/summaries/aggregate",
+        json={
+            "language": "en",
+            "boundaries": [{"file_id": "F0001", "part_id": "document"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["params"]["reason"] == "prompt_language_missing"

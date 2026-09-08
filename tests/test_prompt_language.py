@@ -86,6 +86,15 @@ def test_full_prompt_rejects_unknown_language() -> None:
         full_prompt("translation", "middle", "fr")
 
 
+def test_translation_prompt_describes_summary_context_relation() -> None:
+    for language in ("zh-CN", "en"):
+        prompt = full_prompt("translation", "middle", language)
+        assert "summary_context_relation" in prompt
+        assert "previous_only" in prompt
+        assert "partial_overlap" in prompt
+        assert "contains_all_current" in prompt
+
+
 def test_prompt_language_resolution_rejects_missing_requested_language(
     tmp_path: Path,
 ) -> None:

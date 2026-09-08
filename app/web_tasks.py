@@ -45,13 +45,12 @@ from .sqlite_storage import (
     record_exists,
     utc_now,
 )
-from .stages import run_all
 from .stage_review import run_review
+from .stage_runtime import prompt_middle_digests, prompt_preflight
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
-from .stage_runtime import prompt_middle_digests, prompt_preflight
+from .stages import run_all
 from .summary_aggregation import aggregate_summaries, aggregation_preflight
-from .term_library import load_terms
 from .term_decision import STAGE as TERMINOLOGY_DECISION_STAGE
 from .term_decision import (
     _decision_fingerprint,
@@ -61,6 +60,7 @@ from .term_decision import (
     run_terminology_decision,
 )
 from .term_decision_drafts import current_decision_draft, manual_review_state
+from .term_library import load_terms
 
 
 def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
@@ -254,6 +254,17 @@ def task_options(
             ),
         }
     if stage == "content_summary":
+        preflight = prompt_preflight(
+            project,
+            prompt_language,
+            ("content_summary",),
+        )
+        if not bool(preflight["ok"]):
+            missing = ", ".join(str(item) for item in preflight["missing"])
+            raise UsageError(
+                f"缺少 {preflight['language']} Prompt：{missing}",
+                reason="prompt_language_missing",
+            )
         config = load_project_config(project, stage=stage)
         boundaries = {
             (str(item["file_id"]), str(item["part_id"]))
@@ -898,6 +909,17 @@ class WebTaskManager:
                     for file_id, part_id in summary_selection
                 ],
             )
+            preflight = prompt_preflight(
+                project,
+                prompt_language,
+                ("content_summary",),
+            )
+            if not bool(preflight["ok"]):
+                missing = ", ".join(str(item) for item in preflight["missing"])
+                raise UsageError(
+                    f"缺少 {preflight['language']} Prompt：{missing}",
+                    reason="prompt_language_missing",
+                )
             config = load_project_config(project, stage=stage)
             options_selected_count = len(summary_selection)
             selected_count = len(summary_selection)

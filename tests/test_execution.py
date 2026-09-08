@@ -999,7 +999,7 @@ async def test_ordered_dispatch_tracks_all_files_in_cross_boundary_chunk() -> No
     assert await task == ["F0001-S1", "F0002-S1", "F0004-S1"]
 
 
-def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
+def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -> None:
     source: list[dict] = []
     for index in range(80):
         for value in (f"source text number {index:03d}", ""):
@@ -1030,10 +1030,18 @@ def test_chunk_builder_packs_alternating_empty_lines_near_soft_target() -> None:
             ]
         },
     )
-    assert len(plans) <= 10
-    assert any(plan.estimated_input_tokens >= 480 for plan in plans)
+    planned_ids = [
+        item["segment_id"]
+        for plan in plans
+        for item in plan.segments
+    ]
+    assert planned_ids == [item["segment_id"] for item in work]
+    assert all(
+        not item["is_empty"]
+        for plan in plans
+        for item in plan.segments
+    )
     assert all(plan.estimated_input_tokens <= 600 for plan in plans)
-    assert plans[-1].estimated_input_tokens <= 600
 
 
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:

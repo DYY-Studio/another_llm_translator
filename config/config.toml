@@ -64,6 +64,8 @@ cross_boundary_batching = []
 enabled = true
 # 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。
 previous_segments = 3
+# 是否注入已完成且源文仍匹配的 Part/片段概括；跨边界 Chunk 时不生效。
+previous_summaries = false
 
 [context.proofreading]
 # 是否为校对请求附带同一文件内的前文 Segment。

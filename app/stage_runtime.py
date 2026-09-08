@@ -1170,8 +1170,16 @@ def _split_segment_source(
     segment: dict[str, Any], segment_id: str, source: str
 ) -> dict[str, Any]:
     original_source = str(segment["source"])
+    original_id = str(
+        segment.get("_original_segment_id") or segment["segment_id"]
+    )
     existing_model_source = segment.get("model_source")
-    result = {**segment, "segment_id": segment_id, "source": source}
+    result = {
+        **segment,
+        "segment_id": segment_id,
+        "source": source,
+        "_original_segment_id": original_id,
+    }
     if segment.get("_ruby_mode") in {"short_xml", "compact"}:
         result["model_source"] = segment_model_text(result, source)
     elif isinstance(existing_model_source, str):

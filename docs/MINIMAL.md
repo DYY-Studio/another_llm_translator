@@ -450,12 +450,14 @@ fallback_encoding = "utf-8"
 preset = "default"
 preset_terminology = ""
 preset_terminology_decision = ""
+preset_content_summary = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
 
 temperature_terminology = 0.1
 temperature_terminology_decision = 0.1
+temperature_content_summary = 0.1
 temperature_translation = 0.2
 temperature_proofreading = 0.1
 temperature_polishing = 0.3
@@ -472,6 +474,7 @@ allow_split_oversized_segment = true
 [context.translation]
 enabled = true
 previous_segments = 3
+previous_summaries = false
 
 [context.proofreading]
 enabled = true
@@ -681,6 +684,9 @@ completed 的非空 Segment 重新加入待处理集合。
 翻译还包含启用的文字校验器 ID、插件及 Validator 版本和 `exhausted_mode`。
 最大校验重试次数只影响执行，不进入指纹。
 
+固定 Prompt 规则（包括翻译的 `summary_context` 语义）版本变化会更新阶段指纹；
+`context.translation.previous_summaries` 本身也属于翻译阶段上下文配置。
+
 上述模型、Prompt、temperature、context、调度和术语字段适用于 LLM 阶段。apply 的指纹
 只包含 apply 阶段、应用规则版本、建议类型和是否允许旧基准，不虚构模型或 Prompt 字段。
 
@@ -870,6 +876,20 @@ previous_segments = 3
 最近的非空 Segment 数。跨边界 Chunk 的后续 Segment 不会改变这份上文的边界。
 `terminology_decision` 与 `content_summary` 不读取此上文配置，分别使用术语证据和片段
 概括作为固定输入。
+
+翻译的 `previous_summaries` 独立于 `context.translation.enabled`，默认关闭；当
+`translation` 出现在 `chunking.cross_boundary_batching` 时，即使开启也不注入概括。
+开启后，Part 起始 Chunk 只读取全项目源文顺序中上一 Part 的最新可用 `full` 概括；
+同一 Part 的后续 Chunk 只读取该 Part 内起点最靠后的最新有效 `fragment` 概括，摘要
+范围可以覆盖当前 Chunk 的 Segment。有效摘要必须是 `completed`、非空、
+`source_changed = false`，且其 `source_range` 仍与当前源文匹配；`full` 与 `fragment`
+不会互相替代。`full` 的 provenance 依赖变化可以显示刷新警告，但在上述条件满足时仍可
+作为上下文使用；源文变化仍会禁止注入。翻译 Payload 新增 `summary_context` 文本数组和
+`summary_context_relation`。后者按已校验的稳定 Segment ID 与当前请求的 `segments` 判定：
+`previous_only` 表示摘要与当前 Segments 无交集、仅为前文；`partial_overlap` 表示有交集
+但摘要未覆盖当前请求的全部 Segments；`contains_all_current` 表示摘要来源范围包含当前
+请求的全部 Segments。无可用摘要时发送空数组和 `null`。`reference_context` 的结构和
+边界规则不变。两个摘要字段参与 dry-run、Token 估算、格式修正和上下文拆分。
 
 规则：
 
@@ -1169,10 +1189,12 @@ Anchor 使用 `compact` 策略时只移除样本，不改变按 Segment 计算�
 不可归属到某一种类型的 JSONL 外壳、未知记录或缺失末尾 `end` 会使对应请求重新验证，
 不能静默接受。取消、网络或格式错误会明确显示并写入 Run；已成功的片段仍可读取，
 之后普通再次启动只处理缺失或失败范围，并复用仍有效的片段。显式强制重做且启用片段
-概括时，宿主会在计算覆盖范围和发起请求前，把本次参与选择中各边界的已完成
-`fragment` 标记为 `stale`，保留历史记录；新 Run 生成的 fragment ID 含 Run 标识，
-因此失败或取消不会覆盖、恢复或伪装成旧片段。未选边界、`full`/`reduction` 结果和 Run
-审计记录不受影响；失败状态由当前任务明确显示，dry-run 不修改数据库记录。
+概括时，宿主先完成 Prompt、配置和请求预检；只有确实存在新的摘要请求、即将开始执行时，
+才把本次参与选择中对应边界的已完成 `fragment` 标记为 `stale`，保留历史记录。预检直接阻止
+运行或没有新的摘要请求时，旧片段状态不变；若部分请求已通过预检并进入执行，则仍需先
+排除对应边界的旧片段。新 Run 生成的 fragment ID 含 Run 标识，因此失败
+或取消不会覆盖、恢复或伪装成旧片段。未选边界、`full`/`reduction` 结果和 Run 审计记录
+不受影响；失败状态由当前任务明确显示，dry-run 不修改数据库记录。
 Prompt、Preset、Adapter 或其他设置不匹配时，通用运行弹窗会展示差异并要求用户决定；
 `summary-only` 回填不创建新的术语任务、不改候选、不重新发布术语库。
 
@@ -1181,11 +1203,14 @@ part_id)`、源文/模型输入摘要、Prompt/模型信息、原始 Segment 范
 拆分只在宿主能够保留原始 Segment 与实际模型文本摘要时进行；外部 Adapter 提供的
 `model_source` 若无法安全定位拆分，操作会明确失败，不猜测字符映射。
 
-源文被替换、删除或重排时，历史概括不删除，但与当前边界或摘要指纹不再一致的
-完整概括会标记为过期并在页面显示警告。只要仍保存了完整文本，它仍可查看、完成任务
-统计和导出；页面优先使用当前未过期结果，并建议重新生成。片段概括仍必须覆盖当前
-Segment 才能参与新的聚合。Prompt、Preset 或其他设置不匹配时由通用运行弹窗明确展示
-并要求用户决定；概括页不会在非 force 启动时静默清空结果。
+源文被替换、删除或重排时，历史概括在下一次成功发布对应边界的新 `full` 前不主动删除；
+与当前边界或摘要指纹不再一致的完整概括会标记为过期并在页面显示警告。只要仍在保留范围
+内且保存了完整文本，它仍可查看、完成任务统计和导出；页面优先使用当前未过期结果，并建议
+重新生成。片段概括仍必须覆盖当前 Segment 才能参与新的聚合。已发布的 `full` 是独立缓存：
+片段刷新尚未成功发布新的 `full` 前，只要源文未变化且范围仍匹配，旧 `full` 仍可作为翻译
+上下文；递归 provenance 失效表示需要刷新，不等同于上下文不可用。`source_changed`、范围
+不匹配或非 completed 的摘要仍不得注入翻译。Prompt、Preset 或其他设置不匹配时由通用
+运行弹窗明确展示并要求用户决定；概括页不会在非 force 启动时静默清空结果。
 
 聚合产生的完整概括会沿着 `full`/`reduction` 到 `fragment` 的持久化 provenance
 递归校验子摘要文本、源文摘要、范围、状态、边界和当前 fragment 叶集合；任一已保存
@@ -1195,6 +1220,18 @@ Segment 才能参与新的聚合。Prompt、Preset 或其他设置不匹配时�
 验证处理并过期，不静默当作有效；旧的 `adopted_fragment` 记录仅保留其单 fragment
 依赖的有限兼容校验。
 
+每个 `(file_id, part_id)` 最多保留按 `created_at DESC, updated_at DESC,
+summary_id DESC` 排序的最新 3 个终止态 `full`（包括刚成功发布的版本）。清理只在该边界
+成功发布 `full` 后执行；聚合生成和 fragment 自动采用生成的 `full` 都遵循同一规则。系统从
+保留的 3 个 `full` 递归保护其 provenance 引用的 `full`、`reduction` 和 `fragment`，再回收
+不可达的旧终止态 `full`、已完成或 stale 的 `reduction`，以及 stale 或 `source_changed`
+的 `fragment`。未标记过时的 completed fragment 以及 failed、draft、running 记录不会删除。
+provenance 缺失、损坏、循环、重复引用、未知 kind 或跨边界而无法验证时，该边界跳过清理并
+产生 warning，但新 `full` 仍提交；其他边界仍可继续清理。失败、取消、预检失败和 dry-run
+不会触发清理。清理不删除 `summary_runs`、运行目录，也不执行 `VACUUM` 或回收 SQLite
+物理文件空间；未选边界的旧记录要等该边界下一次成功发布新 `full` 时处理。超出 3 版范围的
+旧 `full` 不再查看或导出。
+
 ### 手动聚合、阅读与导出
 
 单个 fragment 已覆盖整个当前边界时，生成阶段已经发布可读取、可统计和可导出的完整结果。
@@ -1202,9 +1239,16 @@ Segment 才能参与新的聚合。Prompt、Preset 或其他设置不匹配时�
 在概括子页调整参与边界后执行“聚合完整概括”，聚合范围沿用当前已保存的参与选择。
 执行前会通过通用运行弹窗确认当前 Preset、已有结果和旧 Run 处理方式。聚合预检
 要求选定边界的片段结果完整覆盖当前所有非空 Segment；缺失、重叠或源已变化时直接
-失败。一个片段结果已经覆盖整个边界时，聚合会直接采用它且不调用模型，并标记来源
-为“直接采用唯一片段结果”。多个片段先按原文顺序聚合；输入过长时递归压缩并保留
-引用，最小请求仍超限或压缩不收敛则明确失败，不截断输入。
+失败。预检通过后，`(file_id, part_id)` 是聚合完成与失败的独立统计单位；
+`execution.max_parallel` 同时约束边界请求和递归压缩左右子树的请求。一个边界的局部
+模型、格式或递归失败只记录带边界标识的 warning，不取消其他边界。成功生成的 full
+立即独立发布；失败边界不写入 `full/status=failed`，也不覆盖该边界已有的旧 full。
+Run/task 按结果使用 `completed`、`failed` 或整体取消时的 `interrupted` 状态；正常收尾
+时 `pending = 0`。一个片段结果已经覆盖整个边界时，聚合会直接采用它且不调用模型，
+并标记来源为“直接采用唯一片段结果”。多个片段先按原文顺序聚合；输入过长时递归
+压缩并保留引用，最小请求仍超限或压缩不收敛则将该边界明确标记为失败，不截断输入。
+返回的 `boundaries` 只包含成功发布的 artifact，`boundaries[].calls` 仍表示本次聚合
+的总请求数，而不是该边界的请求数。
 
 概括子页默认显示完整概括，也可切换到片段概括；“查看来源”按需打开当前边界的
 原文和引用 Segment。左侧边界列表、完整/片段页签、筛选、滚动位置和来源面板状态
