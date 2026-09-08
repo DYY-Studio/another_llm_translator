@@ -69,7 +69,7 @@ test("async decision requests invalidate late project responses", () => {
 test("summary workspace keeps export errors inside the modal and distinguishes success text", () => {
   assert.match(summarySource, /error && <p className="error-text summary-message">\{error\}<\/p>/);
   assert.match(summarySource, /setDialogError\(errText\)/);
-  assert.match(summarySource, /className=\{`inline-message \$\{message\.type === "success" \? "success-text" : "error-text"\}`\}/);
+  assert.match(summarySource, /className=\{`inline-message \$\{displayedMessage\.type === "success" \? "success-text" : "error-text"\}`\}/);
   assert.doesNotMatch(summarySource, /conflictError|setConflictError/);
 });
 
