@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from .errors import UsageError
 from .execution import Scope
+from .i18n import SUPPORTED_LANGUAGES
 from .locking import project_write_lock
 from .project import load_segments
 from .sqlite_storage import (
@@ -15,6 +16,7 @@ from .sqlite_storage import (
     read_summary_participation,
     write_summary_participation,
 )
+from .stage_runtime import prompt_preflight
 from .summary_aggregation import (
     aggregation_preflight,
     export_summary_markdown,
@@ -43,6 +45,15 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
         seen.add(boundary)
         result.append({"file_id": file_id, "part_id": part_id})
     return result
+
+
+def _prompt_language(payload: dict[str, Any]) -> str | None:
+    language = payload.get("language")
+    if language is None:
+        return None
+    if language not in SUPPORTED_LANGUAGES:
+        raise UsageError("language 必须是 zh-CN 或 en")
+    return str(language)
 
 
 def register_summary_routes(
@@ -136,6 +147,14 @@ def register_summary_routes(
 
     @app.post("/api/v1/projects/{name}/summaries/aggregation-preflight")
     async def preflight(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        language = _prompt_language(payload)
+        prompt = prompt_preflight(project(name), language, ("content_summary",))
+        if not bool(prompt["ok"]):
+            missing = ", ".join(str(item) for item in prompt["missing"])
+            raise UsageError(
+                f"缺少 {prompt['language']} Prompt：{missing}",
+                reason="prompt_language_missing",
+            )
         return aggregation_preflight(project(name), _selection(payload))
 
     @app.post("/api/v1/projects/{name}/summaries/aggregate")
@@ -148,6 +167,7 @@ def register_summary_routes(
             scope=Scope(),
             reuse_mixed_fingerprints=False,
             run_action=None,
+            prompt_language=_prompt_language(payload),
             summary_selection=values,
         )
 
