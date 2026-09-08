@@ -24,6 +24,7 @@ import type {
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { canAutoSelectProject } from "./requestState";
+import { reconcileRecentProjectPaths } from "./recentProjectState";
 import { STORAGE_KEYS } from "./storageKeys";
 import { termsSubpageForTask } from "./summaryWorkspaceState";
 import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
@@ -106,6 +107,10 @@ export default function App() {
   });
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [serverStatusError, setServerStatusError] = useState<unknown>(null);
+  const [serverStatusSettled, setServerStatusSettled] = useState(false);
+  const [serverStatusRetry, setServerStatusRetry] = useState(0);
+  const [authRequired, setAuthRequired] = useState(false);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [recentProjectsReady, setRecentProjectsReady] = useState(false);
   const tasksRef = useRef<Record<string, TaskState>>({});
@@ -115,6 +120,7 @@ export default function App() {
   languageRef.current = language;
   const syncingTasksRef = useRef(false);
   const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
+  const authEpochRef = useRef(0);
   const queryClient = useQueryClient();
   const projectsQuery = useQuery({
     queryKey: queryKeys.projects(),
@@ -137,6 +143,13 @@ export default function App() {
       .filter((item) => isActiveTaskStatus(item.status))
       .map((item) => item.project_id),
   );
+
+  const markAuthRequired = useCallback(() => {
+    authEpochRef.current += 1;
+    setAuthRequired(true);
+    setRecentProjectsReady(false);
+    setServerStatus((current) => current ? { ...current, authed: false } : current);
+  }, []);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -217,20 +230,25 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const requestAuthEpoch = authEpochRef.current;
+    setServerStatusError(null);
+    setServerStatusSettled(false);
     const remove = onAuthRequired(() => {
-      if (active) {
-        setRecentProjectsReady(false);
-        setServerStatus((current) => current ? { ...current, authed: false } : current);
-      }
+      if (active) markAuthRequired();
     });
     void api<ServerStatus>("/api/v1/server/status").then((value) => {
-      if (active) setServerStatus(value);
-    }).catch(() => {
-      // The status endpoint is public; failure here leaves the app on the
-      // normal flow and the next 401 surfaces the login gate.
+      if (!active) return;
+      setServerStatus(value);
+      if (authEpochRef.current === requestAuthEpoch) {
+        setAuthRequired(value.auth.required && !value.authed);
+      }
+    }).catch((reason) => {
+      if (active) setServerStatusError(reason);
+    }).finally(() => {
+      if (active) setServerStatusSettled(true);
     });
     return () => { active = false; remove(); };
-  }, []);
+  }, [markAuthRequired, serverStatusRetry]);
 
   useEffect(() => {
     let active = true;
@@ -298,32 +316,43 @@ export default function App() {
         && errorPayloadFrom(result.reason)?.code === "auth_required"
       ));
       if (authRequired) {
-        setServerStatus((current) => current ? { ...current, authed: false } : current);
+        markAuthRequired();
         return false;
       }
       const validPaths = results.flatMap((result) => (
         result.status === "fulfilled" ? [result.value.path] : []
       ));
+      const pathResult = reconcileRecentProjectPaths(results.map((result, index) => (
+        result.status === "fulfilled"
+          ? { path: paths[index], openedPath: result.value.path }
+          : { path: paths[index], errorCode: errorPayloadFrom(result.reason)?.code }
+      )));
       const warnings = results.flatMap((result) => (
         result.status === "fulfilled" ? result.value.warnings : []
       ));
       for (const path of validPaths) projectActivationRef.current.set(path, "opened");
-      writeRecentProjectPaths(validPaths);
-      const failures = results.length - validPaths.length;
-      if (failures) setError(translate("app.recentPathsInvalid", languageRef.current, { count: failures }));
+      writeRecentProjectPaths(pathResult.paths);
+      const recoveryMessages = [];
+      if (pathResult.invalidCount) {
+        recoveryMessages.push(translate("app.recentPathsInvalid", languageRef.current, { count: pathResult.invalidCount }));
+      }
+      if (pathResult.transientFailureCount) {
+        recoveryMessages.push(translate("app.recentPathsTemporarilyUnavailable", languageRef.current, { count: pathResult.transientFailureCount }));
+      }
+      if (recoveryMessages.length) setError(recoveryMessages.join("；"));
       if (warnings.length) setProjectWarnings(warnings);
       await loadProjects();
       setRecentProjectsReady(true);
       return true;
     } catch (reason) {
       if (errorPayloadFrom(reason)?.code === "auth_required") {
-        setServerStatus((current) => current ? { ...current, authed: false } : current);
+        markAuthRequired();
         return false;
       }
       setError(reason);
       return false;
     }
-  }, [loadProjects]);
+  }, [loadProjects, markAuthRequired]);
 
   const retryQuery = useCallback(async () => {
     if (!queryError) return;
@@ -340,6 +369,13 @@ export default function App() {
       setError(value);
     }
   }, [overviewQuery.refetch, projectsQuery.error, projectsQuery.refetch, queryError, recentProjectsReady, restoreRecentProjects]);
+
+  const retryServerStatus = useCallback(() => {
+    setError(null);
+    setServerStatusError(null);
+    setServerStatusSettled(false);
+    setServerStatusRetry((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     if (!projectsQuery.data || !recentProjectsReady) return;
@@ -371,9 +407,9 @@ export default function App() {
   }, [loadProjects, refresh]);
 
   useEffect(() => {
-    if (!serverStatus || (serverStatus.auth.required && !serverStatus.authed)) return;
+    if (!serverStatusSettled || authRequired) return;
     void restoreRecentProjects();
-  }, [restoreRecentProjects, serverStatus?.auth.required]);
+  }, [authRequired, restoreRecentProjects, serverStatusSettled]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
@@ -558,15 +594,17 @@ export default function App() {
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
-  if (serverStatus?.auth.required && !serverStatus.authed) {
+  if (authRequired || (serverStatus?.auth.required && !serverStatus.authed)) {
     return (
       <LoginView
         language={language}
         onLoggedIn={() => {
           setError(null);
           setWarningDismissed(false);
+          authEpochRef.current += 1;
+          setAuthRequired(false);
+          setRecentProjectsReady(false);
           setServerStatus((current) => current ? { ...current, authed: true } : current);
-          void restoreRecentProjects();
         }}
       />
     );
@@ -608,14 +646,21 @@ export default function App() {
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
-        {error != null ? (
+        {error != null && (
           <button className="error-banner" type="button" onClick={() => setError(null)}>{errorMessage(error, language)}</button>
-        ) : queryError != null ? (
+        )}
+        {serverStatusError != null && (
+          <div className="error-banner error-banner-global" role="alert">
+            <span>{errorMessage(serverStatusError, language)}</span>
+            <button className="quiet-button" type="button" onClick={retryServerStatus}>{translate("common.retry", language)}</button>
+          </div>
+        )}
+        {queryError != null && (
           <div className="error-banner error-banner-global" role="alert">
             <span>{errorMessage(queryError, language)}</span>
             <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button>
           </div>
-        ) : null}
+        )}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) await openProject(created, true); else setProject(selector); }} />}
