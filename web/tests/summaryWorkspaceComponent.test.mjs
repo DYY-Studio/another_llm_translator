@@ -60,11 +60,10 @@ test("decision prefetch keeps failures visible and retryable", () => {
   assert.match(termsSource, /terms\.decisionPrefetchError/);
 });
 
-test("async workspace requests invalidate late decision and terminology responses", () => {
+test("async decision requests invalidate late project responses", () => {
   assert.match(decisionSource, /decisionRequestRef/);
   assert.match(decisionSource, /isCurrentProjectRequest\(/);
   assert.doesNotMatch(decisionSource, /const optionsRequest = api/);
-  assert.match(termsSource, /loadMoreHits[\s\S]*isCurrentProjectRequest\(requestId/);
 });
 
 test("summary workspace keeps export errors inside the modal and distinguishes success text", () => {

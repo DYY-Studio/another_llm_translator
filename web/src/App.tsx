@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
@@ -112,6 +112,7 @@ export default function App() {
   activeProjectRef.current = project;
   const syncingTasksRef = useRef(false);
   const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
+  const queryClient = useQueryClient();
   const projectsQuery = useQuery({
     queryKey: queryKeys.projects(),
     queryFn: ({ signal }) => fetchProjects(signal),
@@ -331,9 +332,9 @@ export default function App() {
   // cached data synchronously and refresh it in the background.
   useEffect(() => {
     if (!project) return;
-    prefetchTerms(project);
+    prefetchTerms(project, queryClient);
     prefetchWorkspace(project);
-  }, [project]);
+  }, [project, queryClient]);
   useEffect(() => {
     let active = true;
     const poll = () => {
