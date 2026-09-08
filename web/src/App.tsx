@@ -577,7 +577,7 @@ export default function App() {
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
         {(error ?? queryError) != null ? (
-          <div className="error-banner" role="alert">
+          <div className="error-banner error-banner-global" role="alert">
             <span>{errorMessage(error ?? queryError, language)}</span>
             {queryError ? <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button> : <button className="quiet-button" type="button" onClick={() => setError(null)}>{translate("common.dismiss", language)}</button>}
           </div>
