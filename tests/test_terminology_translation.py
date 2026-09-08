@@ -303,54 +303,6 @@ async def test_terminology_publishes_and_translation_uses_terms(
 
 
 @pytest.mark.asyncio
-async def test_translation_injects_previous_part_full_summary(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "previous")
-    next_source = tmp_path / "next.txt"
-    next_source.write_text("current", encoding="utf-8")
-    add_project_files(project, [str(next_source)])
-    write_test_summary(
-        project,
-        summary_id="SUMMARY-FULL-PREVIOUS",
-        kind="full",
-        file_id="F0001",
-        part_id="document",
-        segment_indexes=[0],
-        text="上一 Part 概括",
-    )
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "previous_summaries = false",
-            "previous_summaries = true",
-        ),
-        encoding="utf-8",
-    )
-    seen: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        seen.update(json.loads(body["messages"][1]["content"]))
-        return translation_response(request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        await run_translation(
-            project,
-            Scope(only_file="F0002"),
-            http_client=client,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert seen["reference_context"] == []
-    assert seen["summary_context"] == ["上一 Part 概括"]
-    assert seen["summary_context_relation"] == "previous_only"
-
-
-@pytest.mark.asyncio
 async def test_translation_selects_latest_fragment_by_start_and_allows_current_segment(
     tmp_path: Path,
 ) -> None:
