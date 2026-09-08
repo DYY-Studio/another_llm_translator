@@ -198,6 +198,14 @@ def test_summary_payload_schema_aliases_and_safe_errors(tmp_path: Path) -> None:
         "SummarySelectionPayload"
     ]["properties"]["boundaries"]["description"]
     assert "selection" in boundaries_description
+    for model_name in (
+        "SummarySelectionPayload",
+        "SummaryParticipationPayload",
+        "SummaryExportPayload",
+    ):
+        assert schema.json()["components"]["schemas"][model_name]["properties"][
+            "boundaries"
+        ]["x-input-aliases"] == ["selection"]
 
 
 def test_open_project_restores_missing_summary_prompts(tmp_path: Path):

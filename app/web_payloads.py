@@ -38,7 +38,7 @@ class SegmentQueryPayload(SegmentFilterPayload):
             raise ValueError("窗口参数必须是整数")  # noqa: TRY004
         try:
             return int(value)
-        except (TypeError, ValueError) as exc:
+        except (OverflowError, TypeError, ValueError) as exc:
             raise ValueError("窗口参数必须是整数") from exc
 
 
@@ -46,6 +46,7 @@ class _SummaryBoundariesPayload(_WebPayload):
     boundaries: list[BoundaryPayload] = Field(
         validation_alias=AliasChoices("boundaries", "selection"),
         description="边界数组；也接受兼容输入别名 selection",
+        json_schema_extra={"x-input-aliases": ["selection"]},
     )
 
 
