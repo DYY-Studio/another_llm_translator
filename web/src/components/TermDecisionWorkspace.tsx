@@ -193,6 +193,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
   const [review, setReview] = useState<TermDecisionReviewState | null>(null);
   const [options, setOptions] = useState<TaskOptions | null>(null);
   const [reviewLoading, setReviewLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [tab, setTab] = useState<DecisionTab>(initial.tab);
   const [search, setSearch] = useState(initial.search);
   const [kind, setKind] = useState(initial.kind);
@@ -219,6 +220,10 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
       targetProject,
       activeProjectRef.current,
     );
+    if (isCurrent()) {
+      setLoadError("");
+      setOptions(null);
+    }
     try {
       const nextReview = await api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`);
       if (!isCurrent()) return null;
@@ -229,13 +234,13 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
         const nextOptions = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology_decision`);
         if (isCurrent()) setOptions(nextOptions);
       } catch (error) {
-        if (isCurrent()) setMessage(errorMessage(error, language));
+        if (isCurrent()) setLoadError(errorMessage(error, language));
       }
       return nextReview;
     } catch (error) {
       if (isCurrent()) {
         setReviewLoading(false);
-        setMessage(errorMessage(error, language));
+        setLoadError(errorMessage(error, language));
       }
       return null;
     }
@@ -305,6 +310,10 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     setReplaceDraft(replace);
     setRunDialogOpen(true);
   }
+  function retryLoad() {
+    setReviewLoading(true);
+    void load();
+  }
   async function startDecision(decision: RunDecision) {
     const resuming = decision.run_action === "resume";
     if (replaceDraft && !window.confirm(translate("terms.decisionReplaceConfirm", language))) return;
@@ -372,6 +381,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
       </header>
       {review?.draft && <div className="term-decision-warning"><strong>{translate("terms.decisionRevisionWarning", language)}</strong><span>{translate("terms.decisionRevisionWarningHint", language)}</span></div>}
       {message && <p className="inline-message error-text">{message}</p>}
+      {loadError && <p className="inline-message error-text"><span>{loadError}</span><button className="quiet-button" type="button" onClick={retryLoad}>{translate("common.retry", language)}</button></p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
         {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
         {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist" aria-label={translate("terms.decisionTabs", language)}><button type="button" role="tab" id="decision-proposals-tab" aria-selected={tab === "proposals"} aria-controls="decision-proposals-panel" className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button type="button" role="tab" id="decision-manual-tab" aria-selected={tab === "manual"} aria-controls="decision-manual-panel" className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}

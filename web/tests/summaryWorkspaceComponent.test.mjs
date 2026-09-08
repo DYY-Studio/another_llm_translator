@@ -5,6 +5,7 @@ import test from "node:test";
 const summarySource = readFileSync(new URL("../src/components/SummaryWorkspace.tsx", import.meta.url), "utf8");
 const decisionSource = readFileSync(new URL("../src/components/TermDecisionWorkspace.tsx", import.meta.url), "utf8");
 const termsSource = readFileSync(new URL("../src/components/TermsView.tsx", import.meta.url), "utf8");
+const segmentSource = readFileSync(new URL("../src/components/SegmentWorkspace.tsx", import.meta.url), "utf8");
 const i18nSource = readFileSync(new URL("../src/i18n.ts", import.meta.url), "utf8");
 
 test("summary tabs expose linked tab and tabpanel semantics", () => {
@@ -115,4 +116,19 @@ test("summary retry actions keep source first and the selection hint below the b
 test("full summary selection prefers a current result over an expired result", () => {
   assert.match(summarySource, /values\.filter\(\(item\) => \([\s\S]*!summaryArtifactIsExpired\(item\)/);
   assert.match(summarySource, /current\[current\.length - 1\] \?\? values\[values\.length - 1\]/);
+});
+
+test("primary read failures expose local retry actions", () => {
+  assert.match(termsSource, /termsQuery\.error[\s\S]*termsQuery\.refetch\(\)/);
+  assert.match(termsSource, /hitsError[\s\S]*hitsQuery\.refetch\(\)/);
+  assert.match(termsSource, /relatedError[\s\S]*relatedQuery\.refetch\(\)/);
+  assert.match(summarySource, /summariesQuery\.error[\s\S]*summariesQuery\.refetch\(\)/);
+});
+
+test("decision and segment reads can be retried from their local errors", () => {
+  assert.match(decisionSource, /loadError/);
+  assert.match(decisionSource, /retryLoad/);
+  assert.match(decisionSource, /common\.retry/);
+  assert.match(segmentSource, /readRetry/);
+  assert.match(segmentSource, /common\.retry/);
 });

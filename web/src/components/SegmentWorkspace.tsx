@@ -129,6 +129,7 @@ export function SegmentWorkspace({
   const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(null);
   const [total, setTotal] = useState(0);
   const [listError, setListError] = useState("");
+  const [readRetry, setReadRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
@@ -412,6 +413,7 @@ export function SegmentWorkspace({
     pageQueryKey,
     orderedIds,
     virtualItems.map((item) => item.index).join(","),
+    readRetry,
   ]);
 
   const focusedId = selection.focusedKey || orderedIds[0] || "";
@@ -435,7 +437,7 @@ export function SegmentWorkspace({
       })
       .catch((value) => { if (active) setListError(errorMessage(value, language)); });
     return () => { active = false; };
-  }, [project, focusedId, showContext]);
+  }, [project, focusedId, showContext, readRetry]);
 
   useLayoutEffect(() => {
     if (!selected) return;
@@ -627,7 +629,7 @@ export function SegmentWorkspace({
           </div>
           {!total && !loading && <div className="empty">{translate("workspace.noSegments", language)}</div>}
           {loading && <div className="list-loading">{translate("workspace.loadingSegments", language)}</div>}
-          {listError && <div className="error-text">{listError}</div>}
+          {listError && <div className="error-text"><span>{listError}</span><button className="quiet-button" type="button" onClick={() => setReadRetry((value) => value + 1)}>{translate("common.retry", language)}</button></div>}
         </div>
       </section>
       <section className="editor-pane">

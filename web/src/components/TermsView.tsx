@@ -984,7 +984,7 @@ export function TermsView({
               );
             })}
           </div>
-          {termsQuery.error && <div className="empty error-text">{errorMessage(termsQuery.error, language)}</div>}
+          {termsQuery.error && <div className="empty error-text"><span>{errorMessage(termsQuery.error, language)}</span><button className="quiet-button" type="button" onClick={() => { void termsQuery.refetch(); }}>{translate("common.retry", language)}</button></div>}
           {!termsQuery.error && data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
           {!termsQuery.error && !data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
@@ -1015,7 +1015,7 @@ export function TermsView({
             {hitsLoading && !hits ? (
               <div className="term-hits-state">{translate("terms.hitsLoading", language)}</div>
             ) : hitsError ? (
-              <div className="term-hits-state error-text">{hitsError}</div>
+              <div className="term-hits-state error-text"><span>{hitsError}</span><button className="quiet-button" type="button" onClick={() => { void hitsQuery.refetch(); }}>{translate("common.retry", language)}</button></div>
             ) : hits && hits.total === 0 ? (
               <div className="term-hits-state">{translate("terms.hitsEmpty", language)}</div>
             ) : hits && (
@@ -1083,7 +1083,7 @@ export function TermsView({
                     <strong>{translate("terms.relatedTitle", language)}</strong>
                     <p className="term-related-help">{translate("terms.relatedHelp", language)}</p>
                     {relatedLoading && <div className="term-hits-state">{translate("terms.relatedLoading", language)}</div>}
-                    {relatedError && <div className="term-hits-state error-text">{relatedError}</div>}
+                    {relatedError && <div className="term-hits-state error-text"><span>{relatedError}</span><button className="quiet-button" type="button" onClick={() => { void relatedQuery.refetch(); }}>{translate("common.retry", language)}</button></div>}
                     {!relatedLoading && !relatedError && related && !related.related.length && (
                       <div className="term-hits-state">{translate("terms.relatedEmpty", language)}</div>
                     )}
