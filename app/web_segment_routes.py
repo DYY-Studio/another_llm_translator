@@ -9,6 +9,7 @@ from .errors import (
 from .execution import Scope
 from .locking import project_write_lock
 from .stage_review import run_apply
+from .web_payloads import SegmentFilterPayload, SegmentQueryPayload
 from .web_store import WebStore
 
 
@@ -22,67 +23,32 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
 
     @app.post("/api/v1/projects/{name}/segments/query")
     async def overview_query(
-        name: str, payload: dict[str, Any]
+        name: str, payload: SegmentQueryPayload
     ) -> dict[str, Any]:
-        try:
-            offset = int(payload.get("offset", 0))
-            limit = int(payload.get("limit", 100))
-        except (TypeError, ValueError) as exc:
-            raise UsageError("Segment 窗口参数必须是整数") from exc
-        file_id = payload.get("file_id")
-        part_id = payload.get("part_id")
-        status = payload.get("status")
-        search = payload.get("q")
-        stage = payload.get("stage", "translation")
-        if file_id is not None and not isinstance(file_id, str):
-            raise UsageError("file_id 必须是字符串")
-        if part_id is not None and not isinstance(part_id, str):
-            raise UsageError("part_id 必须是字符串")
-        if bool(file_id) != bool(part_id):
+        if bool(payload.file_id) != bool(payload.part_id):
             raise UsageError("file_id 与 part_id 必须同时提供")
-        if status is not None and not isinstance(status, str):
-            raise UsageError("status 必须是字符串")
-        if search is not None and not isinstance(search, str):
-            raise UsageError("q 必须是字符串")
-        if not isinstance(stage, str):
-            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).segment_query(
-            offset=offset,
-            limit=limit,
-            file_id=file_id or None,
-            part_id=part_id or None,
-            status=status or None,
-            search=search or None,
-            stage=stage,
+            offset=payload.offset,
+            limit=payload.limit,
+            file_id=payload.file_id or None,
+            part_id=payload.part_id or None,
+            status=payload.status or None,
+            search=payload.q or None,
+            stage=payload.stage,
         )
 
     @app.post("/api/v1/projects/{name}/segments/ids")
     async def segment_index(
-        name: str, payload: dict[str, Any]
+        name: str, payload: SegmentFilterPayload
     ) -> dict[str, Any]:
-        file_id = payload.get("file_id")
-        part_id = payload.get("part_id")
-        status = payload.get("status")
-        search = payload.get("q")
-        stage = payload.get("stage", "translation")
-        if file_id is not None and not isinstance(file_id, str):
-            raise UsageError("file_id 必须是字符串")
-        if part_id is not None and not isinstance(part_id, str):
-            raise UsageError("part_id 必须是字符串")
-        if bool(file_id) != bool(part_id):
+        if bool(payload.file_id) != bool(payload.part_id):
             raise UsageError("file_id 与 part_id 必须同时提供")
-        if status is not None and not isinstance(status, str):
-            raise UsageError("status 必须是字符串")
-        if search is not None and not isinstance(search, str):
-            raise UsageError("q 必须是字符串")
-        if not isinstance(stage, str):
-            raise UsageError("stage 必须是字符串")
         return WebStore(project(name)).segment_index(
-            file_id=file_id or None,
-            part_id=part_id or None,
-            status=status or None,
-            search=search or None,
-            stage=stage,
+            file_id=payload.file_id or None,
+            part_id=payload.part_id or None,
+            status=payload.status or None,
+            search=payload.q or None,
+            stage=payload.stage,
         )
 
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")

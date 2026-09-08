@@ -169,6 +169,46 @@ def test_web_segment_query_does_not_collect_project_storage(
     assert "files" in overview.json()
 
 
+def test_web_segment_payload_schema_and_business_errors(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    defaults = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": "1", "unknown": "ignored"},
+    )
+    assert defaults.status_code == 200
+    assert defaults.json()["offset"] == 1
+    assert defaults.json()["limit"] == 100
+    assert defaults.json()["stage"] == "translation"
+
+    invalid_offset = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": True},
+    )
+    assert invalid_offset.status_code == 400
+    assert invalid_offset.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset"]},
+    }
+
+    invalid_status = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"status": 1},
+    )
+    assert invalid_status.status_code == 400
+    assert invalid_status.json()["code"] == "request_validation_error"
+    assert invalid_status.json()["params"]["fields"] == ["status"]
+
+    mismatched_filter = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"file_id": "F0001"},
+    )
+    assert mismatched_filter.status_code == 400
+    assert mismatched_filter.json()["code"] == "usage_error"
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

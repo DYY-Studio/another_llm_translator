@@ -22,23 +22,20 @@ from .summary_aggregation import (
     export_summary_markdown,
 )
 from .summary_provenance import assess_full_summary
+from .web_payloads import (
+    BoundaryPayload,
+    SummaryExportPayload,
+    SummaryParticipationPayload,
+    SummarySelectionPayload,
+)
 
 
-def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
-    values = payload.get("boundaries", payload.get("selection"))
-    if not isinstance(values, list):
-        raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
+def _selection(values: list[BoundaryPayload]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for value in values:
-        if not isinstance(value, dict):
-            raise UsageError("boundaries 必须是 file_id/part_id 对象数组")
-        file_id = value.get("file_id")
-        part_id = value.get("part_id")
-        if not isinstance(file_id, str) or not file_id:
-            raise UsageError("boundary 缺少 file_id")
-        if not isinstance(part_id, str) or not part_id:
-            raise UsageError("boundary 缺少 part_id")
+        file_id = value.file_id
+        part_id = value.part_id
         boundary = (file_id, part_id)
         if boundary in seen:
             raise UsageError(f"boundary 不能重复：{file_id}/{part_id}")
@@ -47,8 +44,7 @@ def _selection(payload: dict[str, Any]) -> list[dict[str, str]]:
     return result
 
 
-def _prompt_language(payload: dict[str, Any]) -> str | None:
-    language = payload.get("language")
+def _prompt_language(language: str | None) -> str | None:
     if language is None:
         return None
     if language not in SUPPORTED_LANGUAGES:
@@ -132,12 +128,10 @@ def register_summary_routes(
 
     @app.put("/api/v1/projects/{name}/summaries/participation")
     async def save_participation(
-        name: str, payload: dict[str, Any]
+        name: str, payload: SummaryParticipationPayload
     ) -> dict[str, Any]:
-        values = _selection(payload)
-        selected = payload.get("selected", True)
-        if not isinstance(selected, bool):
-            raise UsageError("selected 必须是布尔值")
+        values = _selection(payload.boundaries)
+        selected = payload.selected
         with project_write_lock(project(name)):
             write_summary_participation(
                 project(name),
@@ -146,8 +140,10 @@ def register_summary_routes(
         return {"participation": read_summary_participation(project(name))}
 
     @app.post("/api/v1/projects/{name}/summaries/aggregation-preflight")
-    async def preflight(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        language = _prompt_language(payload)
+    async def preflight(
+        name: str, payload: SummarySelectionPayload
+    ) -> dict[str, Any]:
+        language = _prompt_language(payload.language)
         prompt = prompt_preflight(project(name), language, ("content_summary",))
         if not bool(prompt["ok"]):
             missing = ", ".join(str(item) for item in prompt["missing"])
@@ -155,32 +151,31 @@ def register_summary_routes(
                 f"缺少 {prompt['language']} Prompt：{missing}",
                 reason="prompt_language_missing",
             )
-        return aggregation_preflight(project(name), _selection(payload))
+        return aggregation_preflight(project(name), _selection(payload.boundaries))
 
     @app.post("/api/v1/projects/{name}/summaries/aggregate")
-    async def aggregate(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def aggregate(
+        name: str, payload: SummarySelectionPayload
+    ) -> dict[str, Any]:
         root = project(name)
-        values = _selection(payload)
+        values = _selection(payload.boundaries)
         return await app.state.tasks.start(
             root,
             "content_summary",
             scope=Scope(),
             reuse_mixed_fingerprints=False,
             run_action=None,
-            prompt_language=_prompt_language(payload),
+            prompt_language=_prompt_language(payload.language),
             summary_selection=values,
         )
 
     @app.post("/api/v1/projects/{name}/summaries/export")
-    async def export(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def export(name: str, payload: SummaryExportPayload) -> dict[str, Any]:
         root = project(name)
-        relative_path = payload.get("path", "summary.md")
-        if not isinstance(relative_path, str):
-            raise UsageError("path 必须是字符串")
         with project_write_lock(root):
             output = export_summary_markdown(
                 root,
-                _selection(payload),
-                relative_path,
+                _selection(payload.boundaries),
+                payload.path,
             )
         return {"path": output.relative_to(root / "output").as_posix()}

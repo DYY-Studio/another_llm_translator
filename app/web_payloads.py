@@ -43,6 +43,7 @@ class SummarySelectionPayload(_WebPayload):
     boundaries: list[BoundaryPayload] = Field(
         validation_alias=AliasChoices("boundaries", "selection")
     )
+    language: str | None = None
 
 
 class SummaryParticipationPayload(SummarySelectionPayload):
