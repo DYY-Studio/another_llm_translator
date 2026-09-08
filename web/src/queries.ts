@@ -8,13 +8,15 @@ import type {
   TermsResponse,
 } from "./types";
 
+type ProjectQueryIdentity = Readonly<{ projectId: string }>;
+
 export const queryKeys = {
   projects: () => ["projects"] as const,
-  overview: (project: string) => ["overview", project] as const,
-  terms: (project: string) => ["terms", project] as const,
-  termHits: (project: string, normalized: string) => ["term-hits", project, normalized] as const,
-  relatedTerms: (project: string, termsRevision: number | null, matchKey: string) => ["related-terms", project, termsRevision, matchKey] as const,
-  summaries: (project: string) => ["summaries", project] as const,
+  overview: ({ projectId }: ProjectQueryIdentity) => ["overview", projectId] as const,
+  terms: ({ projectId }: ProjectQueryIdentity) => ["terms", projectId] as const,
+  termHits: ({ projectId }: ProjectQueryIdentity, normalized: string) => ["term-hits", projectId, normalized] as const,
+  relatedTerms: ({ projectId }: ProjectQueryIdentity, termsRevision: number | null, matchKey: string) => ["related-terms", projectId, termsRevision, matchKey] as const,
+  summaries: ({ projectId }: ProjectQueryIdentity) => ["summaries", projectId] as const,
 };
 
 export async function fetchProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {

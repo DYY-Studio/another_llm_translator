@@ -52,17 +52,17 @@ export type TermsSubpage = "library" | "decision" | "summary";
 const termsSubpageCache = new Map<string, TermsSubpage>();
 const termsSubpageListeners = new Set<(project: string, subpage: TermsSubpage) => void>();
 
-export function openTermsSubpage(project: string, subpage: TermsSubpage) {
-  termsSubpageCache.set(project, subpage);
-  for (const listener of termsSubpageListeners) listener(project, subpage);
+export function openTermsSubpage(projectId: string, subpage: TermsSubpage) {
+  termsSubpageCache.set(projectId, subpage);
+  for (const listener of termsSubpageListeners) listener(projectId, subpage);
 }
 
 // Warms the query cache when a project is opened so the first visit to the
 // terminology page renders instantly. A failed prefetch remains an error in
 // the query cache and is surfaced when the view mounts.
-export function prefetchTerms(project: string, queryClient: QueryClient) {
+export function prefetchTerms(project: string, projectId: string, queryClient: QueryClient) {
   void queryClient.prefetchQuery({
-    queryKey: queryKeys.terms(project),
+    queryKey: queryKeys.terms({ projectId }),
     queryFn: ({ signal }) => fetchTerms(project, signal),
   }).catch(() => {});
 }
@@ -94,6 +94,7 @@ function matchesFilters(term: Term, primarySource: string, query: string, onlyCo
 
 export function TermsView({
   project,
+  projectId,
   overview,
   focusFailures = false,
   language,
@@ -103,6 +104,7 @@ export function TermsView({
   onSubpageChange,
 }: {
   project: string;
+  projectId: string;
   overview: ProjectOverview;
   focusFailures?: boolean;
   language: Language;
@@ -123,7 +125,7 @@ export function TermsView({
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
-  const [summaryOpen, setSummaryOpen] = useState(() => termsSubpageCache.get(project) === "summary");
+  const [summaryOpen, setSummaryOpen] = useState(() => termsSubpageCache.get(projectId) === "summary");
   const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
   const [manualReview, setManualReview] = useState(emptyManualReview);
   const [decisionDraftPending, setDecisionDraftPending] = useState(false);
@@ -137,8 +139,8 @@ export function TermsView({
   const [editorTab, setEditorTab] = useState<"edit" | "group" | "hits">("edit");
   const [pendingPrimary, setPendingPrimary] = useState<string | null>(null);
   const decisionPrefetchRequestRef = useRef(0);
-  const activeProjectRef = useRef(project);
-  activeProjectRef.current = project;
+  const activeProjectRef = useRef(projectId);
+  activeProjectRef.current = projectId;
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
   const [pendingGroupMemberAlias, setPendingGroupMemberAlias] = useState<Term | null>(null);
@@ -152,7 +154,7 @@ export function TermsView({
   const selection = useClassicSelection();
   const queryClient = useQueryClient();
   const termsQuery = useQuery({
-    queryKey: queryKeys.terms(project),
+    queryKey: queryKeys.terms({ projectId }),
     queryFn: ({ signal }) => fetchTerms(project, signal),
     enabled: Boolean(project),
   });
@@ -180,38 +182,38 @@ export function TermsView({
   const selectedIsDisabled = Boolean(selected?.disabled);
 
   function setCurrentData(value: TermsResponse) {
-    if (activeProjectRef.current !== project) return;
-    queryClient.setQueryData(queryKeys.terms(project), value);
-    void queryClient.invalidateQueries({ queryKey: ["term-hits", project] }).catch(() => {});
-    void queryClient.invalidateQueries({ queryKey: ["related-terms", project] }).catch(() => {});
+    if (activeProjectRef.current !== projectId) return;
+    queryClient.setQueryData(queryKeys.terms({ projectId }), value);
+    void queryClient.invalidateQueries({ queryKey: ["term-hits", projectId] }).catch(() => {});
+    void queryClient.invalidateQueries({ queryKey: ["related-terms", projectId] }).catch(() => {});
   }
 
   useEffect(() => {
     const listener = (targetProject: string, subpage: TermsSubpage) => {
-      if (targetProject !== project) return;
+      if (targetProject !== projectId) return;
       setDecisionOpen(subpage === "decision");
       setSummaryOpen(subpage === "summary");
       onSubpageChange?.(subpage);
     };
     termsSubpageListeners.add(listener);
-    const subpage = termsSubpageCache.get(project) ?? "library";
+    const subpage = termsSubpageCache.get(projectId) ?? "library";
     setDecisionOpen(subpage === "decision");
     setSummaryOpen(subpage === "summary");
     onSubpageChange?.(subpage);
     return () => { termsSubpageListeners.delete(listener); };
-  }, [onSubpageChange, project]);
+  }, [onSubpageChange, projectId]);
 
   // Restore view state synchronously during render so switching projects does
   // not briefly reuse the previous project's filters or focus.
-  if (termsProjectRef.current !== project) {
-    termsProjectRef.current = project;
+  if (termsProjectRef.current !== projectId) {
+    termsProjectRef.current = projectId;
     selection.reset();
     setManualFocusId(null);
     termsRestoredRef.current = false;
   }
   if (!termsRestoredRef.current) {
     termsRestoredRef.current = true;
-    const cached = termsCache.get(project);
+    const cached = termsCache.get(projectId);
     if (cached) {
       setSearch(cached.search);
       setOnlyConflicts(cached.onlyConflicts);
@@ -226,16 +228,16 @@ export function TermsView({
   useEffect(() => {
     setForm(emptyForm);
     setMessage("");
-  }, [project]);
+  }, [projectId]);
 
   useEffect(() => {
     setManualReview(emptyManualReview);
     setDecisionDraftPending(false);
-  }, [project]);
+  }, [projectId]);
 
   useEffect(() => {
     const requestId = ++decisionPrefetchRequestRef.current;
-    const targetProject = project;
+    const targetProject = projectId;
     setDecisionPrefetchError("");
     void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
       .then((value) => {
@@ -247,18 +249,18 @@ export function TermsView({
         if (isCurrentProjectRequest(requestId, decisionPrefetchRequestRef.current, targetProject, activeProjectRef.current)) setDecisionPrefetchError(errorMessage(error, language));
       });
     return () => { decisionPrefetchRequestRef.current += 1; };
-  }, [decisionPrefetchAttempt, language, project]);
+  }, [decisionPrefetchAttempt, language, project, projectId]);
 
   useEffect(() => {
     if (!data) return;
-    termsCache.set(project, {
+    termsCache.set(projectId, {
       search,
       onlyConflicts,
       showDisabled,
       focusedKey: selection.focusedKey,
       scrollTop: termListRef.current?.scrollTop ?? 0,
     });
-  }, [project, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
+  }, [projectId, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
 
   useLayoutEffect(() => {
     if (restoredScrollRef.current === null) return;
@@ -273,7 +275,7 @@ export function TermsView({
   const hitsPageSize = 50;
   const hitsEnabled = editorTab === "hits" && Boolean(selected) && !selectedIsDisabled;
   const hitsQuery = useInfiniteQuery({
-    queryKey: queryKeys.termHits(project, selected?.normalized ?? ""),
+    queryKey: queryKeys.termHits({ projectId }, selected?.normalized ?? ""),
     queryFn: ({ pageParam, signal }) => fetchTermHits(project, selected!.normalized, pageParam, signal, hitsPageSize),
     initialPageParam: 0,
     getNextPageParam: (lastPage) => {
@@ -295,7 +297,7 @@ export function TermsView({
 
   const relatedEnabled = editorTab === "group" && Boolean(selected) && !selectedIsDisabled;
   const relatedQuery = useQuery({
-    queryKey: queryKeys.relatedTerms(project, data?.terms_revision ?? null, selectedMatchKey),
+    queryKey: queryKeys.relatedTerms({ projectId }, data?.terms_revision ?? null, selectedMatchKey),
     queryFn: ({ signal }) => fetchRelatedTerms(project, selected!.normalized, signal),
     enabled: relatedEnabled,
   });
@@ -402,13 +404,13 @@ export function TermsView({
     setDecisionInitialTab(tab);
     setDecisionOpen(true);
     setSummaryOpen(false);
-    openTermsSubpage(project, "decision");
+    openTermsSubpage(projectId, "decision");
   }
 
   function openSummary() {
     setDecisionOpen(false);
     setSummaryOpen(true);
-    openTermsSubpage(project, "summary");
+    openTermsSubpage(projectId, "summary");
   }
 
   function updateDecisionReview(value: TermDecisionReviewState) {
@@ -419,7 +421,7 @@ export function TermsView({
   function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
     const term = data?.terms.find((value) => value.normalized === item.normalized) ?? null;
     setDecisionOpen(false);
-    openTermsSubpage(project, "library");
+    openTermsSubpage(projectId, "library");
     setManualFocusId(manualItemId(item));
     setSearch("");
     setOnlyConflicts(false);
@@ -796,25 +798,27 @@ export function TermsView({
 
   if (summaryOpen) {
     return <SummaryWorkspace
-      key={`summary:${project}`}
+      key={`summary:${projectId}`}
       project={project}
+      projectId={projectId}
       overview={overview}
       language={language}
       task={task}
       onTask={onTask}
-      onClose={() => { setSummaryOpen(false); openTermsSubpage(project, "library"); }}
+      onClose={() => { setSummaryOpen(false); openTermsSubpage(projectId, "library"); }}
     />;
   }
 
   if (decisionOpen) {
     return <TermDecisionWorkspace
-      key={`decision:${project}`}
+      key={`decision:${projectId}`}
       project={project}
+      projectId={projectId}
       language={language}
       task={task}
       onTask={onTask}
       onTerms={setCurrentData}
-      onClose={() => { setDecisionOpen(false); openTermsSubpage(project, "library"); }}
+      onClose={() => { setDecisionOpen(false); openTermsSubpage(projectId, "library"); }}
       initialTab={decisionInitialTab}
       onReviewState={updateDecisionReview}
       onNavigateToEditor={openManualEditor}
@@ -926,7 +930,7 @@ export function TermsView({
           </div>
         )}
         <div className="term-list" ref={termListRef} onScroll={(event) => {
-          const cached = termsCache.get(project);
+          const cached = termsCache.get(projectId);
           if (cached) cached.scrollTop = event.currentTarget.scrollTop;
         }}>
           <div className="term-row-stack" style={{ height: termVirtualizer.getTotalSize(), position: "relative" }}>

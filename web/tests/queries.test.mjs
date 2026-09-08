@@ -37,11 +37,14 @@ function assertGet(call, path, signal) {
 
 test("read query keys isolate projects and related revisions", () => {
   assert.deepEqual(queryKeys.projects(), ["projects"]);
-  assert.deepEqual(queryKeys.overview("project-a"), ["overview", "project-a"]);
-  assert.deepEqual(queryKeys.terms("project-a"), ["terms", "project-a"]);
-  assert.deepEqual(queryKeys.termHits("project-a", "term"), ["term-hits", "project-a", "term"]);
-  assert.deepEqual(queryKeys.relatedTerms("project-a", 7, "match"), ["related-terms", "project-a", 7, "match"]);
-  assert.deepEqual(queryKeys.summaries("project-a"), ["summaries", "project-a"]);
+  const project = { projectId: "project-id-a", selector: "same-name" };
+  const otherProject = { projectId: "project-id-b", selector: "same-name" };
+  assert.deepEqual(queryKeys.overview(project), ["overview", "project-id-a"]);
+  assert.deepEqual(queryKeys.terms(project), ["terms", "project-id-a"]);
+  assert.deepEqual(queryKeys.termHits(project, "term"), ["term-hits", "project-id-a", "term"]);
+  assert.deepEqual(queryKeys.relatedTerms(project, 7, "match"), ["related-terms", "project-id-a", 7, "match"]);
+  assert.deepEqual(queryKeys.summaries(project), ["summaries", "project-id-a"]);
+  assert.notDeepEqual(queryKeys.overview(project), queryKeys.overview(otherProject));
 });
 
 test("fetchProjects uses a cancellable GET request", async () => {

@@ -43,9 +43,9 @@ function boundaryKey(fileId: string, partId: string): string {
 // a mounted workspace's fresher entry intact. The cache key matches the
 // workspace's initial default-filter query, and focusedId is the first
 // segment so the mount-time index refresh preserves the restored window.
-export function prefetchWorkspace(project: string) {
+export function prefetchWorkspace(project: string, projectId: string) {
   for (const stage of ["translation", "proofreading", "polishing"] as const) {
-    const key = JSON.stringify([project, stage, "all", "all", ""]);
+    const key = JSON.stringify([projectId, stage, "all", "all", ""]);
     if (workspaceCache.has(key)) continue;
     void Promise.all([
       api<{ segment_ids: string[]; total: number }>(
@@ -97,6 +97,7 @@ function statusFor(segment: Segment, stage: "translation" | "proofreading" | "po
 
 export function SegmentWorkspace({
   project,
+  projectId,
   stage,
   overview,
   onRefresh,
@@ -106,6 +107,7 @@ export function SegmentWorkspace({
   onJumpConsumed,
 }: {
   project: string;
+  projectId: string;
   stage: "translation" | "proofreading" | "polishing";
   overview: ProjectOverview;
   onRefresh: () => Promise<void>;
@@ -165,7 +167,7 @@ export function SegmentWorkspace({
     jumpConsumedRef.current = true;
     jumpTargetRef.current = pendingJump.segmentId;
     jumpSearchRef.current = pendingJump.search;
-    const prefix = JSON.stringify([project, stage]);
+    const prefix = JSON.stringify([projectId, stage]);
     for (const key of [...workspaceCache.keys()]) {
       if (key.startsWith(prefix)) workspaceCache.delete(key);
     }
@@ -175,7 +177,7 @@ export function SegmentWorkspace({
     setSearch(pendingJump.search);
     selection.reset(pendingJump.segmentId);
     onJumpConsumed?.();
-  }, [pendingJump]);
+  }, [pendingJump, projectId, stage]);
   const normalizedSearch = search.trim();
   const boundaryOptions: SegmentBoundaryOption[] = overview.files.flatMap((fileItem) => (
     fileItem.part_ids.map((part_id) => ({
@@ -196,7 +198,7 @@ export function SegmentWorkspace({
     ...(status !== "all" ? { status: status === "error" ? "failed" : status } : {}),
     ...(normalizedSearch ? { q: normalizedSearch } : {}),
   };
-  const pageQueryKey = JSON.stringify([project, stage, selectedBoundary?.key ?? "all", status, normalizedSearch]);
+  const pageQueryKey = JSON.stringify([projectId, stage, selectedBoundary?.key ?? "all", status, normalizedSearch]);
   const showContext = status !== "all" || normalizedSearch !== "";
   const resetPageCache = useCallback(() => {
     pageGenerationRef.current += 1;
@@ -205,18 +207,18 @@ export function SegmentWorkspace({
   }, []);
 
   useEffect(() => {
-    if (workspaceProjectRef.current !== project) {
-      workspaceProjectRef.current = project;
+    if (workspaceProjectRef.current !== projectId) {
+      workspaceProjectRef.current = projectId;
       // Drop only entries of other projects. Entries are keyed by project, so
       // nothing leaks across projects, while the current project's prefetched
       // entries for unvisited stages survive for the first mount.
       for (const key of [...workspaceCache.keys()]) {
-        if ((JSON.parse(key) as string[])[0] !== project) {
+        if ((JSON.parse(key) as string[])[0] !== projectId) {
           workspaceCache.delete(key);
         }
       }
     }
-  }, [project]);
+  }, [projectId]);
 
   // Restore a cached window synchronously during render so the browser never
   // paints an empty frame when switching back to this stage. reloadIndex below
@@ -315,7 +317,7 @@ export function SegmentWorkspace({
         setLoading(false);
       }
     }
-  }, [project, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
+  }, [project, projectId, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
 
   useEffect(() => { void reloadIndex(preserveFocusRef.current, true); }, [reloadIndex]);
 
@@ -401,6 +403,7 @@ export function SegmentWorkspace({
     }
   }, [
     project,
+    projectId,
     stage,
     selectedFileId,
     selectedPartId,

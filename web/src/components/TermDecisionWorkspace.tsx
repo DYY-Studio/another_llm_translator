@@ -176,8 +176,9 @@ function Pagination({ page, pageCount, language, onPage }: { page: number; pageC
   return <nav className="term-decision-pages" aria-label={translate("terms.decisionPagination", language)}><button disabled={page === 0} onClick={() => onPage(page - 1)}>‹</button><span>{page + 1} / {pageCount}</span><button disabled={page + 1 >= pageCount} onClick={() => onPage(page + 1)}>›</button></nav>;
 }
 
-export function TermDecisionWorkspace({ project, language, task, onTask, onTerms, onClose, initialTab = "proposals", onReviewState, onNavigateToEditor }: {
+export function TermDecisionWorkspace({ project, projectId, language, task, onTask, onTerms, onClose, initialTab = "proposals", onReviewState, onNavigateToEditor }: {
   project: string;
+  projectId: string;
   language: Language;
   task: TaskState | null;
   onTask: (task: TaskState) => void;
@@ -187,7 +188,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   onReviewState: (review: TermDecisionReviewState) => void;
   onNavigateToEditor: (item: TermDecisionManualReviewItem, tab: "edit" | "group") => void;
 }) {
-  const restored = restoreTermDecisionWorkspaceState(decisionWorkspaceCache, project, initialTab);
+  const restored = restoreTermDecisionWorkspaceState(decisionWorkspaceCache, projectId, initialTab);
   const initial = initialTab === "manual" ? { ...restored, tab: "manual" as const } : restored;
   const [review, setReview] = useState<TermDecisionReviewState | null>(null);
   const [options, setOptions] = useState<TaskOptions | null>(null);
@@ -205,13 +206,13 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   const [replaceDraft, setReplaceDraft] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const decisionRequestRef = useRef(0);
-  const activeProjectRef = useRef(project);
-  activeProjectRef.current = project;
+  const activeProjectRef = useRef(projectId);
+  activeProjectRef.current = projectId;
   const running = Boolean(task && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
 
   async function load(): Promise<TermDecisionReviewState | null> {
     const requestId = ++decisionRequestRef.current;
-    const targetProject = project;
+    const targetProject = projectId;
     const isCurrent = () => isCurrentProjectRequest(
       requestId,
       decisionRequestRef.current,
@@ -219,13 +220,13 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       activeProjectRef.current,
     );
     try {
-      const nextReview = await api<TermDecisionReviewState>(`/api/v1/projects/${targetProject}/terms/decision`);
+      const nextReview = await api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`);
       if (!isCurrent()) return null;
       setReview(nextReview);
       setReviewLoading(false);
       onReviewState(nextReview);
       try {
-        const nextOptions = await api<TaskOptions>(`/api/v1/projects/${targetProject}/task-options/terminology_decision`);
+        const nextOptions = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology_decision`);
         if (isCurrent()) setOptions(nextOptions);
       } catch (error) {
         if (isCurrent()) setMessage(errorMessage(error, language));
@@ -244,7 +245,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
     setReviewLoading(true);
     void load();
     return () => { decisionRequestRef.current += 1; };
-  }, [project]);
+  }, [project, projectId]);
   useEffect(() => {
     if (task?.stage !== "terminology_decision") return;
     if (["completed", "cancelled", "failed"].includes(task.status)) void load();
@@ -252,7 +253,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
   }, [task?.task_id, task?.status, language]);
 
   useEffect(() => {
-    decisionWorkspaceCache.set(project, updateTermDecisionWorkspaceState(createTermDecisionWorkspaceState(), {
+    decisionWorkspaceCache.set(projectId, updateTermDecisionWorkspaceState(createTermDecisionWorkspaceState(), {
       tab,
       search,
       kind,
@@ -261,7 +262,7 @@ export function TermDecisionWorkspace({ project, language, task, onTask, onTerms
       page,
       scrollTop,
     }));
-  }, [kind, manualStatus, page, project, search, scrollTop, status, tab]);
+  }, [kind, manualStatus, page, projectId, search, scrollTop, status, tab]);
 
   useEffect(() => {
     if (reviewLoading) return;

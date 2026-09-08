@@ -117,16 +117,17 @@ export default function App() {
     queryKey: queryKeys.projects(),
     queryFn: ({ signal }) => fetchProjects(signal),
   });
-  const overviewQuery = useQuery({
-    queryKey: queryKeys.overview(project),
-    queryFn: ({ signal }) => fetchOverview(project, signal),
-    enabled: Boolean(project),
-  });
   const projects = projectsQuery.data ?? [];
+  const selectedProject = projects.find((item) => item.selector === project) ?? null;
+  const selectedProjectId = selectedProject?.project_id ?? "";
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.overview({ projectId: selectedProjectId }),
+    queryFn: ({ signal }) => fetchOverview(project, signal),
+    enabled: Boolean(project && selectedProjectId),
+  });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
-  const selectedProject = projects.find((item) => item.selector === project) ?? null;
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
     Object.values(tasks)
@@ -332,9 +333,10 @@ export default function App() {
   // cached data synchronously and refresh it in the background.
   useEffect(() => {
     if (!project) return;
-    prefetchTerms(project, queryClient);
-    prefetchWorkspace(project);
-  }, [project, queryClient]);
+    if (!selectedProjectId) return;
+    prefetchTerms(project, selectedProjectId, queryClient);
+    prefetchWorkspace(project, selectedProjectId);
+  }, [project, queryClient, selectedProjectId]);
   useEffect(() => {
     let active = true;
     const poll = () => {
@@ -440,7 +442,7 @@ export default function App() {
     if (destination === "terminology") {
       const subpage = termsSubpageForTask(next.stage, next.include_summaries);
       setTermsSubpage(subpage);
-      openTermsSubpage(summary.selector, subpage);
+      openTermsSubpage(summary.project_id, subpage);
     }
     setFailureFocus(null);
   }
@@ -504,9 +506,9 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView project={project} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
+    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
+      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
