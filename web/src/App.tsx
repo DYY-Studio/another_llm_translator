@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, onAuthRequired } from "./api";
+import { api, errorPayloadFrom, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
 import { TermsView, openTermsSubpage, prefetchTerms, type TermsSubpage } from "./components/TermsView";
@@ -24,6 +24,7 @@ import type {
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { canAutoSelectProject } from "./requestState";
+import { reconcileRecentProjectPaths } from "./recentProjectState";
 import { STORAGE_KEYS } from "./storageKeys";
 import { termsSubpageForTask } from "./summaryWorkspaceState";
 import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
@@ -38,6 +39,11 @@ const runnable: Partial<Record<Stage, LLMStage>> = {
   translation: "translation",
   proofreading: "proofreading",
   polishing: "polishing",
+};
+
+type RecentRestoreNotice = {
+  message: string;
+  retryable: boolean;
 };
 
 function readRecentProjectPaths(): string[] {
@@ -106,33 +112,50 @@ export default function App() {
   });
   const [language, setLanguage] = useState<Language>(detectLanguage);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [serverStatusError, setServerStatusError] = useState<unknown>(null);
+  const [serverStatusSettled, setServerStatusSettled] = useState(false);
+  const [serverStatusRetry, setServerStatusRetry] = useState(0);
+  const [authRequired, setAuthRequired] = useState(false);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
+  const [recentProjectsReady, setRecentProjectsReady] = useState(false);
+  const [recentRestoreNotice, setRecentRestoreNotice] = useState<RecentRestoreNotice | null>(null);
   const tasksRef = useRef<Record<string, TaskState>>({});
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const syncingTasksRef = useRef(false);
   const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
+  const authEpochRef = useRef(0);
   const queryClient = useQueryClient();
   const projectsQuery = useQuery({
     queryKey: queryKeys.projects(),
     queryFn: ({ signal }) => fetchProjects(signal),
   });
-  const overviewQuery = useQuery({
-    queryKey: queryKeys.overview(project),
-    queryFn: ({ signal }) => fetchOverview(project, signal),
-    enabled: Boolean(project),
-  });
   const projects = projectsQuery.data ?? [];
+  const selectedProject = projects.find((item) => item.selector === project) ?? null;
+  const selectedProjectId = selectedProject?.project_id ?? "";
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.overview({ projectId: selectedProjectId }),
+    queryFn: ({ signal }) => fetchOverview(project, signal),
+    enabled: Boolean(project && selectedProjectId),
+  });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
-  const selectedProject = projects.find((item) => item.selector === project) ?? null;
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
     Object.values(tasks)
       .filter((item) => isActiveTaskStatus(item.status))
       .map((item) => item.project_id),
   );
+
+  const markAuthRequired = useCallback(() => {
+    authEpochRef.current += 1;
+    setAuthRequired(true);
+    setRecentProjectsReady(false);
+    setServerStatus((current) => current ? { ...current, authed: false } : current);
+  }, []);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -213,17 +236,25 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const requestAuthEpoch = authEpochRef.current;
+    setServerStatusError(null);
+    setServerStatusSettled(false);
     const remove = onAuthRequired(() => {
-      if (active) setServerStatus((current) => current ? { ...current, authed: false } : current);
+      if (active) markAuthRequired();
     });
     void api<ServerStatus>("/api/v1/server/status").then((value) => {
-      if (active) setServerStatus(value);
-    }).catch(() => {
-      // The status endpoint is public; failure here leaves the app on the
-      // normal flow and the next 401 surfaces the login gate.
+      if (!active) return;
+      setServerStatus(value);
+      if (authEpochRef.current === requestAuthEpoch) {
+        setAuthRequired(value.auth.required && !value.authed);
+      }
+    }).catch((reason) => {
+      if (active) setServerStatusError(reason);
+    }).finally(() => {
+      if (active) setServerStatusSettled(true);
     });
     return () => { active = false; remove(); };
-  }, []);
+  }, [markAuthRequired, serverStatusRetry]);
 
   useEffect(() => {
     let active = true;
@@ -274,12 +305,93 @@ export default function App() {
   }, [themeMode]);
 
   const loadProjects = useCallback(async () => {
-    const result = await projectsQuery.refetch();
+    const result = await projectsQuery.refetch({ throwOnError: true });
     return result.data ?? [];
   }, [projectsQuery.refetch]);
 
+  const restoreRecentProjects = useCallback(async (): Promise<boolean> => {
+    const paths = readRecentProjectPaths();
+    setRecentRestoreNotice(null);
+    setRecentProjectsReady(false);
+    try {
+      const results = await Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
+        "/api/v1/projects/open",
+        { method: "POST", body: JSON.stringify({ path }) },
+      )));
+      const authRequired = results.some((result) => (
+        result.status === "rejected"
+        && errorPayloadFrom(result.reason)?.code === "auth_required"
+      ));
+      if (authRequired) {
+        markAuthRequired();
+        return false;
+      }
+      const validPaths = results.flatMap((result) => (
+        result.status === "fulfilled" ? [result.value.path] : []
+      ));
+      const pathResult = reconcileRecentProjectPaths(results.map((result, index) => (
+        result.status === "fulfilled"
+          ? { path: paths[index], openedPath: result.value.path }
+          : { path: paths[index], errorCode: errorPayloadFrom(result.reason)?.code }
+      )));
+      const warnings = results.flatMap((result) => (
+        result.status === "fulfilled" ? result.value.warnings : []
+      ));
+      for (const path of validPaths) projectActivationRef.current.set(path, "opened");
+      writeRecentProjectPaths(pathResult.paths);
+      const recoveryMessages = [];
+      if (pathResult.invalidCount) {
+        recoveryMessages.push(translate("app.recentPathsInvalid", languageRef.current, { count: pathResult.invalidCount }));
+      }
+      if (pathResult.transientFailureCount) {
+        recoveryMessages.push(translate("app.recentPathsTemporarilyUnavailable", languageRef.current, { count: pathResult.transientFailureCount }));
+      }
+      const recoveryNotice = recoveryMessages.length
+        ? {
+            message: recoveryMessages.join("；"),
+            retryable: pathResult.transientFailureCount > 0,
+          }
+        : null;
+      if (warnings.length) setProjectWarnings(warnings);
+      await loadProjects();
+      setRecentRestoreNotice(recoveryNotice);
+      setRecentProjectsReady(true);
+      return true;
+    } catch (reason) {
+      if (errorPayloadFrom(reason)?.code === "auth_required") {
+        markAuthRequired();
+        return false;
+      }
+      setError(reason);
+      return false;
+    }
+  }, [loadProjects, markAuthRequired]);
+
+  const retryQuery = useCallback(async () => {
+    if (!queryError) return;
+    setError(null);
+    try {
+      if (!recentProjectsReady) {
+        await restoreRecentProjects();
+      } else if (projectsQuery.error) {
+        await projectsQuery.refetch({ throwOnError: true });
+      } else {
+        await overviewQuery.refetch({ throwOnError: true });
+      }
+    } catch (value) {
+      setError(value);
+    }
+  }, [overviewQuery.refetch, projectsQuery.error, projectsQuery.refetch, queryError, recentProjectsReady, restoreRecentProjects]);
+
+  const retryServerStatus = useCallback(() => {
+    setError(null);
+    setServerStatusError(null);
+    setServerStatusSettled(false);
+    setServerStatusRetry((value) => value + 1);
+  }, []);
+
   useEffect(() => {
-    if (!projectsQuery.data) return;
+    if (!projectsQuery.data || !recentProjectsReady) return;
     const requestProject = activeProjectRef.current;
     let active = true;
     void syncActiveTasks().then(() => {
@@ -296,45 +408,30 @@ export default function App() {
       if (active) setError(value);
     });
     return () => { active = false; };
-  }, [projectsQuery.data, syncActiveTasks]);
+  }, [projectsQuery.data, recentProjectsReady, syncActiveTasks]);
 
   const refresh = useCallback(async () => {
-    if (!project) return;
-    await overviewQuery.refetch();
-  }, [overviewQuery.refetch, project]);
+    if (!project || !selectedProjectId) return;
+    await overviewQuery.refetch({ throwOnError: true });
+  }, [overviewQuery.refetch, project, selectedProjectId]);
 
   const refreshProject = useCallback(async () => {
     await Promise.all([loadProjects(), refresh()]);
   }, [loadProjects, refresh]);
 
   useEffect(() => {
-    const paths = readRecentProjectPaths();
-    void Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
-      "/api/v1/projects/open",
-      { method: "POST", body: JSON.stringify({ path }) },
-    ))).then(async (results) => {
-      const validPaths = results.flatMap((result) => (
-        result.status === "fulfilled" ? [result.value.path] : []
-      ));
-      const warnings = results.flatMap((result) => (
-        result.status === "fulfilled" ? result.value.warnings : []
-      ));
-      for (const path of validPaths) projectActivationRef.current.set(path, "opened");
-      writeRecentProjectPaths(validPaths);
-      const failures = results.length - validPaths.length;
-      if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
-      if (warnings.length) setProjectWarnings(warnings);
-      await loadProjects();
-    }).catch((value) => setError(value));
-  }, []);
+    if (!serverStatusSettled || authRequired) return;
+    void restoreRecentProjects();
+  }, [authRequired, restoreRecentProjects, serverStatusSettled]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
   useEffect(() => {
     if (!project) return;
-    prefetchTerms(project, queryClient);
-    prefetchWorkspace(project);
-  }, [project, queryClient]);
+    if (!selectedProjectId) return;
+    prefetchTerms(project, selectedProjectId, queryClient);
+    prefetchWorkspace(project, selectedProjectId);
+  }, [project, queryClient, selectedProjectId]);
   useEffect(() => {
     let active = true;
     const poll = () => {
@@ -440,7 +537,7 @@ export default function App() {
     if (destination === "terminology") {
       const subpage = termsSubpageForTask(next.stage, next.include_summaries);
       setTermsSubpage(subpage);
-      openTermsSubpage(summary.selector, subpage);
+      openTermsSubpage(summary.project_id, subpage);
     }
     setFailureFocus(null);
   }
@@ -504,21 +601,23 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView project={project} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
+    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace project={project} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
+      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
-  if (serverStatus?.auth.required && !serverStatus.authed) {
+  if (authRequired || (serverStatus?.auth.required && !serverStatus.authed)) {
     return (
       <LoginView
         language={language}
         onLoggedIn={() => {
           setError(null);
           setWarningDismissed(false);
+          authEpochRef.current += 1;
+          setAuthRequired(false);
+          setRecentProjectsReady(false);
           setServerStatus((current) => current ? { ...current, authed: true } : current);
-          void loadProjects().catch((value) => setError(value));
         }}
       />
     );
@@ -560,7 +659,30 @@ export default function App() {
         {projectWarnings.length > 0 && (
           <button className="warning-banner warning-banner-sticky" onClick={() => setProjectWarnings([])}>{projectWarnings.join("；")}</button>
         )}
-        {(error ?? queryError) != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error ?? queryError, language)}</button> : null}
+        {recentRestoreNotice != null && (
+          <div className="error-banner error-banner-global" role="alert">
+            <span>{recentRestoreNotice.message}</span>
+            {recentRestoreNotice.retryable && (
+              <button className="quiet-button" type="button" onClick={() => { void restoreRecentProjects(); }}>{translate("common.retry", language)}</button>
+            )}
+            <button className="quiet-button" type="button" aria-label={translate("common.dismiss", language)} onClick={() => setRecentRestoreNotice(null)}>×</button>
+          </div>
+        )}
+        {error != null && (
+          <button className="error-banner" type="button" onClick={() => setError(null)}>{errorMessage(error, language)}</button>
+        )}
+        {serverStatusError != null && (
+          <div className="error-banner error-banner-global" role="alert">
+            <span>{errorMessage(serverStatusError, language)}</span>
+            <button className="quiet-button" type="button" onClick={retryServerStatus}>{translate("common.retry", language)}</button>
+          </div>
+        )}
+        {queryError != null && (
+          <div className="error-banner error-banner-global" role="alert">
+            <span>{errorMessage(queryError, language)}</span>
+            <button className="quiet-button" type="button" onClick={() => { void retryQuery(); }}>{translate("common.retry", language)}</button>
+          </div>
+        )}
         {content}
       </AppShell>
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) await openProject(created, true); else setProject(selector); }} />}

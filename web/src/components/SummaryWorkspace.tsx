@@ -36,6 +36,7 @@ import { RunDialog } from "./RunDialog";
 
 interface SummaryWorkspaceProps {
   project: string;
+  projectId: string;
   overview: ProjectOverview;
   language: Language;
   task: TaskState | null;
@@ -371,8 +372,8 @@ function SelectionDialog({
   );
 }
 
-export function SummaryWorkspace({ project, overview, language, task, onTask, onClose }: SummaryWorkspaceProps) {
-  const initial = restoreSummaryWorkspaceState(workspaceCache, project);
+export function SummaryWorkspace({ project, projectId, overview, language, task, onTask, onClose }: SummaryWorkspaceProps) {
+  const initial = restoreSummaryWorkspaceState(workspaceCache, projectId);
   const [search, setSearch] = useState(initial.search);
   const [focusedBoundary, setFocusedBoundary] = useState(initial.focusedBoundary);
   const [tab, setTab] = useState<SummaryTab>(initial.tab);
@@ -389,26 +390,26 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   const [busy, setBusy] = useState(false);
   const [listOpen, setListOpen] = useState(true);
   const contentRef = useRef<HTMLDivElement>(null);
-  const workspaceProjectRef = useRef(project);
+  const workspaceProjectRef = useRef(projectId);
   const participationStateRef = useRef(createSummaryParticipationState());
   const participationQueueRef = useRef(Promise.resolve());
   const [participationSaving, setParticipationSaving] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const partSelection = useClassicSelection();
-  workspaceProjectRef.current = project;
+  workspaceProjectRef.current = projectId;
 
   const activeSummaryTask = Boolean(
     task && (task.stage === "content_summary" || (task.stage === "terminology" && task.include_summaries))
     && ["queued", "running", "cancelling"].includes(task.status),
   );
   const summariesQuery = useQuery({
-    queryKey: queryKeys.summaries(project),
+    queryKey: queryKeys.summaries({ projectId }),
     queryFn: async ({ signal }) => {
       const targetProject = project;
       const participationVersionAtStart = participationStateRef.current.version;
       const participationDirtyAtStart = participationStateRef.current.dirty;
       const value = await fetchSummaries(targetProject, signal);
-      if (workspaceProjectRef.current === targetProject) {
+      if (workspaceProjectRef.current === projectId) {
         const currentParticipationState = participationStateRef.current;
         const nextParticipationState = applySummaryParticipationFetch(
           currentParticipationState,
@@ -455,10 +456,10 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
   })), [boundaries]);
   const summaryProgressValue = summaryProgress(progressBoundaries, participation, data?.artifacts ?? []);
   useEffect(() => {
-    workspaceProjectRef.current = project;
+    workspaceProjectRef.current = projectId;
     participationQueueRef.current = Promise.resolve();
     partSelection.reset();
-    const restored = restoreSummaryWorkspaceState(workspaceCache, project);
+    const restored = restoreSummaryWorkspaceState(workspaceCache, projectId);
     setSearch(restored.search);
     setFocusedBoundary(restored.focusedBoundary);
     setTab(restored.tab);
@@ -468,22 +469,22 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setParticipation(new Set());
     setParticipationSaving(false);
     setMessage(null);
-  }, [project]);
+  }, [projectId]);
 
   useEffect(() => {
     if (task?.stage !== "content_summary" && !(task?.stage === "terminology" && task.include_summaries)) return;
     if (["completed", "failed", "cancelled"].includes(task.status)) void summariesQuery.refetch();
-  }, [task?.task_id, task?.status, task?.stage, task?.include_summaries, project, summariesQuery.refetch]);
+  }, [task?.task_id, task?.status, task?.stage, task?.include_summaries, projectId, summariesQuery.refetch]);
 
   useEffect(() => {
     if (loading) return;
     contentRef.current?.scrollTo({ top: scrollTop });
-  }, [loading, project]);
+  }, [loading, projectId]);
 
   useEffect(() => {
     const next = updateSummaryWorkspaceState(createSummaryWorkspaceState(), { search, focusedBoundary, tab, sourceOpen, scrollTop });
-    workspaceCache.set(project, next);
-  }, [focusedBoundary, project, search, scrollTop, sourceOpen, tab]);
+    workspaceCache.set(projectId, next);
+  }, [focusedBoundary, projectId, search, scrollTop, sourceOpen, tab]);
 
   useEffect(() => {
     if (!boundaries.length) return;
@@ -510,13 +511,13 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
     setParticipationSaving(true);
     setMessage(null);
     participationQueueRef.current = participationQueueRef.current.then(async () => {
-      if (workspaceProjectRef.current !== targetProject) return;
+      if (workspaceProjectRef.current !== projectId) return;
       try {
         const result = await api<{ participation: Array<{ file_id: string; part_id: string; selected: boolean }> }>(`/api/v1/projects/${targetProject}/summaries/participation`, {
           method: "PUT",
           body: JSON.stringify({ boundaries: selectionItems(nextValue, boundaries), selected: true }),
         });
-        if (workspaceProjectRef.current !== targetProject) return;
+        if (workspaceProjectRef.current !== projectId) return;
         participationStateRef.current = resolveSummaryParticipationPut(
           participationStateRef.current,
           version,
@@ -524,13 +525,13 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         );
         setParticipation(new Set(participationStateRef.current.displayed));
       } catch (error) {
-        if (workspaceProjectRef.current === targetProject && version === participationStateRef.current.version) {
+        if (workspaceProjectRef.current === projectId && version === participationStateRef.current.version) {
           participationStateRef.current = rejectSummaryParticipationPut(participationStateRef.current, version);
           setParticipation(new Set(participationStateRef.current.displayed));
           setMessage({ text: errorMessage(error, language), type: "error" });
         }
       } finally {
-        if (workspaceProjectRef.current === targetProject
+        if (workspaceProjectRef.current === projectId
           && version === participationStateRef.current.version
           && !participationStateRef.current.dirty) setParticipationSaving(false);
       }
@@ -725,11 +726,11 @@ export function SummaryWorkspace({ project, overview, language, task, onTask, on
         </aside>
         <main className="summary-content" ref={contentRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
           {activeSummaryTask && <div className="summary-progress"><strong>{translate("terms.summaryTaskRunning", language)}</strong><span>{task?.summary_selection_progress ? translate("terms.summaryTaskBoundaryProgress", language, { done: task.summary_selection_progress.completed, total: task.summary_selection_progress.total }) : translate("terms.summaryProgress", language, summaryProgressValue)}</span></div>}
-          {displayedMessage && <p className={`inline-message ${displayedMessage.type === "success" ? "success-text" : "error-text"}`}>{displayedMessage.text}</p>}
+          {displayedMessage && <p className={`inline-message ${displayedMessage.type === "success" ? "success-text" : "error-text"}`}><span>{displayedMessage.text}</span>{summariesQuery.error && <button className="quiet-button" type="button" onClick={() => { void summariesQuery.refetch(); }}>{translate("common.retry", language)}</button>}</p>}
           {loading ? <p className="summary-empty">{translate("common.loading", language)}</p> : !focused ? <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p> : <>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>
-              {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
+              {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("full")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
             </div>
           </>}
         </main>

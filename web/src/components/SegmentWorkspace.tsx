@@ -8,6 +8,12 @@ import type {
   SegmentDetail,
   SegmentQueryResponse,
 } from "../types";
+import {
+  clearSegmentReadError,
+  emptySegmentReadErrors,
+  firstSegmentReadError,
+  setSegmentReadError,
+} from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 
@@ -43,9 +49,9 @@ function boundaryKey(fileId: string, partId: string): string {
 // a mounted workspace's fresher entry intact. The cache key matches the
 // workspace's initial default-filter query, and focusedId is the first
 // segment so the mount-time index refresh preserves the restored window.
-export function prefetchWorkspace(project: string) {
+export function prefetchWorkspace(project: string, projectId: string) {
   for (const stage of ["translation", "proofreading", "polishing"] as const) {
-    const key = JSON.stringify([project, stage, "all", "all", ""]);
+    const key = JSON.stringify([projectId, stage, "all", "all", ""]);
     if (workspaceCache.has(key)) continue;
     void Promise.all([
       api<{ segment_ids: string[]; total: number }>(
@@ -97,6 +103,7 @@ function statusFor(segment: Segment, stage: "translation" | "proofreading" | "po
 
 export function SegmentWorkspace({
   project,
+  projectId,
   stage,
   overview,
   onRefresh,
@@ -106,6 +113,7 @@ export function SegmentWorkspace({
   onJumpConsumed,
 }: {
   project: string;
+  projectId: string;
   stage: "translation" | "proofreading" | "polishing";
   overview: ProjectOverview;
   onRefresh: () => Promise<void>;
@@ -126,7 +134,8 @@ export function SegmentWorkspace({
   const [records, setRecords] = useState<Record<string, Segment>>({});
   const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(null);
   const [total, setTotal] = useState(0);
-  const [listError, setListError] = useState("");
+  const [readErrors, setReadErrors] = useState(emptySegmentReadErrors);
+  const [readRetry, setReadRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
@@ -165,7 +174,7 @@ export function SegmentWorkspace({
     jumpConsumedRef.current = true;
     jumpTargetRef.current = pendingJump.segmentId;
     jumpSearchRef.current = pendingJump.search;
-    const prefix = JSON.stringify([project, stage]);
+    const prefix = JSON.stringify([projectId, stage]);
     for (const key of [...workspaceCache.keys()]) {
       if (key.startsWith(prefix)) workspaceCache.delete(key);
     }
@@ -175,7 +184,7 @@ export function SegmentWorkspace({
     setSearch(pendingJump.search);
     selection.reset(pendingJump.segmentId);
     onJumpConsumed?.();
-  }, [pendingJump]);
+  }, [pendingJump, projectId, stage]);
   const normalizedSearch = search.trim();
   const boundaryOptions: SegmentBoundaryOption[] = overview.files.flatMap((fileItem) => (
     fileItem.part_ids.map((part_id) => ({
@@ -196,8 +205,9 @@ export function SegmentWorkspace({
     ...(status !== "all" ? { status: status === "error" ? "failed" : status } : {}),
     ...(normalizedSearch ? { q: normalizedSearch } : {}),
   };
-  const pageQueryKey = JSON.stringify([project, stage, selectedBoundary?.key ?? "all", status, normalizedSearch]);
+  const pageQueryKey = JSON.stringify([projectId, stage, selectedBoundary?.key ?? "all", status, normalizedSearch]);
   const showContext = status !== "all" || normalizedSearch !== "";
+  const readErrorQueryRef = useRef(pageQueryKey);
   const resetPageCache = useCallback(() => {
     pageGenerationRef.current += 1;
     pageCacheRef.current.clear();
@@ -205,18 +215,18 @@ export function SegmentWorkspace({
   }, []);
 
   useEffect(() => {
-    if (workspaceProjectRef.current !== project) {
-      workspaceProjectRef.current = project;
+    if (workspaceProjectRef.current !== projectId) {
+      workspaceProjectRef.current = projectId;
       // Drop only entries of other projects. Entries are keyed by project, so
       // nothing leaks across projects, while the current project's prefetched
       // entries for unvisited stages survive for the first mount.
       for (const key of [...workspaceCache.keys()]) {
-        if ((JSON.parse(key) as string[])[0] !== project) {
+        if ((JSON.parse(key) as string[])[0] !== projectId) {
           workspaceCache.delete(key);
         }
       }
     }
-  }, [project]);
+  }, [projectId]);
 
   // Restore a cached window synchronously during render so the browser never
   // paints an empty frame when switching back to this stage. reloadIndex below
@@ -252,6 +262,12 @@ export function SegmentWorkspace({
     preserveFocusRef.current = selection.focusedKey;
   }, [pageQueryKey, resetPageCache]);
 
+  useEffect(() => {
+    if (readErrorQueryRef.current === pageQueryKey) return;
+    readErrorQueryRef.current = pageQueryKey;
+    setReadErrors(emptySegmentReadErrors());
+  }, [pageQueryKey]);
+
   useLayoutEffect(() => {
     if (restoredScrollTopRef.current === null) return;
     if (listRef.current) listRef.current.scrollTop = restoredScrollTopRef.current;
@@ -272,7 +288,7 @@ export function SegmentWorkspace({
     const requestId = ++indexRequestRef.current;
     indexInFlightRef.current = true;
     setLoading(true);
-    setListError("");
+    setReadErrors((current) => clearSegmentReadError(current, "index"));
     try {
       const index = await api<{ segment_ids: string[]; total: number }>(
         `/api/v1/projects/${project}/segments/ids`,
@@ -303,7 +319,7 @@ export function SegmentWorkspace({
     } catch (value) {
       if (requestId !== indexRequestRef.current) return [];
       resetPageCache();
-      setListError(errorMessage(value, language));
+      setReadErrors((current) => setSegmentReadError(current, "index", errorMessage(value, language)));
       setOrderedIds([]);
       setTotal(0);
       setFocusedDetail(null);
@@ -315,9 +331,11 @@ export function SegmentWorkspace({
         setLoading(false);
       }
     }
-  }, [project, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
+  }, [project, projectId, stage, selectedFileId, selectedPartId, status, normalizedSearch, resetPageCache]);
 
-  useEffect(() => { void reloadIndex(preserveFocusRef.current, true); }, [reloadIndex]);
+  useEffect(() => {
+    void reloadIndex(preserveFocusRef.current, true);
+  }, [reloadIndex, readRetry]);
 
   const virtualizer = useVirtualizer({
     count: orderedIds.length,
@@ -382,6 +400,7 @@ export function SegmentWorkspace({
             requestGeneration !== pageGenerationRef.current
             || requestQuery !== activePageQueryRef.current
           ) return;
+          setReadErrors((current) => clearSegmentReadError(current, "page", pageKey));
           pageCacheRef.current.add(pageKey);
           setRecords((current) => {
             const next = { ...current };
@@ -393,7 +412,7 @@ export function SegmentWorkspace({
           if (
             requestGeneration === pageGenerationRef.current
             && requestQuery === activePageQueryRef.current
-          ) setListError(errorMessage(value, language));
+          ) setReadErrors((current) => setSegmentReadError(current, "page", errorMessage(value, language), pageKey));
         })
         .finally(() => {
           pageRequestsRef.current.delete(requestToken);
@@ -401,6 +420,7 @@ export function SegmentWorkspace({
     }
   }, [
     project,
+    projectId,
     stage,
     selectedFileId,
     selectedPartId,
@@ -409,16 +429,19 @@ export function SegmentWorkspace({
     pageQueryKey,
     orderedIds,
     virtualItems.map((item) => item.index).join(","),
+    readRetry,
   ]);
 
   const focusedId = selection.focusedKey || orderedIds[0] || "";
 
   useEffect(() => {
     if (!focusedId) {
+      setReadErrors((current) => clearSegmentReadError(current, "detail"));
       setFocusedDetail(null);
       return;
     }
     if (!showContext && records[focusedId]) {
+      setReadErrors((current) => clearSegmentReadError(current, "detail"));
       setFocusedDetail(null);
       return;
     }
@@ -427,12 +450,15 @@ export function SegmentWorkspace({
     void api<SegmentDetail>(`/api/v1/projects/${project}/segments/${focusedId}`)
       .then((item) => {
         if (!active) return;
+        setReadErrors((current) => clearSegmentReadError(current, "detail"));
         setRecords((current) => ({ ...current, [item.segment_id]: item }));
         setFocusedDetail(item);
       })
-      .catch((value) => { if (active) setListError(errorMessage(value, language)); });
+      .catch((value) => {
+        if (active) setReadErrors((current) => setSegmentReadError(current, "detail", errorMessage(value, language)));
+      });
     return () => { active = false; };
-  }, [project, focusedId, showContext]);
+  }, [project, focusedId, showContext, readRetry]);
 
   useLayoutEffect(() => {
     if (!selected) return;
@@ -450,6 +476,12 @@ export function SegmentWorkspace({
   const selectedVisibleIds = visibleKeys.filter((segmentId) => (
     selection.selectedKeys.has(segmentId)
   ));
+  const readError = firstSegmentReadError(readErrors);
+
+  const retryReads = useCallback(() => {
+    setReadErrors(emptySegmentReadErrors());
+    setReadRetry((value) => value + 1);
+  }, []);
 
   const context = focusedDetail && selected
     && focusedDetail.segment_id === selected.segment_id
@@ -485,10 +517,11 @@ export function SegmentWorkspace({
         const fresh = await api<SegmentDetail>(
           `/api/v1/projects/${project}/segments/${selected.segment_id}`,
         );
+        setReadErrors((current) => clearSegmentReadError(current, "detail"));
         setRecords((current) => ({ ...current, [fresh.segment_id]: fresh }));
         setFocusedDetail(fresh);
       } catch (value) {
-        setListError(errorMessage(value, language));
+        setReadErrors((current) => setSegmentReadError(current, "detail", errorMessage(value, language)));
       }
     }
   }
@@ -624,7 +657,7 @@ export function SegmentWorkspace({
           </div>
           {!total && !loading && <div className="empty">{translate("workspace.noSegments", language)}</div>}
           {loading && <div className="list-loading">{translate("workspace.loadingSegments", language)}</div>}
-          {listError && <div className="error-text">{listError}</div>}
+          {readError && <div className="error-text"><span>{readError}</span><button className="quiet-button" type="button" onClick={retryReads}>{translate("common.retry", language)}</button></div>}
         </div>
       </section>
       <section className="editor-pane">

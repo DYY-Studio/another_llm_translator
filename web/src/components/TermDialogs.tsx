@@ -102,7 +102,7 @@ export function TermImportDialog({
   project: string;
   language: Language;
   onClose: () => void;
-  onImported: (value: TermsResponse) => void;
+  onImported: (value: TermsResponse) => void | Promise<void>;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState("");
@@ -118,7 +118,7 @@ export function TermImportDialog({
         method: "POST",
         body,
       });
-      onImported(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
+      await onImported(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
     } catch (value) {
       setError(errorMessage(value, language));
     } finally {

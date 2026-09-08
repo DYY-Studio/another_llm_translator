@@ -2024,7 +2024,7 @@ Web 还提供全局配置、全局 Prompt 和 LLM Preset 管理；全局配置�
 
 Web 与 CLI 使用同一 SQLite 项目数据库、应用内核和持久化记录。同一项目的写任务通过非阻塞文件锁互斥，冲突时明确失败。
 
-稳定的 Web 请求体端点使用 Pydantic 做边界结构和类型校验；缺失字段、错误类型和非法嵌套结构统一返回 `request_validation_error`，响应只包含安全的字段路径。跨字段关系、重复 boundary、文件/项目存在性、阶段限制、Scope、Prompt 和语言等业务条件继续返回 `usage_error`。这些请求模型忽略未知字段，不改变现有未知字段行为；响应 JSON 形状保持不变。
+稳定的 Web 请求体端点使用 Pydantic 做边界结构和类型校验；缺失字段、错误类型和非法嵌套结构统一返回 `request_validation_error`，响应只包含安全的字段路径。跨字段关系、重复 boundary、文件/项目存在性、阶段限制、Scope、Prompt 和语言等业务条件继续返回 `usage_error`。这些请求模型忽略未知字段，不改变现有未知字段行为；summary 的 `boundaries` 也继续接受兼容别名 `selection`；Segment 窗口参数保持既有整数转换语义但拒绝布尔值；响应 JSON 形状保持不变。
 
 服务器配置的 `[tasks] max_active_projects` 默认是 2，必须是非布尔正整数，可在全局设置或
 `PUT /api/v1/server/config` 修改；`GET /api/v1/server/status` 返回当前值。旧的
