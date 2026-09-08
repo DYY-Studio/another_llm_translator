@@ -34,3 +34,22 @@ test("task activation stops navigation when project opening fails", () => {
   assert.ok(guardIndex > taskActivationIndex);
   assert.ok(navigationIndex > guardIndex);
 });
+
+test("recent project restoration waits for auth and resumes after login", () => {
+  const restoreIndex = appSource.indexOf("const restoreRecentProjects = useCallback");
+  const restoreEnd = appSource.indexOf("// Warm the terminology", restoreIndex);
+  const restoreSource = appSource.slice(restoreIndex, restoreEnd);
+
+  assert.ok(restoreIndex >= 0);
+  assert.match(restoreSource, /errorPayloadFrom\(result\.reason\)\?\.code === "auth_required"/);
+  assert.match(restoreSource, /setRecentProjectsReady\(false\)/);
+  assert.ok(restoreSource.indexOf("if (authRequired)") < restoreSource.indexOf("writeRecentProjectPaths"));
+  assert.ok(restoreSource.indexOf("await loadProjects()") < restoreSource.indexOf("setRecentProjectsReady(true)"));
+
+  const startupIndex = appSource.indexOf("if (!serverStatus || (serverStatus.auth.required && !serverStatus.authed)) return;");
+  assert.ok(startupIndex > restoreIndex);
+
+  const loginIndex = appSource.indexOf("onLoggedIn={() => {");
+  const loginSource = appSource.slice(loginIndex, appSource.indexOf("}}", loginIndex));
+  assert.match(loginSource, /restoreRecentProjects/);
+});

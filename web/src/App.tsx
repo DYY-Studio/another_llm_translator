@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, onAuthRequired } from "./api";
+import { api, errorPayloadFrom, onAuthRequired } from "./api";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
 import { TermsView, openTermsSubpage, prefetchTerms, type TermsSubpage } from "./components/TermsView";
@@ -111,6 +111,8 @@ export default function App() {
   const tasksRef = useRef<Record<string, TaskState>>({});
   const activeProjectRef = useRef(project);
   activeProjectRef.current = project;
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const syncingTasksRef = useRef(false);
   const projectActivationRef = useRef(new Map<string, "opening" | "opened" | "failed">());
   const queryClient = useQueryClient();
@@ -128,19 +130,6 @@ export default function App() {
   });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
-  const retryQuery = useCallback(async () => {
-    if (!queryError) return;
-    setError(null);
-    try {
-      if (projectsQuery.error) {
-        await projectsQuery.refetch({ throwOnError: true });
-      } else {
-        await overviewQuery.refetch({ throwOnError: true });
-      }
-    } catch (value) {
-      setError(value);
-    }
-  }, [overviewQuery.error, overviewQuery.refetch, projectsQuery.error, projectsQuery.refetch, queryError]);
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
@@ -229,7 +218,10 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const remove = onAuthRequired(() => {
-      if (active) setServerStatus((current) => current ? { ...current, authed: false } : current);
+      if (active) {
+        setRecentProjectsReady(false);
+        setServerStatus((current) => current ? { ...current, authed: false } : current);
+      }
     });
     void api<ServerStatus>("/api/v1/server/status").then((value) => {
       if (active) setServerStatus(value);
@@ -293,6 +285,62 @@ export default function App() {
     return result.data ?? [];
   }, [projectsQuery.refetch]);
 
+  const restoreRecentProjects = useCallback(async (): Promise<boolean> => {
+    const paths = readRecentProjectPaths();
+    setRecentProjectsReady(false);
+    try {
+      const results = await Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
+        "/api/v1/projects/open",
+        { method: "POST", body: JSON.stringify({ path }) },
+      )));
+      const authRequired = results.some((result) => (
+        result.status === "rejected"
+        && errorPayloadFrom(result.reason)?.code === "auth_required"
+      ));
+      if (authRequired) {
+        setServerStatus((current) => current ? { ...current, authed: false } : current);
+        return false;
+      }
+      const validPaths = results.flatMap((result) => (
+        result.status === "fulfilled" ? [result.value.path] : []
+      ));
+      const warnings = results.flatMap((result) => (
+        result.status === "fulfilled" ? result.value.warnings : []
+      ));
+      for (const path of validPaths) projectActivationRef.current.set(path, "opened");
+      writeRecentProjectPaths(validPaths);
+      const failures = results.length - validPaths.length;
+      if (failures) setError(translate("app.recentPathsInvalid", languageRef.current, { count: failures }));
+      if (warnings.length) setProjectWarnings(warnings);
+      await loadProjects();
+      setRecentProjectsReady(true);
+      return true;
+    } catch (reason) {
+      if (errorPayloadFrom(reason)?.code === "auth_required") {
+        setServerStatus((current) => current ? { ...current, authed: false } : current);
+        return false;
+      }
+      setError(reason);
+      return false;
+    }
+  }, [loadProjects]);
+
+  const retryQuery = useCallback(async () => {
+    if (!queryError) return;
+    setError(null);
+    try {
+      if (!recentProjectsReady) {
+        await restoreRecentProjects();
+      } else if (projectsQuery.error) {
+        await projectsQuery.refetch({ throwOnError: true });
+      } else {
+        await overviewQuery.refetch({ throwOnError: true });
+      }
+    } catch (value) {
+      setError(value);
+    }
+  }, [overviewQuery.refetch, projectsQuery.error, projectsQuery.refetch, queryError, recentProjectsReady, restoreRecentProjects]);
+
   useEffect(() => {
     if (!projectsQuery.data || !recentProjectsReady) return;
     const requestProject = activeProjectRef.current;
@@ -323,25 +371,9 @@ export default function App() {
   }, [loadProjects, refresh]);
 
   useEffect(() => {
-    const paths = readRecentProjectPaths();
-    void Promise.allSettled(paths.map((path) => api<{ path: string; warnings: string[] }>(
-      "/api/v1/projects/open",
-      { method: "POST", body: JSON.stringify({ path }) },
-    ))).then(async (results) => {
-      const validPaths = results.flatMap((result) => (
-        result.status === "fulfilled" ? [result.value.path] : []
-      ));
-      const warnings = results.flatMap((result) => (
-        result.status === "fulfilled" ? result.value.warnings : []
-      ));
-      for (const path of validPaths) projectActivationRef.current.set(path, "opened");
-      writeRecentProjectPaths(validPaths);
-      const failures = results.length - validPaths.length;
-      if (failures) setError(translate("app.recentPathsInvalid", language, { count: failures }));
-      if (warnings.length) setProjectWarnings(warnings);
-      await loadProjects();
-    }).catch((value) => setError(value)).finally(() => setRecentProjectsReady(true));
-  }, []);
+    if (!serverStatus || (serverStatus.auth.required && !serverStatus.authed)) return;
+    void restoreRecentProjects();
+  }, [restoreRecentProjects, serverStatus?.auth.required]);
   // Warm the terminology and segment head caches when a project is opened so
   // the first visit to those pages renders instantly; the pages restore the
   // cached data synchronously and refresh it in the background.
@@ -534,7 +566,7 @@ export default function App() {
           setError(null);
           setWarningDismissed(false);
           setServerStatus((current) => current ? { ...current, authed: true } : current);
-          void loadProjects().catch((value) => setError(value));
+          void restoreRecentProjects();
         }}
       />
     );
