@@ -169,6 +169,36 @@ def test_summary_payload_schema_aliases_and_safe_errors(tmp_path: Path) -> None:
     assert invalid_selected.json()["code"] == "request_validation_error"
     assert invalid_selected.json()["params"]["fields"] == ["selected"]
 
+    participation_with_unknown_language = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={"boundaries": [boundary], "selected": True, "language": 123},
+    )
+    assert participation_with_unknown_language.status_code == 200
+
+    _full_fragment(project)
+    asyncio.run(
+        aggregate_summaries(
+            project,
+            [boundary],
+        )
+    )
+    export_with_unknown_language = client.post(
+        "/api/v1/projects/demo/summaries/export",
+        json={
+            "boundaries": [boundary],
+            "path": "ignored-language.md",
+            "language": 123,
+        },
+    )
+    assert export_with_unknown_language.status_code == 200
+
+    schema = client.get("/openapi.json")
+    assert schema.status_code == 200
+    boundaries_description = schema.json()["components"]["schemas"][
+        "SummarySelectionPayload"
+    ]["properties"]["boundaries"]["description"]
+    assert "selection" in boundaries_description
+
 
 def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
     project = _project(tmp_path)

@@ -36,21 +36,28 @@ class SegmentQueryPayload(SegmentFilterPayload):
     def reject_boolean_window(cls, value: object) -> object:
         if isinstance(value, bool):
             raise ValueError("窗口参数必须是整数")  # noqa: TRY004
-        return value
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("窗口参数必须是整数") from exc
 
 
-class SummarySelectionPayload(_WebPayload):
+class _SummaryBoundariesPayload(_WebPayload):
     boundaries: list[BoundaryPayload] = Field(
-        validation_alias=AliasChoices("boundaries", "selection")
+        validation_alias=AliasChoices("boundaries", "selection"),
+        description="边界数组；也接受兼容输入别名 selection",
     )
+
+
+class SummarySelectionPayload(_SummaryBoundariesPayload):
     language: str | None = None
 
 
-class SummaryParticipationPayload(SummarySelectionPayload):
+class SummaryParticipationPayload(_SummaryBoundariesPayload):
     selected: StrictBool = True
 
 
-class SummaryExportPayload(SummarySelectionPayload):
+class SummaryExportPayload(_SummaryBoundariesPayload):
     path: str = "summary.md"
 
 

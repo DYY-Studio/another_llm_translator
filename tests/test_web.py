@@ -209,6 +209,26 @@ def test_web_segment_payload_schema_and_business_errors(tmp_path: Path) -> None:
     assert mismatched_filter.json()["code"] == "usage_error"
 
 
+def test_web_segment_query_preserves_legacy_window_conversion(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    fractional = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": 1.2},
+    )
+    assert fractional.status_code == 200
+    assert fractional.json()["offset"] == 1
+
+    decimal_string = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": "1.0"},
+    )
+    assert decimal_string.status_code == 400
+    assert decimal_string.json()["code"] == "request_validation_error"
+    assert decimal_string.json()["params"]["fields"] == ["offset"]
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
