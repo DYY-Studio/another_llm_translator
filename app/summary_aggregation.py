@@ -695,7 +695,16 @@ async def aggregate_summaries(
                 boundary, current, fragments = item
                 try:
                     artifact = await reduce_boundary(boundary, current, fragments)
-                    publish_content_summary_fulls(project, [artifact])
+                    cleanup_report = publish_content_summary_fulls(project, [artifact])
+                    for skipped in cleanup_report["skipped"]:
+                        skipped_boundary = (
+                            str(skipped["file_id"]),
+                            str(skipped["part_id"]),
+                        )
+                        boundary_warnings[skipped_boundary] = (
+                            "内容概括历史清理已跳过："
+                            f"{skipped_boundary[0]}/{skipped_boundary[1]} 的 provenance 无法验证"
+                        )
                 except FatalExternalError:
                     raise
                 except (UsageError, ExternalError) as exc:

@@ -24,6 +24,7 @@ from app.sqlite_storage import (
 )
 from app.stage_runtime import _project_context, prompt_middle_digests
 from app.stage_terminology import _digest
+from app.summary_provenance import build_provenance
 from app.summary_aggregation import (
     aggregate_summaries,
     export_summary_markdown,
@@ -207,6 +208,36 @@ def _record_summary_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
     return project
+
+
+def _write_full_from_fragment(
+    project: Path,
+    fragment: dict[str, object],
+    *,
+    summary_id: str,
+    created_at: str,
+) -> None:
+    metadata = read_json(project, project / "project.json")
+    provenance, input_digest = build_provenance("llm", [fragment])
+    record = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id=summary_id,
+        kind="full",
+        file_id=str(fragment["file_id"]),
+        part_id=str(fragment["part_id"]),
+        status="completed",
+        text=str(fragment["text"]),
+        source_range=fragment["source_range"],
+        source_digest=str(fragment["source_digest"]),
+        input_digest=input_digest,
+        prompt_digest="sha256:prompt",
+        model="test-model",
+        provenance=provenance,
+    )
+    record["created_at"] = created_at
+    record["updated_at"] = created_at
+    write_content_summary(project, record)
 
 
 @pytest.mark.asyncio
@@ -549,6 +580,201 @@ def test_single_full_fragment_is_adopted_without_llm_call(tmp_path: Path) -> Non
     assert len(full) == 1
     assert full[0]["text"] == "单片段概括。"
     assert full[0]["provenance"]["origin"] == "adopted"
+
+
+def test_aggregation_success_surfaces_cleanup_warning_without_deleting_history(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-ONE",
+        segment_indexes=[0],
+        text="片段一。",
+    )
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-TWO",
+        segment_indexes=[1],
+        text="片段二。",
+    )
+    metadata = read_json(project, project / "project.json")
+    invalid_full = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id="SUMMARY-FULL-INVALID",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧完整概括。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:old-source",
+        input_digest="sha256:old-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    invalid_full["created_at"] = "2024-01-01T00:00:00+00:00"
+    invalid_full["updated_at"] = invalid_full["created_at"]
+    write_content_summary(project, invalid_full)
+    old_reduction = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id="SUMMARY-REDUCTION-OLD",
+        kind="reduction",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧压缩结果。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:reduction-source",
+        input_digest="sha256:reduction-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, old_reduction)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    try:
+        result = asyncio.run(
+            aggregate_summaries(
+                project,
+                [{"file_id": "F0001", "part_id": "document"}],
+                http_client=client,
+            )
+        )
+    finally:
+        asyncio.run(client.aclose())
+        os.environ.pop("LLM_API_KEY", None)
+
+    warning = "内容概括历史清理已跳过：F0001/document 的 provenance 无法验证"
+    assert result["completed"] == 1
+    assert result["failed"] == 0
+    assert result["warnings"] == [warning]
+    assert {
+        str(item["record_id"]) for item in read_content_summaries(project)
+    } >= {"SUMMARY-FULL-INVALID", "SUMMARY-REDUCTION-OLD"}
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["warnings"] == [warning]
+    summary_run = next(
+        item
+        for item in read_summary_runs(project, mode="aggregation")
+        if item["run_id"] == result["run_id"]
+    )
+    assert summary_run["status"] == "completed"
+    assert summary_run["warnings"] == [warning]
+
+
+def test_aggregation_cleans_valid_boundary_when_another_boundary_is_skipped(
+    tmp_path: Path,
+) -> None:
+    project = _two_boundary_project(tmp_path)
+    for file_id in ("F0001", "F0002"):
+        _fragment(
+            project,
+            summary_id=f"{file_id}-FRAGMENT-ONE",
+            segment_indexes=[0],
+            file_id=file_id,
+            text=f"{file_id}-片段一。",
+        )
+        _fragment(
+            project,
+            summary_id=f"{file_id}-FRAGMENT-TWO",
+            segment_indexes=[1],
+            file_id=file_id,
+            text=f"{file_id}-片段二。",
+        )
+    fragments = read_content_summaries(project, kind="fragment")
+    fragments_by_boundary = {
+        (str(item["file_id"]), str(item["part_id"])): item
+        for item in fragments
+    }
+    metadata = read_json(project, project / "project.json")
+    invalid_full = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id="F0001-FULL-INVALID",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧完整概括。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:old-source",
+        input_digest="sha256:old-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    invalid_full["created_at"] = "2024-01-01T00:00:00+00:00"
+    invalid_full["updated_at"] = invalid_full["created_at"]
+    write_content_summary(project, invalid_full)
+    old_reduction = record_header(
+        "content_summary",
+        str(metadata["project_id"]),
+        record_id="F0001-REDUCTION-OLD",
+        kind="reduction",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧压缩结果。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:reduction-source",
+        input_digest="sha256:reduction-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, old_reduction)
+
+    file_two_fragment = fragments_by_boundary[("F0002", "document")]
+    for index in range(1, 4):
+        _write_full_from_fragment(
+            project,
+            file_two_fragment,
+            summary_id=f"F0002-FULL-{index}",
+            created_at=f"2024-01-0{index}T00:00:00+00:00",
+        )
+    stale_fragment = dict(file_two_fragment)
+    stale_fragment["record_id"] = "F0002-FRAGMENT-STALE"
+    stale_fragment["status"] = "stale"
+    write_content_summary(project, stale_fragment)
+    old_reduction_two = dict(old_reduction)
+    old_reduction_two.update(
+        {
+            "record_id": "F0002-REDUCTION-OLD",
+            "file_id": "F0002",
+            "input_digest": "sha256:reduction-input-2",
+        }
+    )
+    write_content_summary(project, old_reduction_two)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    try:
+        result = asyncio.run(
+            aggregate_summaries(
+                project,
+                [
+                    {"file_id": "F0001", "part_id": "document"},
+                    {"file_id": "F0002", "part_id": "document"},
+                ],
+                http_client=client,
+            )
+        )
+    finally:
+        asyncio.run(client.aclose())
+        os.environ.pop("LLM_API_KEY", None)
+
+    warning = "内容概括历史清理已跳过：F0001/document 的 provenance 无法验证"
+    assert result["completed"] == 2
+    assert result["failed"] == 0
+    assert result["warnings"] == [warning]
+    ids = {
+        str(item["record_id"]): item for item in read_content_summaries(project)
+    }
+    assert "F0001-FULL-INVALID" in ids
+    assert "F0001-REDUCTION-OLD" in ids
+    assert "F0002-FULL-1" not in ids
+    assert "F0002-REDUCTION-OLD" not in ids
+    assert "F0002-FRAGMENT-STALE" not in ids
 
 
 def test_aggregation_reports_and_persists_exact_usage(tmp_path: Path) -> None:

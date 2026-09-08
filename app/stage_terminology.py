@@ -1215,6 +1215,7 @@ async def run_terminology(
                 for mode in sorted(summary_prompt_modes_used, key=lambda value: value.value)
             },
             "target_language": str(config["project"]["target_language"]),
+            "warnings": list(warnings),
             "updated_at": utc_now(),
         }
         write_summary_run(project, summary_run_record)
@@ -1430,7 +1431,14 @@ async def run_terminology(
                     "input_digest": input_digest,
                     "provenance": provenance,
                 }
-                publish_content_summary_fulls(project, [full_record])
+                cleanup_report = publish_content_summary_fulls(project, [full_record])
+                for skipped in cleanup_report["skipped"]:
+                    warning = (
+                        "内容概括历史清理已跳过："
+                        f"{skipped['file_id']}/{skipped['part_id']} 的 provenance 无法验证"
+                    )
+                    if warning not in warnings:
+                        warnings.append(warning)
         return record
 
     def mark_failed(

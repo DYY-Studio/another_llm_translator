@@ -195,6 +195,78 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
 
 
 @pytest.mark.asyncio
+async def test_auto_adopted_full_surfaces_cleanup_warning_and_keeps_history(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    invalid_full = record_header(
+        "content_summary",
+        project_id,
+        record_id="SUMMARY-FULL-INVALID",
+        kind="full",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧完整概括。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:old-source",
+        input_digest="sha256:old-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, invalid_full)
+    old_reduction = record_header(
+        "content_summary",
+        project_id,
+        record_id="SUMMARY-REDUCTION-OLD",
+        kind="reduction",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="旧压缩结果。",
+        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
+        source_digest="sha256:reduction-source",
+        input_digest="sha256:reduction-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+    )
+    write_content_summary(project, old_reduction)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    try:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    warning = "内容概括历史清理已跳过：F0001/document 的 provenance 无法验证"
+    assert result["failed"] == 0
+    assert result["warnings"] == [warning]
+    assert {
+        str(item["record_id"]) for item in read_content_summaries(project)
+    } >= {"SUMMARY-FULL-INVALID", "SUMMARY-REDUCTION-OLD"}
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["warnings"] == [warning]
+    summary_run = next(
+        item
+        for item in read_summary_runs(project, mode="fragment")
+        if item["run_id"] == result["run_id"]
+    )
+    assert summary_run["status"] == "completed"
+    assert summary_run["warnings"] == [warning]
+
+
+@pytest.mark.asyncio
 async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
     tmp_path: Path,
 ) -> None:
