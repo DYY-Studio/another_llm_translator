@@ -1201,14 +1201,14 @@ part_id)`、源文/模型输入摘要、Prompt/模型信息、原始 Segment 范
 拆分只在宿主能够保留原始 Segment 与实际模型文本摘要时进行；外部 Adapter 提供的
 `model_source` 若无法安全定位拆分，操作会明确失败，不猜测字符映射。
 
-源文被替换、删除或重排时，历史概括不删除，但与当前边界或摘要指纹不再一致的
-完整概括会标记为过期并在页面显示警告。只要仍保存了完整文本，它仍可查看、完成任务
-统计和导出；页面优先使用当前未过期结果，并建议重新生成。片段概括仍必须覆盖当前
-Segment 才能参与新的聚合。已发布的 `full` 是独立缓存：片段刷新尚未成功发布新的
-`full` 前，只要源文未变化且范围仍匹配，旧 `full` 仍可作为翻译上下文；递归 provenance
-失效表示需要刷新，不等同于上下文不可用。`source_changed`、范围不匹配或非 completed
-的摘要仍不得注入翻译。Prompt、Preset 或其他设置不匹配时由通用运行弹窗明确展示并要求
-用户决定；概括页不会在非 force 启动时静默清空结果。
+源文被替换、删除或重排时，历史概括在下一次成功发布对应边界的新 `full` 前不主动删除；
+与当前边界或摘要指纹不再一致的完整概括会标记为过期并在页面显示警告。只要仍在保留范围
+内且保存了完整文本，它仍可查看、完成任务统计和导出；页面优先使用当前未过期结果，并建议
+重新生成。片段概括仍必须覆盖当前 Segment 才能参与新的聚合。已发布的 `full` 是独立缓存：
+片段刷新尚未成功发布新的 `full` 前，只要源文未变化且范围仍匹配，旧 `full` 仍可作为翻译
+上下文；递归 provenance 失效表示需要刷新，不等同于上下文不可用。`source_changed`、范围
+不匹配或非 completed 的摘要仍不得注入翻译。Prompt、Preset 或其他设置不匹配时由通用
+运行弹窗明确展示并要求用户决定；概括页不会在非 force 启动时静默清空结果。
 
 聚合产生的完整概括会沿着 `full`/`reduction` 到 `fragment` 的持久化 provenance
 递归校验子摘要文本、源文摘要、范围、状态、边界和当前 fragment 叶集合；任一已保存
@@ -1217,6 +1217,18 @@ Segment 才能参与新的聚合。已发布的 `full` 是独立缓存：片段�
 或 `provenance_unavailable` 原因。缺少、损坏、循环或跨边界的历史 provenance 按无法
 验证处理并过期，不静默当作有效；旧的 `adopted_fragment` 记录仅保留其单 fragment
 依赖的有限兼容校验。
+
+每个 `(file_id, part_id)` 最多保留按 `created_at DESC, updated_at DESC,
+summary_id DESC` 排序的最新 3 个终止态 `full`（包括刚成功发布的版本）。清理只在该边界
+成功发布 `full` 后执行；聚合生成和 fragment 自动采用生成的 `full` 都遵循同一规则。系统从
+保留的 3 个 `full` 递归保护其 provenance 引用的 `full`、`reduction` 和 `fragment`，再回收
+不可达的旧终止态 `full`、已完成或 stale 的 `reduction`，以及 stale 或 `source_changed`
+的 `fragment`。未标记过时的 completed fragment 以及 failed、draft、running 记录不会删除。
+provenance 缺失、损坏、循环、重复引用、未知 kind 或跨边界而无法验证时，该边界跳过清理并
+产生 warning，但新 `full` 仍提交；其他边界仍可继续清理。失败、取消、预检失败和 dry-run
+不会触发清理。清理不删除 `summary_runs`、运行目录，也不执行 `VACUUM` 或回收 SQLite
+物理文件空间；未选边界的旧记录要等该边界下一次成功发布新 `full` 时处理。超出 3 版范围的
+旧 `full` 不再查看或导出。
 
 ### 手动聚合、阅读与导出
 
