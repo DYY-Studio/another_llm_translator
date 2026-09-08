@@ -25,6 +25,7 @@ from app.sqlite_storage import (
     read_summary_participation,
     read_summary_runs,
     record_header,
+    publish_content_summary_fulls,
     replace_source,
     segment_count,
     segment_ids,
@@ -33,6 +34,7 @@ from app.sqlite_storage import (
     write_summary_participation,
     write_summary_run,
 )
+from app.summary_provenance import build_provenance, digest
 from tests.test_foundation import make_app_root
 
 
@@ -47,6 +49,66 @@ def create_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def _summary_artifact(
+    project_id: str,
+    summary_id: str,
+    *,
+    kind: str,
+    status: str = "completed",
+    text: str | None = None,
+    file_id: str = "F0001",
+    part_id: str = "document",
+    source_changed: bool = False,
+    created_at: str = "2024-01-01T00:00:00+00:00",
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    record = record_header(
+        "content_summary",
+        project_id,
+        record_id=summary_id,
+        kind=kind,
+        file_id=file_id,
+        part_id=part_id,
+        status=status,
+        text=text if text is not None else summary_id,
+        source_range={
+            "file_id": file_id,
+            "part_id": part_id,
+            "segment_ids": [f"{summary_id}-SEGMENT"],
+            "segments": [],
+        },
+        source_digest=f"sha256:{summary_id}-source",
+        input_digest=f"sha256:{summary_id}-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+        source_changed=source_changed,
+    )
+    record["created_at"] = created_at
+    record["updated_at"] = updated_at or created_at
+    return record
+
+
+def _attach_provenance(
+    artifact: dict[str, object],
+    origin: str,
+    children: list[dict[str, object]],
+) -> dict[str, object]:
+    provenance, input_digest = build_provenance(origin, children)
+    artifact["provenance"] = provenance
+    artifact["input_digest"] = input_digest
+    return artifact
+
+
+def _summary_child(artifact: dict[str, object]) -> dict[str, object]:
+    return {
+        "record_id": artifact["record_id"],
+        "kind": artifact["kind"],
+        "text": artifact["text"],
+        "source_digest": artifact["source_digest"],
+        "source_range": artifact["source_range"],
+    }
 
 
 def create_v2_project(tmp_path: Path, *, conflict: bool = False) -> tuple[Path, dict, dict, dict]:
@@ -249,6 +311,251 @@ def test_summary_participation_and_artifacts_persist_provenance(
     assert stored[0]["model"] == summary["model"]
     assert stored[0]["refs"] == summary["refs"]
     assert stored[0]["source_changed"] is False
+
+
+def test_publish_fulls_prunes_unreachable_summary_history_and_keeps_active_states(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+
+    reachable_fragment_a = _summary_artifact(
+        project_id, "FRAGMENT-REACHABLE-A", kind="fragment"
+    )
+    reachable_fragment_b = _summary_artifact(
+        project_id, "FRAGMENT-REACHABLE-B", kind="fragment"
+    )
+    reachable_leaf = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-REACHABLE-LEAF", kind="reduction"),
+        "llm",
+        [_summary_child(reachable_fragment_a), _summary_child(reachable_fragment_b)],
+    )
+    reachable_root = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "REDUCTION-REACHABLE-ROOT",
+            kind="reduction",
+            status="stale",
+        ),
+        "llm",
+        [_summary_child(reachable_leaf)],
+    )
+    completed_unreachable_fragment = _summary_artifact(
+        project_id, "FRAGMENT-COMPLETED-UNREACHABLE", kind="fragment"
+    )
+    stale_fragment = _summary_artifact(
+        project_id, "FRAGMENT-STALE-UNREACHABLE", kind="fragment", status="stale"
+    )
+    changed_fragment = _summary_artifact(
+        project_id,
+        "FRAGMENT-SOURCE-CHANGED-UNREACHABLE",
+        kind="fragment",
+        source_changed=True,
+    )
+    old_reduction = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-COMPLETED-UNREACHABLE", kind="reduction"),
+        "llm",
+        [_summary_child(completed_unreachable_fragment)],
+    )
+    old_stale_reduction = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "REDUCTION-STALE-UNREACHABLE",
+            kind="reduction",
+            status="stale",
+        ),
+        "llm",
+        [_summary_child(completed_unreachable_fragment)],
+    )
+    full_one = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-ONE",
+            kind="full",
+            created_at="2024-01-01T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(old_reduction)],
+    )
+    full_two = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-TWO",
+            kind="full",
+            created_at="2024-01-02T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_root)],
+    )
+    full_three = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-THREE",
+            kind="full",
+            created_at="2024-01-03T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_fragment_a)],
+    )
+    full_four = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-FOUR",
+            kind="full",
+            created_at="2024-01-04T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_root)],
+    )
+    nonterminal_records = [
+        _summary_artifact(
+            project_id, "FRAGMENT-DRAFT", kind="fragment", status="draft"
+        ),
+        _summary_artifact(
+            project_id, "FRAGMENT-RUNNING", kind="fragment", status="running"
+        ),
+        _summary_artifact(
+            project_id, "FRAGMENT-FAILED", kind="fragment", status="failed"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-DRAFT", kind="reduction", status="draft"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-RUNNING", kind="reduction", status="running"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-FAILED", kind="reduction", status="failed"
+        ),
+        _summary_artifact(project_id, "FULL-DRAFT", kind="full", status="draft"),
+        _summary_artifact(project_id, "FULL-RUNNING", kind="full", status="running"),
+        _summary_artifact(project_id, "FULL-FAILED", kind="full", status="failed"),
+    ]
+    for artifact in [
+        reachable_fragment_a,
+        reachable_fragment_b,
+        reachable_leaf,
+        reachable_root,
+        completed_unreachable_fragment,
+        stale_fragment,
+        changed_fragment,
+        old_reduction,
+        old_stale_reduction,
+        full_one,
+        full_two,
+        full_three,
+        *nonterminal_records,
+    ]:
+        write_content_summary(project, artifact)
+
+    report = publish_content_summary_fulls(project, [full_four])
+
+    assert report == {"deleted": 5, "skipped": []}
+    stored = {str(item["record_id"]): item for item in read_content_summaries(project)}
+    assert set(stored) == {
+        "FULL-TWO",
+        "FULL-THREE",
+        "FULL-FOUR",
+        "FULL-DRAFT",
+        "FULL-RUNNING",
+        "FULL-FAILED",
+        "REDUCTION-REACHABLE-LEAF",
+        "REDUCTION-REACHABLE-ROOT",
+        "FRAGMENT-REACHABLE-A",
+        "FRAGMENT-REACHABLE-B",
+        "FRAGMENT-COMPLETED-UNREACHABLE",
+        "FRAGMENT-DRAFT",
+        "FRAGMENT-RUNNING",
+        "FRAGMENT-FAILED",
+        "REDUCTION-DRAFT",
+        "REDUCTION-RUNNING",
+        "REDUCTION-FAILED",
+    }
+    assert stored["FULL-TWO"]["status"] == "stale"
+    assert stored["FULL-THREE"]["status"] == "stale"
+    assert stored["FULL-FOUR"]["status"] == "completed"
+    assert stored["REDUCTION-REACHABLE-ROOT"]["status"] == "stale"
+    assert stored["FRAGMENT-COMPLETED-UNREACHABLE"]["status"] == "completed"
+
+
+def test_publish_fulls_skips_boundary_when_retained_provenance_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    fragment = _summary_artifact(project_id, "FRAGMENT-VALID", kind="fragment")
+    stale_fragment = _summary_artifact(
+        project_id, "FRAGMENT-STALE", kind="fragment", status="stale"
+    )
+    reduction = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-OLD", kind="reduction"),
+        "llm",
+        [_summary_child(stale_fragment)],
+    )
+
+    def full(summary_id: str, created_at: str) -> dict[str, object]:
+        return _attach_provenance(
+            _summary_artifact(
+                project_id,
+                summary_id,
+                kind="full",
+                created_at=created_at,
+            ),
+            "llm",
+            [_summary_child(fragment)],
+        )
+
+    full_one = full("FULL-ONE", "2024-01-01T00:00:00+00:00")
+    full_two = full("FULL-TWO", "2024-01-02T00:00:00+00:00")
+    invalid_full = _summary_artifact(
+        project_id,
+        "FULL-INVALID",
+        kind="full",
+        created_at="2024-01-03T00:00:00+00:00",
+    )
+    invalid_full["provenance"] = {
+        "origin": "llm",
+        "artifact_ids": ["MISSING"],
+        "source_ranges": [{}],
+        "dependencies": [
+            {
+                "record_id": "MISSING",
+                "kind": "fragment",
+                "text_digest": "sha256:text",
+                "source_digest": "sha256:source",
+            }
+        ],
+    }
+    invalid_full["input_digest"] = digest(invalid_full["provenance"]["dependencies"])
+    full_four = full("FULL-FOUR", "2024-01-04T00:00:00+00:00")
+    for artifact in [fragment, stale_fragment, reduction, full_one, full_two, invalid_full]:
+        write_content_summary(project, artifact)
+
+    report = publish_content_summary_fulls(project, [full_four])
+
+    assert report == {
+        "deleted": 0,
+        "skipped": [
+            {
+                "file_id": "F0001",
+                "part_id": "document",
+                "reason": "provenance_unavailable",
+            }
+        ],
+    }
+    stored = {str(item["record_id"]): item for item in read_content_summaries(project)}
+    assert set(stored) == {
+        "FRAGMENT-VALID",
+        "FRAGMENT-STALE",
+        "REDUCTION-OLD",
+        "FULL-ONE",
+        "FULL-TWO",
+        "FULL-INVALID",
+        "FULL-FOUR",
+    }
+    assert stored["FULL-ONE"]["status"] == "stale"
+    assert stored["FULL-TWO"]["status"] == "stale"
+    assert stored["FULL-INVALID"]["status"] == "stale"
+    assert stored["FULL-FOUR"]["status"] == "completed"
 
 
 def test_summary_run_metadata_is_queryable_without_using_run_chunks(

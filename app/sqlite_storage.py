@@ -1315,9 +1315,250 @@ def mark_content_summary_fragments_stale(
     return deleted
 
 
+def _summary_provenance_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _prunable_summary(
+    row: sqlite3.Row,
+) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(str(row["payload_json"]))
+        source_range = json.loads(str(row["source_range_json"]))
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(source_range, dict):
+        return None
+    return {
+        **payload,
+        "record_id": str(row["summary_id"]),
+        "kind": str(row["kind"]),
+        "file_id": str(row["file_id"]),
+        "part_id": str(row["part_id"]),
+        "status": str(row["status"]),
+        "text": row["text"],
+        "source_range": source_range,
+        "source_digest": str(row["source_digest"]),
+        "input_digest": str(row["input_digest"]),
+        "source_changed": bool(row["source_changed"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _prune_published_summary_history(
+    connection: sqlite3.Connection,
+    boundaries: Iterable[tuple[str, str]],
+) -> dict[str, Any]:
+    report: dict[str, Any] = {"deleted": 0, "skipped": []}
+    boundary_values = list(dict.fromkeys((str(file_id), str(part_id)) for file_id, part_id in boundaries))
+    for file_id, part_id in boundary_values:
+        rows = connection.execute(
+            """
+            SELECT summary_id, kind, file_id, part_id, status, text,
+                   source_range_json, source_digest, input_digest, source_changed,
+                   created_at, updated_at, payload_json
+              FROM content_summaries
+             WHERE file_id = ? AND part_id = ?
+            """,
+            (file_id, part_id),
+        ).fetchall()
+        artifacts: dict[str, dict[str, Any]] = {}
+        unavailable = False
+        for row in rows:
+            artifact = _prunable_summary(row)
+            if artifact is None:
+                unavailable = True
+                break
+            record_id = str(artifact["record_id"])
+            if record_id in artifacts:
+                unavailable = True
+                break
+            artifacts[record_id] = artifact
+        if unavailable:
+            report["skipped"].append(
+                {
+                    "file_id": file_id,
+                    "part_id": part_id,
+                    "reason": "provenance_unavailable",
+                }
+            )
+            continue
+
+        terminal_fulls = sorted(
+            (
+                artifact
+                for artifact in artifacts.values()
+                if artifact["kind"] == "full"
+                and artifact["status"] in {"completed", "stale"}
+            ),
+            key=lambda artifact: (
+                str(artifact["created_at"]),
+                str(artifact["updated_at"]),
+                str(artifact["record_id"]),
+            ),
+            reverse=True,
+        )
+        kept_fulls = terminal_fulls[:3]
+        reachable: set[str] = set()
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def unavailable_provenance() -> None:
+            nonlocal unavailable
+            unavailable = True
+
+        def visit(record_id: str) -> None:
+            if unavailable:
+                return
+            if record_id in visiting:
+                unavailable_provenance()
+                return
+            if record_id in visited:
+                return
+            node = artifacts.get(record_id)
+            if node is None:
+                unavailable_provenance()
+                return
+            kind = node["kind"]
+            if kind not in {"fragment", "reduction", "full"}:
+                unavailable_provenance()
+                return
+            visited.add(record_id)
+            reachable.add(record_id)
+            if kind == "fragment":
+                return
+
+            provenance = node.get("provenance")
+            if not isinstance(provenance, dict):
+                unavailable_provenance()
+                return
+            origin = provenance.get("origin")
+            raw_ids = provenance.get("artifact_ids")
+            source_ranges = provenance.get("source_ranges")
+            if (
+                not isinstance(origin, str)
+                or not origin
+                or not isinstance(raw_ids, list)
+                or not raw_ids
+                or any(not isinstance(value, str) or not value for value in raw_ids)
+                or len(set(raw_ids)) != len(raw_ids)
+                or not isinstance(source_ranges, list)
+                or len(source_ranges) != len(raw_ids)
+                or any(not isinstance(value, dict) for value in source_ranges)
+            ):
+                unavailable_provenance()
+                return
+
+            dependencies = provenance.get("dependencies")
+            if origin == "adopted_fragment" and dependencies is None:
+                if (
+                    kind != "full"
+                    or len(raw_ids) != 1
+                    or len(source_ranges) != 1
+                    or raw_ids[0] not in artifacts
+                    or artifacts[raw_ids[0]]["kind"] != "fragment"
+                    or artifacts[raw_ids[0]]["source_range"] != source_ranges[0]
+                ):
+                    unavailable_provenance()
+                    return
+                visiting.add(record_id)
+                visit(raw_ids[0])
+                visiting.remove(record_id)
+                return
+
+            if (
+                not isinstance(dependencies, list)
+                or len(dependencies) != len(raw_ids)
+                or any(not isinstance(value, dict) for value in dependencies)
+                or node.get("input_digest") != _summary_provenance_digest(dependencies)
+            ):
+                unavailable_provenance()
+                return
+
+            visiting.add(record_id)
+            for child_id, source_range, dependency in zip(
+                raw_ids, source_ranges, dependencies, strict=True
+            ):
+                child = artifacts.get(child_id)
+                if child is None or child["kind"] not in {"fragment", "reduction", "full"}:
+                    unavailable_provenance()
+                    break
+                if (child["file_id"], child["part_id"]) != (file_id, part_id):
+                    unavailable_provenance()
+                    break
+                if (
+                    dependency.get("record_id") != child_id
+                    or dependency.get("kind") != child["kind"]
+                    or not isinstance(dependency.get("text_digest"), str)
+                    or not dependency["text_digest"]
+                    or not isinstance(dependency.get("source_digest"), str)
+                    or not dependency["source_digest"]
+                    or source_range != child["source_range"]
+                    or child.get("text") is None
+                    or dependency["text_digest"]
+                    != _summary_provenance_digest(str(child["text"]))
+                    or dependency["source_digest"] != child["source_digest"]
+                ):
+                    unavailable_provenance()
+                    break
+                visit(child_id)
+                if unavailable:
+                    break
+            visiting.remove(record_id)
+
+        for root in kept_fulls:
+            visit(str(root["record_id"]))
+            if unavailable:
+                break
+        if unavailable:
+            report["skipped"].append(
+                {
+                    "file_id": file_id,
+                    "part_id": part_id,
+                    "reason": "provenance_unavailable",
+                }
+            )
+            continue
+
+        deletable = [
+            artifact
+            for artifact in artifacts.values()
+            if artifact["record_id"] not in reachable
+            and (
+                (
+                    artifact["kind"] == "full"
+                    and artifact["status"] in {"completed", "stale"}
+                )
+                or (
+                    artifact["kind"] == "reduction"
+                    and artifact["status"] in {"completed", "stale"}
+                )
+                or (
+                    artifact["kind"] == "fragment"
+                    and artifact["status"] in {"completed", "stale"}
+                    and (artifact["status"] == "stale" or artifact["source_changed"])
+                )
+            )
+        ]
+        for artifact in deletable:
+            connection.execute(
+                "DELETE FROM content_summaries WHERE summary_id = ?",
+                (artifact["record_id"],),
+            )
+        report["deleted"] += len(deletable)
+    return report
+
+
 def publish_content_summary_fulls(
     project: Path, values: Iterable[dict[str, Any]]
-) -> None:
+) -> dict[str, Any]:
     """Publish a complete aggregation batch in one SQLite transaction."""
     checked = [_validate_summary(dict(value), "content summary") for value in values]
     if not checked:
@@ -1353,6 +1594,10 @@ def publish_content_summary_fulls(
                     """,
                     _summary_record_payload(value),
                 )
+            full_ids = {
+                (str(item["file_id"]), str(item["part_id"])): str(item["record_id"])
+                for item in checked
+            }
             for file_id, part_id in boundaries:
                 connection.execute(
                     """
@@ -1362,16 +1607,14 @@ def publish_content_summary_fulls(
                        AND kind = 'full' AND status = 'completed'
                        AND summary_id <> ?
                     """,
-                    [utc_now(), file_id, part_id, next(
-                        str(item["record_id"])
-                        for item in checked
-                        if item["file_id"] == file_id and item["part_id"] == part_id
-                    )],
+                    [utc_now(), file_id, part_id, full_ids[(file_id, part_id)]],
                 )
+            report = _prune_published_summary_history(connection, boundaries)
     except sqlite3.Error as exc:
         raise StorageError(f"无法原子发布内容概括：{project}: {exc}") from exc
     finally:
         connection.close()
+    return report
 
 
 def _hydrate_summary(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
