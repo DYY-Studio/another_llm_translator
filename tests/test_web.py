@@ -745,6 +745,105 @@ def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> No
     ).status_code == 400
 
 
+def test_web_register_project_is_read_only_while_project_is_locked(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        registered = client.post(
+            "/api/v1/projects/register", json={"path": str(project)}
+        )
+
+    assert registered.status_code == 200
+    result = registered.json()
+    assert result == {
+        "selector": "sample",
+        "name": "sample",
+        "project_id": read_json(project, project / "project.json")["project_id"],
+        "path": str(project),
+        "external": False,
+    }
+
+
+def test_web_lists_legacy_project_from_read_only_project_json(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    legacy = projects_root / "legacy"
+    legacy.mkdir(parents=True)
+    sqlite3.connect(legacy / "project.sqlite").close()
+    (legacy / "project.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_type": "project",
+                "project_id": "PRJ-LEGACY",
+                "name": "legacy",
+                "file_count": 0,
+                "segment_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            projects_root=projects_root,
+            app_root=make_app_root(tmp_path),
+            log_path=tmp_path / "app.log",
+        )
+    )
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"] == [
+        {
+            "selector": "legacy",
+            "name": "legacy",
+            "project_id": "PRJ-LEGACY",
+            "path": str(legacy.resolve()),
+            "external": False,
+            "file_count": 0,
+            "segment_count": 0,
+        }
+    ]
+
+
+def test_web_open_project_rejects_project_write_lock(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        opened = client.post(
+            "/api/v1/projects/open", json={"path": str(project)}
+        )
+
+    assert opened.status_code == 400
+    assert "另一个写入任务" in opened.json()["error"]
+
+
+def test_web_open_project_rejects_active_task_with_repair_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+
+    opened = client.post(
+        "/api/v1/projects/open", json={"path": str(project)}
+    )
+
+    assert opened.status_code == 400
+    assert opened.json()["error"] == (
+        "项目存在运行中的任务，结束或取消任务后才能修复项目"
+    )
+
+
 def test_web_open_project_surfaces_storage_upgrade_backup_warning(
     tmp_path: Path,
 ) -> None:

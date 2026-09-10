@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -36,6 +37,7 @@ from .project import (
 )
 from .sqlite_storage import (
     compact_project_database,
+    database_path,
     ensure_supported,
     read_adapter_state,
     read_json,
@@ -215,6 +217,49 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         )
 
 
+    def read_project_metadata_read_only(root: Path) -> dict[str, Any]:
+        database = database_path(root).resolve()
+        project_json = root / "project.json"
+        connection: sqlite3.Connection | None = None
+        metadata: dict[str, Any] | None = None
+        try:
+            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            rows = connection.execute(
+                "SELECT key, value_json FROM project_meta"
+            ).fetchall()
+            metadata = {str(key): json.loads(value_json) for key, value_json in rows}
+        except sqlite3.OperationalError as exc:
+            if "no such table: project_meta" not in str(exc) or not project_json.is_file():
+                raise UsageError(f"无法读取项目元数据：{root}: {exc}") from exc
+            try:
+                value = json.loads(project_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as read_exc:
+                raise UsageError(f"无法读取项目元数据：{project_json}: {read_exc}") from read_exc
+            if isinstance(value, dict):
+                metadata = value
+        except (sqlite3.Error, json.JSONDecodeError) as exc:
+            raise UsageError(f"无法读取项目元数据：{root}: {exc}") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        if metadata is None:
+            raise UsageError(f"项目元数据不是对象：{root}")
+        required = ("project_id", "name", "file_count", "segment_count")
+        if any(key not in metadata for key in required):
+            raise UsageError(f"项目元数据不完整：{root}")
+        return metadata
+
+
+    def project_path_from_payload(payload: dict[str, Any]) -> Path:
+        value = payload.get("path")
+        if not isinstance(value, str) or not value.strip():
+            raise UsageError("项目路径必须是非空字符串")
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise UsageError("项目路径必须是绝对路径")
+        return resolve_project(str(candidate))
+
+
     def replacement_key(root: Path, file_id: str) -> tuple[Path, str]:
         return root.resolve(), file_id
 
@@ -223,7 +268,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         values = []
         selectors: set[str] = set()
         for item in project_paths():
-            metadata = read_json(item, item / "project.json")
+            metadata = read_project_metadata_read_only(item)
             selector = project_selector(item, metadata)
             if selector in selectors:
                 raise UsageError(f"项目标识冲突：{selector}")
@@ -332,15 +377,24 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         summary["external"] = path.parent != projects_root.resolve()
         return summary
 
+    @app.post("/api/v1/projects/register")
+    async def register_project(payload: dict[str, Any]) -> dict[str, Any]:
+        root = project_path_from_payload(payload)
+        metadata = read_project_metadata_read_only(root)
+        remember_project(root)
+        return {
+            "selector": project_selector(root, metadata),
+            "name": metadata["name"],
+            "project_id": metadata["project_id"],
+            "path": str(root),
+            "external": root.parent != projects_root.resolve(),
+        }
+
     @app.post("/api/v1/projects/open")
     async def open_project(payload: dict[str, Any]) -> dict[str, Any]:
-        value = payload.get("path")
-        if not isinstance(value, str) or not value.strip():
-            raise UsageError("项目路径必须是非空字符串")
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            raise UsageError("项目路径必须是绝对路径")
-        root = resolve_project(str(candidate))
+        root = project_path_from_payload(payload)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，结束或取消任务后才能修复项目")
         with project_write_lock(root):
             warnings = ensure_missing_summary_prompts(root, app_root=app_root)
             backup = ensure_supported(root)
