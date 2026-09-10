@@ -22,6 +22,8 @@ from .plugins import (
 )
 from .project import (
     FileReplacementPlan,
+    PROMPT_LANGUAGES,
+    PROMPT_RESOURCE_STAGES,
     add_project_files,
     apply_file_replacement,
     delete_project,
@@ -30,12 +32,14 @@ from .project import (
     load_source_files,
     natural_path_key,
     prepare_file_replacement,
+    prompt_file,
     remove_project_files,
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
 )
 from .sqlite_storage import (
+    SCHEMA_VERSION,
     compact_project_database,
     database_path,
     ensure_supported,
@@ -250,6 +254,54 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return metadata
 
 
+    def project_repair_needed_read_only(root: Path) -> bool:
+        prompt_missing = any(
+            not (root / "prompts" / prompt_file(stage, language)).is_file()
+            for language in PROMPT_LANGUAGES
+            for stage in PROMPT_RESOURCE_STAGES
+        )
+        database = database_path(root).resolve()
+        if not database.is_file():
+            raise UsageError(f"项目缺少 project.sqlite：{root}")
+        connection: sqlite3.Connection | None = None
+        schema_version: int | None = None
+        try:
+            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'schema_meta'"
+            ).fetchone()
+            if table is not None:
+                row = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                if row is not None:
+                    try:
+                        schema_version = int(row[0])
+                    except (TypeError, ValueError) as exc:
+                        raise UsageError(
+                            "不支持的项目 SQLite schema_version："
+                            f"{row[0]!r}；请重新创建项目"
+                        ) from exc
+        except UsageError:
+            raise
+        except sqlite3.Error as exc:
+            raise UsageError(f"无法读取项目 schema：{database}: {exc}") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        if schema_version is not None and schema_version not in {
+            1,
+            2,
+            3,
+            SCHEMA_VERSION,
+        }:
+            raise UsageError(
+                f"不支持的项目 SQLite schema_version：{schema_version}；请重新创建项目"
+            )
+        return prompt_missing or schema_version != SCHEMA_VERSION
+
+
     def project_path_from_payload(payload: dict[str, Any]) -> Path:
         value = payload.get("path")
         if not isinstance(value, str) or not value.strip():
@@ -282,6 +334,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
                     "external": item.parent != projects_root.resolve(),
                     "file_count": metadata["file_count"],
                     "segment_count": metadata["segment_count"],
+                    "repair_needed": project_repair_needed_read_only(item),
                 }
             )
         return {

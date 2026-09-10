@@ -137,6 +137,72 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_project_list_reports_no_repair_for_complete_project(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is False
+
+
+def test_web_project_list_reports_repair_for_missing_prompt(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+
+
+@pytest.mark.parametrize("schema_version", ["3", None])
+def test_web_project_list_checks_schema_read_only_while_project_is_locked(
+    tmp_path: Path, schema_version: str | None
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        with connection:
+            if schema_version is None:
+                connection.execute(
+                    "DELETE FROM schema_meta WHERE key = 'schema_version'"
+                )
+            else:
+                connection.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (schema_version,),
+                )
+    finally:
+        connection.close()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    finally:
+        connection.close()
+    if schema_version is None:
+        assert row is None
+    else:
+        assert row is not None
+        assert row[0] == schema_version
+    assert not (project / "snapshots" / "storage_migrations").exists()
+
+
 def test_web_segment_query_does_not_collect_project_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -807,6 +873,7 @@ def test_web_lists_legacy_project_from_read_only_project_json(
             "external": False,
             "file_count": 0,
             "segment_count": 0,
+            "repair_needed": True,
         }
     ]
 
