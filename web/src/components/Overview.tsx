@@ -72,8 +72,11 @@ export function Overview({
     position: DropPosition;
   } | null>(null);
   const selectedProject = projects.find((item) => item.selector === project);
+  const repairNeeded = selectedProject?.repair_needed === true;
   const repairBlocked = Boolean(
-    selectedProject && runningProjectIds.has(selectedProject.project_id),
+    repairNeeded
+      && selectedProject
+      && runningProjectIds.has(selectedProject.project_id),
   );
 
   useEffect(() => {
@@ -390,17 +393,19 @@ export function Overview({
             <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
               {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
             </button>
-            <button
-              className="quiet-button"
-              disabled={busy || compacting || buttonReorderMode || repairBlocked || repairing}
-              title={repairBlocked ? translate("overview.repairRunningHint", language) : undefined}
-              onClick={() => void onRepair()}
-            >
-              {repairing ? translate("overview.repairing", language) : translate("overview.repair", language)}
-            </button>
+            {repairNeeded && (
+              <button
+                className="quiet-button"
+                disabled={busy || compacting || buttonReorderMode || repairBlocked || repairing}
+                title={repairBlocked ? translate("overview.repairRunningHint", language) : undefined}
+                onClick={() => void onRepair()}
+              >
+                {repairing ? translate("overview.repairing", language) : translate("overview.repair", language)}
+              </button>
+            )}
             <button className="danger-button" disabled={busy || compacting} onClick={() => setDeleting(true)}>{translate("overview.delete", language)}</button>
           </div>
-          {repairBlocked && <span className="muted">{translate("overview.repairRunningHint", language)}</span>}
+          {repairNeeded && repairBlocked && <span className="muted">{translate("overview.repairRunningHint", language)}</span>}
         </div>
       </div>
       <div className="overview-file-section">

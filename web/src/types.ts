@@ -171,6 +171,7 @@ export interface ProjectSummary {
   external: boolean;
   file_count: number;
   segment_count: number;
+  repair_needed: boolean;
 }
 
 export interface ErrorPayload {
