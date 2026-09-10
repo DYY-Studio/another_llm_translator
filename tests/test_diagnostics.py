@@ -87,8 +87,10 @@ async def test_diagnostics_hub_keeps_concurrent_task_sessions_separate(
     release_first.set()
     await first
     remaining = hub.snapshot()
-    assert remaining["metrics"]["total_requests"] == 1
+    assert remaining["metrics"]["total_requests"] == 2
     assert remaining["metrics"]["project"] == "second"
+    assert remaining["metrics"]["input_tokens"] == 30
+    assert remaining["metrics"]["output_tokens"] == 3
     assert hub.request_detail("REQ-T1")["status"] == "interrupted"
     assert hub.request_detail("REQ-T2")["status"] == "running"
     assert hub.snapshot(project="second")["requests"]["total"] == 1
@@ -131,7 +133,8 @@ def test_diagnostics_hub_filters_metrics_and_requests_by_project(
         )
 
     filtered = hub.snapshot(project="second")
-    assert filtered["metrics"]["total_requests"] == 0
+    assert filtered["metrics"]["total_requests"] == 1
+    assert filtered["metrics"]["http_errors"] == 1
     assert filtered["requests"]["total"] == 1
     assert filtered["requests"]["items"][0]["task_id"] == "T2"
 
@@ -169,6 +172,7 @@ def test_diagnostics_hub_distinguishes_unavailable_and_partial_usage(
             assert partial["usage_partial"] is True
             assert partial["input_tokens"] == 12
             assert partial["output_tokens"] == 3
+            assert partial["throughput_tokens_per_second"] is not None
 
 
 def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
@@ -215,14 +219,17 @@ def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
         assert filtered["requests"]["items"][0]["task_id"] == "T1"
 
 
-def test_diagnostics_hub_removes_old_terminal_records_across_sessions(
+def test_diagnostics_hub_removes_old_terminal_records_in_current_batch(
     tmp_path: Path,
 ) -> None:
     hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
-    for index in range(201):
-        task_id = f"T-{index}"
-        request_id = f"REQ-{index}"
-        with hub.activate(f"project-{index}", "translation", task_id=task_id):
+    with ExitStack() as stack:
+        for index in range(201):
+            task_id = f"T-{index}"
+            request_id = f"REQ-{index}"
+            stack.enter_context(
+                hub.activate(f"project-{index}", "translation", task_id=task_id)
+            )
             hub.begin_request(
                 request_id=request_id,
                 model="model",
@@ -239,7 +246,7 @@ def test_diagnostics_hub_removes_old_terminal_records_across_sessions(
     assert hub.request_detail("REQ-200")["request_id"] == "REQ-200"
 
 
-def test_diagnostics_hub_clears_only_previous_run_for_same_project(
+def test_diagnostics_hub_clears_previous_batch_when_new_run_starts(
     tmp_path: Path,
 ) -> None:
     hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
@@ -271,12 +278,53 @@ def test_diagnostics_hub_clears_only_previous_run_for_same_project(
     request_ids = {
         item["request_id"] for item in hub.snapshot()["requests"]["items"]
     }
-    assert request_ids == {"REQ-OTHER", "REQ-NEW"}
+    assert request_ids == {"REQ-NEW"}
+    assert hub.snapshot()["metrics"]["total_requests"] == 1
     with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-OLD"):
         hub.request_detail("REQ-OLD")
 
 
-def test_diagnostics_hub_clears_previous_task_run_for_unscoped_run(
+@pytest.mark.asyncio
+async def test_diagnostics_hub_keeps_finished_sessions_while_another_run_is_active(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-T2",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        with hub.activate("first", "translation", task_id="T1"):
+            hub.begin_request(
+                request_id="REQ-T1",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.complete_request("REQ-T1", content="first", reasoning_content=None)
+
+        with hub.activate("third", "translation", task_id="T3"):
+            hub.begin_request(
+                request_id="REQ-T3",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            snapshot = hub.snapshot()
+
+    assert snapshot["metrics"]["total_requests"] == 3
+    assert {
+        item["request_id"] for item in snapshot["requests"]["items"]
+    } == {"REQ-T1", "REQ-T2", "REQ-T3"}
+
+    finished = hub.snapshot()
+    assert finished["metrics"]["project"] is None
+    assert finished["metrics"]["total_requests"] == 3
+
+
+def test_diagnostics_hub_clears_previous_batch_for_unscoped_run(
     tmp_path: Path,
 ) -> None:
     hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
@@ -308,7 +356,7 @@ def test_diagnostics_hub_clears_previous_task_run_for_unscoped_run(
     request_ids = {
         item["request_id"] for item in hub.snapshot()["requests"]["items"]
     }
-    assert request_ids == {"REQ-OTHER", "REQ-NEW"}
+    assert request_ids == {"REQ-NEW"}
 
 
 def test_diagnostics_hub_unscoped_run_resets_incremental_feed(
@@ -526,7 +574,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert partial["usage_partial"] is True
     assert partial["input_tokens"] == 12
     assert partial["output_tokens"] == 3
-    assert partial["throughput_tokens_per_second"] is None
+    assert partial["throughput_tokens_per_second"] is not None
 
 
 def test_stream_progress_is_visible_without_partial_response(

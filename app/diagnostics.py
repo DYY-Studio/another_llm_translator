@@ -110,15 +110,7 @@ class Diagnostics:
         logger.addHandler(disk)
         logger.addHandler(memory)
 
-    @contextmanager
-    def activate(
-        self, project: str, stage: str, *, task_id: str | None = None
-    ) -> Iterator[None]:
-        active_token = _ACTIVE.set(self)
-        project_token = _PROJECT.set(project)
-        self.project = project
-        self.stage = stage
-        self.task_id = task_id
+    def _reset_run_state(self) -> None:
         self.active_requests = 0
         self.total_requests = 0
         self.http_errors = 0
@@ -131,8 +123,21 @@ class Diagnostics:
         self._retained_terminal_details.clear()
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
-        self._started_monotonic = time.monotonic()
+        self._started_monotonic = None
         self._elapsed_seconds = 0.0
+        self._running = False
+
+    @contextmanager
+    def activate(
+        self, project: str, stage: str, *, task_id: str | None = None
+    ) -> Iterator[None]:
+        active_token = _ACTIVE.set(self)
+        project_token = _PROJECT.set(project)
+        self._reset_run_state()
+        self.project = project
+        self.stage = stage
+        self.task_id = task_id
+        self._started_monotonic = time.monotonic()
         self._running = True
         try:
             yield
@@ -475,7 +480,7 @@ class Diagnostics:
         throughput_input = None
         throughput_output = None
         throughput_total = None
-        if usage_available and elapsed > 0:
+        if usage_observed and elapsed > 0:
             throughput_input = round(input_tokens / elapsed, 2)
             throughput_output = round(output_tokens / elapsed, 2)
             throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
@@ -592,29 +597,18 @@ class DiagnosticsHub(Diagnostics):
         if len(self.requests) < previous_count:
             self._reset_hub_request_feed()
 
-    def _clear_project_sessions(self, project: str) -> None:
-        stale_task_ids = [
-            task_id
-            for task_id, session in self.sessions.items()
-            if session.project == project and not session._running
-        ]
-        clear_unscoped = self.project == project and not self._running and bool(
-            self.requests
+    def _has_running_sessions(self) -> bool:
+        return self._running or any(
+            session._running for session in self.sessions.values()
         )
-        if not stale_task_ids and not clear_unscoped:
-            return
-        stale_sessions = {
-            self.sessions.pop(task_id)
-            for task_id in stale_task_ids
-        }
-        if clear_unscoped:
-            self.requests.clear()
-            self._retained_terminal_details.clear()
-        self._hub_retained_terminal_details = deque(
-            (session, request_id)
-            for session, request_id in self._hub_retained_terminal_details
-            if session not in stale_sessions
-        )
+
+    def _reset_batch(self) -> None:
+        self.sessions.clear()
+        self._hub_retained_terminal_details.clear()
+        self._reset_run_state()
+        self.project = None
+        self.stage = None
+        self.task_id = None
         self._reset_hub_request_feed()
 
     def begin_request(self, **kwargs: Any) -> None:
@@ -694,13 +688,12 @@ class DiagnosticsHub(Diagnostics):
         *,
         task_id: str | None = None,
     ) -> Iterator[None]:
+        if not self._has_running_sessions():
+            self._reset_batch()
         if task_id is None:
-            self._clear_project_sessions(project)
-            self._reset_hub_request_feed()
             with super().activate(project, stage):
                 yield
             return
-        self._clear_project_sessions(project)
         session = RunDiagnostics(
             self.log_path,
             task_id=task_id,
@@ -760,27 +753,30 @@ class DiagnosticsHub(Diagnostics):
                 or query_text in str(item["message"]).casefold()
             )
         ]
-        active_sessions = [
+        metric_sessions = [
             session
             for session in self.sessions.values()
-            if session._running
-            and self._session_matches(session, project=project, stage=stage)
+            if self._session_matches(session, project=project, stage=stage)
         ]
-        if self._running and self._session_matches(
-            self, project=project, stage=stage
+        if (
+            (self._running or self.project is not None)
+            and self._session_matches(self, project=project, stage=stage)
         ):
-            active_sessions.append(self)
+            metric_sessions.append(self)
+        running_sessions = [
+            session for session in metric_sessions if session._running
+        ]
 
-        active_requests = sum(session.active_requests for session in active_sessions)
-        total_requests = sum(session.total_requests for session in active_sessions)
-        http_errors = sum(session.http_errors for session in active_sessions)
-        retry_count = sum(session.retry_count for session in active_sessions)
+        active_requests = sum(session.active_requests for session in metric_sessions)
+        total_requests = sum(session.total_requests for session in metric_sessions)
+        http_errors = sum(session.http_errors for session in metric_sessions)
+        retry_count = sum(session.retry_count for session in metric_sessions)
         waiting_requests = sum(
-            session.rate_limit_waiting_requests for session in active_sessions
+            session.rate_limit_waiting_requests for session in metric_sessions
         )
         latency_samples = [
             sample
-            for session in active_sessions
+            for session in metric_sessions
             for sample in session._latency_samples_seconds
         ]
         latency_count = len(latency_samples)
@@ -796,7 +792,7 @@ class DiagnosticsHub(Diagnostics):
                 sorted(latency_samples)[p95_rank - 1] * 1000, 1
             )
 
-        usages = [session.usage for session in active_sessions]
+        usages = [session.usage for session in metric_sessions]
         usage_values = [usage for usage in usages if isinstance(usage, dict)]
         has_partial_usage = any(
             usage.get("partial") is True for usage in usage_values
@@ -824,27 +820,37 @@ class DiagnosticsHub(Diagnostics):
             if observed_usage
             else 0
         )
-        elapsed_values = []
-        for session in active_sessions:
-            elapsed = session._elapsed_seconds
-            if session._started_monotonic is not None and session._running:
-                elapsed = time.monotonic() - session._started_monotonic
-            elapsed_values.append(elapsed)
-        elapsed = max(elapsed_values, default=0.0)
+        start_times = [
+            session._started_monotonic
+            for session in metric_sessions
+            if session._started_monotonic is not None
+        ]
+        finish_times = [
+            (
+                time.monotonic()
+                if session._running
+                else session._started_monotonic + session._elapsed_seconds
+            )
+            for session in metric_sessions
+            if session._started_monotonic is not None
+        ]
+        elapsed = (
+            max(finish_times) - min(start_times)
+            if start_times and finish_times
+            else 0.0
+        )
         throughput_input = None
         throughput_output = None
         throughput_total = None
-        if complete_usage and elapsed > 0:
+        if observed_usage and elapsed > 0:
             throughput_input = round(input_tokens / elapsed, 2)
             throughput_output = round(output_tokens / elapsed, 2)
             throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
 
         all_requests: list[tuple[Diagnostics, dict[str, Any]]] = [
             (session, request)
-            for session in [*self.sessions.values(), self]
+            for session in metric_sessions
             for request in session.requests.values()
-            if (project is None or request["project"] == project)
-            and (stage is None or request["stage"] == stage)
         ]
         reset = request_session != self._hub_request_session or request_after is None
         request_items = [
@@ -853,12 +859,12 @@ class DiagnosticsHub(Diagnostics):
             if reset
             or request.get("_hub_revision", -1) > int(request_after or 0)
         ]
-        if len(active_sessions) == 1:
-            metric_project = active_sessions[0].project
-            metric_stage = active_sessions[0].stage
+        if len(running_sessions) == 1:
+            metric_project = running_sessions[0].project
+            metric_stage = running_sessions[0].stage
         else:
-            metric_project = project
-            metric_stage = stage
+            metric_project = None
+            metric_stage = None
         return {
             "metrics": {
                 "project": metric_project,
