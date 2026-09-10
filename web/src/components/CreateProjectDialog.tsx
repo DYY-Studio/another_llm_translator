@@ -60,7 +60,7 @@ export function CreateProjectDialog({ onClose, onCreated, language }: { onClose:
   }
   async function open() {
     try {
-      const result = await api<{ selector: string; path: string; external: boolean }>("/api/v1/projects/open", {
+      const result = await api<{ selector: string; path: string; external: boolean }>("/api/v1/projects/register", {
         method: "POST",
         body: JSON.stringify({ path: projectPath.trim() }),
       });
