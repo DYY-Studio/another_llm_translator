@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
+import { JsonPayloadViewer } from "./JsonPayloadViewer";
 import {
   fetchHistoricalRequest,
   fetchHistoricalRun,
@@ -315,7 +316,7 @@ function PayloadPanel({
   return (
     <>
       <p className="history-redaction-note">{translate("diagnostics.history.debugRedaction", language)}</p>
-      <pre className="history-code">{JSON.stringify(payload.value, null, 2)}</pre>
+      <JsonPayloadViewer value={payload.value} language={language} />
     </>
   );
 }
@@ -426,7 +427,11 @@ function HistoricalRequestDiagnostics({
                 ))}
               </div>
             ) : (
-              <PayloadPanel payload={selectedPayload} language={language} />
+              <PayloadPanel
+                key={`${requestId ?? ""}-${attemptIndex}-${requestTab}`}
+                payload={selectedPayload}
+                language={language}
+              />
             )}
           </>
         )}
