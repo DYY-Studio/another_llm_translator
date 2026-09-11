@@ -2,6 +2,9 @@ import { api } from "./api.ts";
 import type {
   ProjectOverview,
   ProjectSummary,
+  HistoricalRunDetail,
+  HistoricalRunRequestDetail,
+  HistoricalRunSummary,
   RelatedTermsResponse,
   SummariesResponse,
   TermHitsResponse,
@@ -17,7 +20,34 @@ export const queryKeys = {
   termHits: ({ projectId }: ProjectQueryIdentity, normalized: string) => ["term-hits", projectId, normalized] as const,
   relatedTerms: ({ projectId }: ProjectQueryIdentity, termsRevision: number | null, matchKey: string) => ["related-terms", projectId, termsRevision, matchKey] as const,
   summaries: ({ projectId }: ProjectQueryIdentity) => ["summaries", projectId] as const,
+  historicalRuns: ({ project, stage, status, offset, limit }: HistoricalRunQuery) => (
+    ["historical-runs", project, stage, status, offset, limit] as const
+  ),
+  historicalRun: ({ project, runId }: HistoricalRunIdentity) => (
+    ["historical-run", project, runId] as const
+  ),
+  historicalRequest: ({ project, runId, requestId, full }: HistoricalRequestIdentity) => (
+    ["historical-request", project, runId, requestId, full] as const
+  ),
 };
+
+export interface HistoricalRunQuery {
+  project: string;
+  stage: string;
+  status: string;
+  offset: number;
+  limit: number;
+}
+
+interface HistoricalRunIdentity {
+  project: string;
+  runId: string;
+}
+
+interface HistoricalRequestIdentity extends HistoricalRunIdentity {
+  requestId: string;
+  full: boolean;
+}
 
 export async function fetchProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
   const value = await api<{ projects: ProjectSummary[] }>("/api/v1/projects", { signal });
@@ -66,4 +96,42 @@ export function fetchRelatedTerms(
 
 export function fetchSummaries(project: string, signal?: AbortSignal): Promise<SummariesResponse> {
   return api<SummariesResponse>(`/api/v1/projects/${project}/summaries`, { signal });
+}
+
+export function fetchHistoricalRuns(
+  query: HistoricalRunQuery,
+  signal?: AbortSignal,
+): Promise<{ items: HistoricalRunSummary[]; total: number; offset: number; limit: number }> {
+  const params = new URLSearchParams();
+  if (query.project) params.set("project", query.project);
+  if (query.stage) params.set("stage", query.stage);
+  if (query.status) params.set("status", query.status);
+  params.set("offset", String(query.offset));
+  params.set("limit", String(query.limit));
+  return api(`/api/v1/runs?${params.toString()}`, { signal });
+}
+
+export function fetchHistoricalRun(
+  project: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<HistoricalRunDetail> {
+  return api<HistoricalRunDetail>(
+    `/api/v1/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(runId)}`,
+    { signal },
+  );
+}
+
+export function fetchHistoricalRequest(
+  project: string,
+  runId: string,
+  requestId: string,
+  full: boolean,
+  signal?: AbortSignal,
+): Promise<HistoricalRunRequestDetail> {
+  const suffix = full ? "?full=true" : "";
+  return api<HistoricalRunRequestDetail>(
+    `/api/v1/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(runId)}/requests/${encodeURIComponent(requestId)}${suffix}`,
+    { signal },
+  );
 }

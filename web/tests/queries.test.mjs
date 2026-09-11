@@ -3,6 +3,9 @@ import { afterEach, test } from "node:test";
 
 import {
   fetchOverview,
+  fetchHistoricalRequest,
+  fetchHistoricalRun,
+  fetchHistoricalRuns,
   fetchProjects,
   fetchRelatedTerms,
   fetchSummaries,
@@ -105,4 +108,51 @@ test("fetchSummaries uses the project-specific summaries URL", async () => {
   await fetchSummaries("project-a", signal);
 
   assertGet(calls[0], "/api/v1/projects/project-a/summaries", signal);
+});
+
+test("historical run query keys include scope and pagination", () => {
+  assert.deepEqual(
+    queryKeys.historicalRuns({
+      project: "sample",
+      stage: "translation",
+      status: "failed",
+      offset: 20,
+      limit: 20,
+    }),
+    ["historical-runs", "sample", "translation", "failed", 20, 20],
+  );
+});
+
+test("fetchHistoricalRuns sends filters and pagination as a GET", async () => {
+  const signal = new AbortController().signal;
+  const calls = stubFetch({ items: [], total: 0, offset: 20, limit: 20 });
+
+  await fetchHistoricalRuns({
+    project: "sample",
+    stage: "translation",
+    status: "failed",
+    offset: 20,
+    limit: 20,
+  }, signal);
+
+  assertGet(
+    calls[0],
+    "/api/v1/runs?project=sample&stage=translation&status=failed&offset=20&limit=20",
+    signal,
+  );
+});
+
+test("historical run detail queries address a run and optionally expand a request", async () => {
+  const signal = new AbortController().signal;
+  const calls = stubFetch({ run_id: "RUN-1" });
+
+  await fetchHistoricalRun("sample", "RUN-1", signal);
+  await fetchHistoricalRequest("sample", "RUN-1", "REQ-1", true, signal);
+
+  assertGet(calls[0], "/api/v1/projects/sample/runs/RUN-1", signal);
+  assertGet(
+    calls[1],
+    "/api/v1/projects/sample/runs/RUN-1/requests/REQ-1?full=true",
+    signal,
+  );
 });
