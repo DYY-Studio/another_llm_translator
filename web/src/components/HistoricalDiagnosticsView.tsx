@@ -456,7 +456,15 @@ function HistoricalRunDetailPanel({
   const [tab, setTab] = useState<DetailTab>("summary");
   if (loading) return <section className="history-detail-panel"><div className="diagnostics-empty">{translate("diagnostics.history.loadingDetail", language)}</div></section>;
   if (error) return <section className="history-detail-panel"><div className="warning-banner">{errorMessage(error, language)}</div></section>;
-  if (!detail) return null;
+  if (!detail) {
+    return (
+      <section className="history-detail-panel history-detail-empty" aria-label={translate("diagnostics.history.detailTitle", language)}>
+        <div className="diagnostics-empty">
+          <strong>{translate("diagnostics.history.detailTitle", language)}</strong>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="history-detail-panel" aria-labelledby="history-detail-title">
       <header className="history-detail-heading">
@@ -531,43 +539,47 @@ export function HistoricalDiagnosticsView({
         </div>
         <button className="quiet-button" onClick={() => void runsQuery.refetch()}>{translate("diagnostics.history.refresh", language)}</button>
       </header>
-      <div className="history-filters">
-        <label>{translate("diagnostics.history.projectFilter", language)}
-          <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
-            <option value="">{translate("diagnostics.history.allProjects", language)}</option>
-            {projects.map((item) => <option value={item.selector} key={item.selector}>{item.name}</option>)}
-          </select>
-        </label>
-        <label>{translate("diagnostics.history.stageFilter", language)}
-          <select value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}>
-            <option value="">{translate("diagnostics.history.allStages", language)}</option>
-            {HISTORY_STAGES.map((stage) => <option value={stage} key={stage}>{stageLabel(stage, language)}</option>)}
-          </select>
-        </label>
-        <label>{translate("diagnostics.history.statusFilter", language)}
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            <option value="">{translate("diagnostics.history.allStatuses", language)}</option>
-            {HISTORY_STATUSES.map((status) => <option value={status} key={status}>{statusLabel(status, language)}</option>)}
-          </select>
-        </label>
-      </div>
-      {runsQuery.isError && <div className="warning-banner">{errorMessage(runsQuery.error, language)}</div>}
-      <div className="history-list-panel">
-        <div className="history-list-heading">
-          <strong>{translate("diagnostics.history.total", language, { count: total })}</strong>
-          <span>{total ? `${offset + 1}–${Math.min(offset + HISTORY_LIMIT, total)} / ${total}` : ""}</span>
-        </div>
-        {runsQuery.isPending ? <div className="diagnostics-empty">{translate("diagnostics.history.loading", language)}</div> : items.length ? (
-          <div className="history-run-list">
-            {items.map((item) => <HistoricalRunRow key={`${item.project_id}-${item.run_id}`} item={item} language={language} selected={selectedRun?.run_id === item.run_id && selectedRun.project_id === item.project_id} onSelect={() => setSelectedRun(item)} />)}
+      <div className="history-browser">
+        <aside className="history-browser-sidebar">
+          <div className="history-filters">
+            <label>{translate("diagnostics.history.projectFilter", language)}
+              <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
+                <option value="">{translate("diagnostics.history.allProjects", language)}</option>
+                {projects.map((item) => <option value={item.selector} key={item.selector}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>{translate("diagnostics.history.stageFilter", language)}
+              <select value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}>
+                <option value="">{translate("diagnostics.history.allStages", language)}</option>
+                {HISTORY_STAGES.map((stage) => <option value={stage} key={stage}>{stageLabel(stage, language)}</option>)}
+              </select>
+            </label>
+            <label>{translate("diagnostics.history.statusFilter", language)}
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <option value="">{translate("diagnostics.history.allStatuses", language)}</option>
+                {HISTORY_STATUSES.map((status) => <option value={status} key={status}>{statusLabel(status, language)}</option>)}
+              </select>
+            </label>
           </div>
-        ) : <div className="diagnostics-empty">{translate("diagnostics.history.empty", language)}</div>}
-        <div className="history-pagination">
-          <button className="quiet-button" disabled={!hasPrevious || runsQuery.isFetching} onClick={() => setOffset((value) => Math.max(0, value - HISTORY_LIMIT))}>{translate("diagnostics.history.previous", language)}</button>
-          <button className="quiet-button" disabled={!hasNext || runsQuery.isFetching} onClick={() => setOffset((value) => value + HISTORY_LIMIT)}>{translate("diagnostics.history.next", language)}</button>
-        </div>
+          {runsQuery.isError && <div className="warning-banner">{errorMessage(runsQuery.error, language)}</div>}
+          <div className="history-list-panel">
+            <div className="history-list-heading">
+              <strong>{translate("diagnostics.history.total", language, { count: total })}</strong>
+              <span>{total ? `${offset + 1}–${Math.min(offset + HISTORY_LIMIT, total)} / ${total}` : ""}</span>
+            </div>
+            {runsQuery.isPending ? <div className="diagnostics-empty">{translate("diagnostics.history.loading", language)}</div> : items.length ? (
+              <div className="history-run-list">
+                {items.map((item) => <HistoricalRunRow key={`${item.project_id}-${item.run_id}`} item={item} language={language} selected={selectedRun?.run_id === item.run_id && selectedRun.project_id === item.project_id} onSelect={() => setSelectedRun(item)} />)}
+              </div>
+            ) : <div className="diagnostics-empty">{translate("diagnostics.history.empty", language)}</div>}
+            <div className="history-pagination">
+              <button className="quiet-button" disabled={!hasPrevious || runsQuery.isFetching} onClick={() => setOffset((value) => Math.max(0, value - HISTORY_LIMIT))}>{translate("diagnostics.history.previous", language)}</button>
+              <button className="quiet-button" disabled={!hasNext || runsQuery.isFetching} onClick={() => setOffset((value) => value + HISTORY_LIMIT)}>{translate("diagnostics.history.next", language)}</button>
+            </div>
+          </div>
+        </aside>
+        <HistoricalRunDetailPanel detail={selectedRun ? detailQuery.data : undefined} loading={Boolean(selectedRun) && detailQuery.isPending} error={selectedRun && detailQuery.isError ? detailQuery.error : null} language={language} onClose={() => setSelectedRun(null)} />
       </div>
-      {selectedRun && <HistoricalRunDetailPanel detail={detailQuery.data} loading={detailQuery.isPending} error={detailQuery.isError ? detailQuery.error : null} language={language} onClose={() => setSelectedRun(null)} />}
     </div>
   );
 }
