@@ -389,7 +389,13 @@ def create_app(
     from .web_summary_routes import register_summary_routes
     register_summary_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_task_routes import register_task_routes
-    register_task_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
+    register_task_routes(
+        app=app,
+        projects_root=projects_root,
+        app_root=app_root,
+        project=project,
+        project_paths=project_paths,
+    )
     from .web_project_routes import register_project_routes
     register_project_routes(app=app, projects_root=projects_root, app_root=app_root, project=project, project_paths=project_paths, remember_project=remember_project)
 

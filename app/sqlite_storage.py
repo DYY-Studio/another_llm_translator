@@ -2516,6 +2516,112 @@ def list_runs(project: Path, stage: str | None = None, status: str | None = None
         connection.close()
 
 
+def _read_only_connection(project: Path) -> sqlite3.Connection:
+    database = database_path(project).resolve()
+    if not database.is_file():
+        raise ProjectError(f"项目缺少 project.sqlite：{project}")
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"{database.as_uri()}?mode=ro", uri=True, timeout=30
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        version = _schema_version(connection)
+        if version is None:
+            raise ProjectError(
+                "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
+            )
+        if version != SCHEMA_VERSION:
+            raise ProjectError(
+                f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
+            )
+        return connection
+    except ProjectError:
+        if connection is not None:
+            connection.close()
+        raise
+    except sqlite3.Error as exc:
+        if connection is not None:
+            connection.close()
+        raise StorageError(f"无法只读打开项目 SQLite：{database}: {exc}") from exc
+
+
+def read_project_meta_read_only(project: Path) -> dict[str, Any]:
+    connection = _read_only_connection(project)
+    try:
+        rows = connection.execute(
+            "SELECT key, value_json FROM project_meta"
+        ).fetchall()
+        return {
+            str(row["key"]): json.loads(str(row["value_json"]))
+            for row in rows
+        }
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法只读读取项目元数据：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def list_run_index(
+    project: Path,
+    stage: str | None = None,
+    status: str | None = None,
+    *,
+    offset: int = 0,
+    limit: int = 20,
+) -> tuple[list[dict[str, Any]], int]:
+    """Read a paged Run index without touching run_chunks or writing SQLite."""
+    connection = _read_only_connection(project)
+    try:
+        clauses = ["1=1"]
+        params: list[Any] = []
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = " AND ".join(clauses)
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM runs WHERE {where}", params
+            ).fetchone()[0]
+        )
+        rows = connection.execute(
+            "SELECT run_id, stage, status, started_at, payload_json "
+            f"FROM runs WHERE {where} "
+            "ORDER BY started_at DESC, run_id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        project_id = _project_id(connection)
+        return [_hydrate_run(row, project_id) for row in rows], total
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法只读查询 Run 索引：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_run_record(project: Path, run_id: str) -> dict[str, Any] | None:
+    """Read one authoritative Run row without changing recovery behavior."""
+    connection = _read_only_connection(project)
+    try:
+        row = connection.execute(
+            "SELECT run_id, stage, status, started_at, payload_json "
+            "FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return (
+            _hydrate_run(row, _project_id(connection))
+            if row is not None
+            else None
+        )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法只读读取 Run：{project}/{run_id}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
     if not stage:
         return "", []

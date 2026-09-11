@@ -23,7 +23,7 @@ from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import ConfigError, UsageError
-from app.execution import Scope, create_run
+from app.execution import Scope, continue_run, create_run, finalize_run
 from app.llm_keys import KeyPool
 from app.locking import project_write_lock
 from app.project import init_project
@@ -69,6 +69,255 @@ def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    config = load_project_config(project, stage="translation")
+    first_id, first_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="first",
+        prompt="first prompt",
+        selected_count=3,
+        requested_count=2,
+        reused_count=1,
+        details={"scope": {"all_nonempty": True}},
+    )
+    finalize_run(
+        project,
+        first_dir,
+        status="failed",
+        completed=1,
+        failed=1,
+        failure_counts={"external_error": 1},
+        warnings=["first warning"],
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "available": True,
+            "partial": False,
+        },
+    )
+    second_id, second_dir = create_run(
+        project,
+        config=config,
+        stage="proofreading",
+        fingerprint="second",
+        prompt="second prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+    )
+    finalize_run(project, second_dir, status="completed", completed=2, failed=0)
+    first = read_json(project, first_dir / "manifest.json")
+    second = read_json(project, second_dir / "manifest.json")
+    first["started_at"] = "2025-01-01T00:00:00+00:00"
+    second["started_at"] = "2025-01-02T00:00:00+00:00"
+    first["manifest_secret"] = "do-not-return"
+    first["chunk_data"] = [{"source": "do-not-return"}]
+    write_json(project, first_dir / "manifest.json", first)
+    write_json(project, second_dir / "manifest.json", second)
+
+    client = TestClient(create_app(projects_root=projects_root))
+    listed = client.get("/api/v1/runs", params={"project": "sample"})
+
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] == 2
+    assert payload["offset"] == 0
+    assert payload["limit"] == 20
+    assert [item["run_id"] for item in payload["items"]] == [second_id, first_id]
+    item = payload["items"][1]
+    assert item["project_id"]
+    assert item["project_name"] == "sample"
+    assert item["stage"] == "translation"
+    assert item["status"] == "failed"
+    assert item["selected_segment_count"] == 3
+    assert item["completed_segment_count"] == 1
+    assert item["failure_counts"] == {"external_error": 1}
+    assert item["usage"]["total_tokens"] == 15
+    assert item["debug_available"] is False
+    assert "manifest_secret" not in item
+    assert "chunk_data" not in item
+
+    filtered = client.get(
+        "/api/v1/runs",
+        params={"project": "sample", "stage": "translation", "status": "failed"},
+    )
+    assert filtered.status_code == 200
+    assert [item["run_id"] for item in filtered.json()["items"]] == [first_id]
+
+    paged = client.get(
+        "/api/v1/runs",
+        params={"project": "sample", "offset": 1, "limit": 1},
+    )
+    assert paged.status_code == 200
+    assert paged.json()["items"][0]["run_id"] == first_id
+
+    for params in (
+        {"stage": "not-a-stage"},
+        {"status": "not-a-status"},
+        {"offset": -1},
+        {"limit": 101},
+        {"project": "missing"},
+    ):
+        assert client.get("/api/v1/runs", params=params).status_code == 400
+
+
+def test_web_historical_run_detail_exposes_executions_snapshots_and_safe_projection(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    config = load_project_config(project, stage="translation")
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="root-fingerprint",
+        prompt="root prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": False,
+                "from_file": "F0001",
+                "only_file": None,
+                "only_segment": None,
+            }
+        },
+    )
+    continue_run(
+        project,
+        run_id,
+        config=config,
+        stage="translation",
+        fingerprint="continuation-fingerprint",
+        prompt="continuation prompt",
+        scope=Scope(only_file="F0001"),
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest["manifest_secret"] = "do-not-return"
+    manifest["headers"] = {"Authorization": "do-not-return"}
+    manifest["chunk_data"] = [{"segment_id": "do-not-return"}]
+    write_json(project, run_dir / "manifest.json", manifest)
+
+    client = TestClient(create_app(projects_root=projects_root))
+    response = client.get(f"/api/v1/projects/sample/runs/{run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == run_id
+    assert payload["stage"] == "translation"
+    assert payload["selected_segment_count"] == 2
+    assert payload["scope"]["from_file"] == "F0001"
+    assert [item["id"] for item in payload["executions"]] == [
+        "root",
+        "continuation-0001",
+    ]
+    root = payload["executions"][0]
+    continuation = payload["executions"][1]
+    assert root["fingerprint"] == "root-fingerprint"
+    assert continuation["fingerprint"] == "continuation-fingerprint"
+    assert root["snapshots"]["prompt"]["status"] == "available"
+    assert root["snapshots"]["config"]["status"] == "available"
+    assert root["snapshots"]["adapter"]["status"] == "available"
+    assert root["snapshots"]["preset"]["status"] == "available"
+    assert root["snapshots"]["prompt"]["content"] == "root prompt"
+    assert continuation["snapshots"]["prompt"]["content"] == "continuation prompt"
+    assert payload["requests"]["status"] == "unavailable"
+    assert "manifest_secret" not in payload
+    assert "headers" not in payload
+    assert "chunk_data" not in payload
+
+
+def test_web_historical_run_detail_reports_missing_and_invalid_snapshots(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="snapshot-test",
+        prompt="prompt",
+        selected_count=0,
+        requested_count=0,
+        reused_count=0,
+    )
+    (run_dir / "prompt.txt").unlink()
+    (run_dir / "llm_adapter.json").write_text("{broken", encoding="utf-8")
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}"
+    )
+
+    assert response.status_code == 200
+    snapshots = response.json()["executions"][0]["snapshots"]
+    assert snapshots["prompt"]["status"] == "missing"
+    assert snapshots["adapter"]["status"] == "invalid"
+    assert snapshots["config"]["status"] == "available"
+
+
+def test_web_lists_all_projects_without_synthetic_run_all_parent(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    other_input = tmp_path / "other.txt"
+    other_input.write_text("other", encoding="utf-8")
+    other, _ = init_project(
+        [str(other_input)],
+        name="other",
+        app_root=tmp_path / "app-root",
+        projects_root=projects_root,
+    )
+    assert other is not None
+    for root, stage in (
+        (project, "translation"),
+        (project, "proofreading"),
+        (other, "polishing"),
+    ):
+        _run_id, run_dir = create_run(
+            root,
+            config=load_project_config(root, stage=stage),
+            stage=stage,
+            fingerprint=f"{root.name}-{stage}",
+            prompt="prompt",
+            selected_count=1,
+            requested_count=1,
+            reused_count=0,
+        )
+        finalize_run(root, run_dir, status="completed", completed=1, failed=0)
+        manifest = read_json(root, run_dir / "manifest.json")
+        manifest["started_at"] = {
+            "translation": "2025-01-01T00:00:00+00:00",
+            "proofreading": "2025-01-02T00:00:00+00:00",
+            "polishing": "2025-01-03T00:00:00+00:00",
+        }[stage]
+        write_json(root, run_dir / "manifest.json", manifest)
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        "/api/v1/runs"
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert response.json()["total"] == 3
+    assert {item["project_name"] for item in items} == {"sample", "other"}
+    assert {item["stage"] for item in items} == {
+        "translation",
+        "proofreading",
+        "polishing",
+    }
+    assert all(item["stage"] != "run-all" for item in items)
 
 
 def test_web_payload_models_keep_stable_defaults_and_types() -> None:
