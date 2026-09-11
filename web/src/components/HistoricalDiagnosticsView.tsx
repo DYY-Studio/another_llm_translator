@@ -95,6 +95,23 @@ function formatValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function runPresetSummary(detail: HistoricalRunDetail): { id: string | null; model: string | null } {
+  const execution = detail.executions.find((item) => item.kind === "root") ?? detail.executions[0];
+  const snapshot = execution?.snapshots.preset;
+  if (!snapshot || snapshot.status !== "available" || !snapshot.content) return { id: null, model: null };
+  try {
+    const value: unknown = JSON.parse(snapshot.content);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { id: null, model: null };
+    const preset = value as Record<string, unknown>;
+    return {
+      id: typeof preset.preset_id === "string" ? preset.preset_id : null,
+      model: typeof preset.model === "string" ? preset.model : null,
+    };
+  } catch {
+    return { id: null, model: null };
+  }
+}
+
 function snapshotIsVariant(
   value: HistoricalExecutionSnapshots[SnapshotTab],
 ): value is { status: "available"; items: HistoricalPromptVariant[] } {
@@ -172,6 +189,7 @@ function HistoricalRunSummaryPanel({
 }) {
   const usage = detail.usage;
   const scopeEntries = detail.scope ? Object.entries(detail.scope) : [];
+  const preset = runPresetSummary(detail);
   return (
     <div className="history-summary-panel">
       <div className="history-info-grid">
@@ -181,6 +199,7 @@ function HistoricalRunSummaryPanel({
         <div><span>{translate("diagnostics.history.startedAt", language)}</span><strong>{dateLabel(detail.started_at, language)}</strong></div>
         <div><span>{translate("diagnostics.history.completedAt", language)}</span><strong>{dateLabel(detail.completed_at, language)}</strong></div>
         <div><span>{translate("diagnostics.history.runId", language)}</span><code>{detail.run_id}</code></div>
+        <div style={{gridColumn: "1 / -1"}}><span>{translate("diagnostics.history.snapshotPreset", language)}</span><strong><code>{preset.id ?? translate("diagnostics.unavailable", language)}</code> · {preset.model ?? translate("diagnostics.unavailable", language)}</strong></div>
       </div>
       <div className="history-count-grid">
         <div><span>{translate("diagnostics.history.selected", language)}</span><strong>{countLabel(detail.selected_segment_count, language)}</strong></div>
