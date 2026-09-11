@@ -23,6 +23,7 @@ from .web_tasks import task_options
 
 
 _RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+_REQUEST_ID_PATTERN = _RUN_ID_PATTERN
 _SCOPE_FIELDS = (
     "all_nonempty",
     "from_file",
@@ -51,6 +52,12 @@ _SNAPSHOT_FILES = {
 def _safe_run_id(value: str) -> str:
     if not _RUN_ID_PATTERN.fullmatch(value) or value in {".", ".."}:
         raise UsageError("Run ID 无效")
+    return value
+
+
+def _safe_request_id(value: str) -> str:
+    if not _REQUEST_ID_PATTERN.fullmatch(value) or value in {".", ".."}:
+        raise UsageError("请求 ID 无效")
     return value
 
 
@@ -378,12 +385,215 @@ def _run_detail(
                     ),
                 }
             )
-    result["requests"] = {
-        "status": "available" if debug_available else "unavailable",
-        "items": [],
+    result["requests"] = _debug_request_index(run_directory, run["run_id"])
+    return result
+
+
+_DEBUG_ATTEMPT_FIELDS = (
+    "attempt",
+    "retry_round",
+    "key_index",
+    "http_status",
+    "provider_error_status",
+    "outcome",
+    "status",
+    "error",
+)
+_DEBUG_REDACTED_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "credential",
+    "headers",
+    "password",
+    "secret",
+}
+
+
+def _read_debug_attempts(
+    directory: Path, run_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    path = _safe_snapshot_path(directory, "attempts.jsonl")
+    if path is None:
+        if (directory / "payloads").is_dir():
+            return [], [{"line": 0, "reason": "missing_attempt_log"}], "partial"
+        return [], [], "unavailable"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return [], [{"line": 0, "reason": "unreadable_attempt_log"}], "partial"
+    attempts: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            errors.append({"line": line_number, "reason": "invalid_record"})
+            continue
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != 1
+            or value.get("record_type") != "request_attempt"
+            or value.get("run_id") != run_id
+            or not isinstance(value.get("request_id"), str)
+            or not _REQUEST_ID_PATTERN.fullmatch(value["request_id"])
+            or type(value.get("attempt")) is not int
+            or value["attempt"] < 1
+        ):
+            errors.append({"line": line_number, "reason": "invalid_record"})
+            continue
+        attempts.append(value)
+    return attempts, errors, "partial" if errors else "available"
+
+
+def _debug_payload_path(
+    directory: Path, request_id: str, attempt: int, suffix: str
+) -> Path | None:
+    return _safe_snapshot_path(
+        directory,
+        f"payloads/{request_id}-A{attempt:03d}.{suffix}.json",
+    )
+
+
+def _redact_debug_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_redact_debug_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        normalized = str(key).casefold().replace("-", "_")
+        if normalized in _DEBUG_REDACTED_KEYS or normalized.endswith("_secret"):
+            continue
+        result[str(key)] = _redact_debug_value(item)
+    return result
+
+
+def _read_debug_payload(
+    directory: Path,
+    request_id: str,
+    attempt: int,
+    suffix: str,
+    *,
+    full: bool,
+) -> dict[str, Any]:
+    path = _debug_payload_path(directory, request_id, attempt, suffix)
+    if path is None:
+        return {"status": "missing"}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {"status": "invalid"}
+    if not isinstance(value, (dict, list)):
+        return {"status": "invalid"}
+    result: dict[str, Any] = {"status": "available"}
+    if full:
+        result["value"] = _redact_debug_value(value)
+    return result
+
+
+def _debug_attempt_summary(
+    directory: Path, record: dict[str, Any]
+) -> dict[str, Any]:
+    request_id = str(record["request_id"])
+    attempt = int(record["attempt"])
+    result = {
+        key: record.get(key)
+        for key in _DEBUG_ATTEMPT_FIELDS
     }
-    if not debug_available:
-        result["requests"]["reason"] = "debug_disabled"
+    result.update(
+        {
+            "request_payload": _read_debug_payload(
+                directory, request_id, attempt, "request", full=False
+            )["status"],
+            "response_payload": _read_debug_payload(
+                directory, request_id, attempt, "response", full=False
+            )["status"],
+            "error_payload": _read_debug_payload(
+                directory, request_id, attempt, "error", full=False
+            )["status"],
+        }
+    )
+    return result
+
+
+def _debug_request_index(directory: Path, run_id: str) -> dict[str, Any]:
+    attempts, errors, status = _read_debug_attempts(directory, str(run_id))
+    if status == "unavailable":
+        return {"status": "unavailable", "reason": "debug_disabled", "items": []}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in attempts:
+        grouped.setdefault(str(record["request_id"]), []).append(record)
+    items: list[dict[str, Any]] = []
+    for request_id, records in grouped.items():
+        records.sort(key=lambda item: int(item["attempt"]))
+        parent_request_id = records[0].get("parent_request_id")
+        items.append(
+            {
+                "request_id": request_id,
+                "parent_request_id": (
+                    parent_request_id if isinstance(parent_request_id, str) else None
+                ),
+                "stage": (
+                    records[0]["stage"]
+                    if isinstance(records[0].get("stage"), str)
+                    else None
+                ),
+                "attempt_count": len(records),
+                "attempts": [
+                    _debug_attempt_summary(directory, record) for record in records
+                ],
+            }
+        )
+    result: dict[str, Any] = {"status": status, "items": items}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _debug_request_detail(
+    directory: Path, run_id: str, request_id: str, *, full: bool
+) -> dict[str, Any]:
+    attempts, errors, status = _read_debug_attempts(directory, run_id)
+    selected = [
+        record for record in attempts if record.get("request_id") == request_id
+    ]
+    if not selected:
+        raise UsageError(f"历史 Run 中不存在请求：{request_id}")
+    selected.sort(key=lambda item: int(item["attempt"]))
+    entries: list[dict[str, Any]] = []
+    for record in selected:
+        entry = _debug_attempt_summary(directory, record)
+        if full:
+            attempt = int(record["attempt"])
+            entry["request"] = _read_debug_payload(
+                directory, request_id, attempt, "request", full=True
+            )
+            entry["response"] = _read_debug_payload(
+                directory, request_id, attempt, "response", full=True
+            )
+            entry["error_payload"] = _read_debug_payload(
+                directory, request_id, attempt, "error", full=True
+            )
+        entries.append(entry)
+    result: dict[str, Any] = {
+        "status": status,
+        "request_id": request_id,
+        "parent_request_id": (
+            selected[0].get("parent_request_id")
+            if isinstance(selected[0].get("parent_request_id"), str)
+            else None
+        ),
+        "stage": selected[0].get("stage")
+        if isinstance(selected[0].get("stage"), str)
+        else None,
+        "attempts": entries,
+    }
+    if errors:
+        result["errors"] = errors
     return result
 
 
@@ -491,6 +701,22 @@ def register_task_routes(
             project_name=project_name,
             project_id=project_id,
             run_directory=run_directory(root, safe_run_id),
+        )
+
+    @app.get("/api/v1/projects/{name}/runs/{run_id}/requests/{request_id}")
+    async def historical_request_detail(
+        name: str, run_id: str, request_id: str, full: bool = False
+    ) -> dict[str, Any]:
+        root = project(name)
+        safe_run_id = _safe_run_id(run_id)
+        safe_request_id = _safe_request_id(request_id)
+        if read_run_record(root, safe_run_id) is None:
+            raise UsageError(f"Run 不存在：{safe_run_id}")
+        return _debug_request_detail(
+            run_directory(root, safe_run_id),
+            safe_run_id,
+            safe_request_id,
+            full=full,
         )
 
     @app.post("/api/v1/projects/{name}/tasks")

@@ -267,6 +267,205 @@ def test_web_historical_run_detail_reports_missing_and_invalid_snapshots(
     assert snapshots["config"]["status"] == "available"
 
 
+def test_web_historical_run_debug_is_summary_first_and_full_on_demand(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="debug-test",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    project_id = read_json(project, project / "project.json")["project_id"]
+    attempts = [
+        record_header(
+            "request_attempt",
+            str(project_id),
+            record_id="REQ-A-A001",
+            run_id=run_id,
+            request_id="REQ-A",
+            parent_request_id=None,
+            stage="translation",
+            attempt=1,
+            retry_round=0,
+            key_index=1,
+            http_status=500,
+            provider_error_status=None,
+            outcome="http_error",
+            status="failed",
+            error="server error",
+        ),
+        record_header(
+            "request_attempt",
+            str(project_id),
+            record_id="REQ-A-A002",
+            run_id=run_id,
+            request_id="REQ-A",
+            parent_request_id=None,
+            stage="translation",
+            attempt=2,
+            retry_round=1,
+            key_index=1,
+            http_status=200,
+            provider_error_status=None,
+            outcome="succeeded",
+            status="completed",
+            error=None,
+        ),
+    ]
+    (run_dir / "attempts.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in attempts),
+        encoding="utf-8",
+    )
+    payload_dir = run_dir / "payloads"
+    payload_dir.mkdir()
+    request_payload = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "source"}],
+        "headers": {"Authorization": "secret-header"},
+        "api_key": "secret-key",
+    }
+    (payload_dir / "REQ-A-A001.request.json").write_text(
+        json.dumps(request_payload), encoding="utf-8"
+    )
+    (payload_dir / "REQ-A-A001.error.json").write_text(
+        json.dumps({"error": "server error", "http_status": 500}),
+        encoding="utf-8",
+    )
+    (payload_dir / "REQ-A-A002.request.json").write_text(
+        json.dumps(request_payload), encoding="utf-8"
+    )
+    (payload_dir / "REQ-A-A002.response.json").write_text(
+        json.dumps({"choices": [{"message": {"content": "translated"}}]}),
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(projects_root=projects_root))
+    detail = client.get(f"/api/v1/projects/sample/runs/{run_id}")
+
+    assert detail.status_code == 200
+    request_index = detail.json()["requests"]
+    assert request_index["status"] == "available"
+    assert request_index["items"] == [
+        {
+            "request_id": "REQ-A",
+            "parent_request_id": None,
+            "stage": "translation",
+            "attempt_count": 2,
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "retry_round": 0,
+                    "key_index": 1,
+                    "http_status": 500,
+                    "provider_error_status": None,
+                    "outcome": "http_error",
+                    "status": "failed",
+                    "error": "server error",
+                    "request_payload": "available",
+                    "response_payload": "missing",
+                    "error_payload": "available",
+                },
+                {
+                    "attempt": 2,
+                    "retry_round": 1,
+                    "key_index": 1,
+                    "http_status": 200,
+                    "provider_error_status": None,
+                    "outcome": "succeeded",
+                    "status": "completed",
+                    "error": None,
+                    "request_payload": "available",
+                    "response_payload": "available",
+                    "error_payload": "missing",
+                },
+            ],
+        }
+    ]
+    assert "source" not in json.dumps(request_index)
+
+    summary = client.get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-A"
+    )
+    assert summary.status_code == 200
+    assert all("value" not in item for item in summary.json()["attempts"])
+
+    full = client.get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-A",
+        params={"full": "true"},
+    )
+    assert full.status_code == 200
+    full_payload = full.json()
+    assert full_payload["status"] == "available"
+    assert full_payload["attempts"][0]["request"]["value"]["model"] == "test-model"
+    assert full_payload["attempts"][0]["request"]["value"]["messages"]
+    assert "headers" not in json.dumps(full_payload)
+    assert "secret-key" not in json.dumps(full_payload)
+
+
+def test_web_historical_run_debug_reports_partial_attempt_log_and_invalid_payload(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="debug-invalid",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    project_id = read_json(project, project / "project.json")["project_id"]
+    attempt = record_header(
+        "request_attempt",
+        str(project_id),
+        record_id="REQ-B-A001",
+        run_id=run_id,
+        request_id="REQ-B",
+        parent_request_id="REQ-PARENT",
+        stage="translation",
+        attempt=1,
+        retry_round=0,
+        key_index=1,
+        http_status=None,
+        provider_error_status=None,
+        outcome="network_error",
+        status="failed",
+        error="network error",
+    )
+    (run_dir / "attempts.jsonl").write_text(
+        json.dumps(attempt) + "\n{broken\n", encoding="utf-8"
+    )
+    payload_dir = run_dir / "payloads"
+    payload_dir.mkdir()
+    (payload_dir / "REQ-B-A001.request.json").write_text(
+        "{broken", encoding="utf-8"
+    )
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}"
+    )
+
+    assert response.status_code == 200
+    request_index = response.json()["requests"]
+    assert request_index["status"] == "partial"
+    assert request_index["errors"] == [{"line": 2, "reason": "invalid_record"}]
+    assert request_index["items"][0]["parent_request_id"] == "REQ-PARENT"
+    full = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-B",
+        params={"full": "true"},
+    )
+    assert full.status_code == 200
+    assert full.json()["attempts"][0]["request"]["status"] == "invalid"
+
+
 def test_web_lists_all_projects_without_synthetic_run_all_parent(
     tmp_path: Path,
 ) -> None:
