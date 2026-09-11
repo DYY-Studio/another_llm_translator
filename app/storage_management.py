@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -12,6 +12,7 @@ from typing import Any
 
 from .errors import AppError, ProjectError, StorageError, UsageError
 from .locking import project_write_lock
+from .logging_utils import LOGGER_NAME
 from .sqlite_storage import (
     database_path,
     list_run_index,
@@ -470,28 +471,29 @@ def _truncate_log_file(path: Path) -> tuple[int, int]:
     if path.is_symlink() or not path.is_file():
         raise UsageError("日志文件路径不安全")
     before = _file_size(path)
-    logger = logging.getLogger()
+    loggers = (logging.getLogger(), logging.getLogger(LOGGER_NAME))
     target = _safe_resolve(path)
-    for handler in list(logger.handlers):
-        handler_path = getattr(handler, "baseFilename", None)
-        if not handler_path:
-            continue
-        try:
-            if _safe_resolve(Path(handler_path)) != target:
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            handler_path = getattr(handler, "baseFilename", None)
+            if not handler_path:
                 continue
-        except StorageError:
-            continue
-        handler.acquire()
-        try:
-            stream = getattr(handler, "stream", None)
-            if stream is None:
+            try:
+                if _safe_resolve(Path(handler_path)) != target:
+                    continue
+            except StorageError:
                 continue
-            stream.seek(0)
-            stream.truncate(0)
-            stream.flush()
-        finally:
-            handler.release()
-        return 1, before
+            handler.acquire()
+            try:
+                stream = getattr(handler, "stream", None)
+                if stream is None:
+                    continue
+                stream.seek(0)
+                stream.truncate(0)
+                stream.flush()
+            finally:
+                handler.release()
+            return 1, before
     with path.open("r+b") as handle:
         handle.truncate(0)
     return 1, before

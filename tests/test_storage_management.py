@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -203,6 +204,31 @@ def test_storage_log_cleanup_truncates_current_log_and_removes_rotations(
     assert not (global_logs / "app.log.1").exists()
     assert (project / "logs" / "app.log").read_bytes() == b""
     assert not (project / "logs" / "app.log.1").exists()
+
+
+def test_storage_log_cleanup_keeps_active_named_handler_writable(
+    tmp_path: Path,
+) -> None:
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    log_path = project / "logs" / "app.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("another_llm_translator")
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    logger.addHandler(handler)
+    try:
+        logger.info("before")
+        handler.flush()
+        manager = _manager(app_root, projects_root, project)
+
+        manager.clear_project_logs(project, confirm=True)
+
+        logger.info("after")
+        handler.flush()
+        assert log_path.read_text(encoding="utf-8") == "after\n"
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def test_lightweight_project_storage_keeps_legacy_totals_and_sqlite_main_size(
