@@ -567,8 +567,8 @@ export default function App() {
   }
 
   let content = <div className="empty-page">{translate("app.selectOrCreate", language)}</div>;
-  if (stage === "diagnostics") content = <DiagnosticsView language={language} />;
-    else if (stage === "settings") content = <SettingsView project={project} language={language} focusField={settingsField} onFocusConsumed={consumeSettingsFocus} />;
+  if (stage === "diagnostics") content = <DiagnosticsView language={language} project={project} projects={projects} />;
+  else if (stage === "settings") content = <SettingsView project={project} language={language} focusField={settingsField} onFocusConsumed={consumeSettingsFocus} />;
   else if (stage === "overview") content = (
     <Overview
       projects={projects}

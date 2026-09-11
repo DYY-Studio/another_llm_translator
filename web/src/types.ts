@@ -329,6 +329,146 @@ export interface DiagnosticsRequestDetail {
   error: string | null;
 }
 
+export type HistoricalSnapshotStatus =
+  | "available"
+  | "missing"
+  | "invalid"
+  | "unavailable";
+
+export interface HistoricalSnapshot {
+  status: HistoricalSnapshotStatus;
+  format?: "text" | "json" | "toml";
+  content?: string;
+}
+
+export interface HistoricalPromptVariant {
+  name: string;
+  requirements: string[];
+  primary_mode: string | null;
+  snapshot: HistoricalSnapshot;
+}
+
+export interface HistoricalExecutionSnapshots {
+  config: HistoricalSnapshot;
+  prompt: HistoricalSnapshot;
+  adapter: HistoricalSnapshot;
+  preset: HistoricalSnapshot;
+  requirements: HistoricalSnapshot;
+  prompt_variants:
+    | { status: "available"; items: HistoricalPromptVariant[] }
+    | HistoricalSnapshot;
+}
+
+export interface HistoricalRunExecution {
+  id: string;
+  kind: "root" | "continuation";
+  started_at?: string;
+  completed_at?: string;
+  fingerprint?: string;
+  prompt_language?: string;
+  primary_mode?: string;
+  scope: Record<string, unknown> | null;
+  selected_segment_count?: number;
+  requested_segment_count?: number;
+  reused_segment_count?: number;
+  document_adapters: Record<string, { adapter_id: string; version: string }>;
+  document_adapter_options: Record<string, Record<string, unknown>>;
+  document_adapter_prompt_requirements: Record<string, Record<string, string>>;
+  prompt_languages: Record<string, string>;
+  snapshots: HistoricalExecutionSnapshots;
+}
+
+export type HistoricalPayloadStatus =
+  | "available"
+  | "missing"
+  | "invalid"
+  | "unavailable";
+
+export interface HistoricalDebugPayload {
+  status: HistoricalPayloadStatus;
+  value?: unknown;
+}
+
+export interface HistoricalDebugAttempt {
+  attempt: number;
+  retry_round: number | null;
+  key_index: number | null;
+  http_status: number | null;
+  provider_error_status: number | null;
+  outcome: string | null;
+  status: string;
+  error: string | null;
+  request_payload: HistoricalPayloadStatus;
+  response_payload: HistoricalPayloadStatus;
+  error_payload: HistoricalPayloadStatus | HistoricalDebugPayload;
+  request?: HistoricalDebugPayload;
+  response?: HistoricalDebugPayload;
+}
+
+export interface HistoricalRunRequest {
+  request_id: string;
+  parent_request_id: string | null;
+  stage: string | null;
+  attempt_count: number;
+  attempts: HistoricalDebugAttempt[];
+}
+
+export interface HistoricalRunRequestDetail {
+  status: "available" | "partial";
+  request_id: string;
+  parent_request_id: string | null;
+  stage: string | null;
+  attempts: HistoricalDebugAttempt[];
+  errors?: HistoricalRequestError[];
+}
+
+export interface HistoricalRequestError {
+  line: number;
+  reason: string;
+}
+
+export interface HistoricalRequestIndex {
+  status: "available" | "partial" | "unavailable";
+  reason?: string;
+  errors?: HistoricalRequestError[];
+  items: HistoricalRunRequest[];
+}
+
+export interface HistoricalRunSummary {
+  run_id: string;
+  project_id: string;
+  project_name: string;
+  stage: string;
+  status: string;
+  started_at: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+  selected_segment_count: number | null;
+  requested_segment_count: number | null;
+  reused_segment_count: number | null;
+  completed_segment_count: number | null;
+  failed_segment_count: number | null;
+  failure_counts: Record<string, number>;
+  warnings: string[];
+  usage: TaskUsage | null;
+  scope: Record<string, unknown> | null;
+  debug_available: boolean;
+  stage_fingerprint?: string;
+  prompt_language?: string;
+  review_stage?: string;
+  primary_mode?: string;
+  terms_revision?: number;
+  document_adapters: Record<string, { adapter_id: string; version: string }>;
+  document_adapter_options: Record<string, Record<string, unknown>>;
+  document_adapter_prompt_requirements: Record<string, Record<string, string>>;
+  translation_validators: Array<Record<string, string>>;
+}
+
+export interface HistoricalRunDetail extends HistoricalRunSummary {
+  executions: HistoricalRunExecution[];
+  requests: HistoricalRequestIndex;
+}
+
 export interface ModelRow {
   id: string;
   display: string;
