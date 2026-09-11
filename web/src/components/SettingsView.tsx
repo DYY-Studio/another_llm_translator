@@ -4,11 +4,12 @@ import { errorMessage, translate, type Language } from "../i18n";
 import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
+import { StorageView } from "./StorageView";
 import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server" | "storage";
 
 interface AdapterRow {
   adapter_id: string;
@@ -32,7 +33,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
     }
   }, [focusField, project]);
   const activeScope: ConfigScope = project ? scope : "global";
-  const globalSections: SettingsSection[] = ["presets", "adapters"];
+  const globalSections: SettingsSection[] = ["presets", "adapters", "credentials", "server", "storage"];
   useEffect(() => {
     if (activeScope === "project" && globalSections.includes(section)) {
       setSection("config");
@@ -52,6 +53,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
           {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
           {activeScope === "global" && <button className={section === "server" ? "active" : ""} onClick={() => setSection("server")}>{translate("server.title", language)}</button>}
+          {activeScope === "global" && <button className={section === "storage" ? "active" : ""} onClick={() => setSection("storage")}>{translate("storage.title", language)}</button>}
         </div>
       </nav>
       <div className="settings-content">
@@ -61,6 +63,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
         {section === "adapters" && <AdapterSettings language={language} />}
         {section === "credentials" && <CredentialsSettings language={language} />}
         {section === "server" && <ServerSettings language={language} onChanged={() => {}} />}
+        {section === "storage" && <StorageView language={language} />}
       </div>
     </div>
   );
