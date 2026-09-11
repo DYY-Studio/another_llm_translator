@@ -6,6 +6,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictStr,
     field_validator,
 )
 
@@ -75,3 +76,11 @@ class TaskStartPayload(_WebPayload):
     reuse_mixed_fingerprints: StrictBool = False
     run_action: str | None = None
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
+
+
+class StorageConfirmPayload(_WebPayload):
+    confirm: StrictBool
+
+
+class StorageOutputClearPayload(StorageConfirmPayload):
+    path: StrictStr = Field(min_length=1)
