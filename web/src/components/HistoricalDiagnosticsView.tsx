@@ -454,23 +454,41 @@ function HistoricalRunDetailPanel({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<DetailTab>("summary");
-  if (loading) return <section className="history-detail-panel"><div className="diagnostics-empty">{translate("diagnostics.history.loadingDetail", language)}</div></section>;
-  if (error) return <section className="history-detail-panel"><div className="warning-banner">{errorMessage(error, language)}</div></section>;
+  if (loading) {
+    return (
+      <section className="history-detail-panel">
+        <div className="history-detail-content">
+          <div className="diagnostics-empty">{translate("diagnostics.history.loadingDetail", language)}</div>
+        </div>
+      </section>
+    );
+  }
+  if (error) {
+    return (
+      <section className="history-detail-panel">
+        <div className="history-detail-content">
+          <div className="warning-banner">{errorMessage(error, language)}</div>
+        </div>
+      </section>
+    );
+  }
   if (!detail) {
     return (
-      <section className="history-detail-panel history-detail-empty" aria-label={translate("diagnostics.history.detailTitle", language)}>
-        <div className="diagnostics-empty">
-          <strong>{translate("diagnostics.history.detailTitle", language)}</strong>
+      <section className="history-detail-panel history-detail-empty" aria-label={translate("diagnostics.history.noSelection", language)}>
+        <div className="history-detail-content">
+          <div className="diagnostics-empty">
+            <strong>{translate("diagnostics.history.noSelection", language)}</strong>
+          </div>
         </div>
       </section>
     );
   }
   return (
-    <section className="history-detail-panel" aria-labelledby="history-detail-title">
+    <section className="history-detail-panel" aria-label={translate("diagnostics.history.detailTitle", language)}>
       <header className="history-detail-heading">
         <div>
           <span className="history-eyebrow">{detail.project_name} · {stageLabel(detail.stage, language)}</span>
-          <h2 id="history-detail-title"><code>{detail.run_id}</code></h2>
+          <h2><code>{detail.run_id}</code></h2>
         </div>
         <div className="history-detail-actions">
           <span className="history-read-only">{translate("diagnostics.history.readOnly", language)}</span>
@@ -484,9 +502,11 @@ function HistoricalRunDetailPanel({
           ["requests", translate("diagnostics.history.requestsTab", language)],
         ] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
       </nav>
-      {tab === "summary" && <HistoricalRunSummaryPanel detail={detail} language={language} />}
-      {tab === "execution" && <HistoricalExecutionPanel detail={detail} language={language} />}
-      {tab === "requests" && <HistoricalRequestDiagnostics detail={detail} language={language} />}
+      <div className="history-detail-content">
+        {tab === "summary" && <HistoricalRunSummaryPanel detail={detail} language={language} />}
+        {tab === "execution" && <HistoricalExecutionPanel detail={detail} language={language} />}
+        {tab === "requests" && <HistoricalRequestDiagnostics detail={detail} language={language} />}
+      </div>
     </section>
   );
 }
