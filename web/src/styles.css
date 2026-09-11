@@ -226,6 +226,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .primary-button:hover { background: var(--accent-hover); }
 .primary-button:disabled { border-color: var(--disabled-button); background: var(--disabled-button); cursor: not-allowed; }
 .quiet-button { color: var(--accent); background: var(--surface); }
+.quiet-button:disabled { border-color: var(--disabled-button); background: var(--disabled-bg); color: var(--disabled-text); cursor: not-allowed; }
 .danger-link { padding: 0; border: 0; color: var(--danger); background: transparent; text-align: left; }
 .page { max-width: 1050px; padding: 34px 38px; }
 .overview-page { width: 100%; max-width: 1440px; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; margin-inline: auto; }
