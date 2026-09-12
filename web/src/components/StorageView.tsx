@@ -400,7 +400,7 @@ function StorageDebugSection({
     <section className="storage-detail-section">
       <div className="storage-section-heading"><div><h3>{translate("storage.debug", language)}</h3><p>{translate("storage.debugHint", language)}</p></div></div>
       {runs.length === 0 ? <EmptyStorage language={language} /> : (
-        <div className="storage-table-wrap">
+        <div className="storage-table-wrap storage-detail-list">
           <table className="storage-table">
             <thead><tr><th>{translate("storage.run", language)}</th><th>{translate("storage.stage", language)}</th><th>{translate("storage.status", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.action", language)}</th></tr></thead>
             <tbody>{runs.map((run) => (
@@ -434,7 +434,7 @@ function StorageOutputSection({
     <section className="storage-detail-section">
       <div className="storage-section-heading"><div><h3>{translate("storage.output", language)}</h3><p>{translate("storage.outputHint", language)}</p></div></div>
       {files.length === 0 ? <EmptyStorage language={language} /> : (
-        <div className="storage-table-wrap storage-output-list">
+        <div className="storage-table-wrap storage-detail-list">
           <table className="storage-table">
             <thead><tr><th>{translate("storage.file", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.action", language)}</th></tr></thead>
             <tbody>{files.map((file) => (
