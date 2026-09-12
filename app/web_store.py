@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -42,6 +41,7 @@ from .term_library import (
 )
 from .term_matching import match_term_validation, match_terms
 from .stage_runtime import prompt_middle_digests
+from .storage_management import lightweight_project_storage
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,
@@ -51,27 +51,7 @@ REVIEW_STAGES = {"proofreading", "polishing"}
 
 
 def _project_storage_size(project: Path) -> int:
-    total = 0
-    pending = [project]
-    while pending:
-        current = pending.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError as exc:
-                        raise ProjectError(
-                            f"无法读取项目存储大小：{entry.path}: {exc}"
-                        ) from exc
-        except OSError as exc:
-            raise ProjectError(f"无法读取项目存储目录：{current}: {exc}") from exc
-    return total
+    return lightweight_project_storage(project)["total_bytes"]
 
 
 def _stored_source_size(project: Path, stored_name: object) -> int:

@@ -174,6 +174,91 @@ export interface ProjectSummary {
   repair_needed: boolean;
 }
 
+export type StorageCategoryId =
+  | "settings"
+  | "logs"
+  | "sqlite"
+  | "input"
+  | "project_config"
+  | "run_snapshots"
+  | "debug_attachments"
+  | "output"
+  | "snapshots"
+  | "other";
+
+export interface StorageCategory {
+  id: StorageCategoryId;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageProjectSummary {
+  selector: string;
+  name: string;
+  project_id: string | null;
+  path: string;
+  external: boolean;
+  categories: StorageCategory[];
+  total_bytes: number;
+  reclaimable_bytes: number;
+  complete: boolean;
+  errors: string[];
+}
+
+export interface StorageSummary {
+  scanned_at: string;
+  complete: boolean;
+  errors: string[];
+  total_bytes: number;
+  reclaimable_bytes: number;
+  global: StorageCategory[];
+  projects: StorageProjectSummary[];
+}
+
+export interface StorageDebugRun {
+  run_id: string;
+  stage: string | null;
+  status: string | null;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageOutputFile {
+  path: string;
+  bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageLogGroup {
+  id: string;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageProjectDetail {
+  complete: boolean;
+  project: StorageProjectSummary;
+  debug_runs: StorageDebugRun[];
+  output_files: StorageOutputFile[];
+  logs: StorageLogGroup[];
+  errors: string[];
+}
+
+export interface StorageCleanupResult {
+  affected_files: number;
+  reclaimed_bytes: number;
+}
+
 export interface ErrorPayload {
   code: string;
   params: Record<string, unknown>;

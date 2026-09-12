@@ -62,6 +62,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
 - `web_export_routes.py`：项目导出、下载和桌面保存位置。
+- `web_storage_routes.py`：存储占用查询以及需要明确确认的可清理项入口。
 
 Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_payloads.py`；Web 进程内项目缓存
 和打开状态位于 `web_store.py`；任务生命周期位于 `web_tasks.py`。
@@ -87,6 +88,12 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 选择当前阶段结果、恢复宿主级文本规则、调用来源或 TXT Document Adapter、验证暂存输出并发布
 导出文件。格式专属重建留在各 Document Adapter。
+
+### `app/storage_management.py`
+
+按需扫描用户数据根目录和已登记的项目路径，排除应用安装资源，按产品类别汇总占用并标记扫描
+完整性。它只清理可再生的 DEBUG 附件、输出文件和日志，并在清理前检查项目写锁、活动任务和
+运行中的 Run；不拥有 SQLite schema、阶段结果或项目生命周期。
 
 ### `app/locking.py`
 
@@ -199,6 +206,9 @@ Document Adapter 与 Translation Validator。
 `web/src/components/` 按页面或弹窗拆分。`AppShell.tsx` 只装配导航和全局状态；项目概览、
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
 拥有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
+
+`StorageView.tsx` 负责设置页中的存储汇总、项目明细和逐项清理交互；它不复制后端扫描或安全判断，
+清理后重新读取服务端状态。
 
 页面局部 UI 状态留在对应 workspace/component；服务端拥有的项目、运行和结果状态必须重新
 读取 API，不在前端建立权威副本。
