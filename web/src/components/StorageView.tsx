@@ -112,7 +112,7 @@ export function StorageView({ language }: { language: Language }) {
     setSelectedProject((current) => (
       current && value.projects.some((item) => item.selector === current)
         ? current
-        : value.projects[0]?.selector ?? null
+        : null
     ));
     return value;
   }
@@ -158,6 +158,30 @@ export function StorageView({ language }: { language: Language }) {
     [summary?.projects],
   );
   const selectedSummary = summary?.projects.find((item) => item.selector === selectedProject) ?? null;
+
+  function openProjectDetail(selector: string) {
+    setError("");
+    setMessage("");
+    setSelectedProject(selector);
+  }
+
+  function closeProjectDetail() {
+    if (busyAction !== null) return;
+    setSelectedProject(null);
+    setDetail(null);
+    setDetailError("");
+    setError("");
+    setMessage("");
+  }
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    function closeOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape" && busyAction === null) closeProjectDetail();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busyAction, selectedProject]);
 
   async function refresh() {
     setRefreshing(true);
@@ -248,8 +272,8 @@ export function StorageView({ language }: { language: Language }) {
           {refreshing ? translate("storage.refreshing", language) : translate("storage.refresh", language)}
         </button>
       </header>
-      {error && <div className="error-banner" role="alert">{error}</div>}
-      {message && <p className="success-text storage-message">{message}</p>}
+      {!selectedProject && error && <div className="error-banner" role="alert">{error}</div>}
+      {!selectedProject && message && <p className="success-text storage-message">{message}</p>}
       {summary && (
         <>
           <div className="storage-summary-strip">
@@ -264,72 +288,80 @@ export function StorageView({ language }: { language: Language }) {
               {summary.errors.length > 0 && <ul>{summary.errors.map((item) => <li key={item}>{item}</li>)}</ul>}
             </div>
           )}
-          <section className="storage-panel">
-            <div className="storage-panel-heading">
-              <div><h2>{translate("storage.global", language)}</h2><p>{translate("storage.globalHint", language)}</p></div>
-            </div>
-            <div className="storage-table-wrap">
-              <table className="storage-table">
-                <thead><tr><th>{translate("storage.category", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.files", language)}</th><th>{translate("storage.reclaimable", language)}</th><th>{translate("storage.action", language)}</th></tr></thead>
-                <tbody>
-                  {summary.global.map((category) => (
-                    <tr key={category.id}>
-                      <td><strong>{categoryLabel(category.id, language)}</strong></td>
-                      <td>{formatSize(category.bytes)}</td>
-                      <td>{category.file_count}</td>
-                      <td>{formatSize(category.reclaimable_bytes)}</td>
-                      <td>
-                        {category.id === "logs" ? (
-                          <div className="storage-action-cell">
-                            <button className="danger-button" type="button" disabled={busyAction !== null || !category.can_clear || !summary.complete} onClick={() => clearGlobalLogCategory(category)}>
-                              {translate("storage.clearLogs", language)}
+          <div className="storage-overview-grid">
+            <section className="storage-panel">
+              <div className="storage-panel-heading">
+                <div><h2>{translate("storage.global", language)}</h2><p>{translate("storage.globalHint", language)}</p></div>
+              </div>
+              <div className="storage-global-list">
+                {summary.global.map((category) => (
+                  <div className="storage-global-row" key={category.id}>
+                    <div className="storage-global-main">
+                      <strong>{categoryLabel(category.id, language)}</strong>
+                      <span>{formatSize(category.bytes)} · {translate("storage.fileCount", language, { count: category.file_count })}</span>
+                    </div>
+                    <div className="storage-global-reclaimable">
+                      <span>{translate("storage.reclaimable", language)}</span>
+                      <strong>{formatSize(category.reclaimable_bytes)}</strong>
+                    </div>
+                    {category.id === "logs" ? (
+                      <div className="storage-action-cell">
+                        <button className="danger-button" type="button" disabled={busyAction !== null || !category.can_clear || !summary.complete} onClick={() => clearGlobalLogCategory(category)}>
+                          {translate("storage.clearLogs", language)}
+                        </button>
+                        {!category.can_clear && <ItemStatus canClear={false} blockedReason={category.blocked_reason} language={language} />}
+                      </div>
+                    ) : <ItemStatus canClear={false} blockedReason={category.blocked_reason} language={language} />}
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section className="storage-panel storage-projects-panel">
+              <div className="storage-panel-heading">
+                <div><h2>{translate("storage.projects", language)}</h2><p>{translate("storage.projectsHint", language)}</p></div>
+              </div>
+              {projects.length === 0 ? <EmptyStorage language={language} text={translate("storage.noProjects", language)} /> : (
+                <div className="storage-table-wrap storage-project-list">
+                  <table className="storage-table storage-project-table">
+                    <thead><tr><th>{translate("storage.project", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.reclaimable", language)}</th><th>{translate("storage.status", language)}</th></tr></thead>
+                    <tbody>
+                      {projects.map((item) => (
+                        <tr key={item.selector}>
+                          <td>
+                            <button className="storage-project-select" type="button" aria-haspopup="dialog" onClick={() => openProjectDetail(item.selector)}>
+                              <strong>{item.name}</strong><code>{item.path}</code>
                             </button>
-                            {!category.can_clear && <ItemStatus canClear={false} blockedReason={category.blocked_reason} language={language} />}
-                          </div>
-                        ) : <ItemStatus canClear={false} blockedReason={category.blocked_reason} language={language} />}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-          <section className="storage-panel">
-            <div className="storage-panel-heading">
-              <div><h2>{translate("storage.projects", language)}</h2><p>{translate("storage.projectsHint", language)}</p></div>
-            </div>
-            {projects.length === 0 ? <EmptyStorage language={language} text={translate("storage.noProjects", language)} /> : (
-              <div className="storage-table-wrap">
-                <table className="storage-table storage-project-table">
-                  <thead><tr><th>{translate("storage.project", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.reclaimable", language)}</th><th>{translate("storage.status", language)}</th></tr></thead>
-                  <tbody>
-                    {projects.map((item) => (
-                      <tr key={item.selector} className={item.selector === selectedProject ? "selected" : ""}>
-                        <td>
-                          <button className="storage-project-select" type="button" onClick={() => setSelectedProject(item.selector)}>
-                            <strong>{item.name}</strong><code>{item.path}</code>
-                          </button>
-                          {item.external && <small className="storage-project-meta">{translate("storage.external", language)}</small>}
-                        </td>
-                        <td>{formatSize(item.total_bytes)}</td>
-                        <td>{formatSize(item.reclaimable_bytes)}</td>
-                        <td><ItemStatus canClear={item.complete && item.reclaimable_bytes > 0} blockedReason={item.complete ? "没有可清理文件" : "扫描未完成"} language={language} /></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-          {selectedSummary && (
-            <section className="storage-panel storage-detail-panel">
-              <div className="storage-panel-heading storage-detail-heading">
-                <div>
-                  <h2>{translate("storage.projectDetails", language)} · {selectedSummary.name}</h2>
-                  <p><code>{selectedSummary.path}</code></p>
+                            {item.external && <small className="storage-project-meta">{translate("storage.external", language)}</small>}
+                          </td>
+                          <td>{formatSize(item.total_bytes)}</td>
+                          <td>{formatSize(item.reclaimable_bytes)}</td>
+                          <td><ItemStatus canClear={item.complete && item.reclaimable_bytes > 0} blockedReason={item.complete ? "没有可清理文件" : "扫描未完成"} language={language} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                <span className="storage-detail-total">{formatSize(selectedSummary.total_bytes)}</span>
+              )}
+            </section>
+          </div>
+        </>
+      )}
+      {selectedSummary && (
+        <div className="modal-backdrop storage-detail-backdrop" onMouseDown={closeProjectDetail}>
+          <section className="modal storage-detail-modal" role="dialog" aria-modal="true" aria-labelledby="storage-detail-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="storage-panel-heading storage-detail-heading">
+              <div>
+                <h2 id="storage-detail-title">{translate("storage.projectDetails", language)} · {selectedSummary.name}</h2>
+                <p><code>{selectedSummary.path}</code></p>
               </div>
+              <div className="storage-detail-actions">
+                <span className="storage-detail-total">{formatSize(selectedSummary.total_bytes)}</span>
+                <button className="quiet-button" type="button" disabled={busyAction !== null} onClick={closeProjectDetail}>{translate("storage.closeDetails", language)}</button>
+              </div>
+            </header>
+            <div className="storage-detail-body">
+              {error && <div className="error-banner" role="alert">{error}</div>}
+              {message && <p className="success-text storage-message">{message}</p>}
               {detailLoading && <p className="muted">{translate("storage.detailLoading", language)}</p>}
               {detailError && <div className="error-banner" role="alert">{detailError}<button className="quiet-button" type="button" onClick={() => setDetailRevision((current) => current + 1)}>{translate("common.retry", language)}</button></div>}
               {detail && (
@@ -345,9 +377,9 @@ export function StorageView({ language }: { language: Language }) {
                   <StorageLogsSection language={language} logs={detail.logs} busyAction={busyAction} onClear={clearProjectLog} />
                 </>
               )}
-            </section>
-          )}
-        </>
+            </div>
+          </section>
+        </div>
       )}
     </section>
   );
@@ -402,7 +434,7 @@ function StorageOutputSection({
     <section className="storage-detail-section">
       <div className="storage-section-heading"><div><h3>{translate("storage.output", language)}</h3><p>{translate("storage.outputHint", language)}</p></div></div>
       {files.length === 0 ? <EmptyStorage language={language} /> : (
-        <div className="storage-table-wrap">
+        <div className="storage-table-wrap storage-output-list">
           <table className="storage-table">
             <thead><tr><th>{translate("storage.file", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.action", language)}</th></tr></thead>
             <tbody>{files.map((file) => (
