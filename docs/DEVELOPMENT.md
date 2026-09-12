@@ -1,7 +1,9 @@
 # 开发指南
 
-本文面向从源码开发、调试或打包 Another LLM Translator 的贡献者。一般使用方法见
-[用户指南](USER_GUIDE.md)，完整产品行为以 [MVP 规范](MINIMAL.md)为准。
+本文只负责 Another LLM Translator 的开发环境、运行、调试、测试和打包。仓库级工程原则、
+测试取舍、兼容策略和提交要求以根目录的 [`AGENTS.md`](../AGENTS.md) 为准；代码模块与依赖
+方向见[模块职责](MODULES.md)。产品行为和协议分别见[最小产品规范](MINIMAL.md)与
+[Adapter 契约](ADAPTERS.md)。
 
 ## 1. 环境准备
 
@@ -26,47 +28,35 @@ python -m pip install -r requirements-dev.txt
 python -m pip check
 ```
 
-`requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 在此基础上增加测试和构建依赖。
-API Key 必须通过 Preset 引用的环境变量或系统钥匙串提供，不要写入仓库文件。
+`requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 增加测试、构建依赖，并以
+editable 方式安装宿主和仓库内的示例插件。插件也可以在各自目录单独构建和安装。
 
-开发依赖会以 editable 方式安装宿主、`plugins/srt` 和
-`plugins/term_validation`，因此测试与桌面构建可以发现官方 SRT 与术语校验
-entry point。两个插件都可以单独构建并安装；插件代码与宿主同进程运行，安装即表示信任。
+开发用 API Key 只能通过 Preset 引用的环境变量或系统钥匙串提供，不得写入仓库文件。
 
-## 2. 仓库结构
+## 2. 后端与 CLI 开发
 
-- `app/`：CLI、本地 Web API、项目存储、阶段执行、LLM 请求和导出。
-- `web/`：React/Vite/TypeScript 前端源码。
-- `src-tauri/`：Tauri 2 桌面壳、sidecar 编排和原生选择器。
-- `config/`、`prompts/`、`llm_adapters/`、`llm_presets/`：随应用分发的内置资源。
-- `tests/`：使用模拟 LLM 响应的确定性工作流测试。
-- `packaging/`：冻结 Python/FastAPI sidecar 的 PyInstaller 配置。
-- `plugins/srt/`：可单独构建和发行的 SRT Document Adapter 示例插件。
-- `plugins/term_validation/`：可单独构建和发行的术语使用 Translation Validator 示例插件。
-- `scripts/`：前端、sidecar 和桌面构建辅助脚本。
-- `docs/`：产品规范、Adapter 契约、用户与开发文档。
+查看入口帮助：
 
-`app/web_dist/`、`sidecar-dist/`、`src-tauri/target/` 和 `dist/` 是构建产物，
-不应提交。`projects/` 和 `logs/` 是运行数据，也不应提交。
+```bash
+python -m app.main --help
+python -m app.web --help
+```
 
-## 3. 核心概念和边界
+启动本地 Web 后端：
 
-项目使用四个职责不同的概念：
+```bash
+python -m app.web
+```
 
-- **File**：源文档边界，也是选择和导出的边界。
-- **Segment**：可翻译的持久化内容单元，是进度和恢复单位。
-- **Chunk**：一次 LLM 请求的临时分组，不是业务状态。
-- **Run**：一次阶段执行记录，保存范围、设置和执行摘要。
+默认地址为 `http://127.0.0.1:8765`，可通过 `--port` 更换端口。开发时可以设置
+`ANOTHER_LLM_USER_ROOT` 指向专用测试数据目录，避免混用日常项目。
 
-LLM 请求、Chunk 和参考上下文不会跨越不允许合并的 File 或 EPUB XHTML part。
-不要用 Chunk 推断持久化进度，也不要混淆 File、Segment、Chunk 和 Run。
+后端模块的职责和入口依赖见[模块职责](MODULES.md)。调试业务行为时应从 CLI/Web 入口追踪到
+共享领域模块，不在前端复制项目状态或恢复逻辑。
 
-数据模型、指纹、恢复、阶段结果和验收行为详见 [MVP 规范](MINIMAL.md)。LLM Adapter、
-Document Adapter、插件和 Preset 的契约详见 [Adapter 契约](ADAPTERS.md)。
+## 3. Web 开发
 
-## 4. Web 开发
-
-安装前端依赖并执行检查：
+安装依赖并执行静态检查与生产构建：
 
 ```bash
 npm ci --prefix web
@@ -74,135 +64,81 @@ npm run typecheck --prefix web
 npm run build --prefix web
 ```
 
-生产构建写入 `app/web_dist/`。该目录缺失时，FastAPI 仍会提供 API，但不会提供完整 Web 页面，并会记录警告。
+生产构建写入 `app/web_dist/`。完成受影响的前端变更后，还应启动实际 Web 界面，通过浏览器
+验证交互和视觉；需要时保存截图作为审核依据。
 
-构建前端后启动后端：
+`app/web_dist/` 是构建产物，不应提交。
 
-```bash
-python -m app.web
-```
+## 4. macOS 桌面开发
 
-默认地址为 `http://127.0.0.1:8765`，可以通过 `--port` 更换端口。服务监听和 LAN 放行由
-服务配置与 HTTP 守卫共同控制；默认只允许回环客户端。
-
-前端和 CLI 共用相同的项目数据库、阶段执行、限速、写锁和恢复代码。不要在前端实现第二套业务状态或恢复逻辑。
-
-## 5. macOS 桌面开发与打包
-
-### 开发运行
-
-先完成 Python 依赖和前端构建，再运行：
+先安装 Python 与前端依赖并构建 Web，然后运行：
 
 ```bash
 npm run build --prefix web
 bash scripts/desktop-dev.sh
 ```
 
-`desktop-dev.sh` 设置仓库根目录和 Python 解释器后执行 Tauri 开发壳。可用环境变量：
+开发脚本使用以下环境变量：
 
 - `ANOTHER_LLM_PYTHON`：开发模式使用的 Python，默认 `.venv/bin/python`。
-- `ANOTHER_LLM_REPO_ROOT`：桌面开发壳使用的仓库根目录，由脚本自动设置。
+- `ANOTHER_LLM_REPO_ROOT`：桌面壳使用的仓库根目录，脚本会自动设置。
 - `ANOTHER_LLM_WEB_PORT`：sidecar Web 端口，默认 `8765`。
 
-`scripts/build-sidecar.sh` 使用 PyInstaller 收集构建环境中已安装的
-`another_llm_translator.plugins` entry point 及其发行元数据。
+桌面壳会启动本地 Web sidecar，再在 Tauri 窗口中加载它。开发时若端口已被残留进程占用，
+先确认进程来源并结束残留实例，再重新启动；不要假定正在监听的服务就是本次构建。
 
-官方构建会检查 SRT 和术语校验 entry point 已安装后再冻结。这只提供构建时插件装配，
-不提供成品运行时安装任意插件。
+原生文件、文件夹和导出位置选择由 Tauri command 提供。普通浏览器路径仍使用上传、服务端
+目录浏览和下载，因此修改选择器时需要分别验证桌面与浏览器入口。
 
-开发和发布只使用当前包名、命令、环境变量、插件组和用户数据目录。旧版本位置中的数据不会
-自动发现、迁移或删除；如需保留，请用户自行处理。
+## 5. macOS 打包
 
-桌面壳启动时优先拉起 bundle 内的冻结 sidecar；找不到时，使用开发环境中的
-`python -m app.web`。健康探测成功后加载 `http://127.0.0.1:<port>`。退出桌面应用时，
-会终止由本次进程启动的 sidecar。
-
-如果应用异常退出后端口上仍有兼容服务，再次启动可能继续使用该服务。必要时应手动结束
-残留进程。
-
-桌面端通过 Tauri command 提供原生文件、文件夹和导出位置选择；普通浏览器仍使用上传、服务端目录浏览和下载。
-
-### 打包 macOS 应用
-
-`scripts/build-app.sh` 依次执行前端类型检查与构建、PyInstaller sidecar 冻结和 Tauri 打包：
+完整构建：
 
 ```bash
 bash scripts/build-app.sh
 ```
 
-脚本生成未签名的 ad hoc `.app` 和 zip，输出目录为：
+脚本依次执行前端类型检查与构建、PyInstaller sidecar 冻结和 Tauri 打包。sidecar 构建会收集
+构建环境中已安装的 `another_llm_translator.plugins` entry point；官方构建会检查仓库内要求
+装配的示例插件是否存在。
+
+当前输出是面向 macOS arm64 的未签名 ad hoc `.app` 和 zip：
 
 ```text
 dist/another-llm-translator-<版本>-macos-arm64/
 ```
 
-构建产物内含配置、Prompt、Adapter、Preset 和 Web 静态资源。当前脚本面向 macOS arm64。
-签名、公证和公开发行流程尚未建立，仓库也没有可直接下载的 GitHub Release。
+签名、公证和公开发行流程尚未建立。未签名应用首次打开可能需要通过“系统设置 → 隐私与
+安全性”或右键“打开”放行。
 
-本地安装时将 `.app` 拖入“应用程序”。未签名应用首次打开可能需要在
-“系统设置 → 隐私与安全性”中放行，或通过右键菜单选择“打开”。升级和卸载应用都不会
-自动删除平台用户数据目录中的项目与设置。
-
-## 6. 配置、存储与安全
-
-内置全局资源随源码或应用包分发。Web 对全局配置、Prompt、Adapter 和 Preset 的修改写入
-平台用户数据根目录；同名用户资源优先于内置资源，内置文件本身保持只读。
-
-macOS 默认用户数据根目录：
+以下目录都是构建产物，不应提交：
 
 ```text
-~/Library/Application Support/another-llm-translator/
+app/web_dist/
+sidecar-dist/
+src-tauri/target/
+dist/
 ```
 
-开发时可以用 `ANOTHER_LLM_USER_ROOT` 覆盖。典型项目目录包含：
+## 6. 调试与诊断
 
-```text
-projects/<name>/
-├── project.sqlite
-├── config.toml
-├── prompts/
-├── input/
-├── runs/
-├── logs/
-└── output/
-```
+普通日志用于查看启动、请求摘要、重试和失败原因。Debug 模式会额外保存完整请求、响应和
+执行诊断，可能包含 Prompt、源文或模型输出；只能在明确的本地诊断场景启用，完成后应关闭，
+不得提交生成的数据。
 
-用户级提示词仓库存放在同一用户数据根目录下，不属于任何项目：
+排查顺序建议保持聚焦：
 
-```text
-prompt_library/<stage>/<language>/<prompt-id>.middle.txt
-```
+1. 先用对应 CLI 子命令的 `--help` 和最小可复现项目确认入口参数。
+2. 查看终端错误和项目日志中的明确失败原因。
+3. Web 问题同时检查浏览器控制台与后端日志。
+4. 桌面问题再检查 sidecar 启动、端口和 Tauri 日志。
+5. 只有普通诊断不足时才启用 Debug，并使用不含敏感内容的样本。
 
-`prompt-id` 只允许以小写字母开头并包含小写字母、数字和连字符。仓库条目使用 UTF-8
-原子写入，并按阶段和语言隔离。读取、覆盖或删除仓库条目不会修改全局 Prompt、
-项目 Prompt 或项目元数据。
-
-仓库内容不进入 Bundle Hash、阶段指纹或 Run 快照，直到用户将其载入项目编辑器并显式
-保存为项目 Prompt。
-
-`project.sqlite` 是项目权威存储。Run 目录提供可读的 manifest 与设置快照，
-但不能代替数据库判断进度。
-
-普通日志不得记录完整 Prompt、源文、鉴权 Header、未脱敏请求正文或流式增量正文。
-
-> [!CAUTION]
-> Debug 记录可能包含敏感内容。启用后会保存每个流式 Attempt 收集到的原始 SSE `data`
-> 事件，只能用于明确的本地诊断。
-
-诊断 API 只返回流式事件数、接收字节数和首事件耗时。完整正文通过格式解析与校验后，
-才会进入请求详情。
-
-Document Adapter 和 LLM Adapter 插件是可信同进程扩展，不提供沙箱。
-
-Preset schema 4 的 `stream` 必须由用户显式开启，且只对声明 `streaming` SSE 规则的 JSON LLM Adapter 有效。
-
-启动 CLI、Web 或桌面 sidecar 会先原子迁移用户 schema 2/3 Preset 和 schema 1 Adapter；迁移失败应终止启动，不留下兼容副本。
-
-流式请求默认使用 `request_timeout_seconds` 作为连接及连续读取的空闲超时；关闭 `stream_read_timeout_enabled` 后只取消连续读取超时，不限制完整生成时间；EOF、读取超时和流内错误会丢弃半成品并沿 HTTP 尝试次数重试，不自动回退为非流式。
+测试和诊断不得调用真实模型；使用确定性的模拟响应。
 
 ## 7. 验证
 
-文档或代码变更提交前，根据影响范围运行：
+根据修改范围执行最小充分验证：
 
 ```bash
 python -m pip check
@@ -214,16 +150,9 @@ npm run build --prefix web
 git diff --check
 ```
 
-测试使用临时项目和模拟 HTTP 响应，不应调用真实模型。若只修改 Markdown，可以跳过应用
-测试和前端构建，但仍应检查链接、命令、标题层级和 `git diff --check`。
+- 后端行为变更：运行相关测试，合并前优先运行完整 Python 测试。
+- Web 变更：运行 TypeScript 检查和前端构建，并在浏览器中验证受影响交互。
+- Adapter、存储、恢复或协议变更：运行对应契约和回归测试。
+- 纯文档变更：检查链接、命令、标题层级和 `git diff --check`，无需运行应用测试。
 
-## 8. 实现原则
-
-- 以当前明确需求为目标，优先最小、直接、易维护的实现。
-- 只在系统边界校验外部输入，不为假设中的未来功能增加扩展框架或兼容分支。
-- 设置变化、术语冲突、结果复用和建议应用等关键决策必须由用户明确作出。
-- 不添加无明确触发条件的 fallback、自动重试、feature flag 或静默降级。
-- 保留鉴权、数据保护、注入防护、项目写锁和持久化一致性等必要安全属性。
-- 修改后做减法审查，删除未使用代码、重复校验和不必要分支。
-
-更完整的仓库协作、测试和提交要求见根目录的 [`AGENTS.md`](../AGENTS.md)。
+更细的测试取舍、减法审查和提交规则不在本文重复，统一遵循 [`AGENTS.md`](../AGENTS.md)。

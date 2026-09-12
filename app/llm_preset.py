@@ -29,8 +29,10 @@ _PRESET_KEYS = frozenset(
         "requests_per_minute",
         "input_tokens_per_minute",
         "max_parallel",
+        "max_parallel_per_key",
         "request_timeout_seconds",
         "extra_body",
+        "extra_headers",
         "stream",
         "stream_endpoint",
         "stream_read_timeout_enabled",
@@ -63,18 +65,21 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version not in {2, 3, 4}:
+    if schema_version not in {2, 3, 4, 5}:
         raise ConfigError(
-            "LLM Preset schema_version 必须是 4；v1 的 api_key_env 字段已移除，"
+            "LLM Preset schema_version 必须是 5；v1 的 api_key_env 字段已移除，"
             "请改用显式 credential 引用"
         )
-    if schema_version in {2, 3}:
+    if schema_version in {2, 3, 4}:
         value = deepcopy(value)
-        value["schema_version"] = 4
+        value["schema_version"] = 5
         if schema_version == 2:
             value.setdefault("stream", False)
             value.setdefault("stream_endpoint", "")
-        value.setdefault("stream_read_timeout_enabled", True)
+        if schema_version in {2, 3}:
+            value.setdefault("stream_read_timeout_enabled", True)
+        value.setdefault("max_parallel_per_key", value.get("max_parallel"))
+    value.setdefault("extra_headers", {})
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
     if unknown:
@@ -147,10 +152,11 @@ def load_llm_preset(path: Path) -> LLMPreset:
             raise ConfigError("LLM Preset proxy_url 必须是有效的 HTTP/HTTPS URL")
     for key in (
         "context_window_tokens",
-        "max_output_tokens",
         "max_parallel",
+        "max_parallel_per_key",
     ):
         _require_integer(value, key, positive=True)
+    _require_integer(value, "max_output_tokens", positive=False)
     for key in (
         "context_safety_margin_tokens",
         "requests_per_minute",
@@ -171,6 +177,28 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(extra_body, dict):
         raise ConfigError("LLM Preset extra_body 必须是 JSON 对象")
     _reject_placeholders(extra_body)
+    extra_headers = value["extra_headers"]
+    if not isinstance(extra_headers, dict):
+        raise ConfigError("LLM Preset extra_headers 必须是字符串到字符串的对象")
+    header_names: set[str] = set()
+    for name, template in extra_headers.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+        ):
+            raise ConfigError("LLM Preset extra_headers Header 名称无效")
+        normalized_name = name.lower()
+        if normalized_name in header_names:
+            raise ConfigError("LLM Preset extra_headers Header 名称重复")
+        header_names.add(normalized_name)
+        if not isinstance(template, str) or "\r" in template or "\n" in template:
+            raise ConfigError("LLM Preset extra_headers Header 值无效")
+        placeholders = re.findall(r"\$\{([^}]*)\}", template)
+        if template.count("${") != len(placeholders):
+            raise ConfigError("LLM Preset extra_headers 包含无效占位符")
+        unknown = set(placeholders) - {"session_id", "request_id"}
+        if unknown:
+            raise ConfigError("LLM Preset extra_headers 包含未知占位符")
     return LLMPreset(
         preset_id=preset_id,
         adapter_id=value["adapter_id"],

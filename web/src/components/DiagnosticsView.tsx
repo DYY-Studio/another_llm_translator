@@ -1,12 +1,14 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
 import type {
   DiagnosticsRequestDetail,
   DiagnosticsRequestStatus,
   DiagnosticsRequestSummary,
   DiagnosticsResponse,
 } from "../types";
+import type { ProjectSummary } from "../types";
 import { errorMessage, translate, type Language } from "../i18n";
 import { STORAGE_KEYS } from "../storageKeys";
 
@@ -148,7 +150,7 @@ const RequestGroup = memo(function RequestGroup({
   );
 });
 
-export function DiagnosticsView({ language }: { language: Language }) {
+function RuntimeDiagnosticsView({ language }: { language: Language }) {
   const statusLabels = useMemo(() => Object.fromEntries(
     ["running", "retrying", "completed", "failed", "interrupted"]
       .map((key) => [key, translate(`reqStatus.${key}`, language)]),
@@ -235,6 +237,18 @@ export function DiagnosticsView({ language }: { language: Language }) {
     } catch (reason) {
       if (loadId === summaryLoadRef.current) setError(errorMessage(reason, language));
     }
+  }, [level, project, stage, query]);
+
+  useEffect(() => {
+    summaryLoadRef.current += 1;
+    requestFeedRef.current = { sessionId: "", cursor: 0 };
+    setRequestSummaries(new Map());
+    setRequestTotal(0);
+    setValue(null);
+    setSelectedRequest(null);
+    setDetail(null);
+    setDetailError("");
+    setError("");
   }, [level, project, stage, query]);
 
   useEffect(() => {
@@ -341,19 +355,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
   }
 
   return (
-    <section className="diagnostics-page">
-      <header className="diagnostics-heading">
-        <div>
-          <h1>{translate("diagnostics.title", language)}</h1>
-          <p>
-            {metrics?.project
-            ? translate("diagnostics.currentRun", language, { project: metrics.project ?? "", stage: metrics.stage ?? "" })
-              : translate("diagnostics.noRun", language)}
-          </p>
-        </div>
-        <span className="diagnostics-live"><i />{translate("diagnostics.live", language)}</span>
-      </header>
-
+    <div className="diagnostics-runtime">
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
@@ -530,7 +532,7 @@ export function DiagnosticsView({ language }: { language: Language }) {
                   <div className="exchange-attempts">
                     {detail.attempts.length ? detail.attempts.map((attempt) => (
                       <article key={attempt.attempt}>
-                        <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}</strong>
+                        <strong>{translate("diagnostics.attempt", language, { count: attempt.attempt })}{attempt.retry_round == null ? "" : ` · ${translate("diagnostics.retryRound", language, { count: attempt.retry_round })}`}{attempt.key_index == null ? "" : ` · ${translate("diagnostics.key", language, { count: attempt.key_index })}`}</strong>
                         <span>{attempt.http_status === null ? translate("diagnostics.networkError", language) : `HTTP ${attempt.http_status}`}</span>
                         {attempt.provider_error_status !== null && <span>{translate("diagnostics.providerErrorStatus", language, { status: attempt.provider_error_status })}</span>}
                         <span>{translate("diagnostics.outcome", language, { outcome: attempt.outcome })}</span>
@@ -546,6 +548,37 @@ export function DiagnosticsView({ language }: { language: Language }) {
           </section>
         </div>
       )}
+    </div>
+  );
+}
+
+export function DiagnosticsView({
+  language,
+  project,
+  projects,
+}: {
+  language: Language;
+  project: string;
+  projects: ProjectSummary[];
+}) {
+  const [tab, setTab] = useState<"runtime" | "history">("runtime");
+  return (
+    <section className="diagnostics-page">
+      <header className="diagnostics-heading diagnostics-shell-heading">
+        <div>
+          <h1>{translate("diagnostics.title", language)}</h1>
+          <p>{translate(tab === "runtime" ? "diagnostics.runtimeDescription" : "diagnostics.historyDescription", language)}</p>
+        </div>
+        <nav className="diagnostics-subtabs" role="tablist" aria-label={translate("diagnostics.subtabs", language)}>
+          <button role="tab" aria-selected={tab === "runtime"} className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>{translate("diagnostics.runtimeTab", language)}</button>
+          <button role="tab" aria-selected={tab === "history"} className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>{translate("diagnostics.historyTab", language)}</button>
+        </nav>
+      </header>
+      <div className="diagnostics-view-content">
+        {tab === "runtime"
+          ? <RuntimeDiagnosticsView language={language} />
+          : <HistoricalDiagnosticsView language={language} currentProject={project} projects={projects} />}
+      </div>
     </section>
   );
 }

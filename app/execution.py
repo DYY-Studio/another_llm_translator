@@ -1,44 +1,60 @@
 from __future__ import annotations
 
 import asyncio
+
 import hashlib
+
 import json
+
 import math
-import random
+
+
 import re
+
 import shutil
+
 import sys
+
 import time
+
 import uuid
-from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+
+from collections import defaultdict
+
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+
 from copy import deepcopy
+
 from dataclasses import dataclass, replace
+
 from pathlib import Path
+
 from typing import Any, TypeVar
 
-import httpx
 
 from .config import load_project_config, load_run_config
-from .credentials import resolve_api_key
-from .diagnostics import current_diagnostics
+
+
+
 from .documents import aozora_to_model_ruby
+
 from .errors import (
     ConfigError,
-    ContextLengthError,
-    ExternalError,
-    FatalExternalError,
     RequestSizeError,
     StorageError,
     UsageError,
 )
+
 from .i18n import SUPPORTED_LANGUAGES
-from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
-from .llm_preset import endpoint_url
-from .logging_utils import get_logger
+
+from .llm_adapter import JSONLLMAdapter
+
+from .llm_response import TerminologyResponseMode, response_record_types
+
+
+
 from .sqlite_storage import (
     append_jsonl,
-    append_jsonl_file,
     atomic_write_json,
     read_json,
     read_jsonl,
@@ -46,6 +62,7 @@ from .sqlite_storage import (
     utc_now,
     write_json,
 )
+
 from .term_decision_protocol import terminology_decision_protocol
 
 STAGE_FILES = {
@@ -59,6 +76,7 @@ STAGE_FILES = {
 STAGE_CODES = {
     "terminology": "TERM",
     "terminology_decision": "TERMD",
+    "content_summary": "SUM",
     "translation": "TR",
     "proofreading": "PR",
     "polishing": "PO",
@@ -66,113 +84,7 @@ STAGE_CODES = {
     "polishing_applied": "POA",
 }
 
-
-class _StreamRetryable(Exception):
-    """A stream ended or reported an error before a complete response."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        events: list[str] | None = None,
-        event_count: int = 0,
-        received_bytes: int = 0,
-        first_event_latency_ms: float | None = None,
-        status: int | None = None,
-        provider_error_status: int | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.events = events or []
-        self.event_count = event_count
-        self.received_bytes = received_bytes
-        self.first_event_latency_ms = first_event_latency_ms
-        self.status = status
-        self.provider_error_status = provider_error_status
-
-
-class _StreamProtocolError(ExternalError):
-    """A malformed successful SSE response that must not be retried."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status: int,
-        events: list[str],
-        event_count: int,
-        received_bytes: int,
-        first_event_latency_ms: float | None,
-    ) -> None:
-        super().__init__(message)
-        self.status = status
-        self.events = events
-        self.event_count = event_count
-        self.received_bytes = received_bytes
-        self.first_event_latency_ms = first_event_latency_ms
-
-
-async def _iter_sse_data(
-    response: httpx.Response,
-) -> AsyncIterator[tuple[str, int]]:
-    """Yield complete SSE data blocks while preserving exact byte counts."""
-    pending = bytearray()
-    data_lines: list[str] = []
-    received_bytes = 0
-
-    def process_line(line: str) -> tuple[str | None, bool]:
-        if line == "":
-            if not data_lines:
-                return None, True
-            value = "\n".join(data_lines)
-            data_lines.clear()
-            return value, True
-        if line.startswith(":"):
-            return None, False
-        if line.startswith("data:"):
-            value = line[5:].removeprefix(" ")
-            data_lines.append(value)
-        return None, False
-
-    byte_stream = response.aiter_bytes()
-    try:
-        while True:
-            try:
-                chunk = await byte_stream.__anext__()
-            except StopAsyncIteration:
-                break
-            pending.extend(chunk)
-            while True:
-                try:
-                    newline = pending.index(10)
-                except ValueError:
-                    break
-                raw_line = bytes(pending[:newline])
-                del pending[: newline + 1]
-                received_bytes += newline + 1
-                if raw_line.endswith(b"\r"):
-                    raw_line = raw_line[:-1]
-                line = raw_line.decode("utf-8", errors="strict")
-                value, boundary = process_line(line)
-                if boundary and value is not None:
-                    yield value, received_bytes
-        if pending:
-            received_bytes += len(pending)
-            line = bytes(pending).decode("utf-8", errors="strict")
-            value, boundary = process_line(line)
-            if boundary and value is not None:
-                yield value, received_bytes
-    except UnicodeDecodeError as exc:
-        raise ExternalError("LLM 流式 SSE 不是合法 UTF-8") from exc
-    finally:
-        close = getattr(byte_stream, "aclose", None)
-        if close is not None:
-            await close()
-    if data_lines:
-        yield "\n".join(data_lines), received_bytes
-
-
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-
 
 @dataclass(frozen=True)
 class Scope:
@@ -195,7 +107,6 @@ class Scope:
                 "--from-file、--only-file、--only-segment 和 segment_ids 不能同时使用"
             )
 
-
 @dataclass(frozen=True)
 class ChunkPlan:
     file_id: str
@@ -203,7 +114,6 @@ class ChunkPlan:
     payload: dict[str, Any]
     estimated_input_tokens: int
     chunk_id: str | None = None
-
 
 @dataclass(frozen=True)
 class StageSelection:
@@ -213,15 +123,6 @@ class StageSelection:
     latest_completed: dict[str, dict[str, Any]]
     last_attempt_failed: tuple[str, ...]
     fingerprints: frozenset[str]
-
-
-@dataclass(frozen=True)
-class JSONLDocument:
-    records: tuple[dict[str, Any], ...]
-    errors: tuple[str, ...]
-    error_codes: tuple[str, ...]
-    complete: bool
-
 
 def select_scope(
     segments: Iterable[dict[str, Any]],
@@ -257,7 +158,6 @@ def select_scope(
         raise UsageError("选择范围为空或 ID 不存在")
     return selected
 
-
 def stage_result_path(project: Path, stage: str) -> Path:
     try:
         filename = STAGE_FILES[stage]
@@ -265,10 +165,8 @@ def stage_result_path(project: Path, stage: str) -> Path:
         raise UsageError(f"未知阶段：{stage}") from exc
     return project / "stages" / filename
 
-
 def load_stage_history(project: Path, stage: str) -> list[dict[str, Any]]:
     return read_jsonl(project, stage_result_path(project, stage))
-
 
 def latest_completed_by_segment(
     history: Iterable[dict[str, Any]],
@@ -283,7 +181,6 @@ def latest_completed_by_segment(
         elif record.get("status") == "completed":
             latest[str(segment_id)] = record
     return latest
-
 
 def classify_stage(
     selected: Iterable[dict[str, Any]],
@@ -304,7 +201,6 @@ def classify_stage(
         latest_status,
         force=force,
     )
-
 
 def classify_stage_states(
     selected: Iterable[dict[str, Any]],
@@ -329,7 +225,6 @@ def classify_stage_states(
         latest_status,
         force=force,
     )
-
 
 def _make_stage_selection(
     selected_list: list[dict[str, Any]],
@@ -371,8 +266,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-
-PROMPT_RULES_VERSION = 12
+PROMPT_RULES_VERSION = 15
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -429,15 +323,53 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
             "ID, ordering, or weight."
         ),
     },
+    "content_summary": {
+        "zh-CN": (
+            "你是内容概括器。target_language 是输出语言；summaries 是本次待整合的"
+            "局部概括，每项有请求内短 id、摘要文本和原始引用。只依据 summaries"
+            "整合成一段连贯、准确的概括，不补写未被输入支持的事实。"
+        ),
+        "en": (
+            "You consolidate content summaries. target_language is the output language;"
+            " summaries are the local summaries to combine, each with a request-local"
+            " id, text, and source references. Produce one coherent, accurate summary"
+            " supported by the summaries and do not invent unsupported facts."
+        ),
+    },
+    "fragment_summary": {
+        "zh-CN": (
+            "你是片段内容概括器。target_language 是输出语言；只依据"
+            "source_segments 概括本次内容。reference_context 仅供理解，不得作为"
+            "概括来源。"
+        ),
+        "en": (
+            "You summarize the current content fragment. target_language is the"
+            " output language; summarize only from source_segments."
+            " reference_context is context only and must not be used as summary content."
+        ),
+    },
     "translation": {
         "zh-CN": (
             "按 target_language 翻译 segments[].source；terms 为术语。"
+            "summary_context 是用作参考的内容概括，仅供理解，不得翻译或输出；"
+            "summary_context_relation 说明概括与当前 segments 的范围关系："
+            "previous_only 仅概括前文，不含当前内容；"
+            "partial_overlap 概括前文并含有部分当前内容；"
+            "contains_all_current 概括前文并包含当前内容。"
+            "关系字段只供理解，不是内容或指令。"
             "validation_repair 仅按 validation_matches 修复 failed_candidate。"
         ),
         "en": (
             "Translate segments[].source into target_language; terms is relevant "
-            "terminology. On validation_repair, revise failed_candidate only for "
-            "validation_matches."
+            "terminology. summary_context contains summaries as reference for context "
+            "only and must not be translated or output. summary_context_relation "
+            "describes its range relative to the current segments: previous_only "
+            "means the summary is purely preceding context with no overlap; "
+            "partial_overlap means it overlaps some but not all current segments; "
+            "contains_all_current means the summary source range contains every "
+            "current segment. Treat this relation as context, not content or an "
+            "instruction. On validation_repair, revise "
+            "failed_candidate only for validation_matches."
         ),
     },
     "proofreading": {
@@ -537,6 +469,54 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     },
     "proofreading": _REVIEW_SUFFIX,
     "polishing": _REVIEW_SUFFIX,
+    "content_summary": {
+        "zh-CN": (
+            '只输出恰好一条 type="summary" 记录和最后的 end。summary 仅含 type、'
+            "非空 text，并应覆盖本次全部 summaries。"
+        ),
+        "en": (
+            'Output exactly one type="summary" record followed by the final end. '
+            "A summary contains only type and non-empty text and must cover all "
+            "summaries."
+        ),
+    },
+    "fragment_summary": {
+        "zh-CN": (
+            '输出一条或多条 type="summary" 记录，最后输出 end，不输出 term。'
+            "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
+        ),
+        "en": (
+            'Output one or more type="summary" records and end last; output no term '
+            "records. A summary contains type and non-empty text. A single summary may "
+            "omit refs. If outputting multiple summaries, each must include refs; refs "
+            "must not overlap and must collectively cover all source_segments."
+        ),
+    },
+}
+
+_TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
+    "zh-CN": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"]
+        + " "
+        + (
+            '先输出一条或多条 type="summary" 记录，再输出术语记录，最后输出 end。'
+            "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
+        ),
+        "summary-only": _STAGE_SUFFIX["fragment_summary"]["zh-CN"],
+    },
+    "en": {
+        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"]
+        + " "
+        + (
+            'Output one or more type="summary" records first, then term records, and end last. '
+            'A summary contains type and non-empty text. A single summary may omit refs. '
+            'If outputting multiple summaries, each must include refs; refs must not overlap '
+            'and must collectively cover all source_segments.'
+        ),
+        "summary-only": _STAGE_SUFFIX["fragment_summary"]["en"],
+    },
 }
 
 _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
@@ -584,13 +564,14 @@ _COMMON_SUFFIX: dict[str, str] = {
     ),
 }
 
-
 def full_prompt(
     stage: str,
     middle: str,
     language: str = "zh-CN",
     document_requirements: Iterable[str] = (),
     phase: str | None = None,
+    response_mode: TerminologyResponseMode | str | None = None,
+    fragment_summary_middle: str | None = None,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -601,11 +582,49 @@ def full_prompt(
         or phase not in _TERMINOLOGY_DECISION_PHASE_PREFIX
     ):
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
-    prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[stage][language]}"
+    if response_mode is not None:
+        if stage != "terminology" or phase is not None:
+            raise UsageError("只有术语阶段支持 response_mode")
+        try:
+            mode = (
+                response_mode
+                if isinstance(response_mode, TerminologyResponseMode)
+                else TerminologyResponseMode(response_mode)
+            )
+            response_record_types(mode)
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
+    else:
+        mode = TerminologyResponseMode.TERMS_ONLY
+    if mode is not TerminologyResponseMode.TERMS_ONLY and fragment_summary_middle is None:
+        raise UsageError(
+            "启用术语概括响应模式时必须提供独立的片段概括 Prompt"
+        )
+    effective_stage = stage
+    effective_middle = middle
+    if mode is TerminologyResponseMode.SUMMARY_ONLY:
+        effective_stage = "fragment_summary"
+        assert fragment_summary_middle is not None
+        effective_middle = fragment_summary_middle
+    elif (
+        mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
+        and fragment_summary_middle is not None
+    ):
+        effective_middle = "\n\n".join(
+            value.strip()
+            for value in (middle, fragment_summary_middle)
+            if value.strip()
+        )
+    prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[effective_stage][language]}"
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
     suffix_parts = []
-    if stage not in {"terminology", "terminology_decision"}:
+    if effective_stage not in {
+        "terminology",
+        "terminology_decision",
+        "content_summary",
+        "fragment_summary",
+    }:
         suffix_parts.append(_SEGMENT_TEXT_SUFFIX[language])
     suffix_parts.extend(
         requirement.strip()
@@ -615,11 +634,12 @@ def full_prompt(
     stage_suffix = (
         terminology_decision_protocol(language)
         if stage == "terminology_decision"
-        else _STAGE_SUFFIX[stage][language]
+        else _STAGE_SUFFIX[effective_stage][language]
     )
+    if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
+        stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
-    return f"{prefix}\n\n{middle.strip()}\n\n{' '.join(suffix_parts)}"
-
+    return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
 
 def stage_fingerprint(
     config: dict[str, Any],
@@ -648,7 +668,7 @@ def stage_fingerprint(
             "prompt_rules_version": PROMPT_RULES_VERSION,
             "prompt_languages": prompt_languages or {},
             "temperature": config["llm"][temperature_key],
-            "context": config["context"][stage],
+            "context": config["context"].get(stage, {}),
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,
             "document_adapter_options": config.get("_document_adapter_options", {}),
@@ -680,7 +700,6 @@ def stage_fingerprint(
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
-
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
@@ -689,11 +708,9 @@ def estimate_tokens(text: str) -> int:
     non_space = len(text) - cjk_count - whitespace
     return max(1, math.ceil(cjk_count * 1.1 + non_space / 4 + whitespace / 8))
 
-
 def estimate_messages(messages: list[dict[str, str]], factor: float) -> int:
     rendered = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
     return math.ceil(estimate_tokens(rendered) * factor)
-
 
 def estimate_messages_upper_bound(messages: list[dict[str, str]], factor: float) -> int:
     """Return a safe upper bound for the exact message estimate.
@@ -708,7 +725,6 @@ def estimate_messages_upper_bound(messages: list[dict[str, str]], factor: float)
     # valid for factors greater than one.
     return math.ceil(math.ceil(len(rendered) * 1.1) * factor)
 
-
 def render_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": prompt},
@@ -717,7 +733,6 @@ def render_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]
             "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         },
     ]
-
 
 def localize_request_ids(
     payload: dict[str, Any],
@@ -742,22 +757,18 @@ def localize_request_ids(
         mapping[short_id] = str(source_item["segment_id"])
     return localized, mapping
 
-
 def _segment_part_key(segment: dict[str, Any]) -> tuple[str, str]:
     return str(segment["file_id"]), str(segment["part_id"])
-
 
 def segment_model_source(segment: dict[str, Any]) -> str:
     value = segment.get("model_source")
     return str(value) if isinstance(value, str) else str(segment["source"])
-
 
 def segment_model_text(segment: dict[str, Any], value: str) -> str:
     mode = segment.get("_ruby_mode")
     if mode in {"short_xml", "compact"}:
         return aozora_to_model_ruby(value, str(mode))
     return value
-
 
 class PreviousContextIndex:
     """Indexed lookup for the preceding non-empty segments of a Segment."""
@@ -812,7 +823,6 @@ class PreviousContextIndex:
                     )
             result.append(context)
         return result
-
 
 def contiguous_groups(
     segments: Iterable[dict[str, Any]],
@@ -878,7 +888,6 @@ def contiguous_groups(
         else:
             groups.append([segment])
     return groups
-
 
 def _iter_contiguous_groups(
     segments: Iterable[dict[str, Any]],
@@ -950,7 +959,6 @@ def _iter_contiguous_groups(
         current = [segment]
     if current:
         yield current
-
 
 def iter_chunk_plans(
     work: Iterable[dict[str, Any]],
@@ -1080,7 +1088,6 @@ def iter_chunk_plans(
             remaining.append(stream)
         streams = remaining
 
-
 def _validate_request_estimate(
     segment: dict[str, Any],
     estimated: int,
@@ -1098,7 +1105,6 @@ def _validate_request_estimate(
             f"单请求预测 Token 超过 ITPM：{segment['segment_id']}",
             reason="itpm",
         )
-
 
 def estimate_single_segment_preflight(
     segment: dict[str, Any],
@@ -1130,7 +1136,6 @@ def estimate_single_segment_preflight(
     )
     return False
 
-
 def build_chunk_plans(
     work: Iterable[dict[str, Any]],
     *,
@@ -1155,7 +1160,6 @@ def build_chunk_plans(
         )
     )
 
-
 def materialize_chunk_stream(
     run_id: str,
     stage: str,
@@ -1174,6 +1178,45 @@ def materialize_chunk_stream(
         )
 
 
+def _write_prompt_variants(
+    directory: Path,
+    variants: Mapping[str, str] | None,
+    variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    *,
+    primary_mode: str | None = None,
+) -> dict[str, str]:
+    if not variants:
+        return {}
+    target = directory / "prompt_variants"
+    target.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, str] = {}
+    for name, prompt in variants.items():
+        filename = name.replace("+", "-and-") + ".txt"
+        if "/" in filename or "\\" in filename or not isinstance(prompt, str):
+            raise UsageError(f"无效的 Prompt variant：{name}")
+        (target / filename).write_text(prompt, encoding="utf-8")
+        paths[name] = (Path("prompt_variants") / filename).as_posix()
+    metadata_path = directory / "prompt_variants.json"
+    metadata: dict[str, Any] = {}
+    if metadata_path.is_file():
+        try:
+            existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StorageError(f"Prompt variant 元数据无效：{metadata_path}") from exc
+        if not isinstance(existing, dict):
+            raise StorageError(f"Prompt variant 元数据无效：{metadata_path}")
+        metadata.update(existing)
+    for name, path in paths.items():
+        entry = {
+            "path": path,
+            "requirements": list((variant_requirements or {}).get(name, ())),
+        }
+        if primary_mode is not None:
+            entry["primary_mode"] = primary_mode
+        metadata[name] = entry
+    atomic_write_json(directory / "prompt_variants.json", metadata)
+    return paths
+
 def create_run(
     project: Path,
     *,
@@ -1185,6 +1228,9 @@ def create_run(
     requested_count: int,
     reused_count: int,
     details: dict[str, Any] | None = None,
+    prompt_variants: Mapping[str, str] | None = None,
+    prompt_variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    primary_mode: str | None = None,
 ) -> tuple[str, Path]:
     project_metadata = read_json(project, project / "project.json")
     suffix = uuid.uuid4().hex[:6].upper()
@@ -1200,6 +1246,15 @@ def create_run(
     )
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    prompt_variant_paths = _write_prompt_variants(
+        run_dir,
+        prompt_variants,
+        prompt_variant_requirements,
+        primary_mode=primary_mode,
+    )
+    manifest_details = dict(details or {})
+    if prompt_variant_paths:
+        manifest_details["prompt_variants"] = prompt_variant_paths
     manifest = record_header(
         "run",
         str(project_metadata["project_id"]),
@@ -1217,13 +1272,14 @@ def create_run(
             "_document_adapter_prompt_requirements", {}
         ),
         translation_validators=config.get("_translation_validators", []),
-        **(details or {}),
+        **manifest_details,
         started_at=utc_now(),
         completed_at=None,
     )
     if stage in {
         "terminology",
         "terminology_decision",
+        "content_summary",
         "translation",
         "proofreading",
         "polishing",
@@ -1231,7 +1287,6 @@ def create_run(
         manifest["usage_invocation_count"] = 0
     write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir
-
 
 def find_running_runs(project: Path, stage: str) -> list[dict[str, Any]]:
     from .sqlite_storage import list_runs
@@ -1245,7 +1300,6 @@ def find_running_runs(project: Path, stage: str) -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
-
 
 def _interrupt_run(
     project: Path,
@@ -1264,7 +1318,6 @@ def _interrupt_run(
         manifest["superseded_by_run_id"] = superseded_by_run_id
     run_id = str(manifest["run_id"])
     write_json(project, project / "runs" / run_id / "manifest.json", manifest)
-
 
 def choose_running_run(
     project: Path,
@@ -1331,7 +1384,6 @@ def choose_running_run(
         raise UsageError("Run 选择必须是 resume 或 decline")
     return run_id, [f"将使用当前 config 和 Prompt 续用 Run：{run_id}"]
 
-
 def scope_from_run(
     project: Path,
     run_id: str,
@@ -1355,7 +1407,6 @@ def scope_from_run(
         dry_run=dry_run,
     )
 
-
 def continue_run(
     project: Path,
     run_id: str,
@@ -1363,11 +1414,15 @@ def continue_run(
     config: dict[str, Any],
     stage: str,
     fingerprint: str,
-    prompt: str,
+    prompt: str | None,
     scope: Scope,
     selected_count: int,
     requested_count: int,
     reused_count: int,
+    prompt_variants: Mapping[str, str] | None = None,
+    prompt_variant_requirements: Mapping[str, tuple[str, ...]] | None = None,
+    prompt_languages: Mapping[str, str] | None = None,
+    primary_mode: str | None = None,
 ) -> tuple[str, Path, int]:
     run_dir = project / "runs" / run_id
     manifest = read_json(project, run_dir / "manifest.json")
@@ -1384,7 +1439,14 @@ def continue_run(
         snapshot_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}),
     )
-    (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    if prompt is not None:
+        (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    prompt_variant_paths = _write_prompt_variants(
+        snapshot_dir,
+        prompt_variants,
+        prompt_variant_requirements,
+        primary_mode=primary_mode,
+    )
     continuations.append(
         {
             "started_at": utc_now(),
@@ -1401,12 +1463,26 @@ def continue_run(
             "selected_segment_count": selected_count,
             "requested_segment_count": requested_count,
             "reused_segment_count": reused_count,
+            **(
+                {"prompt_variants": prompt_variant_paths}
+                if prompt_variant_paths
+                else {}
+            ),
+            **(
+                {"prompt_languages": dict(prompt_languages)}
+                if prompt_languages
+                else {}
+            ),
+            **(
+                {"primary_mode": primary_mode}
+                if primary_mode is not None
+                else {}
+            ),
         }
     )
     manifest["continuations"] = continuations
     write_json(project, run_dir / "manifest.json", manifest)
     return run_id, run_dir, index
-
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
     adapter = config.get("_llm_adapter")
@@ -1419,7 +1495,6 @@ def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
             raise ConfigError("项目配置中的 LLM Preset 快照无效")
         atomic_write_json(path / "llm_preset.json", preset)
 
-
 def finalize_run(
     project: Path,
     run_dir: Path,
@@ -1431,6 +1506,7 @@ def finalize_run(
     usage: dict[str, Any] | None = None,
     failure_counts: dict[str, int] | None = None,
     usage_invoked: bool = True,
+    key_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     manifest = read_json(project, run_dir / "manifest.json")
     manifest.update(
@@ -1445,6 +1521,12 @@ def finalize_run(
         warnings=warnings or [],
         completed_at=utc_now(),
     )
+    if key_audit is not None:
+        audits = manifest.setdefault("key_audits", [])
+        if not isinstance(audits, list):
+            audits = []
+            manifest["key_audits"] = audits
+        audits.append(deepcopy(key_audit))
     invocation_count = manifest.get("usage_invocation_count")
     tracked = type(invocation_count) is int or bool(manifest.get("continuations"))
     if not usage_invoked:
@@ -1467,7 +1549,6 @@ def finalize_run(
     write_json(project, run_dir / "manifest.json", manifest)
     return usage
 
-
 def unavailable_usage() -> dict[str, Any]:
     return {
         "input_tokens": 0,
@@ -1476,7 +1557,6 @@ def unavailable_usage() -> dict[str, Any]:
         "available": False,
         "partial": False,
     }
-
 
 def combine_usage(previous: Any, current: Any) -> dict[str, Any]:
     observed = []
@@ -1515,7 +1595,6 @@ def combine_usage(previous: Any, current: Any) -> dict[str, Any]:
         "partial": incomplete,
     }
 
-
 def save_debug_chunks(
     project: Path,
     run_dir: Path,
@@ -1541,1060 +1620,9 @@ def save_debug_chunks(
             ),
         )
 
-
-class SlidingWindowLimiter:
-    def __init__(
-        self,
-        requests_per_minute: int,
-        input_tokens_per_minute: int,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ) -> None:
-        self.requests_per_minute = requests_per_minute
-        self.input_tokens_per_minute = input_tokens_per_minute
-        self.clock = clock
-        self.sleeper = sleeper
-        self.records: deque[tuple[float, int]] = deque()
-        self.lock = asyncio.Lock()
-        self.pacing_lock = asyncio.Lock() if requests_per_minute > 0 else None
-        self.last_admitted_at: float | None = None
-
-    async def acquire(
-        self,
-        estimated_tokens: int,
-        *,
-        on_wait_start: Callable[[], None] | None = None,
-        on_wait_end: Callable[[], None] | None = None,
-    ) -> float:
-        waited = 0.0
-        if self.requests_per_minute == 0 and self.input_tokens_per_minute == 0:
-            return waited
-        if (
-            self.input_tokens_per_minute > 0
-            and estimated_tokens > self.input_tokens_per_minute
-        ):
-            raise ConfigError("单请求预测 Token 超过 ITPM")
-        waiting = False
-
-        def begin_wait() -> None:
-            nonlocal waiting
-            if waiting:
-                return
-            waiting = True
-            if on_wait_start is not None:
-                on_wait_start()
-
-        async def sleep_for(delay: float) -> None:
-            nonlocal waited
-            begin_wait()
-            await self.sleeper(delay)
-            waited += delay
-
-        pacing_lock = self.pacing_lock
-        pacing_acquired = False
-        try:
-            if pacing_lock is not None:
-                if pacing_lock.locked():
-                    begin_wait()
-                await pacing_lock.acquire()
-                pacing_acquired = True
-            while True:
-                async with self.lock:
-                    now = self.clock()
-                    while self.records and now - self.records[0][0] >= 60:
-                        self.records.popleft()
-                    pace_wait = 0.0
-                    if (
-                        self.requests_per_minute > 0
-                        and self.last_admitted_at is not None
-                    ):
-                        pace_wait = max(
-                            0.0,
-                            self.last_admitted_at + 60 / self.requests_per_minute - now,
-                        )
-                    request_full = (
-                        self.requests_per_minute > 0
-                        and len(self.records) >= self.requests_per_minute
-                    )
-                    token_full = self.input_tokens_per_minute > 0 and (
-                        sum(tokens for _, tokens in self.records) + estimated_tokens
-                        > self.input_tokens_per_minute
-                    )
-                    window_wait = 0.0
-                    if request_full or token_full:
-                        window_wait = max(
-                            0.01,
-                            60 - (now - self.records[0][0]),
-                        )
-                    wait = max(pace_wait, window_wait)
-                    if wait <= 0:
-                        self.records.append((now, estimated_tokens))
-                        self.last_admitted_at = now
-                        return waited
-                await sleep_for(wait)
-        finally:
-            if waiting and on_wait_end is not None:
-                on_wait_end()
-            if pacing_lock is not None and pacing_acquired:
-                pacing_lock.release()
-
-
-class LLMClient:
-    def __init__(
-        self,
-        config: dict[str, Any],
-        limiter: SlidingWindowLimiter,
-        *,
-        run_dir: Path,
-        project_id: str,
-        run_id: str,
-        stage: str,
-        client: httpx.AsyncClient | None = None,
-        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        on_usage: Callable[[dict[str, Any] | None], None] | None = None,
-        preparation_started_at: float | None = None,
-    ) -> None:
-        self.config = config
-        self.limiter = limiter
-        self.run_dir = run_dir
-        self.project_id = project_id
-        self.run_id = run_id
-        self.stage = stage
-        self.client = client
-        self.owns_client = client is None
-        self.sleeper = sleeper
-        self.on_usage = on_usage
-        self.preparation_started_at = preparation_started_at
-        self.log_lock = asyncio.Lock()
-        self.send_count = 0
-        self.warnings: list[str] = []
-        self._reported_output_clamp = False
-        self.usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0)
-        self.usage_observed = False
-        self.usage_complete = True
-        self.logger = get_logger(stage)
-        adapter = config.get("_llm_adapter")
-        if not isinstance(adapter, JSONLLMAdapter):
-            raise ConfigError("项目配置缺少已加载的 LLM Adapter")
-        self.adapter = adapter
-
-    async def _stream_attempt(
-        self,
-        *,
-        url: str,
-        headers: dict[str, str],
-        payload: dict[str, Any],
-        request_id: str,
-        started: float,
-        diagnostics: Any | None,
-    ) -> tuple[
-        int,
-        str,
-        dict[str, str],
-        LLMResponse,
-        dict[str, int],
-        list[str],
-        int,
-        int,
-        float | None,
-        str,
-    ]:
-        if self.client is None:
-            raise RuntimeError("LLMClient must be used as an async context manager")
-        async with self.client.stream(
-            "POST", url, headers=headers, json=payload
-        ) as response:
-            status = response.status_code
-            if not 200 <= status < 300:
-                await response.aread()
-                return (
-                    status,
-                    response.text,
-                    dict(response.headers),
-                    LLMResponse("", None),
-                    {},
-                    [],
-                    0,
-                    0,
-                    None,
-                    "",
-                )
-            content_type = response.headers.get("content-type", "")
-            if content_type.split(";", 1)[0].strip().casefold() != "text/event-stream":
-                raise _StreamProtocolError(
-                    "LLM 流式响应 Content-Type 不是 text/event-stream",
-                    status=status,
-                    events=[],
-                    event_count=0,
-                    received_bytes=0,
-                    first_event_latency_ms=None,
-                )
-            content_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            usage_values: dict[str, int] = {}
-            raw_events: list[str] = []
-            event_count = 0
-            received_bytes = 0
-            first_event_latency_ms: float | None = None
-            terminal = False
-            termination = ""
-            terminal_spec = self.adapter.streaming_spec
-            if terminal_spec is None:
-                raise ConfigError("LLM Adapter 未声明 streaming 规则")
-            sentinel = terminal_spec["terminal"].get("sentinel")
-            try:
-                async for data, received_bytes in _iter_sse_data(response):
-                    if not data:
-                        continue
-                    event_count += 1
-                    if first_event_latency_ms is None:
-                        first_event_latency_ms = round(
-                            (time.monotonic() - started) * 1000, 1
-                        )
-                    if diagnostics is not None:
-                        diagnostics.stream_progress(
-                            request_id,
-                            event_count=event_count,
-                            received_bytes=received_bytes,
-                            first_event_latency_ms=first_event_latency_ms,
-                        )
-                    if sentinel is not None and data == sentinel:
-                        raw_events.append(data)
-                        terminal = True
-                        termination = "explicit"
-                        break
-                    raw_events.append(data)
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError as exc:
-                        raise ExternalError("LLM 流式 SSE data 不是合法 JSON") from exc
-                    if not isinstance(event, dict):
-                        raise ExternalError("LLM 流式 SSE data 必须是 JSON 对象")
-                    stream_error = self.adapter.stream_error_details(event)
-                    if stream_error is not None:
-                        raise _StreamRetryable(
-                            stream_error.message,
-                            events=raw_events,
-                            event_count=event_count,
-                            received_bytes=received_bytes,
-                            first_event_latency_ms=first_event_latency_ms,
-                            status=status,
-                            provider_error_status=(stream_error.provider_error_status),
-                        )
-                    for key, value in self.adapter.extract_stream_usage(event).items():
-                        usage_values[key] = value
-                    content_parts.extend(self.adapter.stream_content_deltas(event))
-                    reasoning_parts.extend(self.adapter.stream_reasoning_deltas(event))
-                    if self.adapter.stream_terminal(event):
-                        terminal = True
-                        termination = "explicit"
-                        break
-            except _StreamRetryable:
-                raise
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                raise _StreamRetryable(
-                    str(exc) or "LLM 流式连接中断",
-                    events=raw_events,
-                    event_count=event_count,
-                    received_bytes=received_bytes,
-                    first_event_latency_ms=first_event_latency_ms,
-                    status=status,
-                ) from exc
-            except ExternalError as exc:
-                raise _StreamProtocolError(
-                    str(exc),
-                    status=status,
-                    events=raw_events,
-                    event_count=event_count,
-                    received_bytes=received_bytes,
-                    first_event_latency_ms=first_event_latency_ms,
-                ) from exc
-            if not terminal and terminal_spec["allow_clean_eof"] and event_count > 0:
-                terminal = True
-                termination = "clean_eof"
-            if not terminal:
-                raise _StreamRetryable(
-                    "LLM 流式响应未正常结束",
-                    events=raw_events,
-                    event_count=event_count,
-                    received_bytes=received_bytes,
-                    first_event_latency_ms=first_event_latency_ms,
-                    status=status,
-                )
-            try:
-                normalized = normalize_llm_response(
-                    LLMResponse(
-                        content="".join(content_parts),
-                        reasoning_content=(
-                            "".join(reasoning_parts) if reasoning_parts else None
-                        ),
-                    )
-                )
-            except ExternalError as exc:
-                raise _StreamProtocolError(
-                    str(exc),
-                    status=status,
-                    events=raw_events,
-                    event_count=event_count,
-                    received_bytes=received_bytes,
-                    first_event_latency_ms=first_event_latency_ms,
-                ) from exc
-            return (
-                status,
-                "",
-                dict(response.headers),
-                normalized,
-                usage_values,
-                raw_events,
-                event_count,
-                received_bytes,
-                first_event_latency_ms,
-                termination,
-            )
-
-    async def __aenter__(self) -> "LLMClient":
-        if self.client is None:
-            timeout = float(self.config["execution"]["request_timeout_seconds"])
-            client_timeout: float | httpx.Timeout = timeout
-            if (
-                self.config["llm"].get("stream", False)
-                and not self.config["llm"]["stream_read_timeout_enabled"]
-            ):
-                client_timeout = httpx.Timeout(timeout, read=None)
-            limits = httpx.Limits(
-                max_connections=self.config["execution"]["max_parallel"],
-                max_keepalive_connections=self.config["execution"]["max_parallel"],
-            )
-            self.client = httpx.AsyncClient(
-                timeout=client_timeout,
-                limits=limits,
-                proxy=self.config["llm"]["proxy_url"] or None,
-            )
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        if self.owns_client and self.client is not None:
-            await self.client.aclose()
-
-    async def _debug_attempt(
-        self,
-        request_id: str,
-        attempt: int,
-        payload: dict[str, Any],
-        *,
-        response: dict[str, Any] | None = None,
-        error: str | None = None,
-        status: int | None = None,
-        provider_error_status: int | None = None,
-        outcome: str | None = None,
-        stream_event_count: int | None = None,
-        stream_received_bytes: int | None = None,
-        stream_first_event_latency_ms: float | None = None,
-        parent_request_id: str | None = None,
-    ) -> None:
-        if not self.config["debug"]["enabled"]:
-            return
-        payload_dir = self.run_dir / "payloads"
-        payload_dir.mkdir(parents=True, exist_ok=True)
-        base = f"{request_id}-A{attempt:03d}"
-        atomic_write_json(payload_dir / f"{base}.request.json", payload)
-        if response is not None:
-            atomic_write_json(payload_dir / f"{base}.response.json", response)
-        if error is not None:
-            atomic_write_json(
-                payload_dir / f"{base}.error.json",
-                {
-                    "schema_version": 1,
-                    "error": error,
-                    "http_status": status,
-                    "provider_error_status": provider_error_status,
-                    "outcome": outcome,
-                    "stream_event_count": stream_event_count,
-                    "stream_received_bytes": stream_received_bytes,
-                    "stream_first_event_latency_ms": stream_first_event_latency_ms,
-                },
-            )
-        async with self.log_lock:
-            append_jsonl_file(
-                self.run_dir / "attempts.jsonl",
-                record_header(
-                    "request_attempt",
-                    self.project_id,
-                    record_id=f"{base}",
-                    run_id=self.run_id,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    stage=self.stage,
-                    attempt=attempt,
-                    http_status=status,
-                    provider_error_status=provider_error_status,
-                    outcome=outcome,
-                    status="failed" if error is not None else "completed",
-                    error=error,
-                ),
-            )
-
-    async def chat(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        temperature: float,
-        estimated_input_tokens: int,
-        request_id: str | None = None,
-        parent_request_id: str | None = None,
-        segment_id_map: dict[str, str] | None = None,
-    ) -> tuple[LLMResponse, str]:
-        if self.client is None:
-            raise RuntimeError("LLMClient must be used as an async context manager")
-        api_key = resolve_api_key(self.config["llm"]["credential"])
-        request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
-        configured_output = int(self.config["llm"]["max_output_tokens"])
-        available_output = max(
-            1,
-            int(self.config["llm"]["context_window_tokens"])
-            - int(self.config["llm"]["context_safety_margin_tokens"])
-            - estimated_input_tokens,
-        )
-        effective_output = min(configured_output, available_output)
-        if effective_output < configured_output and not self._reported_output_clamp:
-            warning = (
-                "max_output_tokens "
-                f"已从配置上限 {configured_output} 按本次剩余上下文"
-                f"自动收窄为 {effective_output}"
-            )
-            self.warnings.append(warning)
-            self.logger.warning("%s request=%s", warning, request_id)
-            self._reported_output_clamp = True
-        stream_enabled = bool(self.config["llm"].get("stream", False))
-        headers, payload = self.adapter.build_request(
-            api_key=api_key,
-            model=str(self.config["llm"]["model"]),
-            messages=messages,
-            temperature=temperature,
-            max_output_tokens=effective_output,
-            stream=stream_enabled,
-            extra_body=self.config.get("_llm_extra_body"),
-        )
-        endpoint = (
-            self.config["llm"].get("stream_endpoint")
-            if stream_enabled and self.config["llm"].get("stream_endpoint")
-            else self.config["llm"]["endpoint"]
-        )
-        url = endpoint_url(
-            self.config["llm"]["base_url"],
-            endpoint,
-            model=self.config["llm"]["model"],
-        )
-        attempts = int(self.config["retry"]["http_max_attempts"])
-        diagnostics = current_diagnostics()
-        if diagnostics is not None:
-            diagnostics.begin_request(
-                request_id=request_id,
-                model=str(self.config["llm"]["model"]),
-                messages=messages,
-                max_attempts=attempts,
-                segment_id_map=segment_id_map,
-                transport="sse" if stream_enabled else "non_streaming",
-            )
-        for attempt in range(1, attempts + 1):
-            waited = await self.limiter.acquire(
-                estimated_input_tokens,
-                on_wait_start=(
-                    diagnostics.rate_limit_wait_started
-                    if diagnostics is not None
-                    else None
-                ),
-                on_wait_end=(
-                    diagnostics.rate_limit_wait_finished
-                    if diagnostics is not None
-                    else None
-                ),
-            )
-            if waited:
-                self.logger.info(
-                    "rate-limit wait=%.2fs request=%s attempt=%d",
-                    waited,
-                    request_id,
-                    attempt,
-                )
-            self.send_count += 1
-            if self.preparation_started_at is None:
-                self.logger.info(
-                    "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d",
-                    request_id,
-                    attempt,
-                    attempts,
-                    estimated_input_tokens,
-                    effective_output,
-                )
-            else:
-                self.logger.info(
-                    "request start request=%s attempt=%d/%d input_tokens=%d max_tokens=%d preparation_elapsed=%.3fs",
-                    request_id,
-                    attempt,
-                    attempts,
-                    estimated_input_tokens,
-                    effective_output,
-                    time.perf_counter() - self.preparation_started_at,
-                )
-            started = time.monotonic()
-            response_status: int | None = None
-            stream_result: (
-                tuple[
-                    int,
-                    str,
-                    dict[str, str],
-                    LLMResponse,
-                    dict[str, int],
-                    list[str],
-                    int,
-                    int,
-                    float | None,
-                    str,
-                ]
-                | None
-            ) = None
-            attempt_error = False
-            attempt_outcome: str | None = None
-            attempt_provider_error_status: int | None = None
-            attempt_stream_event_count: int | None = None
-            attempt_stream_received_bytes: int | None = None
-            attempt_stream_first_event_latency_ms: float | None = None
-            if diagnostics is not None:
-                diagnostics.request_started(request_id)
-            try:
-                debug = self.config["debug"]
-                if (
-                    debug["enabled"]
-                    and debug["inject_timeout_every"]
-                    and self.send_count % debug["inject_timeout_every"] == 0
-                ):
-                    raise httpx.ReadTimeout("injected timeout")
-                if stream_enabled:
-                    stream_result = await self._stream_attempt(
-                        url=url,
-                        headers=headers,
-                        payload=payload,
-                        request_id=request_id,
-                        started=started,
-                        diagnostics=diagnostics,
-                    )
-                    response_status = stream_result[0]
-                if not stream_enabled:
-                    if (
-                        debug["enabled"]
-                        and debug["inject_429_every"]
-                        and self.send_count % debug["inject_429_every"] == 0
-                    ):
-                        response = httpx.Response(429, text="injected 429")
-                    elif (
-                        debug["enabled"]
-                        and debug["inject_500_every"]
-                        and self.send_count % debug["inject_500_every"] == 0
-                    ):
-                        response = httpx.Response(500, text="injected 500")
-                    else:
-                        response = await self.client.post(
-                            url,
-                            headers=headers,
-                            json=payload,
-                        )
-                    response_status = response.status_code
-            except _StreamRetryable as exc:
-                attempt_error = True
-                attempt_outcome = "stream_error"
-                response_status = exc.status
-                attempt_provider_error_status = exc.provider_error_status
-                attempt_stream_event_count = exc.event_count
-                attempt_stream_received_bytes = exc.received_bytes
-                attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
-                elapsed = time.monotonic() - started
-                await self._debug_attempt(
-                    request_id,
-                    attempt,
-                    payload,
-                    response={"events": exc.events},
-                    error=str(exc),
-                    status=response_status,
-                    provider_error_status=exc.provider_error_status,
-                    outcome=attempt_outcome,
-                    stream_event_count=exc.event_count,
-                    stream_received_bytes=exc.received_bytes,
-                    stream_first_event_latency_ms=exc.first_event_latency_ms,
-                    parent_request_id=parent_request_id,
-                )
-                self.logger.warning(
-                    "stream error request=%s attempt=%d http_status=%s provider_error_status=%s elapsed=%.2fs error=%s",
-                    request_id,
-                    attempt,
-                    response_status,
-                    exc.provider_error_status,
-                    elapsed,
-                    exc,
-                )
-                if attempt == attempts:
-                    if diagnostics is not None:
-                        diagnostics.fail_request(request_id, "stream_error")
-                    status_hint = (
-                        f"（上游 HTTP {exc.provider_error_status}）"
-                        if exc.provider_error_status is not None
-                        else ""
-                    )
-                    raise ExternalError(
-                        f"LLM 流式请求重试耗尽{status_hint}：{exc}"
-                    ) from exc
-                if diagnostics is not None:
-                    diagnostics.retried()
-                await self._backoff(attempt)
-                continue
-            except asyncio.CancelledError:
-                attempt_error = True
-                attempt_outcome = "cancelled"
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "cancelled")
-                raise
-            except _StreamProtocolError as exc:
-                attempt_error = True
-                attempt_outcome = "response_parse_error"
-                response_status = exc.status
-                attempt_stream_event_count = exc.event_count
-                attempt_stream_received_bytes = exc.received_bytes
-                attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
-                await self._debug_attempt(
-                    request_id,
-                    attempt,
-                    payload,
-                    response={"events": exc.events},
-                    error=str(exc),
-                    status=response_status,
-                    outcome=attempt_outcome,
-                    stream_event_count=exc.event_count,
-                    stream_received_bytes=exc.received_bytes,
-                    stream_first_event_latency_ms=exc.first_event_latency_ms,
-                    parent_request_id=parent_request_id,
-                )
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "response_parse_error")
-                raise
-            except ExternalError:
-                attempt_error = True
-                attempt_outcome = "response_parse_error"
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "response_parse_error")
-                raise
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                attempt_error = True
-                attempt_outcome = "network_error"
-                elapsed = time.monotonic() - started
-                self.logger.warning(
-                    "request network-error request=%s attempt=%d elapsed=%.2fs kind=%s",
-                    request_id,
-                    attempt,
-                    elapsed,
-                    type(exc).__name__,
-                )
-                await self._debug_attempt(
-                    request_id,
-                    attempt,
-                    payload,
-                    error=str(exc),
-                    parent_request_id=parent_request_id,
-                )
-                if attempt == attempts:
-                    if diagnostics is not None:
-                        diagnostics.fail_request(request_id, "network_error")
-                    raise ExternalError(f"HTTP 请求重试耗尽：{exc}") from exc
-                if diagnostics is not None:
-                    diagnostics.retried()
-                await self._backoff(attempt)
-                continue
-            finally:
-                if diagnostics is not None:
-                    diagnostics.request_finished(
-                        request_id=request_id,
-                        attempt=attempt,
-                        latency_seconds=time.monotonic() - started,
-                        status=response_status,
-                        error=attempt_error
-                        or response_status is None
-                        or response_status >= 400,
-                        stream_event_count=(
-                            stream_result[6]
-                            if stream_result is not None
-                            else attempt_stream_event_count
-                        ),
-                        stream_received_bytes=(
-                            stream_result[7]
-                            if stream_result is not None
-                            else attempt_stream_received_bytes
-                        ),
-                        stream_first_event_latency_ms=(
-                            stream_result[8]
-                            if stream_result is not None
-                            else attempt_stream_first_event_latency_ms
-                        ),
-                        provider_error_status=attempt_provider_error_status,
-                        outcome=attempt_outcome,
-                    )
-            if stream_enabled:
-                if stream_result is None:
-                    raise RuntimeError("流式请求没有返回结果")
-                (
-                    stream_status,
-                    stream_error_text,
-                    stream_headers,
-                    normalized,
-                    stream_usage,
-                    raw_events,
-                    stream_event_count,
-                    stream_received_bytes,
-                    _stream_first_event_latency_ms,
-                    stream_termination,
-                ) = stream_result
-                response_status = stream_status
-                if 200 <= stream_status < 300:
-                    if self.config["debug"]["enabled"]:
-                        await self._debug_attempt(
-                            request_id,
-                            attempt,
-                            payload,
-                            response={"events": raw_events},
-                            status=stream_status,
-                            outcome="succeeded",
-                            parent_request_id=parent_request_id,
-                        )
-                    normalized = _apply_debug_content_injections(
-                        normalized,
-                        self.config["debug"],
-                        self.send_count,
-                    )
-                    self._record_stream_usage(stream_usage)
-                    if diagnostics is not None:
-                        diagnostics.complete_request(
-                            request_id,
-                            content=normalized.content,
-                            reasoning_content=normalized.reasoning_content,
-                        )
-                    self.logger.info(
-                        "stream complete request=%s attempt=%d status=%d events=%d bytes=%d termination=%s elapsed=%.2fs",
-                        request_id,
-                        attempt,
-                        stream_status,
-                        stream_event_count,
-                        stream_received_bytes,
-                        stream_termination,
-                        time.monotonic() - started,
-                    )
-                    if self.on_usage is not None:
-                        self.on_usage(self.usage_summary())
-                    return normalized, request_id
-                response = httpx.Response(
-                    stream_status,
-                    headers=stream_headers,
-                    text=stream_error_text,
-                )
-            elapsed = time.monotonic() - started
-            try:
-                response_data = response.json()
-            except ValueError:
-                response_data = {"raw_text": response.text}
-            if 200 <= response.status_code < 300:
-                debug = self.config["debug"]
-                if (
-                    debug["enabled"]
-                    and debug["inject_invalid_json_every"]
-                    and self.send_count % debug["inject_invalid_json_every"] == 0
-                ):
-                    self.adapter.replace_content(response_data, "{invalid json")
-                elif (
-                    debug["enabled"]
-                    and debug["inject_missing_segment_every"]
-                    and self.send_count % debug["inject_missing_segment_every"] == 0
-                ):
-                    try:
-                        content = self.adapter.parse_response(response_data).content
-                        lines = extract_jsonl_content(content).splitlines()
-                        segment_indexes = []
-                        for index, line in enumerate(lines):
-                            value = json.loads(line)
-                            if (
-                                isinstance(value, dict)
-                                and value.get("type") == "segment"
-                            ):
-                                segment_indexes.append(index)
-                        if segment_indexes:
-                            lines.pop(segment_indexes[-1])
-                            self.adapter.replace_content(
-                                response_data, "\n".join(lines)
-                            )
-                    except (
-                        KeyError,
-                        IndexError,
-                        TypeError,
-                        ValueError,
-                        json.JSONDecodeError,
-                    ):
-                        pass
-                await self._debug_attempt(
-                    request_id,
-                    attempt,
-                    payload,
-                    response=response_data,
-                    status=response.status_code,
-                    parent_request_id=parent_request_id,
-                )
-                try:
-                    parsed = self.adapter.parse_response(response_data)
-                    normalized = normalize_llm_response(parsed)
-                except Exception:
-                    if diagnostics is not None:
-                        diagnostics.fail_request(request_id, "response_parse_error")
-                    raise
-                if diagnostics is not None:
-                    diagnostics.complete_request(
-                        request_id,
-                        content=normalized.content,
-                        reasoning_content=normalized.reasoning_content,
-                    )
-                extracted = self.adapter.extract_usage(response_data)
-                if extracted is not None:
-                    self.usage = Usage(
-                        input_tokens=(self.usage.input_tokens + extracted.input_tokens),
-                        output_tokens=(
-                            self.usage.output_tokens + extracted.output_tokens
-                        ),
-                        total_tokens=(self.usage.total_tokens + extracted.total_tokens),
-                    )
-                    self.usage_observed = True
-                elif self.adapter.usage_pointers is not None:
-                    self.usage_complete = False
-                if self.on_usage is not None:
-                    self.on_usage(self.usage_summary())
-                self.logger.info(
-                    "request complete request=%s attempt=%d status=%d elapsed=%.2fs",
-                    request_id,
-                    attempt,
-                    response.status_code,
-                    elapsed,
-                )
-                return normalized, request_id
-            retryable = (
-                response.status_code in {408, 429} or response.status_code >= 500
-            )
-            await self._debug_attempt(
-                request_id,
-                attempt,
-                payload,
-                error=response.text,
-                status=response.status_code,
-                parent_request_id=parent_request_id,
-            )
-            if response.status_code in {401, 403}:
-                self.logger.error(
-                    "request fatal request=%s attempt=%d status=%d elapsed=%.2fs",
-                    request_id,
-                    attempt,
-                    response.status_code,
-                    elapsed,
-                )
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "authentication_error")
-                raise FatalExternalError(f"鉴权失败：HTTP {response.status_code}")
-            response_hint = response.text.casefold()
-            if response.status_code == 400 and (
-                "context_length" in response_hint
-                or (
-                    "context" in response_hint
-                    and ("token" in response_hint or "maximum" in response_hint)
-                )
-            ):
-                self.logger.warning(
-                    "request context-too-long request=%s attempt=%d elapsed=%.2fs",
-                    request_id,
-                    attempt,
-                    elapsed,
-                )
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "context_length_error")
-                raise ContextLengthError(
-                    "模型报告上下文过长",
-                    request_id=request_id,
-                )
-            if response.status_code in {400, 404}:
-                self.logger.error(
-                    "request fatal request=%s attempt=%d status=%d elapsed=%.2fs",
-                    request_id,
-                    attempt,
-                    response.status_code,
-                    elapsed,
-                )
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "request_configuration_error")
-                raise FatalExternalError(
-                    f"请求或端点配置错误：HTTP {response.status_code}"
-                )
-            if not retryable or attempt == attempts:
-                self.logger.error(
-                    "request failed request=%s attempt=%d status=%d elapsed=%.2fs",
-                    request_id,
-                    attempt,
-                    response.status_code,
-                    elapsed,
-                )
-                if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "http_error")
-                raise ExternalError(f"LLM 请求失败：HTTP {response.status_code}")
-            self.logger.warning(
-                "request retry request=%s attempt=%d status=%d elapsed=%.2fs",
-                request_id,
-                attempt,
-                response.status_code,
-                elapsed,
-            )
-            if diagnostics is not None:
-                diagnostics.retried()
-            retry_after = response.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    delay = float(retry_after)
-                    self.logger.info(
-                        "retry-after request=%s wait=%.2fs", request_id, delay
-                    )
-                    await self._retry_sleep(
-                        delay,
-                        diagnostics=diagnostics
-                        if response.status_code == 429
-                        else None,
-                    )
-                    continue
-                except ValueError:
-                    pass
-            await self._backoff(
-                attempt,
-                diagnostics=diagnostics if response.status_code == 429 else None,
-            )
-        raise ExternalError("HTTP 请求重试耗尽")
-
-    async def _retry_sleep(
-        self,
-        delay: float,
-        *,
-        diagnostics: Any | None,
-    ) -> None:
-        if diagnostics is not None:
-            diagnostics.rate_limit_wait_started()
-        try:
-            await self.sleeper(delay)
-        finally:
-            if diagnostics is not None:
-                diagnostics.rate_limit_wait_finished()
-
-    async def _backoff(
-        self,
-        attempt: int,
-        *,
-        diagnostics: Any | None = None,
-    ) -> None:
-        delay = min(
-            float(self.config["retry"]["max_delay_seconds"]),
-            float(self.config["retry"]["base_delay_seconds"]) * (2 ** (attempt - 1)),
-        )
-        delay += random.uniform(0, float(self.config["retry"]["jitter_seconds"]))
-        self.logger.info("retry backoff attempt=%d wait=%.2fs", attempt, delay)
-        await self._retry_sleep(delay, diagnostics=diagnostics)
-
-    def usage_summary(self) -> dict[str, Any] | None:
-        if self.adapter.usage_pointers is None:
-            return None
-        available = self.usage_observed and self.usage_complete
-        partial = self.usage_observed and not self.usage_complete
-        return {
-            "input_tokens": self.usage.input_tokens if self.usage_observed else 0,
-            "output_tokens": self.usage.output_tokens if self.usage_observed else 0,
-            "total_tokens": self.usage.total_tokens if self.usage_observed else 0,
-            "available": available,
-            "partial": partial,
-        }
-
-    def _record_stream_usage(self, values: dict[str, int]) -> None:
-        if self.adapter.usage_pointers is None:
-            return
-        spec = self.adapter.streaming_spec
-        if spec is None:
-            self.usage_complete = False
-            return
-        usage_spec = spec["usage"]
-        base_pointers = self.adapter.usage_pointers
-        if base_pointers is None:
-            self.usage_complete = False
-            return
-        required = {
-            metric
-            for metric, pointer in zip(
-                ("input_tokens", "output_tokens", "total_tokens"),
-                base_pointers,
-            )
-            if pointer is not None
-        }
-        declared_stream_metrics = {
-            key.removesuffix("_pointers")
-            for key, pointers in usage_spec.items()
-            if pointers
-        }
-        if not required or not required.issubset(declared_stream_metrics):
-            self.usage_complete = False
-            return
-        if not required.issubset(values):
-            self.usage_complete = False
-            return
-        self.usage = Usage(
-            input_tokens=self.usage.input_tokens + values.get("input_tokens", 0),
-            output_tokens=self.usage.output_tokens + values.get("output_tokens", 0),
-            total_tokens=self.usage.total_tokens + values.get("total_tokens", 0),
-        )
-        self.usage_observed = True
-
-
-def _apply_debug_content_injections(
-    response: LLMResponse, debug: dict[str, Any], send_count: int
-) -> LLMResponse:
-    if (
-        debug["enabled"]
-        and debug["inject_invalid_json_every"]
-        and send_count % debug["inject_invalid_json_every"] == 0
-    ):
-        return LLMResponse("{invalid json", response.reasoning_content)
-    if not (
-        debug["enabled"]
-        and debug["inject_missing_segment_every"]
-        and send_count % debug["inject_missing_segment_every"] == 0
-    ):
-        return response
-    try:
-        lines = extract_jsonl_content(response.content).splitlines()
-        segment_indexes = []
-        for index, line in enumerate(lines):
-            value = json.loads(line)
-            if isinstance(value, dict) and value.get("type") == "segment":
-                segment_indexes.append(index)
-        if segment_indexes:
-            lines.pop(segment_indexes[-1])
-            return LLMResponse("\n".join(lines), response.reasoning_content)
-    except (
-        KeyError,
-        IndexError,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-    ):
-        pass
-    return response
-
-
 _Item = TypeVar("_Item")
-_Result = TypeVar("_Result")
 
+_Result = TypeVar("_Result")
 
 async def run_bounded(
     items: Iterable[_Item],
@@ -2636,7 +1664,6 @@ async def run_bounded(
             await asyncio.gather(*pending, return_exceptions=True)
         raise
     return [results[index] for index in range(next_index)]
-
 
 async def dispatch_chunks(
     chunks: Iterable[ChunkPlan],
@@ -2729,105 +1756,3 @@ async def dispatch_chunks(
     if mode != "parallel":
         raise ConfigError(f"未知调度模式：{mode}")
     return await run_bounded(chunks, worker, max_parallel=max_parallel)
-
-
-_SUPPORTED_FENCE_LABELS = {"", "jsonl", "ndjson", "json"}
-_FENCE_RE = re.compile(
-    r"```[ \t]*(?P<label>[^\r\n`]*)\r?\n(?P<body>.*?)```",
-    re.DOTALL,
-)
-_THOUGHT_BLOCK_TAGS = (
-    ("<think>", "</think>"),
-    ("<thinking>", "</thinking>"),
-    ("<thought>", "</thought>"),
-    ("<analysis>", "</analysis>"),
-)
-
-
-def normalize_llm_response(response: LLMResponse) -> LLMResponse:
-    embedded = _extract_embedded_reasoning(response.content)
-    if response.reasoning_content and embedded.reasoning_content:
-        raise ExternalError("LLM 响应同时包含结构化和 content 内嵌思考正文")
-    return LLMResponse(
-        content=embedded.content,
-        reasoning_content=(response.reasoning_content or embedded.reasoning_content),
-    )
-
-
-def _extract_embedded_reasoning(content: str) -> LLMResponse:
-    normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-    stripped = normalized.lstrip()
-    for opening, closing in _THOUGHT_BLOCK_TAGS:
-        if not stripped.startswith(opening):
-            continue
-        closing_at = stripped.find(closing, len(opening))
-        if closing_at < 0:
-            return LLMResponse(stripped.strip(), None)
-        thought = stripped[len(opening) : closing_at]
-        remainder = stripped[closing_at + len(closing) :].lstrip()
-        if any(tag in thought for pair in _THOUGHT_BLOCK_TAGS for tag in pair) or any(
-            remainder.startswith(tag) for pair in _THOUGHT_BLOCK_TAGS for tag in pair
-        ):
-            return LLMResponse(stripped.strip(), None)
-        return LLMResponse(remainder, thought)
-    return LLMResponse(stripped.strip(), None)
-
-
-def extract_jsonl_content(content: str) -> str:
-    normalized = _extract_embedded_reasoning(content).content
-    for match in _FENCE_RE.finditer(normalized):
-        label = match.group("label").strip().casefold()
-        body = match.group("body").strip()
-        if label in _SUPPORTED_FENCE_LABELS and body:
-            outside = normalized[: match.start()] + normalized[match.end() :]
-            if any(tag in outside for pair in _THOUGHT_BLOCK_TAGS for tag in pair):
-                return normalized.strip()
-            return body
-    return normalized.strip()
-
-
-def parse_jsonl_document(content: str, *, record_type: str) -> JSONLDocument:
-    body = extract_jsonl_content(content)
-    records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    error_codes: list[str] = []
-    seen_end = False
-    for line_number, raw_line in enumerate(body.split("\n"), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        if seen_end:
-            errors.append(f"第 {line_number} 行位于 end 之后")
-            error_codes.append("after_end")
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            errors.append(f"第 {line_number} 行不是合法 JSON 对象")
-            error_codes.append("invalid_json")
-            continue
-        if not isinstance(value, dict):
-            errors.append(f"第 {line_number} 行必须是 JSON 对象")
-            error_codes.append("non_object")
-            continue
-        item_type = value.get("type")
-        if item_type == "end":
-            if set(value) != {"type"}:
-                errors.append(f"第 {line_number} 行 end 记录含有额外字段")
-                error_codes.append("invalid_end")
-            seen_end = True
-            continue
-        if item_type != record_type:
-            errors.append(f"第 {line_number} 行包含未知 type")
-            error_codes.append("unknown_type")
-            continue
-        records.append(value)
-    if not seen_end:
-        errors.append("响应缺少最终 end 记录")
-        error_codes.append("missing_end")
-    return JSONLDocument(
-        records=tuple(records),
-        errors=tuple(errors),
-        error_codes=tuple(error_codes),
-        complete=seen_end and not errors,
-    )

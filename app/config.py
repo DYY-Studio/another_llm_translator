@@ -14,7 +14,7 @@ from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
 
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
-LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision")
+LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision", "content_summary")
 
 SCHEMA: dict[str, Any] = {
     "project": {
@@ -27,11 +27,13 @@ SCHEMA: dict[str, Any] = {
         "preset": None,
         "preset_terminology": None,
         "preset_terminology_decision": None,
+        "preset_content_summary": None,
         "preset_translation": None,
         "preset_proofreading": None,
         "preset_polishing": None,
         "temperature_terminology": None,
         "temperature_terminology_decision": None,
+        "temperature_content_summary": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
         "temperature_polishing": None,
@@ -43,7 +45,11 @@ SCHEMA: dict[str, Any] = {
         "cross_boundary_batching": None,
     },
     "context": {
-        "translation": {"enabled": None, "previous_segments": None},
+        "translation": {
+            "enabled": None,
+            "previous_segments": None,
+            "previous_summaries": None,
+        },
         "proofreading": {"enabled": None, "previous_segments": None},
         "polishing": {"enabled": None, "previous_segments": None},
         "terminology": {"enabled": None, "previous_segments": None},
@@ -217,6 +223,7 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in (
         "temperature_terminology",
         "temperature_terminology_decision",
+        "temperature_content_summary",
         "temperature_translation",
         "temperature_proofreading",
         "temperature_polishing",
@@ -349,6 +356,10 @@ def validate_config(config: dict[str, Any]) -> None:
             or context["previous_segments"] < 0
         ):
             raise ConfigError(f"context.{stage}.previous_segments 必须是非负整数")
+        if stage == "translation" and not isinstance(
+            context["previous_summaries"], bool
+        ):
+            raise ConfigError("context.translation.previous_summaries 必须是布尔值")
 
 
 def dump_config(config: dict[str, Any]) -> str:
@@ -405,9 +416,17 @@ def load_config(path: Path) -> dict[str, Any]:
     if isinstance(llm, dict):
         llm.setdefault("preset_terminology_decision", "")
         llm.setdefault("temperature_terminology_decision", 0.1)
+        llm.setdefault("preset_content_summary", "")
+        llm.setdefault("temperature_content_summary", 0.1)
     chunking = config.get("chunking")
     if isinstance(chunking, dict):
         chunking.setdefault("cross_boundary_batching", [])
+    context = config.get("context")
+    translation_context = (
+        context.get("translation") if isinstance(context, dict) else None
+    )
+    if isinstance(translation_context, dict):
+        translation_context.setdefault("previous_summaries", False)
     project = config.get("project")
     if isinstance(project, dict):
         project.setdefault("target_language_tag", "")
@@ -569,6 +588,7 @@ def _resolve_llm_config(
                 "requests_per_minute",
                 "input_tokens_per_minute",
                 "max_parallel",
+                "max_parallel_per_key",
                 "request_timeout_seconds",
             )
         }
@@ -577,6 +597,7 @@ def _resolve_llm_config(
     config["_llm_preset_hash"] = preset.digest
     config["_llm_preset_definition"] = definition
     config["_llm_extra_body"] = definition["extra_body"]
+    config["_llm_extra_headers"] = definition["extra_headers"]
     adapter_id = str(config["llm"]["adapter"])
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != adapter_id:
@@ -596,5 +617,8 @@ def _resolve_llm_config(
         max_output_tokens=int(config["llm"]["max_output_tokens"]),
         stream=stream,
         extra_body=config["_llm_extra_body"],
+        extra_headers=config["_llm_extra_headers"],
+        session_id="RUN-VALIDATION",
+        request_id="REQ-VALIDATION",
     )
     return config

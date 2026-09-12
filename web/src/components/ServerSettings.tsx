@@ -45,6 +45,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
   const [required, setRequired] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [maxActiveProjects, setMaxActiveProjects] = useState(2);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -61,6 +62,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
     setRequired(statusResponse.auth.required);
     setUsername(statusResponse.auth.username);
     setPassword("");
+    setMaxActiveProjects(statusResponse.tasks.max_active_projects);
   }
 
   useEffect(() => {
@@ -84,6 +86,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
         body: JSON.stringify({
           lan: { enabled, bind_address: enabled ? bindAddress : "" },
           auth: { required, username, password },
+          tasks: { max_active_projects: maxActiveProjects },
         }),
       });
       setMessage(
@@ -104,7 +107,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
     <div className="config-settings">
       <div className="page-heading config-heading settings-action-heading">
         <div><h1>{translate("server.title", language)}</h1><p>{translate("server.subtitle", language)}</p></div>
-        <div className="button-group"><button className="primary-button" disabled={saving || (enabled && !bindAddress)} onClick={() => void save()}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button></div>
+        <div className="button-group"><button className="primary-button" disabled={saving || (enabled && !bindAddress) || !Number.isInteger(maxActiveProjects) || maxActiveProjects < 1} onClick={() => void save()}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button></div>
       </div>
       {error && <div className="error-banner">{error}</div>}
       {message && <p className="success-text">{message}</p>}
@@ -124,6 +127,22 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
                 </select>
               </label>
             )}
+          </div>
+        </section>
+        <section className="config-section">
+          <h2>{translate("server.tasks", language)}</h2>
+          <div className="config-grid">
+            <label className="config-field">
+              {translate("server.maxActiveProjects", language)}
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={maxActiveProjects}
+                onChange={(event) => setMaxActiveProjects(Number(event.target.value))}
+              />
+              <small>{translate("server.maxActiveProjectsHint", language)}</small>
+            </label>
           </div>
         </section>
         {enabled && (

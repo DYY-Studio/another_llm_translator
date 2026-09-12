@@ -13,6 +13,7 @@ def default_server_config() -> dict[str, Any]:
     return {
         "lan": {"enabled": False, "bind_address": ""},
         "auth": {"required": False, "username": ""},
+        "tasks": {"max_active_projects": 2},
     }
 
 
@@ -31,12 +32,15 @@ def load_server_config() -> dict[str, Any]:
     config = default_server_config()
     lan = value.get("lan", {})
     auth = value.get("auth", {})
+    tasks = value.get("tasks", {})
     for key in ("enabled", "bind_address"):
         if key in lan:
             config["lan"][key] = lan[key]
     for key in ("required", "username"):
         if key in auth:
             config["auth"][key] = auth[key]
+    if "max_active_projects" in tasks:
+        config["tasks"]["max_active_projects"] = tasks["max_active_projects"]
     _validate(config)
     return config
 
@@ -50,12 +54,27 @@ def _validate(config: dict[str, Any]) -> None:
         section, name = key.split(".")
         if not isinstance(config[section][name], str):
             raise ConfigError(f"server.toml {key} 必须是字符串")
+    max_active_projects = config["tasks"]["max_active_projects"]
+    if (
+        not isinstance(max_active_projects, int)
+        or isinstance(max_active_projects, bool)
+        or max_active_projects < 1
+    ):
+        raise ConfigError("server.toml tasks.max_active_projects 必须是正整数")
 
 
 def save_server_config(config: dict[str, Any]) -> None:
+    defaults = default_server_config()
+    config = {
+        **defaults,
+        "lan": {**defaults["lan"], **config.get("lan", {})},
+        "auth": {**defaults["auth"], **config.get("auth", {})},
+        "tasks": {**defaults["tasks"], **config.get("tasks", {})},
+    }
     _validate(config)
     lan = config["lan"]
     auth = config["auth"]
+    tasks = config["tasks"]
     lines = [
         "[lan]",
         f"enabled = {json.dumps(lan['enabled'])}",
@@ -64,6 +83,9 @@ def save_server_config(config: dict[str, Any]) -> None:
         "[auth]",
         f"required = {json.dumps(auth['required'])}",
         f"username = {json.dumps(auth['username'])}",
+        "",
+        "[tasks]",
+        f"max_active_projects = {tasks['max_active_projects']}",
         "",
     ]
     path = server_config_path()

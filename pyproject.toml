@@ -14,6 +14,7 @@ dependencies = [
   "httpx>=0.27,<1",
   "keyring>=25,<26",
   "psutil>=5.9,<7",
+  "pydantic>=2,<3",
   "python-multipart>=0.0.20,<1",
   "regex>=2024.11.6,<2027",
   "uvicorn>=0.30,<1",
@@ -33,6 +34,10 @@ app = ["web_dist/**"]
 [tool.setuptools.data-files]
 config = ["config/config.toml"]
 prompts = [
+  "prompts/content_summary.en.middle.txt",
+  "prompts/content_summary.zh-CN.middle.txt",
+  "prompts/fragment_summary.en.middle.txt",
+  "prompts/fragment_summary.zh-CN.middle.txt",
   "prompts/polishing.en.middle.txt",
   "prompts/polishing.zh-CN.middle.txt",
   "prompts/proofreading.en.middle.txt",

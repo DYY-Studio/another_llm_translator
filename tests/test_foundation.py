@@ -273,6 +273,23 @@ def test_config_defaults_alias_collision_for_existing_projects(
     assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
 
 
+def test_config_defaults_translation_previous_summaries_for_existing_projects(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    config_path = app_root / "config" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "previous_summaries = false\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(config_path)["context"]["translation"][
+        "previous_summaries"
+    ] is False
+
+
 def test_config_defaults_missing_target_language_tag_to_empty(
     tmp_path: Path,
 ) -> None:
@@ -359,6 +376,7 @@ def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
     assert load_config(path) == config
     text = path.read_text(encoding="utf-8")
     assert "[context.translation]" in text
+    assert "previous_summaries = false" in text
     assert 'target_language = "简体中文 \\"测试\\""' in text
     assert "cross_boundary_batching = []" in text
 

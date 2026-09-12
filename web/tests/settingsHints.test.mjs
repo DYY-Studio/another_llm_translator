@@ -8,6 +8,7 @@ const hintKeys = [
   "settings.encodingThresholdHint",
   "settings.fallbackEncodingHint",
   "settings.temperatureHint",
+  "settings.summaryContextHint",
   "settings.schedulingModeHint",
   "settings.targetChunkTokensHint",
   "settings.splitOversizedHint",
@@ -33,7 +34,12 @@ const hintKeys = [
   "preset.maxOutputTokensHint",
   "preset.contextSafetyMarginHint",
   "preset.tokenSafetyFactorHint",
+  "preset.keyIndexHint",
+  "preset.rpmHint",
+  "preset.itpmHint",
+  "preset.maxConcurrencyPerKeyHint",
   "preset.timeoutSecondsHint",
+  "preset.extraHeadersHint",
 ];
 
 test("configuration help text is localized in both supported languages", () => {

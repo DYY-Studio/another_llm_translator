@@ -26,6 +26,7 @@ preset = "default"
 # 各 LLM 阶段可分别覆盖全局 Preset；空字符串表示使用上面的全局 Preset。
 preset_terminology = ""
 preset_terminology_decision = ""
+preset_content_summary = ""
 preset_translation = ""
 preset_proofreading = ""
 preset_polishing = ""
@@ -34,6 +35,7 @@ preset_polishing = ""
 temperature_terminology = 0.1
 # 自动术语决策阶段的采样温度。
 temperature_terminology_decision = 0.1
+temperature_content_summary = 0.1
 # 翻译阶段的采样温度。
 temperature_translation = 0.2
 # 校对建议阶段的采样温度。
@@ -62,6 +64,8 @@ cross_boundary_batching = []
 enabled = true
 # 携带当前 Chunk 之前最近多少个非空 Segment；不会跨文件。
 previous_segments = 3
+# 是否注入已完成且源文仍匹配的 Part/片段概括；跨边界 Chunk 时不生效。
+previous_summaries = false
 
 [context.proofreading]
 # 是否为校对请求附带同一文件内的前文 Segment。

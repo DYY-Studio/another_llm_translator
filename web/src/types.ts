@@ -8,6 +8,66 @@ export type Stage =
   | "export"
   | "settings";
 
+export interface SummaryBoundary {
+  file_id: string;
+  part_id: string;
+  segment_count: number;
+}
+
+export type SummaryExpiryReason =
+  | "stale_status"
+  | "source_changed"
+  | "dependency_changed"
+  | "provenance_unavailable"
+  | string;
+
+export interface SummaryArtifact {
+  record_type: "content_summary";
+  record_id: string;
+  kind: "fragment" | "reduction" | "full";
+  file_id: string;
+  part_id: string;
+  status: "completed" | "failed" | "stale" | string;
+  text: string | null;
+  error_class?: string | null;
+  error_message?: string | null;
+  error?: string | null;
+  refs?: string[];
+  source_range: Record<string, unknown>;
+  source_changed: boolean;
+  expired: boolean;
+  expiry_reason: SummaryExpiryReason | null;
+  provenance?: {
+    origin?: string;
+    artifact_ids?: string[];
+    source_ranges?: Array<Record<string, unknown>>;
+    dependencies?: Array<{
+      record_id: string;
+      kind: "fragment" | "reduction";
+      text_digest: string;
+      source_digest: string;
+    }>;
+    [key: string]: unknown;
+  };
+  source_digest: string;
+  input_digest: string;
+  prompt_digest: string;
+  model: string;
+  run_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SummariesResponse {
+  participation: Array<{
+    file_id: string;
+    part_id: string;
+    selected: boolean;
+  }>;
+  boundaries: SummaryBoundary[];
+  artifacts: SummaryArtifact[];
+}
+
 export type SettingsField =
   | "target_language"
   | "target_language_tag"
@@ -19,6 +79,8 @@ export type LLMStage =
   | "translation"
   | "proofreading"
   | "polishing";
+
+export type RunStage = LLMStage | "content_summary";
 
 export interface ResultView {
   record_id: string;
@@ -71,6 +133,10 @@ export interface StageError {
 export interface ProjectOverview {
   name: string;
   path: string;
+  storage: {
+    total_bytes: number;
+    sqlite_bytes: number;
+  };
   nonempty_segment_count: number;
   completed_segments: number;
   total_segments: number;
@@ -82,7 +148,18 @@ export interface ProjectOverview {
     file_order: number;
     name: string;
     document_adapter_id: string;
+    part_ids: string[];
+    size_bytes: number;
   }>;
+  segments: Segment[];
+}
+
+export interface SegmentQueryResponse {
+  completed_segments: number;
+  total_segments: number;
+  offset: number;
+  limit: number;
+  stage: LLMStage;
   segments: Segment[];
 }
 
@@ -94,6 +171,7 @@ export interface ProjectSummary {
   external: boolean;
   file_count: number;
   segment_count: number;
+  repair_needed: boolean;
 }
 
 export interface ErrorPayload {
@@ -121,12 +199,15 @@ export interface TaskState {
   project_id: string;
   stage: string;
   status: string;
+  include_summaries?: boolean;
+  summary_selection?: Array<{ file_id: string; part_id: string }>;
   error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
   completed_segments: number;
   failed_segments: number;
   pending_segments: number;
   total_segments: number;
+  summary_selection_progress?: { completed: number; failed: number; total: number } | null;
   failure_counts: Record<string, number>;
   usage: TaskUsage;
 }
@@ -152,6 +233,7 @@ export interface DiagnosticsRequestSummary {
   project: string | null;
   stage: string | null;
   request_id: string;
+  task_id?: string | null;
   model: string;
   transport: "non_streaming" | "sse";
   status: DiagnosticsRequestStatus;
@@ -233,10 +315,12 @@ export interface DiagnosticsRequestDetail {
   reasoning_content_truncated: boolean;
   attempts: Array<{
     attempt: number;
+    retry_round?: number | null;
+    key_index?: number | null;
     transport: "non_streaming" | "sse";
     http_status: number | null;
     latency_ms: number;
-    outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "cancelled";
+    outcome: "succeeded" | "http_error" | "network_error" | "stream_error" | "response_parse_error" | "authentication_error" | "rate_limit_error" | "cancelled";
     provider_error_status: number | null;
     stream_event_count?: number;
     stream_received_bytes?: number;
@@ -245,13 +329,153 @@ export interface DiagnosticsRequestDetail {
   error: string | null;
 }
 
+export type HistoricalSnapshotStatus =
+  | "available"
+  | "missing"
+  | "invalid"
+  | "unavailable";
+
+export interface HistoricalSnapshot {
+  status: HistoricalSnapshotStatus;
+  format?: "text" | "json" | "toml";
+  content?: string;
+}
+
+export interface HistoricalPromptVariant {
+  name: string;
+  requirements: string[];
+  primary_mode: string | null;
+  snapshot: HistoricalSnapshot;
+}
+
+export interface HistoricalExecutionSnapshots {
+  config: HistoricalSnapshot;
+  prompt: HistoricalSnapshot;
+  adapter: HistoricalSnapshot;
+  preset: HistoricalSnapshot;
+  requirements: HistoricalSnapshot;
+  prompt_variants:
+    | { status: "available"; items: HistoricalPromptVariant[] }
+    | HistoricalSnapshot;
+}
+
+export interface HistoricalRunExecution {
+  id: string;
+  kind: "root" | "continuation";
+  started_at?: string;
+  completed_at?: string;
+  fingerprint?: string;
+  prompt_language?: string;
+  primary_mode?: string;
+  scope: Record<string, unknown> | null;
+  selected_segment_count?: number;
+  requested_segment_count?: number;
+  reused_segment_count?: number;
+  document_adapters: Record<string, { adapter_id: string; version: string }>;
+  document_adapter_options: Record<string, Record<string, unknown>>;
+  document_adapter_prompt_requirements: Record<string, Record<string, string>>;
+  prompt_languages: Record<string, string>;
+  snapshots: HistoricalExecutionSnapshots;
+}
+
+export type HistoricalPayloadStatus =
+  | "available"
+  | "missing"
+  | "invalid"
+  | "unavailable";
+
+export interface HistoricalDebugPayload {
+  status: HistoricalPayloadStatus;
+  value?: unknown;
+}
+
+export interface HistoricalDebugAttempt {
+  attempt: number;
+  retry_round: number | null;
+  key_index: number | null;
+  http_status: number | null;
+  provider_error_status: number | null;
+  outcome: string | null;
+  status: string;
+  error: string | null;
+  request_payload: HistoricalPayloadStatus;
+  response_payload: HistoricalPayloadStatus;
+  error_payload: HistoricalPayloadStatus | HistoricalDebugPayload;
+  request?: HistoricalDebugPayload;
+  response?: HistoricalDebugPayload;
+}
+
+export interface HistoricalRunRequest {
+  request_id: string;
+  parent_request_id: string | null;
+  stage: string | null;
+  attempt_count: number;
+  attempts: HistoricalDebugAttempt[];
+}
+
+export interface HistoricalRunRequestDetail {
+  status: "available" | "partial";
+  request_id: string;
+  parent_request_id: string | null;
+  stage: string | null;
+  attempts: HistoricalDebugAttempt[];
+  errors?: HistoricalRequestError[];
+}
+
+export interface HistoricalRequestError {
+  line: number;
+  reason: string;
+}
+
+export interface HistoricalRequestIndex {
+  status: "available" | "partial" | "unavailable";
+  reason?: string;
+  errors?: HistoricalRequestError[];
+  items: HistoricalRunRequest[];
+}
+
+export interface HistoricalRunSummary {
+  run_id: string;
+  project_id: string;
+  project_name: string;
+  stage: string;
+  status: string;
+  started_at: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+  selected_segment_count: number | null;
+  requested_segment_count: number | null;
+  reused_segment_count: number | null;
+  completed_segment_count: number | null;
+  failed_segment_count: number | null;
+  failure_counts: Record<string, number>;
+  warnings: string[];
+  usage: TaskUsage | null;
+  scope: Record<string, unknown> | null;
+  debug_available: boolean;
+  stage_fingerprint?: string;
+  prompt_language?: string;
+  review_stage?: string;
+  primary_mode?: string;
+  terms_revision?: number;
+  document_adapters: Record<string, { adapter_id: string; version: string }>;
+  document_adapter_options: Record<string, Record<string, unknown>>;
+  document_adapter_prompt_requirements: Record<string, Record<string, string>>;
+  translation_validators: Array<Record<string, string>>;
+}
+
+export interface HistoricalRunDetail extends HistoricalRunSummary {
+  executions: HistoricalRunExecution[];
+  requests: HistoricalRequestIndex;
+}
+
 export interface ModelRow {
   id: string;
   display: string;
 }
 
 export interface TaskOptions {
-  stage: LLMStage;
+  stage: RunStage;
   preset: {
     id: string;
     model: string;
@@ -266,6 +490,14 @@ export interface TaskOptions {
   has_pending_draft?: boolean;
   estimated_requests?: number;
   estimated_input_tokens?: number;
+  summary_selected_boundaries?: number;
+  summary_only_work?: boolean;
+  summary_prompt_preflight?: {
+    ok: boolean;
+    language: string;
+    required_stages: string[];
+    missing: string[];
+  };
   overflow_policy?: {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
@@ -482,11 +714,13 @@ export interface ProjectConfig {
     preset: string;
     preset_terminology: string;
     preset_terminology_decision: string;
+    preset_content_summary: string;
     preset_translation: string;
     preset_proofreading: string;
     preset_polishing: string;
     temperature_terminology: number;
     temperature_terminology_decision: number;
+    temperature_content_summary: number;
     temperature_translation: number;
     temperature_proofreading: number;
     temperature_polishing: number;
@@ -502,7 +736,13 @@ export interface ProjectConfig {
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
     previous_segments: number;
-  }>;
+  }> & {
+    translation: {
+      enabled: boolean;
+      previous_segments: number;
+      previous_summaries: boolean;
+    };
+  };
   terminology: {
     unicode_normalization: "" | "NFC" | "NFD" | "NFKC" | "NFKD";
     case_insensitive: boolean;
@@ -549,7 +789,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 4;
+  schema_version: 5;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -564,11 +804,13 @@ export interface LLMPreset {
   requests_per_minute: number;
   input_tokens_per_minute: number;
   max_parallel: number;
+  max_parallel_per_key: number;
   request_timeout_seconds: number;
   stream: boolean;
   stream_endpoint: string;
   stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
+  extra_headers: Record<string, string>;
 }
 
 export interface LLMCredential {
@@ -586,6 +828,7 @@ export interface ServerStatus {
   auth: { required: boolean; username: string };
   authed: boolean;
   loopback: boolean;
+  tasks: { max_active_projects: number };
 }
 
 export interface InterfaceEntry {

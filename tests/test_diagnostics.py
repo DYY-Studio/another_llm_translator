@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.diagnostics import Diagnostics
+from app.diagnostics import Diagnostics, DiagnosticsHub
 from app.errors import ExternalError
-from app.execution import LLMClient, SlidingWindowLimiter, render_messages
+from app.llm_client import LLMClient, SlidingWindowLimiter
+from app.execution import render_messages
 from app.logging_utils import get_logger
 from app.web import create_app
 from tests.test_execution import config
@@ -37,6 +39,404 @@ def test_diagnostics_keeps_bounded_global_logs_and_filters(tmp_path: Path) -> No
     }
     assert snapshot["filters"]["projects"] == ["first", "second"]
     assert (tmp_path / "logs" / "app.log").is_file()
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_hub_keeps_concurrent_task_sessions_separate(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    entered = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def run_task(task_id: str, project: str, release: asyncio.Event) -> None:
+        with hub.activate(project, "translation", task_id=task_id):
+            hub.begin_request(
+                request_id=f"REQ-{task_id}",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.set_usage(
+                {
+                    "input_tokens": 10 if task_id == "T1" else 20,
+                    "output_tokens": 1 if task_id == "T1" else 2,
+                    "total_tokens": 11 if task_id == "T1" else 22,
+                    "available": True,
+                    "partial": False,
+                }
+            )
+            entered.set()
+            await release.wait()
+
+    first = asyncio.create_task(run_task("T1", "first", release_first))
+    second = asyncio.create_task(run_task("T2", "second", release_second))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert entered.is_set()
+    active = hub.snapshot()
+    assert active["metrics"]["total_requests"] == 2
+    assert {
+        item["task_id"] for item in active["requests"]["items"]
+    } == {"T1", "T2"}
+    assert active["metrics"]["input_tokens"] == 30
+    assert active["metrics"]["output_tokens"] == 3
+    assert active["metrics"]["usage_available"] is True
+
+    release_first.set()
+    await first
+    remaining = hub.snapshot()
+    assert remaining["metrics"]["total_requests"] == 2
+    assert remaining["metrics"]["project"] == "second"
+    assert remaining["metrics"]["input_tokens"] == 30
+    assert remaining["metrics"]["output_tokens"] == 3
+    assert hub.request_detail("REQ-T1")["status"] == "interrupted"
+    assert hub.request_detail("REQ-T2")["status"] == "running"
+    assert hub.snapshot(project="second")["requests"]["total"] == 1
+    release_second.set()
+    await second
+
+
+def test_diagnostics_hub_filters_metrics_and_requests_by_project(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-FIRST",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.request_finished(
+            request_id="REQ-FIRST",
+            attempt=1,
+            latency_seconds=0.1,
+            status=200,
+            error=False,
+        )
+        hub.complete_request("REQ-FIRST", content="ok", reasoning_content=None)
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-SECOND",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.request_finished(
+            request_id="REQ-SECOND",
+            attempt=1,
+            latency_seconds=0.3,
+            status=500,
+            error=True,
+        )
+
+    filtered = hub.snapshot(project="second")
+    assert filtered["metrics"]["total_requests"] == 1
+    assert filtered["metrics"]["http_errors"] == 1
+    assert filtered["requests"]["total"] == 1
+    assert filtered["requests"]["items"][0]["task_id"] == "T2"
+
+
+def test_diagnostics_hub_distinguishes_unavailable_and_partial_usage(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.set_usage(
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "available": False,
+                "partial": False,
+            }
+        )
+        unavailable = hub.snapshot()["metrics"]
+        assert unavailable["usage_available"] is False
+        assert unavailable["usage_partial"] is False
+
+        with hub.activate("second", "translation", task_id="T2"):
+            hub.set_usage(
+                {
+                    "input_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                    "available": True,
+                    "partial": False,
+                }
+            )
+            partial = hub.snapshot()["metrics"]
+            assert partial["usage_available"] is False
+            assert partial["usage_partial"] is True
+            assert partial["input_tokens"] == 12
+            assert partial["output_tokens"] == 3
+            assert partial["throughput_tokens_per_second"] is not None
+
+
+def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with ExitStack() as stack:
+        stack.enter_context(hub.activate("first", "translation", task_id="T1"))
+        stack.enter_context(hub.activate("second", "proofreading", task_id="T2"))
+        first = hub.sessions["T1"]
+        second = hub.sessions["T2"]
+        for session, request_id, latency in (
+            (first, "REQ-FIRST", 0.1),
+            (second, "REQ-SECOND", 0.3),
+        ):
+            session.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            session.request_finished(
+                request_id=request_id,
+                attempt=1,
+                latency_seconds=latency,
+                status=200,
+                error=False,
+            )
+
+        aggregate = hub.snapshot()
+        assert aggregate["metrics"]["total_requests"] == 2
+        assert aggregate["metrics"]["average_latency_ms"] == 200.0
+        assert aggregate["metrics"]["p95_latency_ms"] == 300.0
+        assert {item["task_id"] for item in aggregate["requests"]["items"]} == {
+            "T1",
+            "T2",
+        }
+
+        filtered = hub.snapshot(project="first", stage="translation")
+        assert filtered["metrics"]["total_requests"] == 1
+        assert filtered["metrics"]["average_latency_ms"] == 100.0
+        assert filtered["metrics"]["p95_latency_ms"] == 100.0
+        assert filtered["requests"]["total"] == 1
+        assert filtered["requests"]["items"][0]["task_id"] == "T1"
+
+
+def test_diagnostics_hub_removes_old_terminal_records_in_current_batch(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with ExitStack() as stack:
+        for index in range(201):
+            task_id = f"T-{index}"
+            request_id = f"REQ-{index}"
+            stack.enter_context(
+                hub.activate(f"project-{index}", "translation", task_id=task_id)
+            )
+            hub.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[{"role": "user", "content": request_id}],
+                max_attempts=1,
+            )
+            hub.complete_request(request_id, content="response", reasoning_content=None)
+
+    items = hub.snapshot()["requests"]["items"]
+    assert len(items) == 200
+    assert all(item["detail_available"] for item in items)
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-0"):
+        hub.request_detail("REQ-0")
+    assert hub.request_detail("REQ-200")["request_id"] == "REQ-200"
+
+
+def test_diagnostics_hub_clears_previous_batch_when_new_run_starts(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-OTHER",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
+    with hub.activate("first", "translation", task_id="T3"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-NEW"}
+    assert hub.snapshot()["metrics"]["total_requests"] == 1
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-OLD"):
+        hub.request_detail("REQ-OLD")
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_hub_keeps_finished_sessions_while_another_run_is_active(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("second", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-T2",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        with hub.activate("first", "translation", task_id="T1"):
+            hub.begin_request(
+                request_id="REQ-T1",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.complete_request("REQ-T1", content="first", reasoning_content=None)
+
+        with hub.activate("third", "translation", task_id="T3"):
+            hub.begin_request(
+                request_id="REQ-T3",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            snapshot = hub.snapshot()
+
+    assert snapshot["metrics"]["total_requests"] == 3
+    assert {
+        item["request_id"] for item in snapshot["requests"]["items"]
+    } == {"REQ-T1", "REQ-T2", "REQ-T3"}
+
+    finished = hub.snapshot()
+    assert finished["metrics"]["project"] is None
+    assert finished["metrics"]["total_requests"] == 3
+
+
+def test_diagnostics_hub_clears_previous_batch_for_unscoped_run(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("other", "translation", task_id="T2"):
+        hub.begin_request(
+            request_id="REQ-OTHER",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-NEW"}
+
+
+def test_diagnostics_hub_unscoped_run_resets_incremental_feed(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+        before = hub.snapshot()["requests"]
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+        after = hub.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert [item["request_id"] for item in after["items"]] == ["REQ-NEW"]
+
+
+def test_diagnostics_hub_task_run_clears_previous_unscoped_run(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with hub.activate("first", "translation"):
+        hub.begin_request(
+            request_id="REQ-OLD",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
+    with hub.activate("first", "translation", task_id="T1"):
+        hub.begin_request(
+            request_id="REQ-NEW",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
+
+    request_ids = {
+        item["request_id"] for item in hub.snapshot()["requests"]["items"]
+    }
+    assert request_ids == {"REQ-NEW"}
+
+
+def test_diagnostics_hub_preserves_details_for_more_than_200_active_requests(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with ExitStack() as stack:
+        for index in range(201):
+            task_id = f"ACTIVE-{index}"
+            stack.enter_context(hub.activate("project", "translation", task_id=task_id))
+            hub.begin_request(
+                request_id=f"REQ-ACTIVE-{index}",
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+
+        active = hub.snapshot()
+        assert active["metrics"]["total_requests"] == 201
+        assert sum(
+            item["detail_available"] for item in active["requests"]["items"]
+        ) == 201
+        assert hub.request_detail("REQ-ACTIVE-0")["status"] == "running"
 
 
 def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> None:
@@ -174,7 +574,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert partial["usage_partial"] is True
     assert partial["input_tokens"] == 12
     assert partial["output_tokens"] == 3
-    assert partial["throughput_tokens_per_second"] is None
+    assert partial["throughput_tokens_per_second"] is not None
 
 
 def test_stream_progress_is_visible_without_partial_response(
@@ -344,7 +744,9 @@ async def test_rate_limit_waiting_requests_track_queue_and_cancellation(
     assert diagnostics.snapshot()["metrics"]["rate_limit_waiting_requests"] == 0
 
 
-def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> None:
+def test_request_records_are_bounded_and_released_records_removed(
+    tmp_path: Path,
+) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
     with diagnostics.activate("sample", "translation"):
@@ -370,12 +772,11 @@ def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> N
             )
 
     feed = diagnostics.snapshot()["requests"]
-    assert feed["total"] == 201
-    assert len(feed["items"]) == 201
-    assert sum(item["detail_available"] for item in feed["items"]) == 200
-    assert feed["items"][0]["has_content"] is True
-    assert feed["items"][0]["has_reasoning"] is True
-    with pytest.raises(ValueError, match="已从内存释放.*REQ-0"):
+    assert feed["total"] == 200
+    assert len(feed["items"]) == 200
+    assert all(item["detail_available"] for item in feed["items"])
+    assert all(item["request_id"] != "REQ-0" for item in feed["items"])
+    with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-0"):
         diagnostics.request_detail("REQ-0")
     detail = diagnostics.request_detail("REQ-200")
     assert len(detail["messages"][0]["content"]) == 100_000
@@ -397,6 +798,78 @@ def test_request_details_are_bounded_while_summaries_remain(tmp_path: Path) -> N
 
     with diagnostics.activate("third", "polishing"):
         assert diagnostics.snapshot()["requests"]["items"] == []
+
+
+def test_request_record_release_resets_incremental_feed(tmp_path: Path) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+
+    with diagnostics.activate("sample", "translation"):
+        for index in range(200):
+            request_id = f"REQ-{index}"
+            diagnostics.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            diagnostics.complete_request(
+                request_id, content="content", reasoning_content=None
+            )
+        before = diagnostics.snapshot()["requests"]
+
+        diagnostics.begin_request(
+            request_id="REQ-200",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        diagnostics.complete_request(
+            "REQ-200", content="content", reasoning_content=None
+        )
+        after = diagnostics.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert after["total"] == 200
+    assert len(after["items"]) == 200
+    assert all(item["request_id"] != "REQ-0" for item in after["items"])
+
+
+def test_diagnostics_hub_session_prune_resets_incremental_feed(
+    tmp_path: Path,
+) -> None:
+    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
+
+    with hub.activate("sample", "translation", task_id="T1"):
+        for index in range(200):
+            request_id = f"REQ-{index}"
+            hub.begin_request(
+                request_id=request_id,
+                model="model",
+                messages=[],
+                max_attempts=1,
+            )
+            hub.complete_request(request_id, content="content", reasoning_content=None)
+        before = hub.snapshot()["requests"]
+
+        hub.begin_request(
+            request_id="REQ-200",
+            model="model",
+            messages=[],
+            max_attempts=1,
+        )
+        hub.complete_request("REQ-200", content="content", reasoning_content=None)
+        after = hub.snapshot(
+            request_session=before["session_id"],
+            request_after=before["cursor"],
+        )["requests"]
+
+    assert after["reset"] is True
+    assert after["total"] == 200
+    assert len(after["items"]) == 200
+    assert all(item["request_id"] != "REQ-0" for item in after["items"])
 
 
 def test_request_summary_feed_is_incremental_and_resets_per_run(
@@ -545,7 +1018,8 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     assert snapshot["metrics"]["http_errors"] == 1
     assert snapshot["metrics"]["retry_count"] == 1
     assert snapshot["metrics"]["rate_limit_waiting_requests"] == 0
-    assert snapshot["metrics"]["usage_available"] is True
+    assert snapshot["metrics"]["usage_available"] is False
+    assert snapshot["metrics"]["usage_partial"] is True
     assert snapshot["requests"]["total"] == 1
     request_summary = snapshot["requests"]["items"][0]
     assert request_summary["status"] == "completed"

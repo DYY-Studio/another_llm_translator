@@ -1,11 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { RelatedTerm, RelatedTermsResponse, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
+import { isCurrentProjectRequest } from "../requestState";
+import type { ProjectOverview, RelatedTerm, TaskState, Term, TermDecisionManualReviewItem, TermDecisionReviewState, TermHitsResponse, TermsResponse } from "../types";
+import { fetchRelatedTerms, fetchTermHits, fetchTerms, queryKeys } from "../queries";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
+import { SummaryWorkspace } from "./SummaryWorkspace";
+import { ConfirmDialog, RelatedGroupDialog, TermImportDialog, TermExportDialog, PartialPublishDialog } from "./TermDialogs";
 
 interface TermForm {
   source: string;
@@ -24,7 +29,6 @@ const emptyForm: TermForm = {
 };
 
 interface TermsCacheEntry {
-  data: TermsResponse;
   search: string;
   onlyConflicts: boolean;
   showDisabled: boolean;
@@ -39,31 +43,28 @@ const emptyManualReview: TermDecisionReviewState["manual_review"] = {
   remaining: 0,
 };
 
-// Survives tab switches so returning renders the term list instantly. Keyed
-// by project; cleared when the project changes so cached data never leaks
-// across projects.
+// Survives tab switches so returning restores the view state instantly. The
+// server data itself is owned by the React Query cache.
 const termsCache = new Map<string, TermsCacheEntry>();
 const termsProjectRef = { current: "" };
 
-// Warms the cache when a project is opened so the first visit to the
-// terminology page renders instantly. Best-effort: failures are left to the
-// view, which fetches and surfaces them on visit; the write guard keeps a
-// mounted view's fresher entry (with its filters and scroll state) intact.
-export function prefetchTerms(project: string) {
-  if (termsCache.has(project)) return;
-  void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
-    .then((data) => {
-      if (termsCache.has(project)) return;
-      termsCache.set(project, {
-        data,
-        search: "",
-        onlyConflicts: false,
-        showDisabled: false,
-        focusedKey: "",
-        scrollTop: 0,
-      });
-    })
-    .catch(() => {});
+export type TermsSubpage = "library" | "decision" | "summary";
+const termsSubpageCache = new Map<string, TermsSubpage>();
+const termsSubpageListeners = new Set<(project: string, subpage: TermsSubpage) => void>();
+
+export function openTermsSubpage(projectId: string, subpage: TermsSubpage) {
+  termsSubpageCache.set(projectId, subpage);
+  for (const listener of termsSubpageListeners) listener(projectId, subpage);
+}
+
+// Warms the query cache when a project is opened so the first visit to the
+// terminology page renders instantly. A failed prefetch remains an error in
+// the query cache and is surfaced when the view mounts.
+export function prefetchTerms(project: string, projectId: string, queryClient: QueryClient) {
+  void queryClient.prefetchQuery({
+    queryKey: queryKeys.terms({ projectId }),
+    queryFn: ({ signal }) => fetchTerms(project, signal),
+  }).catch(() => {});
 }
 
 function formFor(term: Term): TermForm {
@@ -93,20 +94,25 @@ function matchesFilters(term: Term, primarySource: string, query: string, onlyCo
 
 export function TermsView({
   project,
+  projectId,
+  overview,
   focusFailures = false,
   language,
   onFindSegment,
   task,
   onTask,
+  onSubpageChange,
 }: {
   project: string;
+  projectId: string;
+  overview: ProjectOverview;
   focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
   task: TaskState | null;
   onTask: (task: TaskState) => void;
+  onSubpageChange?: (subpage: TermsSubpage) => void;
 }) {
-  const [data, setData] = useState<TermsResponse | null>(null);
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
   const [onlyConflicts, setOnlyConflicts] = useState(false);
@@ -119,9 +125,12 @@ export function TermsView({
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(() => termsSubpageCache.get(projectId) === "summary");
   const [decisionInitialTab, setDecisionInitialTab] = useState<"proposals" | "manual">("proposals");
   const [manualReview, setManualReview] = useState(emptyManualReview);
   const [decisionDraftPending, setDecisionDraftPending] = useState(false);
+  const [decisionPrefetchError, setDecisionPrefetchError] = useState("");
+  const [decisionPrefetchAttempt, setDecisionPrefetchAttempt] = useState(0);
   const [manualFocusId, setManualFocusId] = useState<string | null>(null);
   const [termActionsOpen, setTermActionsOpen] = useState(false);
   const [exportSource, setExportSource] = useState<"published" | "scanned">("published");
@@ -129,15 +138,9 @@ export function TermsView({
   const [showScanFailures, setShowScanFailures] = useState(false);
   const [editorTab, setEditorTab] = useState<"edit" | "group" | "hits">("edit");
   const [pendingPrimary, setPendingPrimary] = useState<string | null>(null);
-  const [hits, setHits] = useState<TermHitsResponse | null>(null);
-  const [hitsLoading, setHitsLoading] = useState(false);
-  const [hitsError, setHitsError] = useState("");
-  const hitsRequestRef = useRef(0);
-  const [related, setRelated] = useState<RelatedTermsResponse | null>(null);
-  const [relatedLoading, setRelatedLoading] = useState(false);
-  const [relatedError, setRelatedError] = useState("");
-  const relatedRequestRef = useRef(0);
-  const relatedCacheRef = useRef(new Map<string, RelatedTermsResponse>());
+  const decisionPrefetchRequestRef = useRef(0);
+  const activeProjectRef = useRef(projectId);
+  activeProjectRef.current = projectId;
   const [pendingRelatedGroup, setPendingRelatedGroup] = useState<RelatedTerm | null>(null);
   const [pendingRelatedAlias, setPendingRelatedAlias] = useState<RelatedTerm | null>(null);
   const [pendingGroupMemberAlias, setPendingGroupMemberAlias] = useState<Term | null>(null);
@@ -149,6 +152,13 @@ export function TermsView({
   const suppressFocusScrollForDataRef = useRef<TermsResponse | null>(null);
   const termsRestoredRef = useRef(false);
   const selection = useClassicSelection();
+  const queryClient = useQueryClient();
+  const termsQuery = useQuery({
+    queryKey: queryKeys.terms({ projectId }),
+    queryFn: ({ signal }) => fetchTerms(project, signal),
+    enabled: Boolean(project),
+  });
+  const data = termsQuery.data ?? null;
   const selected = data?.terms.find(
     (term) => term.normalized === selection.focusedKey,
   ) ?? null;
@@ -171,34 +181,48 @@ export function TermsView({
     : "";
   const selectedIsDisabled = Boolean(selected?.disabled);
 
-  // Restore a cached view synchronously during render so the browser never
-  // paints an empty frame. This runs on the first mount too: prefetchTerms
-  // warms the cache when the project is opened, so entering the terminology
-  // page renders instantly. Switching projects drops every entry except the
-  // current project's (including its prefetched entry), so cached data never
-  // leaks across projects; the load effect refreshes in the background.
-  if (termsProjectRef.current !== project) {
-    termsProjectRef.current = project;
-    for (const key of [...termsCache.keys()]) {
-      if (key !== project) termsCache.delete(key);
-    }
-    setData(null);
+  async function setCurrentData(value: TermsResponse) {
+    if (activeProjectRef.current !== projectId) return;
+    await queryClient.cancelQueries({ queryKey: queryKeys.terms({ projectId }) });
+    if (activeProjectRef.current !== projectId) return;
+    queryClient.setQueryData(queryKeys.terms({ projectId }), value);
+    void queryClient.invalidateQueries({ queryKey: ["term-hits", projectId] }).catch(() => {});
+    void queryClient.invalidateQueries({ queryKey: ["related-terms", projectId] }).catch(() => {});
+  }
+
+  useEffect(() => {
+    const listener = (targetProject: string, subpage: TermsSubpage) => {
+      if (targetProject !== projectId) return;
+      setDecisionOpen(subpage === "decision");
+      setSummaryOpen(subpage === "summary");
+      onSubpageChange?.(subpage);
+    };
+    termsSubpageListeners.add(listener);
+    const subpage = termsSubpageCache.get(projectId) ?? "library";
+    setDecisionOpen(subpage === "decision");
+    setSummaryOpen(subpage === "summary");
+    onSubpageChange?.(subpage);
+    return () => { termsSubpageListeners.delete(listener); };
+  }, [onSubpageChange, projectId]);
+
+  // Restore view state synchronously during render so switching projects does
+  // not briefly reuse the previous project's filters or focus.
+  if (termsProjectRef.current !== projectId) {
+    termsProjectRef.current = projectId;
     selection.reset();
     setManualFocusId(null);
     termsRestoredRef.current = false;
   }
   if (!termsRestoredRef.current) {
     termsRestoredRef.current = true;
-    const cached = termsCache.get(project);
+    const cached = termsCache.get(projectId);
     if (cached) {
-      setData(cached.data);
       setSearch(cached.search);
       setOnlyConflicts(cached.onlyConflicts);
       setShowDisabled(cached.showDisabled);
       selection.reset(cached.focusedKey);
       restoredScrollRef.current = cached.scrollTop;
     } else {
-      setData(null);
       selection.reset();
     }
   }
@@ -206,34 +230,39 @@ export function TermsView({
   useEffect(() => {
     setForm(emptyForm);
     setMessage("");
-    void api<TermsResponse>(`/api/v1/projects/${project}/terms`)
-      .then(setData)
-      .catch((error) => setMessage(errorMessage(error, language)));
-  }, [project]);
+  }, [projectId]);
 
   useEffect(() => {
+    setManualReview(emptyManualReview);
+    setDecisionDraftPending(false);
+  }, [projectId]);
+
+  useEffect(() => {
+    const requestId = ++decisionPrefetchRequestRef.current;
+    const targetProject = projectId;
+    setDecisionPrefetchError("");
     void api<TermDecisionReviewState>(`/api/v1/projects/${project}/terms/decision`)
       .then((value) => {
+        if (!isCurrentProjectRequest(requestId, decisionPrefetchRequestRef.current, targetProject, activeProjectRef.current)) return;
         setManualReview(value.manual_review);
         setDecisionDraftPending(Boolean(value.draft));
       })
-      .catch(() => {
-        setManualReview(emptyManualReview);
-        setDecisionDraftPending(false);
+      .catch((error) => {
+        if (isCurrentProjectRequest(requestId, decisionPrefetchRequestRef.current, targetProject, activeProjectRef.current)) setDecisionPrefetchError(errorMessage(error, language));
       });
-  }, [project]);
+    return () => { decisionPrefetchRequestRef.current += 1; };
+  }, [decisionPrefetchAttempt, language, project, projectId]);
 
   useEffect(() => {
     if (!data) return;
-    termsCache.set(project, {
-      data,
+    termsCache.set(projectId, {
       search,
       onlyConflicts,
       showDisabled,
       focusedKey: selection.focusedKey,
       scrollTop: termListRef.current?.scrollTop ?? 0,
     });
-  }, [project, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
+  }, [projectId, data, search, onlyConflicts, showDisabled, selection.focusedKey]);
 
   useLayoutEffect(() => {
     if (restoredScrollRef.current === null) return;
@@ -246,100 +275,41 @@ export function TermsView({
   }, [focusFailures]);
 
   const hitsPageSize = 50;
-  function loadHits(normalized: string, offset: number) {
-    return api<TermHitsResponse>(
-      `/api/v1/projects/${project}/terms/hits`,
-      {
-        method: "POST",
-        body: JSON.stringify({ normalized, offset, limit: hitsPageSize }),
-      },
-    );
-  }
+  const hitsEnabled = editorTab === "hits" && Boolean(selected) && !selectedIsDisabled;
+  const hitsQuery = useInfiniteQuery({
+    queryKey: queryKeys.termHits({ projectId }, selected?.normalized ?? ""),
+    queryFn: ({ pageParam, signal }) => fetchTermHits(project, selected!.normalized, pageParam, signal, hitsPageSize),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => {
+      const nextOffset = lastPage.offset + lastPage.hits.length;
+      return nextOffset < lastPage.total ? nextOffset : undefined;
+    },
+    enabled: hitsEnabled,
+  });
+  const hits = useMemo<TermHitsResponse | null>(() => {
+    if (editorTab === "hits" && selected?.normalized && selectedIsDisabled) {
+      return { normalized: selected.normalized, source: selected.source, total: 0, offset: 0, limit: hitsPageSize, hits: [] };
+    }
+    if (!hitsEnabled || !hitsQuery.data?.pages.length) return null;
+    const [firstPage] = hitsQuery.data.pages;
+    return { ...firstPage, hits: hitsQuery.data.pages.flatMap((page) => page.hits) };
+  }, [editorTab, hitsEnabled, hitsQuery.data, selected, selectedIsDisabled]);
+  const hitsLoading = hitsEnabled && (hitsQuery.isPending || hitsQuery.isFetchingNextPage);
+  const hitsError = hitsEnabled && hitsQuery.error ? errorMessage(hitsQuery.error, language) : "";
 
-  // Hits are intentionally loaded only when the user opens the hits tab. A
-  // normal term selection must not scan every Segment in the project.
-  useEffect(() => {
-    const normalized = selected?.normalized ?? "";
-    const requestId = ++hitsRequestRef.current;
-    if (editorTab !== "hits" || !normalized || selectedIsDisabled) {
-      setHits(
-        editorTab === "hits" && normalized && selectedIsDisabled
-          ? { normalized, source: selected?.source ?? normalized, total: 0, offset: 0, limit: hitsPageSize, hits: [] }
-          : null,
-      );
-      setHitsLoading(false);
-      setHitsError("");
-      return;
-    }
-    setHitsLoading(true);
-    setHitsError("");
-    setHits(null);
-    void loadHits(normalized, 0)
-      .then((value) => {
-        if (requestId === hitsRequestRef.current) setHits(value);
-      })
-      .catch((error) => {
-        if (requestId === hitsRequestRef.current) setHitsError(errorMessage(error, language));
-      })
-      .finally(() => {
-        if (requestId === hitsRequestRef.current) setHitsLoading(false);
-      });
-  }, [editorTab, project, selectedIsDisabled, selectedMatchKey]);
-
-  // Related terms are cheap to compute but only useful on the group tab. Keep
-  // a small revision-aware cache so switching between tabs does not repeat
-  // the same library scan, while a save/removal naturally invalidates it.
-  useEffect(() => {
-    const normalized = selected?.normalized ?? "";
-    const requestId = ++relatedRequestRef.current;
-    if (editorTab !== "group" || !normalized || selectedIsDisabled) {
-      setRelated(null);
-      setRelatedLoading(false);
-      setRelatedError("");
-      return;
-    }
-    const cacheKey = `${project}:${data?.terms_revision ?? "none"}:${selectedMatchKey}`;
-    const cached = relatedCacheRef.current.get(cacheKey);
-    if (cached) {
-      setRelated(cached);
-      setRelatedLoading(false);
-      setRelatedError("");
-      return;
-    }
-    setRelated(null);
-    setRelatedLoading(true);
-    setRelatedError("");
-    void api<RelatedTermsResponse>(`/api/v1/projects/${project}/terms/related`, {
-      method: "POST",
-      body: JSON.stringify({ normalized, limit: 20 }),
-    })
-      .then((value) => {
-        if (requestId !== relatedRequestRef.current) return;
-        if (relatedCacheRef.current.size >= 50) relatedCacheRef.current.clear();
-        relatedCacheRef.current.set(cacheKey, value);
-        setRelated(value);
-      })
-      .catch((error) => {
-        if (requestId === relatedRequestRef.current) setRelatedError(errorMessage(error, language));
-      })
-      .finally(() => {
-        if (requestId === relatedRequestRef.current) setRelatedLoading(false);
-      });
-  }, [data?.terms_revision, editorTab, project, selectedIsDisabled, selectedMatchKey]);
+  const relatedEnabled = editorTab === "group" && Boolean(selected) && !selectedIsDisabled;
+  const relatedQuery = useQuery({
+    queryKey: queryKeys.relatedTerms({ projectId }, data?.terms_revision ?? null, selectedMatchKey),
+    queryFn: ({ signal }) => fetchRelatedTerms(project, selected!.normalized, signal),
+    enabled: relatedEnabled,
+  });
+  const related = relatedEnabled ? relatedQuery.data ?? null : null;
+  const relatedLoading = relatedEnabled && (relatedQuery.isPending || relatedQuery.isFetching);
+  const relatedError = relatedEnabled && relatedQuery.error ? errorMessage(relatedQuery.error, language) : "";
 
   function loadMoreHits() {
-    if (!selected || !hits) return;
-    const normalized = selected.normalized;
-    const offset = hits.hits.length;
-    setHitsLoading(true);
-    void loadHits(normalized, offset)
-      .then((value) => setHits((current) => (
-        current && current.normalized === normalized
-          ? { ...value, hits: [...current.hits, ...value.hits] }
-          : current
-      )))
-      .catch((error) => setHitsError(errorMessage(error, language)))
-      .finally(() => setHitsLoading(false));
+    if (!hitsEnabled || !hitsQuery.hasNextPage || hitsQuery.isFetchingNextPage) return;
+    void hitsQuery.fetchNextPage();
   }
 
   const visible = useMemo(() => {
@@ -435,6 +405,14 @@ export function TermsView({
     if (tab === "manual" && decisionDraftPending) return;
     setDecisionInitialTab(tab);
     setDecisionOpen(true);
+    setSummaryOpen(false);
+    openTermsSubpage(projectId, "decision");
+  }
+
+  function openSummary() {
+    setDecisionOpen(false);
+    setSummaryOpen(true);
+    openTermsSubpage(projectId, "summary");
   }
 
   function updateDecisionReview(value: TermDecisionReviewState) {
@@ -445,6 +423,7 @@ export function TermsView({
   function openManualEditor(item: TermDecisionManualReviewItem, tab: "edit" | "group") {
     const term = data?.terms.find((value) => value.normalized === item.normalized) ?? null;
     setDecisionOpen(false);
+    openTermsSubpage(projectId, "library");
     setManualFocusId(manualItemId(item));
     setSearch("");
     setOnlyConflicts(false);
@@ -507,7 +486,7 @@ export function TermsView({
       } else {
         suppressFocusScrollForDataRef.current = null;
       }
-      setData(value);
+      await setCurrentData(value);
       selection.reset(saved?.normalized ?? "");
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
@@ -530,7 +509,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.removedCount", language, { count: value.removed }));
@@ -554,7 +533,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
@@ -574,15 +553,9 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/clear`,
         { method: "POST", body: JSON.stringify({ confirm: true }) },
       );
-      setData(value);
+      await setCurrentData(value);
       selection.reset();
       setForm(emptyForm);
-      setHits(null);
-      setHitsLoading(false);
-      setHitsError("");
-      setRelated(null);
-      setRelatedLoading(false);
-      setRelatedError("");
       setPendingPrimary(null);
       setPendingRelatedGroup(null);
       setPendingRelatedAlias(null);
@@ -592,9 +565,6 @@ export function TermsView({
       setRelatedPrimary("");
       setShowScanFailures(false);
       setPartialOpen(false);
-      hitsRequestRef.current += 1;
-      relatedRequestRef.current += 1;
-      relatedCacheRef.current.clear();
       setClearOpen(false);
       setMessage(translate("terms.stageCleared", language));
     } catch (error) {
@@ -614,7 +584,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/materialize`,
         { method: "POST", body: JSON.stringify({ normalized: selectedNormalized, alias }) },
       );
-      setData(value);
+      await setCurrentData(value);
       const member = value.terms.find((term) => term.normalized === value.materialized) ?? null;
       const restored = Boolean(data?.terms.find((term) => term.normalized === value.materialized)?.disabled);
       const groupPrimary = termByKey.get(selected.group_primary ?? selectedNormalized) ?? selected;
@@ -640,7 +610,7 @@ export function TermsView({
         `/api/v1/projects/${project}/terms/set-primary`,
         { method: "POST", body: JSON.stringify({ normalized: pendingPrimary, confirm: true }) },
       );
-      setData(value);
+      await setCurrentData(value);
       selection.reset(pendingPrimary);
       const primary = value.terms.find((term) => term.normalized === pendingPrimary);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -705,7 +675,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === relatedPrimary) ?? null;
       selection.reset(primary?.normalized ?? selectedNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -736,7 +706,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       const target = value.terms.find((term) => term.normalized === selectedNormalized) ?? null;
       selection.reset(target?.normalized ?? "");
       setForm(target ? formFor(target) : emptyForm);
@@ -766,7 +736,7 @@ export function TermsView({
           }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       const primary = value.terms.find((term) => term.normalized === primaryNormalized) ?? null;
       selection.reset(primary?.normalized ?? primaryNormalized);
       setForm(primary ? formFor(primary) : emptyForm);
@@ -793,7 +763,7 @@ export function TermsView({
           body: JSON.stringify({ normalized, confirm: true }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       const focused = value.terms.find((term) => term.normalized === focusedNormalized) ?? null;
       selection.reset(focused?.normalized ?? focusedNormalized);
       setForm(focused ? formFor(focused) : emptyForm);
@@ -818,7 +788,7 @@ export function TermsView({
           body: JSON.stringify({ normalized: [pendingRelatedRemoval.normalized] }),
         },
       );
-      setData(value);
+      await setCurrentData(value);
       setPendingRelatedRemoval(null);
       setMessage(translate("terms.relatedRemoved", language));
     } catch (error) {
@@ -828,14 +798,29 @@ export function TermsView({
     }
   }
 
-  if (decisionOpen) {
-    return <TermDecisionWorkspace
+  if (summaryOpen) {
+    return <SummaryWorkspace
+      key={`summary:${projectId}`}
       project={project}
+      projectId={projectId}
+      overview={overview}
       language={language}
       task={task}
       onTask={onTask}
-      onTerms={setData}
-      onClose={() => setDecisionOpen(false)}
+      onClose={() => { setSummaryOpen(false); openTermsSubpage(projectId, "library"); }}
+    />;
+  }
+
+  if (decisionOpen) {
+    return <TermDecisionWorkspace
+      key={`decision:${projectId}`}
+      project={project}
+      projectId={projectId}
+      language={language}
+      task={task}
+      onTask={onTask}
+      onTerms={setCurrentData}
+      onClose={() => { setDecisionOpen(false); openTermsSubpage(projectId, "library"); }}
       initialTab={decisionInitialTab}
       onReviewState={updateDecisionReview}
       onNavigateToEditor={openManualEditor}
@@ -881,8 +866,6 @@ export function TermsView({
             <div className="segment-batch-actions">
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
-              <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => openDecision("proposals")}>{translate("terms.autoDecision", language)}</button>
-              {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => openDecision("manual")}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
               {selectedActive.length > 0 && <button
                 className="danger-button"
                 onClick={() => { setTermActionsOpen(false); setRemoveOpen(true); }}
@@ -894,6 +877,18 @@ export function TermsView({
               >
                 <summary className="quiet-button">{translate("terms.moreActions", language)}</summary>
                 <div className="term-actions-popover">
+                  <div className="term-actions-group">
+                    <strong>{translate("terms.experiments", language)}</strong>
+                    <div className="term-actions-experiment-entry">
+                      <button className="quiet-button" disabled={!data?.terms_revision || Boolean(task && ["queued", "running", "cancelling"].includes(task.status))} onClick={() => { setTermActionsOpen(false); openDecision("proposals"); }}>{translate("terms.autoDecision", language)}</button>
+                      <small>{translate("terms.autoDecisionDescription", language)}</small>
+                    </div>
+                    {!decisionDraftPending && manualReview.remaining > 0 && <button className="quiet-button term-manual-queue-button" onClick={() => { setTermActionsOpen(false); openDecision("manual"); }}>{translate("terms.manualReviewQueueProgress", language, { remaining: manualReview.remaining, total: manualReview.total })}</button>}
+                    <div className="term-actions-experiment-entry">
+                      <button className="quiet-button" onClick={() => { setTermActionsOpen(false); openSummary(); }}>{translate("terms.summary", language)}</button>
+                      <small>{translate("terms.summaryDescription", language)}</small>
+                    </div>
+                  </div>
                   <button
                     className="danger-button"
                     disabled={!selectedTerms.length}
@@ -910,6 +905,7 @@ export function TermsView({
             <small className="term-removal-help">{translate("terms.removalHelp", language)}</small>
           </div>
         </div>
+        {decisionPrefetchError && <div className="inline-message error-text"><span>{translate("terms.decisionPrefetchError", language, { status: translate("terms.decisionPrefetchFailed", language), detail: decisionPrefetchError })}</span><button className="quiet-button" type="button" onClick={() => setDecisionPrefetchAttempt((value) => value + 1)}>{translate("terms.decisionRetryLoad", language)}</button></div>}
         {data?.scan.active_task_id && (
           <div className="term-scan-status">
             <div>
@@ -936,7 +932,7 @@ export function TermsView({
           </div>
         )}
         <div className="term-list" ref={termListRef} onScroll={(event) => {
-          const cached = termsCache.get(project);
+          const cached = termsCache.get(projectId);
           if (cached) cached.scrollTop = event.currentTarget.scrollTop;
         }}>
           <div className="term-row-stack" style={{ height: termVirtualizer.getTotalSize(), position: "relative" }}>
@@ -988,8 +984,9 @@ export function TermsView({
               );
             })}
           </div>
-          {data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
-          {!data && <div className="empty">{translate("terms.loading", language)}</div>}
+          {termsQuery.error && <div className="empty error-text"><span>{errorMessage(termsQuery.error, language)}</span><button className="quiet-button" type="button" onClick={() => { void termsQuery.refetch(); }}>{translate("common.retry", language)}</button></div>}
+          {!termsQuery.error && data && !visible.length && <div className="empty">{translate("terms.noMatch", language)}</div>}
+          {!termsQuery.error && !data && <div className="empty">{translate("terms.loading", language)}</div>}
         </div>
       </section>
       <section className="term-editor">
@@ -1018,7 +1015,7 @@ export function TermsView({
             {hitsLoading && !hits ? (
               <div className="term-hits-state">{translate("terms.hitsLoading", language)}</div>
             ) : hitsError ? (
-              <div className="term-hits-state error-text">{hitsError}</div>
+              <div className="term-hits-state error-text"><span>{hitsError}</span><button className="quiet-button" type="button" onClick={() => { void hitsQuery.refetch(); }}>{translate("common.retry", language)}</button></div>
             ) : hits && hits.total === 0 ? (
               <div className="term-hits-state">{translate("terms.hitsEmpty", language)}</div>
             ) : hits && (
@@ -1036,8 +1033,8 @@ export function TermsView({
                     </button>
                   ))}
                 </div>
-                {hits.hits.length < hits.total && (
-                  <button className="quiet-button term-hits-more" disabled={hitsLoading} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
+                {hitsQuery.hasNextPage && (
+                  <button className="quiet-button term-hits-more" disabled={hitsQuery.isFetchingNextPage} onClick={loadMoreHits}>{translate("terms.hitsLoadMore", language)}</button>
                 )}
               </>
             )}
@@ -1086,7 +1083,7 @@ export function TermsView({
                     <strong>{translate("terms.relatedTitle", language)}</strong>
                     <p className="term-related-help">{translate("terms.relatedHelp", language)}</p>
                     {relatedLoading && <div className="term-hits-state">{translate("terms.relatedLoading", language)}</div>}
-                    {relatedError && <div className="term-hits-state error-text">{relatedError}</div>}
+                    {relatedError && <div className="term-hits-state error-text"><span>{relatedError}</span><button className="quiet-button" type="button" onClick={() => { void relatedQuery.refetch(); }}>{translate("common.retry", language)}</button></div>}
                     {!relatedLoading && !relatedError && related && !related.related.length && (
                       <div className="term-hits-state">{translate("terms.relatedEmpty", language)}</div>
                     )}
@@ -1304,8 +1301,8 @@ export function TermsView({
           project={project}
           language={language}
           onClose={() => setImportOpen(false)}
-          onImported={(value) => {
-            setData(value);
+          onImported={async (value) => {
+            await setCurrentData(value);
             selection.reset();
             setForm(emptyForm);
             setImportOpen(false);
@@ -1330,7 +1327,7 @@ export function TermsView({
           onClose={() => setPartialOpen(false)}
           onPublished={async () => {
             setPartialOpen(false);
-            setData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
+            await setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
             setMessage(translate("terms.published", language));
           }}
         />
@@ -1353,239 +1350,6 @@ function ConflictChoices({
       <strong>{label}</strong>
       <div className="choice-buttons">
         {values.map((value) => <button key={value} type="button" onClick={() => onChoose(value)}>{value}</button>)}
-      </div>
-    </div>
-  );
-}
-
-function ConfirmDialog({
-  title,
-  text,
-  confirmLabel,
-  language,
-  confirming,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  text: string;
-  confirmLabel?: string;
-  language: Language;
-  confirming: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const effectiveConfirmLabel = confirmLabel ?? translate("terms.confirmRemoval", language);
-  return (
-    <Modal ariaLabel={title}>
-      <h2>{title}</h2>
-      <p>{text}</p>
-      <div className="modal-actions">
-        <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
-        <button className="danger-button" disabled={confirming} onClick={onConfirm}>{effectiveConfirmLabel}</button>
-      </div>
-    </Modal>
-  );
-}
-
-function RelatedGroupDialog({
-  language,
-  candidate,
-  primary,
-  selectedRoot,
-  selectedRootSource,
-  confirming,
-  onPrimaryChange,
-  onCancel,
-  onConfirm,
-}: {
-  language: Language;
-  candidate: RelatedTerm;
-  primary: string;
-  selectedRoot: string;
-  selectedRootSource: string;
-  confirming: boolean;
-  onPrimaryChange: (value: string) => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const options = [
-    {
-      normalized: selectedRoot,
-      source: selectedRootSource,
-    },
-    {
-      normalized: candidate.group_root_normalized,
-      source: candidate.group_root_source,
-    },
-  ].filter(
-    (option, index, all) =>
-      all.findIndex((item) => item.normalized === option.normalized) === index,
-  );
-  return (
-    <Modal ariaLabel={translate("terms.relatedGroupTitle", language)}>
-      <h2>{translate("terms.relatedGroupTitle", language)}</h2>
-      <p>{translate("terms.relatedGroupText", language, { source: candidate.source })}</p>
-      <div className="related-primary-options">
-        {options.map((option) => (
-          <label key={option.normalized} className="radio-option">
-            <input
-              type="radio"
-              name="related-primary"
-              checked={primary === option.normalized}
-              onChange={() => onPrimaryChange(option.normalized)}
-            />
-            <span>{option.source}</span>
-          </label>
-        ))}
-      </div>
-      <div className="modal-actions">
-        <button className="quiet-button" disabled={confirming} onClick={onCancel}>{translate("common.cancel", language)}</button>
-        <button className="primary-button" disabled={confirming} onClick={onConfirm}>{translate("terms.relatedGroup", language)}</button>
-      </div>
-    </Modal>
-  );
-}
-
-function TermImportDialog({
-  project,
-  language,
-  onClose,
-  onImported,
-}: {
-  project: string;
-  language: Language;
-  onClose: () => void;
-  onImported: (value: TermsResponse) => void;
-}) {
-  const [file, setFile] = useState<File | null>(null);
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  async function submit() {
-    if (!file) return;
-    const body = new FormData();
-    body.append("file", file);
-    setSaving(true);
-    try {
-      await api(`/api/v1/projects/${project}/terms/import`, {
-        method: "POST",
-        body,
-      });
-      onImported(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
-    } catch (value) {
-      setError(errorMessage(value, language));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Modal ariaLabel={translate("terms.importDialogTitle", language)}>
-      <h2>{translate("terms.importDialogTitle", language)}</h2>
-      <p>{translate("terms.importHint", language)}</p>
-      <label>{translate("terms.termFile", language)}<input type="file" accept=".json,.csv" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
-      {error && <p className="error-text">{error}</p>}
-      <div className="modal-actions">
-        <button className="quiet-button" disabled={saving} onClick={onClose}>{translate("common.cancel", language)}</button>
-        <button className="primary-button" disabled={saving || !file} onClick={submit}>{translate("terms.import", language)}</button>
-      </div>
-    </Modal>
-  );
-}
-
-function TermExportDialog({
-  project,
-  language,
-  hasScanned,
-  defaultSource,
-  onClose,
-}: {
-  project: string;
-  language: Language;
-  hasScanned: boolean;
-  defaultSource: "published" | "scanned";
-  onClose: () => void;
-}) {
-  const [format, setFormat] = useState<"json" | "csv">("json");
-  const [source, setSource] = useState<"published" | "scanned">(defaultSource);
-  const [includeDisabled, setIncludeDisabled] = useState(false);
-  const [error, setError] = useState("");
-
-  async function download() {
-    try {
-      const response = await fetch(
-        `/api/v1/projects/${project}/terms/export?format=${format}&include_disabled=${includeDisabled}&source=${source}`,
-      );
-      if (!response.ok) {
-        throw await apiErrorFromResponse(response);
-      }
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${project}-terms.${format}`;
-      link.click();
-      URL.revokeObjectURL(url);
-      onClose();
-    } catch (value) {
-      setError(errorMessage(value, language));
-    }
-  }
-
-  return (
-    <Modal ariaLabel={translate("terms.exportDialogTitle", language)}>
-      <h2>{translate("terms.exportDialogTitle", language)}</h2>
-      <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
-      <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
-      <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>
-      {error && <p className="error-text">{error}</p>}
-      <div className="modal-actions">
-        <button className="quiet-button" onClick={onClose}>{translate("common.cancel", language)}</button>
-        <button className="primary-button" onClick={download}>{translate("terms.download", language)}</button>
-      </div>
-    </Modal>
-  );
-}
-
-function PartialPublishDialog({
-  project,
-  language,
-  count,
-  onClose,
-  onPublished,
-}: {
-  project: string;
-  language: Language;
-  count: number;
-  onClose: () => void;
-  onPublished: () => Promise<void>;
-}) {
-  const [working, setWorking] = useState(false);
-  const [error, setError] = useState("");
-
-  async function confirm() {
-    setWorking(true);
-    setError("");
-    try {
-      await api(`/api/v1/projects/${project}/terms/publish-partial`, { method: "POST", body: JSON.stringify({ confirm: true }) });
-      await onPublished();
-    } catch (value) {
-      setError(errorMessage(value, language));
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.publishTitle", language)}>
-        <h2>{translate("terms.publishTitle", language)}</h2>
-        <p>{translate("terms.publishText", language, { count })}</p>
-        {error && <p className="error-text">{error}</p>}
-        <div className="modal-actions">
-          <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>
-          <button className="primary-button" disabled={working || !count} onClick={confirm}>{working ? translate("terms.publishing", language) : translate("terms.publish", language)}</button>
-        </div>
       </div>
     </div>
   );

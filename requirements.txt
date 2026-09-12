@@ -6,3 +6,4 @@ regex>=2024.11.6,<2027
 uvicorn>=0.30,<1
 keyring>=25,<26
 psutil>=5.9,<7
+pydantic>=2,<3

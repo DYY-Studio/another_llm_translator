@@ -3,6 +3,7 @@ import type { Stage, TaskState, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
+import { canCancelTaskStatus, isTerminalTaskStatus } from "../taskState";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -14,10 +15,20 @@ const items: Array<{ id: Stage; key: string }> = [
   { id: "export", key: "nav.export" },
 ];
 
+function taskStageLabelKey(stage: string): string {
+  if (stage === "terminology_decision") return "stage.terminologyDecision";
+  if (stage === "content_summary") return "stage.contentSummary";
+  return `stage.${stage}`;
+}
+
 export function AppShell({
   project,
   stage,
   task,
+  tasks,
+  onOpenTaskProject,
+  onCancelTask,
+  onDismissTask,
   onStage,
   onShowFailures,
   onRun,
@@ -34,6 +45,10 @@ export function AppShell({
   project: string;
   stage: Stage;
   task: TaskState | null;
+  tasks: TaskState[];
+  onOpenTaskProject: (task: TaskState) => void | Promise<void>;
+  onCancelTask: (taskId: string) => void;
+  onDismissTask: (taskId: string) => void;
   onStage: (value: Stage) => void;
   onShowFailures: () => void;
   onRun: () => void;
@@ -49,9 +64,11 @@ export function AppShell({
 }) {
   const runStatusRef = useRef<HTMLElement>(null);
   const [runStatusHeight, setRunStatusHeight] = useState(0);
+  const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   const running = Boolean(
     task && ["queued", "running", "cancelling"].includes(task.status),
   );
+  const terminal = Boolean(task && isTerminalTaskStatus(task.status));
   const completed = task?.completed_segments ?? 0;
   const failed = task?.failed_segments ?? 0;
   const pending = task?.pending_segments ?? 0;
@@ -101,6 +118,77 @@ export function AppShell({
       <header className="topbar">
         <div className="brand">{translate("brand", language)}</div>
         <div className="topbar-spacer" />
+        <div className="task-panel-wrap">
+          <button
+            className={`task-panel-trigger${tasks.length ? " has-tasks" : ""}`}
+            aria-expanded={taskPanelOpen}
+            aria-label={translate("run.taskPanel", language, { count: tasks.length })}
+            onClick={() => setTaskPanelOpen((current) => !current)}
+          >
+            {translate("run.taskPanel", language, { count: tasks.length })}
+          </button>
+          {taskPanelOpen && (
+            <div className="task-panel-popover" role="dialog" aria-label={translate("run.taskPanelTitle", language)}>
+              <div className="task-panel-heading">
+                <strong>{translate("run.taskPanelTitle", language)}</strong>
+                <span>{tasks.length}</span>
+              </div>
+              {tasks.length === 0 ? (
+                <p className="task-panel-empty">{translate("run.taskPanelEmpty", language)}</p>
+              ) : (
+                <div className="task-panel-list">
+                  {tasks.map((next) => {
+                    const nextCompleted = next.completed_segments;
+                    const nextFailed = next.failed_segments;
+                    const nextPending = next.pending_segments;
+                    const nextTotal = next.total_segments;
+                    const nextProcessed = nextCompleted + nextFailed;
+                    const nextStage = taskStageLabelKey(next.stage);
+                    return (
+                      <article className="task-panel-item" key={next.task_id}>
+                        <div className="task-panel-identity">
+                          <strong>{next.project}</strong>
+                          <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
+                        </div>
+                        <div className="task-panel-progress">
+                          <span>{translate("run.completedCount", language, {
+                            completed: nextCompleted,
+                            failed: nextFailed,
+                            pending: nextPending,
+                            total: nextTotal,
+                          })}</span>
+                          <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={nextTotal} aria-valuenow={nextProcessed}>
+                            <span className="progress-completed" style={{ width: `${nextTotal ? nextCompleted / nextTotal * 100 : 0}%` }} />
+                            <span className="progress-failed" style={{ width: `${nextTotal ? nextFailed / nextTotal * 100 : 0}%` }} />
+                          </div>
+                        </div>
+                        <div className="task-panel-tokens">
+                          {next.usage.available ? (
+                            <><span>{translate("run.tokensInput", language)} {next.usage.input_tokens}</span><span>{translate("run.tokensOutput", language)} {next.usage.output_tokens}</span></>
+                          ) : next.usage.partial ? (
+                            <span>{translate("run.tokensPartial", language, { input: next.usage.input_tokens, output: next.usage.output_tokens })}</span>
+                          ) : (
+                            <span>{translate("run.tokensUnavailable", language)}</span>
+                          )}
+                        </div>
+                        <div className="task-panel-actions">
+                          <button className="quiet-button" onClick={() => { setTaskPanelOpen(false); void onOpenTaskProject(next); }}>
+                            {translate("run.openProject", language)}
+                          </button>
+                          {canCancelTaskStatus(next.status) && (
+                            <button className="danger-link" onClick={() => onCancelTask(next.task_id)}>
+                              {translate("run.cancel", language)}
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         <button className="icon-button" aria-label={themeTitle} title={themeTitle} onClick={onTheme}>
           {themeIcon}
         </button>
@@ -110,10 +198,10 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className="global-run-status" ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
+        <section className={`global-run-status${terminal ? " terminal" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
-            <span>{task.project} · {task.stage}</span>
+            <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}</span>
           </div>
           <div className="run-progress">
             <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
@@ -128,17 +216,31 @@ export function AppShell({
             ) : task.usage.partial ? <span>{translate("run.tokensPartial", language, { input: task.usage.input_tokens, output: task.usage.output_tokens })}</span>
               : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
-          {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
-          {task.error && (
-            <span
-              className="error-text run-error"
-              role="alert"
-              title={errorMessage(task.error, language)}
-            >
-              {errorMessage(task.error, language)}
-            </span>
+          {(failed > 0 || task.error) && (
+            <div className="run-tokens run-task-details">
+              {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
+              {task.error && (
+                <span
+                  className="error-text run-error"
+                  role="alert"
+                  title={errorMessage(task.error, language)}
+                >
+                  {errorMessage(task.error, language)}
+                </span>
+              )}
+            </div>
           )}
-          {["queued", "running"].includes(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
+          {canCancelTaskStatus(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
+          {terminal && (
+            <button
+              className="quiet-button run-dismiss"
+              aria-label={translate("run.dismiss", language)}
+              title={translate("run.dismiss", language)}
+              onClick={() => onDismissTask(task.task_id)}
+            >
+              ×
+            </button>
+          )}
         </section>
       )}
       <aside className="sidebar">

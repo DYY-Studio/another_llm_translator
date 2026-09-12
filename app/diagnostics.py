@@ -7,7 +7,7 @@ import math
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -43,8 +43,23 @@ def _bounded(value: str, limit: int) -> tuple[str, bool]:
 
 
 class Diagnostics:
-    def __init__(self, log_path: Path) -> None:
+    def __init__(
+        self,
+        log_path: Path,
+        *,
+        task_id: str | None = None,
+        install_handlers: bool = True,
+        log_sink: Any | None = None,
+        revision_sink: Callable[[], int] | None = None,
+        terminal_sink: Callable[[Diagnostics, str], None] | None = None,
+        request_reset_sink: Callable[[], None] | None = None,
+    ) -> None:
         self.log_path = log_path
+        self.task_id = task_id
+        self._log_sink = log_sink or self
+        self._revision_sink = revision_sink
+        self._terminal_sink = terminal_sink
+        self._request_reset_sink = request_reset_sink
         self.logs: deque[dict[str, Any]] = deque(maxlen=1000)
         self.requests: dict[str, dict[str, Any]] = {}
         self._retained_terminal_details: deque[str] = deque()
@@ -63,7 +78,8 @@ class Diagnostics:
         self._started_monotonic: float | None = None
         self._elapsed_seconds = 0.0
         self._running = False
-        self._install_handlers()
+        if install_handlers:
+            self._install_handlers()
 
     def _install_handlers(self) -> None:
         logger = logging.getLogger(LOGGER_NAME)
@@ -88,18 +104,13 @@ class Diagnostics:
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         )
-        memory = _MemoryHandler(self)
+        memory = _MemoryHandler(self._log_sink)
         setattr(memory, _HANDLER_MARKER, "web-memory")
         memory.addFilter(context_filter)
         logger.addHandler(disk)
         logger.addHandler(memory)
 
-    @contextmanager
-    def activate(self, project: str, stage: str) -> Iterator[None]:
-        active_token = _ACTIVE.set(self)
-        project_token = _PROJECT.set(project)
-        self.project = project
-        self.stage = stage
+    def _reset_run_state(self) -> None:
         self.active_requests = 0
         self.total_requests = 0
         self.http_errors = 0
@@ -112,8 +123,21 @@ class Diagnostics:
         self._retained_terminal_details.clear()
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
-        self._started_monotonic = time.monotonic()
+        self._started_monotonic = None
         self._elapsed_seconds = 0.0
+        self._running = False
+
+    @contextmanager
+    def activate(
+        self, project: str, stage: str, *, task_id: str | None = None
+    ) -> Iterator[None]:
+        active_token = _ACTIVE.set(self)
+        project_token = _PROJECT.set(project)
+        self._reset_run_state()
+        self.project = project
+        self.stage = stage
+        self.task_id = task_id
+        self._started_monotonic = time.monotonic()
         self._running = True
         try:
             yield
@@ -158,6 +182,7 @@ class Diagnostics:
             "project": self.project,
             "stage": self.stage,
             "request_id": request_id,
+            "task_id": self.task_id,
             "model": model,
             "transport": transport,
             "segment_id_map": dict(segment_id_map or {}),
@@ -188,6 +213,8 @@ class Diagnostics:
     def _touch_request(self, request: dict[str, Any]) -> None:
         self._request_cursor += 1
         request["_revision"] = self._request_cursor
+        if self._revision_sink is not None:
+            request["_hub_revision"] = self._revision_sink()
 
     def _finish_request(
         self,
@@ -205,19 +232,19 @@ class Diagnostics:
             self._retained_terminal_details.append(request["request_id"])
         self._touch_request(request)
         self._prune_terminal_details()
+        if not was_terminal and self._terminal_sink is not None:
+            self._terminal_sink(self, request["request_id"])
 
     def _prune_terminal_details(self) -> None:
         while len(self._retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
             request_id = self._retained_terminal_details.popleft()
             request = self.requests.get(request_id)
-            if request is None or not request["detail_available"]:
+            if request is None:
                 continue
-            request["detail_available"] = False
-            request["segment_id_map"] = {}
-            request["messages"] = []
-            request["response_content"] = None
-            request["reasoning_content"] = None
-            self._touch_request(request)
+            del self.requests[request_id]
+            self._request_session = uuid.uuid4().hex
+            if self._request_reset_sink is not None:
+                self._request_reset_sink()
 
     def request_started(self, request_id: str) -> None:
         self.active_requests += 1
@@ -251,9 +278,12 @@ class Diagnostics:
         *,
         request_id: str,
         attempt: int,
+        retry_round: int | None = None,
+        key_index: int | None = None,
         latency_seconds: float,
         status: int | None,
         error: bool,
+        retrying: bool = False,
         stream_event_count: int | None = None,
         stream_received_bytes: int | None = None,
         stream_first_event_latency_ms: float | None = None,
@@ -279,6 +309,8 @@ class Diagnostics:
         request["attempts"].append(
             {
                 "attempt": attempt,
+                "retry_round": retry_round,
+                "key_index": key_index,
                 "transport": request["transport"],
                 "http_status": status,
                 "latency_ms": round(latency_seconds * 1000, 1),
@@ -302,9 +334,8 @@ class Diagnostics:
             }
         )
         if error:
-            if (
-                request["status"] not in _TERMINAL_REQUEST_STATUSES
-                and attempt < request["max_attempts"]
+            if request["status"] not in _TERMINAL_REQUEST_STATUSES and (
+                retrying or attempt < request["max_attempts"]
             ):
                 request["status"] = "retrying"
                 self._touch_request(request)
@@ -350,6 +381,8 @@ class Diagnostics:
     def fail_request(self, request_id: str, error: str) -> None:
         request = self._request(request_id)
         if request is not None:
+            if request["attempts"]:
+                request["attempts"][-1]["outcome"] = error
             self._finish_request(request, status="failed", error=error)
 
     def request_detail(self, request_id: str) -> dict[str, Any]:
@@ -358,9 +391,52 @@ class Diagnostics:
             raise ValueError(f"本次运行中不存在请求：{request_id}")
         if not request["detail_available"]:
             raise ValueError(f"请求详情已从内存释放：{request_id}")
-        return copy.deepcopy(
-            {key: value for key, value in request.items() if key != "_revision"}
+        detail = copy.deepcopy(
+            {
+                key: value
+                for key, value in request.items()
+                if key not in {"_revision", "_hub_revision"}
+            }
         )
+        if self.task_id is None:
+            detail.pop("task_id", None)
+        return detail
+
+    def _request_summary(self, request: dict[str, Any]) -> dict[str, Any]:
+        summary = {
+            "timestamp": request["timestamp"],
+            "finished_at": request["finished_at"],
+            "project": request["project"],
+            "stage": request["stage"],
+            "request_id": request["request_id"],
+            "model": request["model"],
+            "transport": request["transport"],
+            "status": request["status"],
+            "attempt_count": len(request["attempts"]),
+            "last_http_status": (
+                request["attempts"][-1]["http_status"]
+                if request["attempts"]
+                else None
+            ),
+            "latest_latency_ms": (
+                request["attempts"][-1]["latency_ms"]
+                if request["attempts"]
+                else None
+            ),
+            "has_content": request["has_content"],
+            "has_reasoning": request["has_reasoning"],
+            "error": request["error"],
+            "detail_available": request["detail_available"],
+            "stream_event_count": request["stream_event_count"],
+            "stream_received_bytes": request["stream_received_bytes"],
+            "stream_first_event_latency_ms": request[
+                "stream_first_event_latency_ms"
+            ],
+            "provider_error_status": request["provider_error_status"],
+        }
+        if self.task_id is not None:
+            summary["task_id"] = self.task_id
+        return summary
 
     def snapshot(
         self,
@@ -404,7 +480,7 @@ class Diagnostics:
         throughput_input = None
         throughput_output = None
         throughput_total = None
-        if usage_available and elapsed > 0:
+        if usage_observed and elapsed > 0:
             throughput_input = round(input_tokens / elapsed, 2)
             throughput_output = round(output_tokens / elapsed, 2)
             throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
@@ -448,37 +524,7 @@ class Diagnostics:
                 ),
                 "total": len(self.requests),
                 "items": [
-                    {
-                        "timestamp": request["timestamp"],
-                        "finished_at": request["finished_at"],
-                        "project": request["project"],
-                        "stage": request["stage"],
-                        "request_id": request["request_id"],
-                        "model": request["model"],
-                        "transport": request["transport"],
-                        "status": request["status"],
-                        "attempt_count": len(request["attempts"]),
-                        "last_http_status": (
-                            request["attempts"][-1]["http_status"]
-                            if request["attempts"]
-                            else None
-                        ),
-                        "latest_latency_ms": (
-                            request["attempts"][-1]["latency_ms"]
-                            if request["attempts"]
-                            else None
-                        ),
-                        "has_content": request["has_content"],
-                        "has_reasoning": request["has_reasoning"],
-                        "error": request["error"],
-                        "detail_available": request["detail_available"],
-                        "stream_event_count": request["stream_event_count"],
-                        "stream_received_bytes": request["stream_received_bytes"],
-                        "stream_first_event_latency_ms": request[
-                            "stream_first_event_latency_ms"
-                        ],
-                        "provider_error_status": request["provider_error_status"],
-                    }
+                    self._request_summary(request)
                     for request in self.requests.values()
                     if (
                         request_session != self._request_session
@@ -493,3 +539,371 @@ class Diagnostics:
                 "stages": sorted({item["stage"] for item in self.logs}),
             },
         }
+
+
+class RunDiagnostics(Diagnostics):
+    """Diagnostics state owned by one running Web task."""
+
+
+class DiagnosticsHub(Diagnostics):
+    """Aggregate independent diagnostics sessions for concurrent Web tasks."""
+
+    def __init__(self, log_path: Path) -> None:
+        super().__init__(log_path)
+        self.sessions: dict[str, Diagnostics] = {}
+        self._hub_request_session = uuid.uuid4().hex
+        self._hub_request_cursor = 0
+        self._hub_retained_terminal_details: deque[tuple[Diagnostics, str]] = deque()
+
+    def _next_hub_revision(self) -> int:
+        self._hub_request_cursor += 1
+        return self._hub_request_cursor
+
+    def _reset_hub_request_feed(self) -> None:
+        self._hub_request_session = uuid.uuid4().hex
+
+    def _touch_request(self, request: dict[str, Any]) -> None:
+        super()._touch_request(request)
+        request["_hub_revision"] = self._next_hub_revision()
+
+    def _active_session(self) -> Diagnostics | None:
+        active = current_diagnostics()
+        if active is self or active is None:
+            return None
+        if active.task_id is None or self.sessions.get(active.task_id) is not active:
+            return None
+        return active
+
+    def _retain_terminal_detail(
+        self, session: Diagnostics, request_id: str
+    ) -> None:
+        request = session.requests.get(request_id)
+        if request is None or not request["detail_available"]:
+            return
+        self._hub_retained_terminal_details.append((session, request_id))
+        while len(self._hub_retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
+            old_session, old_request_id = (
+                self._hub_retained_terminal_details.popleft()
+            )
+            old_request = old_session.requests.get(old_request_id)
+            if old_request is None:
+                continue
+            del old_session.requests[old_request_id]
+            self._reset_hub_request_feed()
+
+    def _prune_terminal_details(self) -> None:
+        previous_count = len(self.requests)
+        super()._prune_terminal_details()
+        if len(self.requests) < previous_count:
+            self._reset_hub_request_feed()
+
+    def _has_running_sessions(self) -> bool:
+        return self._running or any(
+            session._running for session in self.sessions.values()
+        )
+
+    def _reset_batch(self) -> None:
+        self.sessions.clear()
+        self._hub_retained_terminal_details.clear()
+        self._reset_run_state()
+        self.project = None
+        self.stage = None
+        self.task_id = None
+        self._reset_hub_request_feed()
+
+    def begin_request(self, **kwargs: Any) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.begin_request(**kwargs)
+            return
+        super().begin_request(**kwargs)
+
+    def request_started(self, request_id: str) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.request_started(request_id)
+            return
+        super().request_started(request_id)
+
+    def stream_progress(self, request_id: str, **kwargs: Any) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.stream_progress(request_id, **kwargs)
+            return
+        super().stream_progress(request_id, **kwargs)
+
+    def request_finished(self, **kwargs: Any) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.request_finished(**kwargs)
+            return
+        super().request_finished(**kwargs)
+
+    def retried(self) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.retried()
+            return
+        super().retried()
+
+    def rate_limit_wait_started(self) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.rate_limit_wait_started()
+            return
+        super().rate_limit_wait_started()
+
+    def rate_limit_wait_finished(self) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.rate_limit_wait_finished()
+            return
+        super().rate_limit_wait_finished()
+
+    def complete_request(
+        self, request_id: str, *, content: str, reasoning_content: str | None
+    ) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.complete_request(
+                request_id, content=content, reasoning_content=reasoning_content
+            )
+            return
+        super().complete_request(
+            request_id, content=content, reasoning_content=reasoning_content
+        )
+
+    def fail_request(self, request_id: str, error: str) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.fail_request(request_id, error)
+            return
+        super().fail_request(request_id, error)
+
+    @contextmanager
+    def activate(
+        self,
+        project: str,
+        stage: str,
+        *,
+        task_id: str | None = None,
+    ) -> Iterator[None]:
+        if not self._has_running_sessions():
+            self._reset_batch()
+        if task_id is None:
+            with super().activate(project, stage):
+                yield
+            return
+        session = RunDiagnostics(
+            self.log_path,
+            task_id=task_id,
+            install_handlers=False,
+            log_sink=self,
+            revision_sink=self._next_hub_revision,
+            terminal_sink=self._retain_terminal_detail,
+            request_reset_sink=self._reset_hub_request_feed,
+        )
+        self.sessions[task_id] = session
+        with session.activate(project, stage, task_id=task_id):
+            yield
+
+    def set_usage(self, usage: dict[str, Any]) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.set_usage(usage)
+            return
+        super().set_usage(usage)
+
+    @staticmethod
+    def _session_matches(
+        session: Diagnostics,
+        *,
+        project: str | None,
+        stage: str | None,
+    ) -> bool:
+        return (
+            (project is None or session.project == project)
+            and (stage is None or session.stage == stage)
+        )
+
+    def snapshot(
+        self,
+        *,
+        level: str | None = None,
+        project: str | None = None,
+        stage: str | None = None,
+        query: str | None = None,
+        request_session: str | None = None,
+        request_after: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_level = level.upper() if level else None
+        if normalized_level is not None and normalized_level not in _LEVELS:
+            raise ValueError(f"未知日志级别：{level}")
+        if request_after is not None and request_after < 0:
+            raise ValueError("request_after 不能小于 0")
+        query_text = query.casefold() if query else None
+        logs = [
+            item
+            for item in self.logs
+            if (normalized_level is None or item["level"] == normalized_level)
+            and (project is None or item["project"] == project)
+            and (stage is None or item["stage"] == stage)
+            and (
+                query_text is None
+                or query_text in str(item["message"]).casefold()
+            )
+        ]
+        metric_sessions = [
+            session
+            for session in self.sessions.values()
+            if self._session_matches(session, project=project, stage=stage)
+        ]
+        if (
+            (self._running or self.project is not None)
+            and self._session_matches(self, project=project, stage=stage)
+        ):
+            metric_sessions.append(self)
+        running_sessions = [
+            session for session in metric_sessions if session._running
+        ]
+
+        active_requests = sum(session.active_requests for session in metric_sessions)
+        total_requests = sum(session.total_requests for session in metric_sessions)
+        http_errors = sum(session.http_errors for session in metric_sessions)
+        retry_count = sum(session.retry_count for session in metric_sessions)
+        waiting_requests = sum(
+            session.rate_limit_waiting_requests for session in metric_sessions
+        )
+        latency_samples = [
+            sample
+            for session in metric_sessions
+            for sample in session._latency_samples_seconds
+        ]
+        latency_count = len(latency_samples)
+        average_latency_ms = (
+            round(sum(latency_samples) / latency_count * 1000, 1)
+            if latency_count
+            else None
+        )
+        p95_latency_ms = None
+        if latency_count:
+            p95_rank = math.ceil(0.95 * latency_count)
+            p95_latency_ms = round(
+                sorted(latency_samples)[p95_rank - 1] * 1000, 1
+            )
+
+        usages = [session.usage for session in metric_sessions]
+        usage_values = [usage for usage in usages if isinstance(usage, dict)]
+        has_partial_usage = any(
+            usage.get("partial") is True for usage in usage_values
+        )
+        has_exact_usage = any(
+            usage.get("available") is True
+            and usage.get("partial") is not True
+            for usage in usage_values
+        )
+        has_unavailable_usage = len(usage_values) != len(usages) or any(
+            usage.get("available") is not True
+            and usage.get("partial") is not True
+            for usage in usage_values
+        )
+        complete_usage = bool(usages) and not has_partial_usage and not has_unavailable_usage
+        partial_usage = has_partial_usage or (has_exact_usage and has_unavailable_usage)
+        observed_usage = complete_usage or partial_usage
+        input_tokens = (
+            sum(int(usage["input_tokens"]) for usage in usages if usage is not None)
+            if observed_usage
+            else 0
+        )
+        output_tokens = (
+            sum(int(usage["output_tokens"]) for usage in usages if usage is not None)
+            if observed_usage
+            else 0
+        )
+        start_times = [
+            session._started_monotonic
+            for session in metric_sessions
+            if session._started_monotonic is not None
+        ]
+        finish_times = [
+            (
+                time.monotonic()
+                if session._running
+                else session._started_monotonic + session._elapsed_seconds
+            )
+            for session in metric_sessions
+            if session._started_monotonic is not None
+        ]
+        elapsed = (
+            max(finish_times) - min(start_times)
+            if start_times and finish_times
+            else 0.0
+        )
+        throughput_input = None
+        throughput_output = None
+        throughput_total = None
+        if observed_usage and elapsed > 0:
+            throughput_input = round(input_tokens / elapsed, 2)
+            throughput_output = round(output_tokens / elapsed, 2)
+            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
+
+        all_requests: list[tuple[Diagnostics, dict[str, Any]]] = [
+            (session, request)
+            for session in metric_sessions
+            for request in session.requests.values()
+        ]
+        reset = request_session != self._hub_request_session or request_after is None
+        request_items = [
+            session._request_summary(request)
+            for session, request in all_requests
+            if reset
+            or request.get("_hub_revision", -1) > int(request_after or 0)
+        ]
+        if len(running_sessions) == 1:
+            metric_project = running_sessions[0].project
+            metric_stage = running_sessions[0].stage
+        else:
+            metric_project = None
+            metric_stage = None
+        return {
+            "metrics": {
+                "project": metric_project,
+                "stage": metric_stage,
+                "active_requests": active_requests,
+                "total_requests": total_requests,
+                "http_errors": http_errors,
+                "retry_count": retry_count,
+                "rate_limit_waiting_requests": waiting_requests,
+                "average_latency_ms": average_latency_ms,
+                "p95_latency_ms": p95_latency_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "usage_available": complete_usage,
+                "usage_partial": partial_usage,
+                "throughput_input_tokens_per_second": throughput_input,
+                "throughput_output_tokens_per_second": throughput_output,
+                "throughput_tokens_per_second": throughput_total,
+            },
+            "logs": logs,
+            "requests": {
+                "session_id": self._hub_request_session,
+                "cursor": self._hub_request_cursor,
+                "reset": reset,
+                "total": len(all_requests),
+                "items": request_items,
+            },
+            "filters": {
+                "levels": sorted({item["level"] for item in self.logs}),
+                "projects": sorted({item["project"] for item in self.logs}),
+                "stages": sorted({item["stage"] for item in self.logs}),
+            },
+        }
+
+    def request_detail(self, request_id: str) -> dict[str, Any]:
+        request = self.requests.get(request_id)
+        if request is not None:
+            return super().request_detail(request_id)
+        for session in self.sessions.values():
+            if request_id in session.requests:
+                return session.request_detail(request_id)
+        raise ValueError(f"本次运行中不存在请求：{request_id}")

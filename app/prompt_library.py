@@ -4,9 +4,8 @@ import hashlib
 import re
 from pathlib import Path
 
-from .config import LLM_MODEL_STAGES
 from .errors import UsageError
-from .project import PROMPT_LANGUAGES
+from .project import PROMPT_LANGUAGES, PROMPT_RESOURCE_STAGES
 from .sqlite_storage import atomic_write_text
 from .user_config import user_root
 
@@ -15,7 +14,7 @@ _LIBRARY_SUFFIX = ".middle.txt"
 
 
 def validate_prompt_library_scope(stage: str, language: str) -> None:
-    if stage not in LLM_MODEL_STAGES:
+    if stage not in PROMPT_RESOURCE_STAGES:
         raise UsageError(f"未知 Prompt 阶段：{stage}")
     if language not in PROMPT_LANGUAGES:
         raise UsageError("language 必须是 zh-CN 或 en")

@@ -13,13 +13,18 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import app.web as web_module
+import app.web_store as web_store_module
+import app.web_tasks as web_tasks_module
+import app.web_resource_routes as web_resource_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
-from app.errors import UsageError
-from app.execution import Scope, create_run
+from app.errors import ConfigError, UsageError
+from app.execution import Scope, continue_run, create_run, finalize_run
+from app.llm_keys import KeyPool
 from app.locking import project_write_lock
 from app.project import init_project
 from app.sqlite_storage import (
@@ -30,11 +35,22 @@ from app.sqlite_storage import (
     read_segments,
     record_exists,
     record_header,
+    replace_source,
+    write_summary_participation,
     write_json,
 )
 from app.web import create_app
 from app.web_store import WebStore
-from app.web_tasks import WebTaskManager
+from app.web_tasks import SharedLimiterPool, WebTaskManager
+from app.web_payloads import (
+    BoundaryPayload,
+    SegmentFilterPayload,
+    SegmentQueryPayload,
+    SummaryExportPayload,
+    SummaryParticipationPayload,
+    SummarySelectionPayload,
+    TaskStartPayload,
+)
 from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
@@ -53,6 +69,493 @@ def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    config = load_project_config(project, stage="translation")
+    first_id, first_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="first",
+        prompt="first prompt",
+        selected_count=3,
+        requested_count=2,
+        reused_count=1,
+        details={"scope": {"all_nonempty": True}},
+    )
+    finalize_run(
+        project,
+        first_dir,
+        status="failed",
+        completed=1,
+        failed=1,
+        failure_counts={"external_error": 1},
+        warnings=["first warning"],
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "available": True,
+            "partial": False,
+        },
+    )
+    second_id, second_dir = create_run(
+        project,
+        config=config,
+        stage="proofreading",
+        fingerprint="second",
+        prompt="second prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+    )
+    finalize_run(project, second_dir, status="completed", completed=2, failed=0)
+    first = read_json(project, first_dir / "manifest.json")
+    second = read_json(project, second_dir / "manifest.json")
+    first["started_at"] = "2025-01-01T00:00:00+00:00"
+    second["started_at"] = "2025-01-02T00:00:00+00:00"
+    first["manifest_secret"] = "do-not-return"
+    first["chunk_data"] = [{"source": "do-not-return"}]
+    write_json(project, first_dir / "manifest.json", first)
+    write_json(project, second_dir / "manifest.json", second)
+
+    client = TestClient(create_app(projects_root=projects_root))
+    listed = client.get("/api/v1/runs", params={"project": "sample"})
+
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] == 2
+    assert payload["offset"] == 0
+    assert payload["limit"] == 20
+    assert [item["run_id"] for item in payload["items"]] == [second_id, first_id]
+    item = payload["items"][1]
+    assert item["project_id"]
+    assert item["project_name"] == "sample"
+    assert item["stage"] == "translation"
+    assert item["status"] == "failed"
+    assert item["selected_segment_count"] == 3
+    assert item["completed_segment_count"] == 1
+    assert item["failure_counts"] == {"external_error": 1}
+    assert item["usage"]["total_tokens"] == 15
+    assert item["debug_available"] is False
+    assert "manifest_secret" not in item
+    assert "chunk_data" not in item
+
+    filtered = client.get(
+        "/api/v1/runs",
+        params={"project": "sample", "stage": "translation", "status": "failed"},
+    )
+    assert filtered.status_code == 200
+    assert [item["run_id"] for item in filtered.json()["items"]] == [first_id]
+
+    paged = client.get(
+        "/api/v1/runs",
+        params={"project": "sample", "offset": 1, "limit": 1},
+    )
+    assert paged.status_code == 200
+    assert paged.json()["items"][0]["run_id"] == first_id
+
+    for params in (
+        {"stage": "not-a-stage"},
+        {"status": "not-a-status"},
+        {"offset": -1},
+        {"limit": 101},
+        {"project": "missing"},
+    ):
+        assert client.get("/api/v1/runs", params=params).status_code == 400
+
+
+def test_web_historical_run_detail_exposes_executions_snapshots_and_safe_projection(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    config = load_project_config(project, stage="translation")
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="root-fingerprint",
+        prompt="root prompt",
+        selected_count=2,
+        requested_count=2,
+        reused_count=0,
+        details={
+            "scope": {
+                "all_nonempty": False,
+                "from_file": "F0001",
+                "only_file": None,
+                "only_segment": None,
+            }
+        },
+    )
+    continue_run(
+        project,
+        run_id,
+        config=config,
+        stage="translation",
+        fingerprint="continuation-fingerprint",
+        prompt="continuation prompt",
+        scope=Scope(only_file="F0001"),
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    manifest = read_json(project, run_dir / "manifest.json")
+    manifest["manifest_secret"] = "do-not-return"
+    manifest["headers"] = {"Authorization": "do-not-return"}
+    manifest["chunk_data"] = [{"segment_id": "do-not-return"}]
+    write_json(project, run_dir / "manifest.json", manifest)
+
+    client = TestClient(create_app(projects_root=projects_root))
+    response = client.get(f"/api/v1/projects/sample/runs/{run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == run_id
+    assert payload["stage"] == "translation"
+    assert payload["selected_segment_count"] == 2
+    assert payload["scope"]["from_file"] == "F0001"
+    assert [item["id"] for item in payload["executions"]] == [
+        "root",
+        "continuation-0001",
+    ]
+    root = payload["executions"][0]
+    continuation = payload["executions"][1]
+    assert root["fingerprint"] == "root-fingerprint"
+    assert continuation["fingerprint"] == "continuation-fingerprint"
+    assert root["snapshots"]["prompt"]["status"] == "available"
+    assert root["snapshots"]["config"]["status"] == "available"
+    assert root["snapshots"]["adapter"]["status"] == "available"
+    assert root["snapshots"]["preset"]["status"] == "available"
+    assert root["snapshots"]["prompt"]["content"] == "root prompt"
+    assert continuation["snapshots"]["prompt"]["content"] == "continuation prompt"
+    assert payload["requests"]["status"] == "unavailable"
+    assert "manifest_secret" not in payload
+    assert "headers" not in payload
+    assert "chunk_data" not in payload
+
+
+def test_web_historical_run_detail_reports_missing_and_invalid_snapshots(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="snapshot-test",
+        prompt="prompt",
+        selected_count=0,
+        requested_count=0,
+        reused_count=0,
+    )
+    (run_dir / "prompt.txt").unlink()
+    (run_dir / "llm_adapter.json").write_text("{broken", encoding="utf-8")
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}"
+    )
+
+    assert response.status_code == 200
+    snapshots = response.json()["executions"][0]["snapshots"]
+    assert snapshots["prompt"]["status"] == "missing"
+    assert snapshots["adapter"]["status"] == "invalid"
+    assert snapshots["config"]["status"] == "available"
+
+
+def test_web_historical_run_debug_is_summary_first_and_full_on_demand(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="debug-test",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    project_id = read_json(project, project / "project.json")["project_id"]
+    attempts = [
+        record_header(
+            "request_attempt",
+            str(project_id),
+            record_id="REQ-A-A001",
+            run_id=run_id,
+            request_id="REQ-A",
+            parent_request_id=None,
+            stage="translation",
+            attempt=1,
+            retry_round=0,
+            key_index=1,
+            http_status=500,
+            provider_error_status=None,
+            outcome="http_error",
+            status="failed",
+            error="server error",
+        ),
+        record_header(
+            "request_attempt",
+            str(project_id),
+            record_id="REQ-A-A002",
+            run_id=run_id,
+            request_id="REQ-A",
+            parent_request_id=None,
+            stage="translation",
+            attempt=2,
+            retry_round=1,
+            key_index=1,
+            http_status=200,
+            provider_error_status=None,
+            outcome="succeeded",
+            status="completed",
+            error=None,
+        ),
+    ]
+    (run_dir / "attempts.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in attempts),
+        encoding="utf-8",
+    )
+    payload_dir = run_dir / "payloads"
+    payload_dir.mkdir()
+    request_payload = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "source"}],
+        "headers": {"Authorization": "secret-header"},
+        "api_key": "secret-key",
+    }
+    (payload_dir / "REQ-A-A001.request.json").write_text(
+        json.dumps(request_payload), encoding="utf-8"
+    )
+    (payload_dir / "REQ-A-A001.error.json").write_text(
+        json.dumps({"error": "server error", "http_status": 500}),
+        encoding="utf-8",
+    )
+    (payload_dir / "REQ-A-A002.request.json").write_text(
+        json.dumps(request_payload), encoding="utf-8"
+    )
+    (payload_dir / "REQ-A-A002.response.json").write_text(
+        json.dumps({"choices": [{"message": {"content": "translated"}}]}),
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(projects_root=projects_root))
+    detail = client.get(f"/api/v1/projects/sample/runs/{run_id}")
+
+    assert detail.status_code == 200
+    request_index = detail.json()["requests"]
+    assert request_index["status"] == "available"
+    assert request_index["items"] == [
+        {
+            "request_id": "REQ-A",
+            "parent_request_id": None,
+            "stage": "translation",
+            "attempt_count": 2,
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "retry_round": 0,
+                    "key_index": 1,
+                    "http_status": 500,
+                    "provider_error_status": None,
+                    "outcome": "http_error",
+                    "status": "failed",
+                    "error": "server error",
+                    "request_payload": "available",
+                    "response_payload": "missing",
+                    "error_payload": "available",
+                },
+                {
+                    "attempt": 2,
+                    "retry_round": 1,
+                    "key_index": 1,
+                    "http_status": 200,
+                    "provider_error_status": None,
+                    "outcome": "succeeded",
+                    "status": "completed",
+                    "error": None,
+                    "request_payload": "available",
+                    "response_payload": "available",
+                    "error_payload": "missing",
+                },
+            ],
+        }
+    ]
+    assert "source" not in json.dumps(request_index)
+
+    summary = client.get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-A"
+    )
+    assert summary.status_code == 200
+    assert all("value" not in item for item in summary.json()["attempts"])
+
+    full = client.get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-A",
+        params={"full": "true"},
+    )
+    assert full.status_code == 200
+    full_payload = full.json()
+    assert full_payload["status"] == "available"
+    assert full_payload["attempts"][0]["request"]["value"]["model"] == "test-model"
+    assert full_payload["attempts"][0]["request"]["value"]["messages"]
+    assert "headers" not in json.dumps(full_payload)
+    assert "secret-key" not in json.dumps(full_payload)
+
+
+def test_web_historical_run_debug_reports_partial_attempt_log_and_invalid_payload(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    run_id, run_dir = create_run(
+        project,
+        config=load_project_config(project, stage="translation"),
+        stage="translation",
+        fingerprint="debug-invalid",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    project_id = read_json(project, project / "project.json")["project_id"]
+    attempt = record_header(
+        "request_attempt",
+        str(project_id),
+        record_id="REQ-B-A001",
+        run_id=run_id,
+        request_id="REQ-B",
+        parent_request_id="REQ-PARENT",
+        stage="translation",
+        attempt=1,
+        retry_round=0,
+        key_index=1,
+        http_status=None,
+        provider_error_status=None,
+        outcome="network_error",
+        status="failed",
+        error="network error",
+    )
+    (run_dir / "attempts.jsonl").write_text(
+        json.dumps(attempt) + "\n{broken\n", encoding="utf-8"
+    )
+    payload_dir = run_dir / "payloads"
+    payload_dir.mkdir()
+    (payload_dir / "REQ-B-A001.request.json").write_text(
+        "{broken", encoding="utf-8"
+    )
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}"
+    )
+
+    assert response.status_code == 200
+    request_index = response.json()["requests"]
+    assert request_index["status"] == "partial"
+    assert request_index["errors"] == [{"line": 2, "reason": "invalid_record"}]
+    assert request_index["items"][0]["parent_request_id"] == "REQ-PARENT"
+    full = TestClient(create_app(projects_root=projects_root)).get(
+        f"/api/v1/projects/sample/runs/{run_id}/requests/REQ-B",
+        params={"full": "true"},
+    )
+    assert full.status_code == 200
+    assert full.json()["attempts"][0]["request"]["status"] == "invalid"
+
+
+def test_web_lists_all_projects_without_synthetic_run_all_parent(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    other_input = tmp_path / "other.txt"
+    other_input.write_text("other", encoding="utf-8")
+    other, _ = init_project(
+        [str(other_input)],
+        name="other",
+        app_root=tmp_path / "app-root",
+        projects_root=projects_root,
+    )
+    assert other is not None
+    for root, stage in (
+        (project, "translation"),
+        (project, "proofreading"),
+        (other, "polishing"),
+    ):
+        _run_id, run_dir = create_run(
+            root,
+            config=load_project_config(root, stage=stage),
+            stage=stage,
+            fingerprint=f"{root.name}-{stage}",
+            prompt="prompt",
+            selected_count=1,
+            requested_count=1,
+            reused_count=0,
+        )
+        finalize_run(root, run_dir, status="completed", completed=1, failed=0)
+        manifest = read_json(root, run_dir / "manifest.json")
+        manifest["started_at"] = {
+            "translation": "2025-01-01T00:00:00+00:00",
+            "proofreading": "2025-01-02T00:00:00+00:00",
+            "polishing": "2025-01-03T00:00:00+00:00",
+        }[stage]
+        write_json(root, run_dir / "manifest.json", manifest)
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        "/api/v1/runs"
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert response.json()["total"] == 3
+    assert {item["project_name"] for item in items} == {"sample", "other"}
+    assert {item["stage"] for item in items} == {
+        "translation",
+        "proofreading",
+        "polishing",
+    }
+    assert all(item["stage"] != "run-all" for item in items)
+
+
+def test_web_payload_models_keep_stable_defaults_and_types() -> None:
+    boundary = BoundaryPayload(file_id="F0001", part_id="document")
+    assert boundary.model_dump() == {"file_id": "F0001", "part_id": "document"}
+
+    query = SegmentQueryPayload(offset="12", limit="7", unknown="ignored")
+    assert query.offset == 12
+    assert query.limit == 7
+    assert query.stage == "translation"
+    assert "unknown" not in query.model_dump()
+    assert SegmentFilterPayload(q="needle").q == "needle"
+
+    selection = SummarySelectionPayload(selection=[boundary])
+    assert selection.boundaries == [boundary]
+    assert SummaryParticipationPayload(boundaries=[boundary]).selected is True
+    assert SummaryExportPayload(boundaries=[boundary]).path == "summary.md"
+
+    task = TaskStartPayload(stage="translation")
+    assert task.force is False
+    assert task.replace_draft is False
+    assert task.summary_selection == []
+
+
+@pytest.mark.parametrize("value", [1, "true"])
+def test_web_payload_models_reject_boolean_option_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        TaskStartPayload(stage="translation", force=value)
+
+
+def test_web_payload_models_reject_invalid_structured_values() -> None:
+    with pytest.raises(ValidationError):
+        BoundaryPayload(file_id="", part_id="document")
+    with pytest.raises(ValidationError):
+        SegmentFilterPayload(file_id=123)
+    with pytest.raises(ValidationError):
+        SegmentQueryPayload(offset=True)
+    with pytest.raises(ValidationError):
+        SummarySelectionPayload(boundaries=[{"file_id": "F0001"}])
 
 
 def test_web_lists_project_edits_translation_and_rejects_remote_origin(
@@ -82,6 +585,185 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
+def test_web_project_list_reports_no_repair_for_complete_project(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is False
+
+
+def test_web_project_list_reports_repair_for_missing_prompt(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+
+
+@pytest.mark.parametrize("schema_version", ["3", None])
+def test_web_project_list_checks_schema_read_only_while_project_is_locked(
+    tmp_path: Path, schema_version: str | None
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        with connection:
+            if schema_version is None:
+                connection.execute(
+                    "DELETE FROM schema_meta WHERE key = 'schema_version'"
+                )
+            else:
+                connection.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (schema_version,),
+                )
+    finally:
+        connection.close()
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    finally:
+        connection.close()
+    if schema_version is None:
+        assert row is None
+    else:
+        assert row is not None
+        assert row[0] == schema_version
+    assert not (project / "snapshots" / "storage_migrations").exists()
+
+
+def test_web_segment_query_does_not_collect_project_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path, source="one\ntwo")
+    client = TestClient(create_app(projects_root=projects_root))
+
+    def fail_storage_scan(_: Path) -> int:
+        raise AssertionError("Segment query must not scan project storage")
+
+    monkeypatch.setattr(web_store_module, "_project_storage_size", fail_storage_scan)
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"stage": "translation", "offset": 0, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {
+        "offset",
+        "limit",
+        "stage",
+        "completed_segments",
+        "total_segments",
+        "segments",
+    }
+    monkeypatch.undo()
+    overview = client.get("/api/v1/projects/sample")
+    assert overview.status_code == 200
+    assert "storage" in overview.json()
+    assert "files" in overview.json()
+
+
+def test_web_segment_payload_schema_and_business_errors(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    defaults = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": "1", "unknown": "ignored"},
+    )
+    assert defaults.status_code == 200
+    assert defaults.json()["offset"] == 1
+    assert defaults.json()["limit"] == 100
+    assert defaults.json()["stage"] == "translation"
+
+    invalid_offset = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": True},
+    )
+    assert invalid_offset.status_code == 400
+    assert invalid_offset.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset"]},
+    }
+
+    invalid_status = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"status": 1},
+    )
+    assert invalid_status.status_code == 400
+    assert invalid_status.json()["code"] == "request_validation_error"
+    assert invalid_status.json()["params"]["fields"] == ["status"]
+
+    mismatched_filter = client.post(
+        "/api/v1/projects/sample/segments/ids",
+        json={"file_id": "F0001"},
+    )
+    assert mismatched_filter.status_code == 400
+    assert mismatched_filter.json()["code"] == "usage_error"
+
+
+def test_web_segment_query_preserves_legacy_window_conversion(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    fractional = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": 1.2},
+    )
+    assert fractional.status_code == 200
+    assert fractional.json()["offset"] == 1
+
+    decimal_string = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": "1.0"},
+    )
+    assert decimal_string.status_code == 400
+    assert decimal_string.json()["code"] == "request_validation_error"
+    assert decimal_string.json()["params"]["fields"] == ["offset"]
+
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity"])
+def test_web_segment_query_rejects_non_finite_window_values(
+    tmp_path: Path, value: str
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        content=(f'{{"offset": {value}}}').encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset"]},
+    }
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -100,7 +782,7 @@ def test_web_compacts_project_storage_and_blocks_running_tasks(
         called.append(project)
         return {"before_bytes": 100, "after_bytes": 64, "reclaimed_bytes": 36}
 
-    monkeypatch.setattr(web_module, "compact_project_database", fake_compact)
+    monkeypatch.setattr("app.web_project_routes.compact_project_database", fake_compact)
     response = client.post("/api/v1/projects/sample/storage/compact")
     assert response.status_code == 200
     assert response.json() == {
@@ -123,6 +805,27 @@ def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
     assert payload["code"] == "request_validation_error"
     assert payload["params"]["fields"] == ["name"]
     assert "input" not in payload["params"]
+
+
+def test_web_payload_validation_errors_do_not_echo_input_values(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    secret = "sk-local-validation-secret"
+
+    response = client.post(
+        "/api/v1/projects/sample/segments/query",
+        json={"offset": secret, "status": {"secret": secret}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["offset", "status"]},
+    }
+    assert secret not in response.text
 
 
 def test_web_epub_export_error_preserves_language_tag_guidance(
@@ -162,7 +865,7 @@ def test_web_unexpected_error_returns_safe_payload(
     def unexpected(*_: object, **__: object) -> None:
         raise RuntimeError("secret diagnostic detail")
 
-    monkeypatch.setattr(web_module, "resolve_project", unexpected)
+    monkeypatch.setattr("app.web.resolve_project", unexpected)
     client = TestClient(
         create_app(projects_root=projects_root),
         raise_server_exceptions=False,
@@ -556,6 +1259,152 @@ def test_web_creates_opens_and_remembers_external_projects(tmp_path: Path) -> No
     ).status_code == 400
 
 
+def test_web_register_project_is_read_only_while_project_is_locked(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        registered = client.post(
+            "/api/v1/projects/register", json={"path": str(project)}
+        )
+
+    assert registered.status_code == 200
+    result = registered.json()
+    assert result == {
+        "selector": "sample",
+        "name": "sample",
+        "project_id": read_json(project, project / "project.json")["project_id"],
+        "path": str(project),
+        "external": False,
+    }
+
+
+def test_web_lists_legacy_project_from_read_only_project_json(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    legacy = projects_root / "legacy"
+    legacy.mkdir(parents=True)
+    sqlite3.connect(legacy / "project.sqlite").close()
+    (legacy / "project.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_type": "project",
+                "project_id": "PRJ-LEGACY",
+                "name": "legacy",
+                "file_count": 0,
+                "segment_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            projects_root=projects_root,
+            app_root=make_app_root(tmp_path),
+            log_path=tmp_path / "app.log",
+        )
+    )
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["projects"] == [
+        {
+            "selector": "legacy",
+            "name": "legacy",
+            "project_id": "PRJ-LEGACY",
+            "path": str(legacy.resolve()),
+            "external": False,
+            "file_count": 0,
+            "segment_count": 0,
+            "repair_needed": True,
+        }
+    ]
+
+
+def test_web_open_project_rejects_project_write_lock(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    with project_write_lock(project):
+        opened = client.post(
+            "/api/v1/projects/open", json={"path": str(project)}
+        )
+
+    assert opened.status_code == 400
+    assert "另一个写入任务" in opened.json()["error"]
+
+
+def test_web_open_project_rejects_active_task_with_repair_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+
+    opened = client.post(
+        "/api/v1/projects/open", json={"path": str(project)}
+    )
+
+    assert opened.status_code == 400
+    assert opened.json()["error"] == (
+        "项目存在运行中的任务，结束或取消任务后才能修复项目"
+    )
+
+
+def test_web_open_project_surfaces_storage_upgrade_backup_warning(
+    tmp_path: Path,
+) -> None:
+    from tests.test_sqlite_storage import create_v2_project
+
+    projects_root, _ = make_project(tmp_path)
+    app_root = tmp_path / "app-root"
+    legacy_parent = tmp_path / "legacy-source"
+    legacy_parent.mkdir()
+    legacy, _file_record, _segment_record, _stage_record = create_v2_project(
+        legacy_parent
+    )
+    target = projects_root / "legacy"
+    legacy.replace(target)
+    metadata = record_header(
+        "project",
+        "PRJ-V2",
+        record_id="PRJ-V2",
+        name="legacy",
+        global_bundle_hash_seen=None,
+        file_count=1,
+        segment_count=1,
+        next_file_sequence=2,
+        status="active",
+    )
+    connection = sqlite3.connect(target / "project.sqlite")
+    try:
+        with connection:
+            connection.execute("DELETE FROM project_meta")
+            connection.executemany(
+                "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
+                [(key, json.dumps(item)) for key, item in metadata.items()],
+            )
+    finally:
+        connection.close()
+
+    client = TestClient(
+        create_app(projects_root=projects_root, app_root=app_root)
+    )
+    opened = client.post("/api/v1/projects/open", json={"path": str(target)})
+    assert opened.status_code == 200
+    warnings = opened.json()["warnings"]
+    assert any("snapshots/storage_migrations" in item for item in warnings)
+    assert any("已升级" in item for item in warnings)
+
+
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
     tmp_path: Path,
 ) -> None:
@@ -628,15 +1477,15 @@ def test_windows_drive_probe_keeps_unavailable_drive_visible(
     class FakeWindll:
         kernel32 = FakeKernel32()
 
-    monkeypatch.setattr(web_module.os, "name", "nt")
-    monkeypatch.setattr(web_module.ctypes, "windll", FakeWindll(), raising=False)
+    monkeypatch.setattr(web_resource_module.os, "name", "nt")
+    monkeypatch.setattr(web_resource_module.ctypes, "windll", FakeWindll(), raising=False)
     monkeypatch.setattr(
-        web_module.os.path,
+        web_resource_module.os.path,
         "isdir",
         lambda path: path == "C:\\",
     )
 
-    assert web_module._windows_drive_entries() == [
+    assert web_resource_module._windows_drive_entries() == [
         {
             "name": "C:",
             "path": "C:\\",
@@ -979,6 +1828,33 @@ def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
     assert detail.status_code == 200
     assert detail.json()["part_id"] == "OEBPS/text/ch2.xhtml"
     assert detail.json()["context"] == {"before": [], "after": []}
+
+    filtered = client.post(
+        "/api/v1/projects/chapter-parts/segments/query",
+        json={
+            "stage": "translation",
+            "file_id": "F0001",
+            "part_id": "OEBPS/text/ch2.xhtml",
+        },
+    )
+    assert filtered.status_code == 200
+    assert [item["source"] for item in filtered.json()["segments"]] == [
+        "第二章"
+    ]
+    assert overview["files"][0]["part_ids"] == [
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch2.xhtml",
+    ]
+    for incomplete in (
+        {"stage": "translation", "file_id": "F0001"},
+        {"stage": "translation", "part_id": "OEBPS/text/ch2.xhtml"},
+    ):
+        response = client.post(
+            "/api/v1/projects/chapter-parts/segments/ids",
+            json=incomplete,
+        )
+        assert response.status_code == 400
+        assert "file_id 与 part_id 必须同时提供" in response.json()["error"]
 
 
 def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None:
@@ -1461,6 +2337,22 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert preview["transport"] == "sse"
     assert preview["body"]["stream"] is True
     assert preview["body"]["stream_options"] == {"include_usage": True}
+
+    legacy = {
+        **default,
+        "preset_id": "legacy",
+        "schema_version": 4,
+    }
+    legacy.pop("max_parallel_per_key")
+    migrated = client.put("/api/v1/global/presets/legacy", json=legacy)
+    assert migrated.status_code == 200
+    stored_legacy = json.loads(
+        (tmp_path / "user-root" / "llm_presets" / "legacy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored_legacy["schema_version"] == 5
+    assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
 
     conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
     assert client.put(
@@ -2570,7 +3462,11 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
         json={"stage": "translation", "force": "true"},
     )
     assert invalid_boolean.status_code == 400
-    assert "force 必须是布尔值" in invalid_boolean.json()["error"]
+    assert invalid_boolean.json() == {
+        "error": "请求参数无效",
+        "code": "request_validation_error",
+        "params": {"fields": ["force"]},
+    }
     conflicting = client.post(
         "/api/v1/projects/sample/tasks",
         json={
@@ -2582,6 +3478,34 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert conflicting.status_code == 400
     assert "不能同时使用" in conflicting.json()["error"]
     assert app.state.tasks.tasks == {}
+
+
+def test_web_task_start_payload_schema_and_explicit_null_language(
+    tmp_path: Path,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    missing_stage = client.post("/api/v1/projects/sample/tasks", json={})
+    assert missing_stage.status_code == 400
+    assert missing_stage.json()["code"] == "request_validation_error"
+    assert missing_stage.json()["params"]["fields"] == ["stage"]
+
+    invalid_scope = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "only_segment": 1},
+    )
+    assert invalid_scope.status_code == 400
+    assert invalid_scope.json()["code"] == "request_validation_error"
+    assert invalid_scope.json()["params"]["fields"] == ["only_segment"]
+
+    explicit_null_language = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "language": None},
+    )
+    assert explicit_null_language.status_code == 400
+    assert explicit_null_language.json()["code"] == "usage_error"
+    assert "language" in explicit_null_language.json()["error"]
 
 
 def test_web_task_options_report_effective_stage_preset(
@@ -2910,6 +3834,1007 @@ async def test_web_task_manager_active_tasks_excludes_terminal_states(
     assert manager.active_tasks() == []
 
 
+@pytest.mark.asyncio
+async def test_web_task_manager_queues_projects_fifo_until_slot_is_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered: list[Path] = []
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered.append(project)
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.sleep(0)
+    assert entered == [first_project, second_project]
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert manager.tasks[third["task_id"]].asyncio_task is not None
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert entered == [first_project, second_project, third_project]
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_can_cancel_queued_task_without_using_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    cancelled = await manager.cancel(second["task_id"])
+    assert cancelled["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.active_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_raising_limit_promotes_fifo_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    assert manager.get(second["task_id"])["status"] == "queued"
+    await manager.set_max_active_projects(2)
+    for _ in range(20):
+        if manager.get(second["task_id"])["status"] == "running":
+            break
+        await asyncio.sleep(0)
+    assert manager.get(second["task_id"])["status"] == "running"
+    release.set()
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_revalidates_queued_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_tasks_module.task_options
+    second_calls = 0
+
+    def changed_options(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+        if project == second_project and second_calls == 2:
+            raise UsageError("排队期间项目设置已变化")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.tasks[second["task_id"]].asyncio_task is not None
+    await manager.tasks[second["task_id"]].asyncio_task
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_selection_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_tasks_module.task_options
+    second_calls = 0
+
+    def changed_options(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        options = original_options(project, stage)
+        if project == second_project:
+            second_calls += 1
+            if second_calls == 1:
+                options["selected"] = int(options["selected"]) - 1
+        return options
+
+    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_summary_participation_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    write_summary_participation(
+        second_project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_terminology(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_terminology", fake_terminology)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        include_summaries=True,
+    )
+    write_summary_participation(
+        second_project,
+        [{"file_id": "F0001", "part_id": "document", "selected": False}],
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_task_scope_counts_actual_selected_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    selected_id = str(read_segments(project)[1]["segment_id"])
+    release = asyncio.Event()
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        await release.wait()
+        return {"selected": 1, "completed": 1, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(only_segment=selected_id),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 1
+    release.set()
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+@pytest.mark.asyncio
+async def test_web_task_rejects_same_count_source_change_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_rejects_changed_input_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run_all(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {
+            "stage": "run-all",
+            "selected": 8,
+            "completed": 8,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    files = read_files(second_project)
+    segments = read_segments(second_project)
+    changed = [dict(item) for item in segments]
+    changed[0]["source"] = "changed while queued"
+    replace_source(
+        second_project,
+        files,
+        changed,
+        read_json(second_project, second_project / "project.json"),
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_reports_progress_and_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def fake_run_all(*_: object, **kwargs: object) -> dict[str, object]:
+        progress = kwargs["on_progress"]
+        usage = kwargs["on_usage"]
+        assert callable(progress)
+        assert callable(usage)
+        progress(1, 0, 4)
+        usage(
+            {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            }
+        )
+        return {
+            "stage": "run-all",
+            "selected": 4,
+            "requested": 4,
+            "reused": 0,
+            "completed": 1,
+            "failed": 0,
+            "pending": 3,
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "total_tokens": 17,
+                "available": True,
+                "partial": False,
+            },
+        }
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["completed_segments"] == 1
+    assert state["total_segments"] == 4
+    assert state["usage"]["total_tokens"] == 17
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_initial_total_excludes_completed_terminology_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    _seed_terms(
+        project,
+        [
+            {
+                "record_id": "TERM-RUN-ALL",
+                "source": "one",
+                "normalized": "one",
+                "category": "普通",
+                "description": None,
+                "preferred_translation": "一",
+                "aliases": [],
+                "group_primary": None,
+                "disabled": False,
+            }
+        ],
+    )
+    entered = asyncio.Event()
+
+    async def fake_run_all(*_: object, **__: object) -> dict[str, object]:
+        entered.set()
+        await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    assert started["total_segments"] == 6
+    await entered.wait()
+    await manager.cancel(started["task_id"])
+    await manager.tasks[started["task_id"]].asyncio_task
+
+
+def test_web_selection_snapshot_includes_document_adapter_state(
+    tmp_path: Path,
+) -> None:
+    project = init_epub(tmp_path)
+    before = web_tasks_module._selection_snapshot(project, Scope())
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["state"]["ruby_mode"] = "base_only"
+    write_json(project, state_path, state)
+
+    after = web_tasks_module._selection_snapshot(project, Scope())
+
+    assert before != after
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_rejects_changed_fingerprint_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    prompt_path = second_project / "prompts" / "translation.zh-CN.middle.txt"
+    prompt_path.write_text(
+        prompt_path.read_text(encoding="utf-8") + "\nchanged while queued",
+        encoding="utf-8",
+    )
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+
+    state = manager.get(second["task_id"])
+    assert state["status"] == "failed"
+    assert "排队期间项目选择或设置已变化" in str(state["error"])
+
+
+@pytest.mark.asyncio
+async def test_web_run_all_rejects_inconsistent_duplicate_limiter_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+    original_load = web_tasks_module.load_project_config
+    run_all_called = False
+
+    def changed_config(project_path: Path, *, stage: str | None = None) -> dict[str, object]:
+        config = original_load(project_path, stage=stage)
+        if stage in {"translation", "proofreading"}:
+            config["_llm_preset_id"] = "shared"
+            config["_llm_preset_hash"] = "same"
+            config["execution"] = {
+                **config["execution"],
+                "requests_per_minute": 1 if stage == "translation" else 2,
+            }
+        return config
+
+    async def fake_run_all(*_: object, **__: object) -> dict[str, object]:
+        nonlocal run_all_called
+        run_all_called = True
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.load_project_config", changed_config)
+    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "run-all",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    state = manager.get(started["task_id"])
+    assert state["status"] == "failed"
+    assert "共享限流配置不一致" in str(state["error"])
+    assert not run_all_called
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_cancels_before_coroutine_start_without_leaking_slot(
+    tmp_path: Path,
+) -> None:
+    _, project = make_project(tmp_path)
+    manager = WebTaskManager(max_active_projects=1)
+    started = await manager.start(
+        project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.cancel(started["task_id"])
+    await asyncio.gather(
+        manager.tasks[started["task_id"]].asyncio_task,
+        return_exceptions=True,
+    )
+
+    assert manager.get(started["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_shutdown_cancels_queued_and_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    entered = asyncio.Event()
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project == first_project:
+            entered.set()
+            await asyncio.Future()
+        return {}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.shutdown()
+
+    assert manager.get(first["task_id"])["status"] == "cancelled"
+    assert manager.get(second["task_id"])["status"] == "cancelled"
+    assert manager.active_tasks() == []
+    assert not manager.queued_task_ids
+    assert manager.running_task_ids == set()
+    assert manager.active_by_project == {}
+    with pytest.raises(UsageError, match="任务管理器正在关闭"):
+        await manager.start(
+            first_project,
+            "translation",
+            scope=Scope(),
+            reuse_mixed_fingerprints=False,
+            run_action=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_lowering_limit_does_not_preempt_running_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = {project: asyncio.Event() for project in (first_project, second_project)}
+    releases = {project: asyncio.Event() for project in (first_project, second_project)}
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        if project in entered:
+            entered[project].set()
+            await releases[project].wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(*(event.wait() for event in entered.values()))
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    await manager.set_max_active_projects(1)
+    assert manager.get(first["task_id"])["status"] == "running"
+    assert manager.get(second["task_id"])["status"] == "running"
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[first_project].set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "queued"
+
+    releases[second_project].set()
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+    assert manager.get(third["task_id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    _, third_project = make_project(tmp_path / "third")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    entered_projects: list[Path] = []
+
+    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+        entered_projects.append(project)
+        if project == first_project:
+            entered.set()
+            await release.wait()
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    original_options = web_tasks_module.task_options
+    second_calls = 0
+
+    def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
+        nonlocal second_calls
+        if project == second_project:
+            second_calls += 1
+            if second_calls == 2:
+                raise UsageError("promotion validation failed")
+        return original_options(project, stage)
+
+    monkeypatch.setattr("app.web_tasks.task_options", fail_second_promotion)
+    manager = WebTaskManager(max_active_projects=1)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await entered.wait()
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    third = await manager.start(
+        third_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+
+    with project_write_lock(third_project):
+        pass
+    release.set()
+    await manager.tasks[first["task_id"]].asyncio_task
+    await manager.tasks[second["task_id"]].asyncio_task
+    await manager.tasks[third["task_id"]].asyncio_task
+
+    assert manager.get(second["task_id"])["status"] == "failed"
+    assert "promotion validation failed" in str(manager.get(second["task_id"])["error"])
+    assert manager.get(third["task_id"])["status"] == "completed"
+    assert entered_projects == [first_project, third_project]
+
+
+def test_shared_limiter_pool_reuses_only_identical_preset_hashes() -> None:
+    now = [0.0]
+    pool = SharedLimiterPool(clock=lambda: now[0])
+    first_config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    same_config = {**first_config}
+    different_config = {
+        **first_config,
+        "_llm_preset_hash": "hash-b",
+    }
+    first, release_first = pool.acquire(first_config)
+    same, release_same = pool.acquire(same_config)
+    different, release_different = pool.acquire(different_config)
+    assert same is first
+    assert different is not first
+    release_first()
+    release_same()
+    release_different()
+    now[0] = 59.0
+    retained, release_retained = pool.acquire(first_config)
+    assert retained is first
+    release_retained()
+    now[0] = 119.0
+    expired, release_expired = pool.acquire(first_config)
+    assert expired is not first
+    release_expired()
+
+
+def test_shared_limiter_pool_rejects_inconsistent_limits_for_same_preset() -> None:
+    pool = SharedLimiterPool()
+    config = {
+        "_llm_preset_id": "default",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 3, "input_tokens_per_minute": 40},
+    }
+    pool.acquire(config)
+    changed = {
+        **config,
+        "execution": {"requests_per_minute": 4, "input_tokens_per_minute": 40},
+    }
+    with pytest.raises(ConfigError, match="共享限流配置不一致"):
+        pool.acquire(changed)
+
+
+@pytest.mark.asyncio
+async def test_shared_limiter_pool_merges_rpm_and_itpm_across_projects() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    itpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-itpm",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    first, release_first = pool.acquire(itpm_config)
+    second, release_second = pool.acquire({**itpm_config})
+    assert first is second
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == [60.0]
+    release_first()
+    release_second()
+
+    now[0] = 0.0
+    sleeps.clear()
+    rpm_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-rpm",
+        "execution": {"requests_per_minute": 2, "input_tokens_per_minute": 0},
+    }
+    first, release_first = pool.acquire(rpm_config)
+    second, release_second = pool.acquire({**rpm_config})
+    await first.acquire(1)
+    await second.acquire(1)
+    assert sleeps == [30.0]
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
+async def test_shared_limiter_pool_isolates_different_hash_counters() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    pool = SharedLimiterPool(clock=lambda: now[0], sleeper=sleeper)
+    first_config = {
+        "_llm_preset_id": "shared",
+        "_llm_preset_hash": "hash-a",
+        "execution": {"requests_per_minute": 0, "input_tokens_per_minute": 10},
+    }
+    second_config = {**first_config, "_llm_preset_hash": "hash-b"}
+    first, release_first = pool.acquire(first_config)
+    second, release_second = pool.acquire(second_config)
+    await first.acquire(6)
+    await second.acquire(5)
+    assert sleeps == []
+    release_first()
+    release_second()
+
+
+@pytest.mark.asyncio
+async def test_web_tasks_pass_shared_limiter_to_same_preset_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first_project = make_project(tmp_path / "first")
+    _, second_project = make_project(tmp_path / "second")
+    limiters: list[object] = []
+
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        limiters.append(kwargs["limiter"])
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
+    manager = WebTaskManager(max_active_projects=2)
+    first = await manager.start(
+        first_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    second = await manager.start(
+        second_project,
+        "translation",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+    )
+    await asyncio.gather(
+        manager.tasks[first["task_id"]].asyncio_task,
+        manager.tasks[second["task_id"]].asyncio_task,
+    )
+    assert len(limiters) == 2
+    assert limiters[0] is limiters[1]
+    assert isinstance(limiters[0], KeyPool)
+
+
 def test_web_task_options_include_completed_terminology_scans(
     tmp_path: Path,
 ) -> None:
@@ -3063,7 +4988,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         fake.kwargs = kwargs
         return fake
 
-    monkeypatch.setattr("app.web.httpx.AsyncClient", fake_client)
+    monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     preset = client.get("/api/v1/global/presets/default").json()
     saved_definition = dict(preset)
@@ -3078,10 +5003,10 @@ def test_web_preset_models_discovery_fetches_and_parses(
             "request_timeout_seconds": 45,
         }
     )
-    os.environ["DRAFT_LLM_API_KEY"] = "draft-secret"
+    os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
     try:
         result = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=2", json=preset
         )
     finally:
         del os.environ["DRAFT_LLM_API_KEY"]
@@ -3094,7 +5019,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         "count": 2,
     }
     assert fake.request_url == "https://draft.example/v2/models"
-    assert fake.request_headers["Authorization"] == "Bearer draft-secret"
+    assert fake.request_headers["Authorization"] == "Bearer second-secret"
     assert fake.kwargs == {
         "timeout": 45.0,
         "proxy": "https://proxy.example",
@@ -3103,9 +5028,19 @@ def test_web_preset_models_discovery_fetches_and_parses(
         "/api/v1/global/presets/default"
     ).json() == saved_definition
 
+    os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
+    try:
+        out_of_range = client.post(
+            "/api/v1/global/presets/default/models?key_index=3", json=preset
+        )
+    finally:
+        del os.environ["DRAFT_LLM_API_KEY"]
+    assert out_of_range.status_code == 400
+    assert "超出" in out_of_range.json()["error"]
+
     mismatched = {**preset, "preset_id": "other"}
     rejected = client.post(
-        "/api/v1/global/presets/default/models", json=mismatched
+        "/api/v1/global/presets/default/models?key_index=1", json=mismatched
     )
     assert rejected.status_code == 400
     assert "URL 中的 Preset ID" in rejected.json()["error"]
@@ -3132,7 +5067,7 @@ def test_web_preset_models_discovery_fails_fast(
     preset["adapter_id"] = "minimal"
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     no_spec = client.post(
-        "/api/v1/global/presets/default/models", json=preset
+        "/api/v1/global/presets/default/models?key_index=1", json=preset
     )
     assert no_spec.status_code == 400
     assert "未声明模型发现规格" in no_spec.json()["error"]
@@ -3140,7 +5075,7 @@ def test_web_preset_models_discovery_fails_fast(
     preset["adapter_id"] = "openai-compatible"
     monkeypatch.delenv(preset["credential"]["name"], raising=False)
     missing_key = client.post(
-        "/api/v1/global/presets/default/models", json=preset
+        "/api/v1/global/presets/default/models?key_index=1", json=preset
     )
     assert missing_key.status_code == 400
     assert "缺少环境变量" in missing_key.json()["error"]
@@ -3149,36 +5084,36 @@ def test_web_preset_models_discovery_fails_fast(
     try:
         fake = FakeModelsClient()
         fake.raise_error = httpx.ConnectError("no route")
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         network = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert network.status_code == 400
         assert "模型列表请求失败" in network.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(status_code=500)
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         http_error = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert http_error.status_code == 400
         assert "HTTP 500" in http_error.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(json_error=True)
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         bad_json = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert bad_json.status_code == 400
         assert "不是合法 JSON" in bad_json.json()["error"]
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
-        monkeypatch.setattr("app.web.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
         bad_shape = client.post(
-            "/api/v1/global/presets/default/models", json=preset
+            "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
         assert bad_shape.status_code == 400
         assert "不是数组" in bad_shape.json()["error"]

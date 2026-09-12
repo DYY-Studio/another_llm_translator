@@ -10,8 +10,17 @@ from app.web_store import WebStore
 from app.errors import TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project
-from app.sqlite_storage import query_segments, read_json, record_header, segment_ids, write_json
-from app.stages import TermNormalization, export_project, load_terms, match_terms
+from app.sqlite_storage import (
+    query_segments,
+    read_files,
+    read_json,
+    record_header,
+    segment_ids,
+    write_json,
+)
+from app.project_export import export_project
+from app.term_library import TermNormalization, load_terms
+from app.term_matching import match_terms
 from tests.test_foundation import make_app_root
 
 
@@ -794,6 +803,66 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "outdated": False,
         "applied_current": False,
     }
+
+
+def test_web_store_overview_reports_storage_and_source_file_sizes(
+    tmp_path: Path,
+) -> None:
+    project = create_web_store_project(tmp_path, "source text")
+    overview = WebStore(project).overview()
+    stored = project / "input" / str(read_files(project)[0]["stored_name"])
+
+    total_bytes = sum(
+        path.stat().st_size
+        for path in project.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+    assert overview["storage"] == {
+        "total_bytes": total_bytes,
+        "sqlite_bytes": (project / "project.sqlite").stat().st_size,
+    }
+    assert overview["files"][0]["size_bytes"] == stored.stat().st_size
+
+
+def test_web_store_filters_segments_by_file_and_part(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "chapter one\nchapter two\nchapter one again")
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("chapter-1.xhtml", "F0001-S000001"),
+                ("chapter-2.xhtml", "F0001-S000002"),
+                ("chapter-1.xhtml", "F0001-S000003"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = WebStore(project)
+    store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "translated chapter one"}
+    )
+    overview = store.overview(file_id="F0001", part_id="chapter-1.xhtml")
+
+    assert overview["files"][0]["part_ids"] == [
+        "chapter-1.xhtml",
+        "chapter-2.xhtml",
+    ]
+    assert [item["part_id"] for item in overview["segments"]] == [
+        "chapter-1.xhtml",
+        "chapter-1.xhtml",
+    ]
+    assert overview["total_segments"] == 2
+    assert overview["completed_segments"] == 1
+    other = store.overview(file_id="F0001", part_id="chapter-2.xhtml")
+    assert other["total_segments"] == 1
+    assert other["completed_segments"] == 0
+    assert store.segment_index(
+        file_id="F0001", part_id="chapter-2.xhtml"
+    )["segment_ids"] == ["F0001-S000002"]
 
 
 def test_segment_windows_follow_file_order_not_file_id(tmp_path: Path) -> None:

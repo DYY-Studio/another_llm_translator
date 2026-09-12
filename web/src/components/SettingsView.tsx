@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { CredentialSummary, LLMStage, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, SettingsField, TranslationValidatorSummary } from "../types";
+import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { Icon } from "./Icons";
@@ -197,9 +197,10 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
     ["proofreading", translate("stage.proofreading", language)],
     ["polishing", translate("stage.polishing", language)],
   ];
-  const modelStages: Array<[LLMStage, string]> = [
+  const modelStages: Array<[RunStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["terminology_decision", translate("stage.terminologyDecision", language)],
+    ["content_summary", translate("stage.contentSummary", language)],
     ["translation", translate("stage.translation", language)],
     ["proofreading", translate("stage.proofreading", language)],
     ["polishing", translate("stage.polishing", language)],
@@ -234,10 +235,11 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <Field label={translate("settings.fallbackEncoding", language)} help={translate("settings.fallbackEncodingHint", language)}><input value={config.input.fallback_encoding} onChange={(event) => update((draft) => { draft.input.fallback_encoding = event.target.value; })} /></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.llmSampling", language)} description={translate("settings.llmSamplingHint", language)}>
-          <Field label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          <Field className="grid-span" label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
           {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
           <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
           <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
+          <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
           <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
           <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
@@ -250,6 +252,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         </ConfigSection>
         <ConfigSection title={translate("settings.referenceContext", language)} description={translate("settings.referenceContextHint", language)}>
           {contextLabels.map(([stage, label]) => <div className="context-config-row" key={stage}><ToggleField label={translate("settings.contextEnabled", language, { stage: label })} checked={config.context[stage].enabled} onChange={(value) => update((draft) => { draft.context[stage].enabled = value; })} /><NumberField label={translate("settings.previousSegments", language)} value={config.context[stage].previous_segments} min={0} step={1} onChange={(value) => update((draft) => { draft.context[stage].previous_segments = value; })} />{(!config.context[stage].enabled || config.context[stage].previous_segments === 0) && <p className="muted context-risk-note">{translate("settings.contextDisabledRisk", language, { stage: label })}</p>}</div>)}
+          <ToggleField className="grid-span" label={translate("settings.summaryContext", language)} checked={config.context.translation.previous_summaries} help={translate("settings.summaryContextHint", language)} onChange={(value) => update((draft) => { draft.context.translation.previous_summaries = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.terminology", language)} description={translate("settings.terminologyHint", language)}>
           <Field label={translate("settings.unicodeNormalization", language)} help={translate("settings.unicodeHint", language)}><select value={config.terminology.unicode_normalization} onChange={(event) => update((draft) => { draft.terminology.unicode_normalization = event.target.value as ProjectConfig["terminology"]["unicode_normalization"]; })}><option value="">{translate("settings.unicodeNone", language)}</option><option value="NFC">NFC</option><option value="NFD">NFD</option><option value="NFKC">NFKC</option><option value="NFKD">NFKD</option></select></Field>
@@ -317,10 +320,12 @@ function PresetSettings({ language }: { language: Language }) {
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
   const [extraBody, setExtraBody] = useState("{}");
+  const [extraHeaders, setExtraHeaders] = useState("{}");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
+  const [keyIndex, setKeyIndex] = useState(1);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [keychainCredentials, setKeychainCredentials] = useState<CredentialSummary[]>([]);
@@ -359,6 +364,7 @@ function PresetSettings({ language }: { language: Language }) {
       if (!active) return;
       setPreset(definition);
       setExtraBody(JSON.stringify(definition.extra_body, null, 2));
+      setExtraHeaders(JSON.stringify(definition.extra_headers ?? {}, null, 2));
       setPreview(requestPreview);
     }).catch((reason) => {
       if (active) setError(errorMessage(reason, language));
@@ -370,12 +376,16 @@ function PresetSettings({ language }: { language: Language }) {
 
   async function discoverModels() {
     if (!preset) return;
+    if (!Number.isInteger(keyIndex) || keyIndex < 1) {
+      setModelsError(translate("preset.keyIndexInvalid", language));
+      return;
+    }
     setModels(null);
     setModelsLoading(true);
     setModelsError(""); setMessage(""); setError("");
     try {
-      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
-      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models`, { method: "POST", body: JSON.stringify(definition) });
+      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
+      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models?key_index=${encodeURIComponent(String(keyIndex))}`, { method: "POST", body: JSON.stringify(definition) });
       setModels(result.models);
     } catch (reason) { setModelsError(errorMessage(reason, language)); }
     finally { setModelsLoading(false); }
@@ -395,7 +405,7 @@ function PresetSettings({ language }: { language: Language }) {
   async function save() {
     if (!preset) return;
     try {
-      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown };
+      const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
       await api(`/api/v1/global/presets/${preset.preset_id}`, { method: "PUT", body: JSON.stringify(definition) });
       setPreset(definition as LLMPreset);
       setPreview(await api<Record<string, unknown>>(`/api/v1/global/presets/${preset.preset_id}/preview`));
@@ -408,7 +418,7 @@ function PresetSettings({ language }: { language: Language }) {
     const presetId = window.prompt(translate("preset.newId", language));
     if (!presetId || !preset) return;
     try {
-      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown };
+      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
       await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
       await loadLists(presetId);
       setMessage(translate("preset.created", language, { id: presetId }));
@@ -462,15 +472,17 @@ function PresetSettings({ language }: { language: Language }) {
                   )}
                 </div>
               </Field>
+              <Field label={translate("preset.keyIndex", language)} help={translate("preset.keyIndexHint", language)}><input type="number" min={1} step={1} value={keyIndex} onChange={(event) => setKeyIndex(Number(event.target.value))} /></Field>
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
-              <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={1} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
+              <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={0} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
               <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
-              <NumberField label="RPM" value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
-              <NumberField label="ITPM" value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
+              <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
+              <NumberField label={translate("preset.itpm", language)} value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
               <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
+              <NumberField label={translate("preset.maxConcurrencyPerKey", language)} value={preset.max_parallel_per_key} min={1} step={1} help={translate("preset.maxConcurrencyPerKeyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel_per_key = value; })} />
               <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("preset.timeoutSecondsHint", language)} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
               <ToggleField
                 label={translate("preset.streaming", language)}
@@ -494,6 +506,7 @@ function PresetSettings({ language }: { language: Language }) {
                 />
               </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
+              <label className="code-field preset-extra"><span>{translate("preset.extraHeaders", language)}</span><small>{translate("preset.extraHeadersHint", language)}</small><textarea spellCheck={false} value={extraHeaders} onChange={(event) => setExtraHeaders(event.target.value)} /></label>
             </div>
             <h2 className="preview-heading">{translate("preset.requestPreview", language)}</h2>
             <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : translate("preset.previewHint", language)}</pre>
@@ -575,7 +588,7 @@ function CredentialsSettings({ language }: { language: Language }) {
           <h2>{translate("credentials.new", language)}</h2>
           <div className="config-grid">
             <Field label={translate("credentials.id", language)}><input value={newId} onChange={(event) => setNewId(event.target.value)} /></Field>
-            <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
+            <Field label={translate("credentials.secret", language)} help={translate("credentials.secretHint", language)}><textarea spellCheck={false} rows={4} value={newSecret} onChange={(event) => setNewSecret(event.target.value)} /></Field>
           </div>
           <div className="button-group"><button className="primary-button" disabled={!newId || !newSecret} onClick={() => void create()}>{translate("common.save", language)}</button><button className="quiet-button" onClick={reset}>{translate("common.cancel", language)}</button></div>
         </section>
@@ -600,9 +613,9 @@ function CredentialsSettings({ language }: { language: Language }) {
           <section className="config-section">
             <h2>{translate("credentials.edit", language, { id: editing.id })}</h2>
             <div className="config-grid">
-              <Field label={translate("credentials.secret", language)}><input type="password" autoComplete="new-password" value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
+              <Field label={translate("credentials.secret", language)} help={translate("credentials.secretHint", language)}><textarea spellCheck={false} rows={4} value={editSecret} onChange={(event) => setEditSecret(event.target.value)} /></Field>
             </div>
-            <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => setEditing(null)}>{translate("common.cancel", language)}</button></div>
+            <div className="button-group"><button className="primary-button" disabled={!editSecret} onClick={() => void update()}>{translate("common.validateSave", language)}</button><button className="quiet-button" onClick={() => { setEditing(null); setEditSecret(""); }}>{translate("common.cancel", language)}</button></div>
           </section>
         )}
       </div>
@@ -705,15 +718,18 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
 }
 
 function ConfigSection({ title, description, warning = false, children }: { title: string; description: string; warning?: boolean; children: ReactNode }) { return <fieldset className={`config-section${warning ? " warning" : ""}`}><legend>{title}</legend><p>{description}</p><div className="config-grid">{children}</div></fieldset>; }
-function Field({ label, help, children }: { label: string; help?: string; children: ReactNode }) { return <label className="config-field"><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
+function Field({ label, help, children, className = "" }: { label: string; help?: string; children: ReactNode; className?: string }) { return <label className={`config-field${className ? ` ${className}` : ""}`}><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
 function NumberField({ label, value, onChange, help, min, max, step }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number }) { return <Field label={label} help={help}><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
-function ToggleField({ label, checked, onChange, help, disabled = false }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean }) { return <label className="config-toggle"><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
+function ToggleField({ label, checked, onChange, help, disabled = false, className = "" }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean; className?: string }) { return <label className={`config-toggle${className ? ` ${className}` : ""}`}><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
 interface PromptView {
   content: string;
   language: string;
   assembled: string;
   assembled_phases?: Record<string, string>;
+  assembled_modes?: Record<string, string>;
+  assembled_mode_languages?: Record<string, string>;
+  assembled_mode_errors?: Record<string, string>;
   languages: string[];
   global_sync?: {
     available: boolean;
@@ -729,6 +745,10 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
   const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
+  const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
+  const [assembledModeLanguages, setAssembledModeLanguages] = useState<Record<string, string>>({});
+  const [assembledModeErrors, setAssembledModeErrors] = useState<Record<string, string>>({});
+  const [previewMode, setPreviewMode] = useState("terms-only");
   const [previewPhase, setPreviewPhase] = useState("adjudication");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
   const [globalSync, setGlobalSync] = useState<PromptView["global_sync"]>(undefined);
@@ -748,6 +768,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     setSavedContent(value.content);
     setAssembled(value.assembled);
     setAssembledPhases(value.assembled_phases ?? {});
+    setAssembledModes(value.assembled_modes ?? {});
+    setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+    setAssembledModeErrors(value.assembled_mode_errors ?? {});
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
     setLanguages(value.languages);
@@ -808,6 +831,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       setContent(value.content);
       setAssembled(value.assembled);
       setAssembledPhases(value.assembled_phases ?? {});
+      setAssembledModes(value.assembled_modes ?? {});
+      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+      setAssembledModeErrors(value.assembled_mode_errors ?? {});
       setPromptLanguage(value.language);
       setLoadedGlobalDraft(true);
       setMessage(translate("settings.promptGlobalLoaded", language));
@@ -821,6 +847,9 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       setContent(value.content);
       setAssembled(value.assembled);
       setAssembledPhases(value.assembled_phases ?? {});
+      setAssembledModes(value.assembled_modes ?? {});
+      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
+      setAssembledModeErrors(value.assembled_mode_errors ?? {});
       setSelectedLibraryEntry(promptId);
       setLoadedGlobalDraft(false);
       setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
@@ -862,6 +891,20 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
 
   const draftDirty = content !== savedContent;
   const showSyncCard = scope === "project" && globalSync;
+  const previewModes = stage === "terminology"
+    ? [
+      ["terms-only", translate("settings.promptModeTermsOnly", language)],
+      ["terms+fragment-summary", translate("settings.promptModeTermsAndSummary", language)],
+      ["summary-only", translate("settings.promptModeSummaryOnly", language)],
+    ] as const
+    : stage === "fragment_summary"
+      ? [["summary-only", translate("settings.promptModeSummaryOnly", language)]] as const
+      : [];
+  const activeMode = previewModes.some(([mode]) => mode === previewMode)
+    ? previewMode
+    : previewModes[0]?.[0] ?? "";
+  const modeError = activeMode ? assembledModeErrors[activeMode] : undefined;
+  const modePreview = activeMode ? assembledModes[activeMode] : undefined;
   return <section className="text-settings">
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
@@ -870,7 +913,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
         <button className="primary-button" onClick={() => void save()}>{translate("common.validateSave", language)}</button>
       </div>
     </div>
-    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="terminology_decision">{translate("stage.terminologyDecision", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
+    <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="terminology">{translate("stage.terminology", language)}</option><option value="terminology_decision">{translate("stage.terminologyDecision", language)}</option><option value="content_summary">{translate("stage.contentSummary", language)}</option><option value="fragment_summary">{translate("stage.fragmentSummary", language)}</option><option value="translation">{translate("stage.translation", language)}</option><option value="proofreading">{translate("stage.proofreading", language)}</option><option value="polishing">{translate("stage.polishing", language)}</option></select></label>
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
     {showSyncCard && <div className={`prompt-sync-card ${globalSync.available && globalSync.same && !draftDirty ? "synced" : "out-of-sync"}`}>
       <div><strong>{!globalSync.available ? translate("settings.promptGlobalUnavailable", language) : draftDirty ? translate("settings.promptUnsaved", language) : globalSync.same ? translate("settings.promptSynced", language) : translate("settings.promptOutOfSync", language)}</strong><small>{!globalSync.available ? translate("settings.promptSyncLanguage", language, { language: globalSync.language }) : loadedGlobalDraft ? translate("settings.promptGlobalLoadedHint", language) : translate("settings.promptSyncLanguage", language, { language: globalSync.language })}</small></div>
@@ -896,6 +939,11 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>
+      {previewModes.length > 0 && <>
+        <label className="stage-select">{translate("settings.promptPreviewMode", language)}<select value={activeMode} onChange={(event) => setPreviewMode(event.target.value)}>{previewModes.map(([mode, label]) => <option key={mode} value={mode} disabled={!assembledModes[mode] && !assembledModeErrors[mode]}>{label}</option>)}</select></label>
+        {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}
+        {modeError && <p className="error-text">{translate("settings.promptModeError", language, { error: modeError })}</p>}
+      </>}
       {stage === "terminology_decision" && Object.keys(assembledPhases).length > 0 && <>
         <p className="prompt-preview-hint">{translate("settings.promptPhaseHint", language)}</p>
         <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptPhaseHint", language)}>
@@ -903,7 +951,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
           <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
         </div>
       </>}
-      <pre>{(assembledPhases[previewPhase] ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
+      <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
     </div>
   </section>;
 }

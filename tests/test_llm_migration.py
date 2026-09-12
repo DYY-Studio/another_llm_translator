@@ -53,14 +53,14 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     upgraded_adapter = json.loads(
         (root / "llm_adapters" / "custom.json").read_text("utf-8")
     )
-    assert upgraded_preset["schema_version"] == 4
+    assert upgraded_preset["schema_version"] == 5
     assert upgraded_preset["stream"] is False
     assert upgraded_preset["stream_endpoint"] == ""
     assert upgraded_preset["stream_read_timeout_enabled"] is True
     upgraded_v3 = json.loads(
         (root / "llm_presets" / "custom-v3.json").read_text("utf-8")
     )
-    assert upgraded_v3["schema_version"] == 4
+    assert upgraded_v3["schema_version"] == 5
     assert upgraded_v3["stream_read_timeout_enabled"] is True
     assert upgraded_preset == load_llm_preset(
         root / "llm_presets" / "custom.json"
@@ -87,8 +87,27 @@ def test_llm_resource_migration_uses_user_root_override_without_base(
     assert migrate_llm_resources() == 1
     assert (
         json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
-        == 4
+        == 5
     )
+
+
+def test_llm_resource_migration_upgrades_v4_per_key_concurrency(
+    tmp_path: Path,
+) -> None:
+    root = default_user_root(base=tmp_path)
+    presets = root / "llm_presets"
+    presets.mkdir(parents=True)
+    value = json.loads(
+        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
+    )
+    value["schema_version"] = 4
+    value.pop("max_parallel_per_key")
+    (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
+
+    assert migrate_llm_resources(base=tmp_path) == 1
+    upgraded = json.loads((presets / "default.json").read_text("utf-8"))
+    assert upgraded["schema_version"] == 5
+    assert upgraded["max_parallel_per_key"] == upgraded["max_parallel"]
 
 
 def test_llm_resource_migration_rejects_invalid_file_without_rewriting(

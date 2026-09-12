@@ -45,6 +45,30 @@ def test_preset_loads_nested_extra_body_and_hashes_content(tmp_path: Path) -> No
     assert preset.preset_id == "default"
     assert preset.definition["extra_body"] == value["extra_body"]
     assert preset.digest.startswith("sha256:")
+    assert preset.definition["extra_headers"] == {}
+
+
+def test_preset_accepts_extra_headers_and_rejects_invalid_values(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["extra_headers"] = {"x-opencode-session": "${session_id}"}
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["extra_headers"] == value["extra_headers"]
+
+    value["extra_headers"] = {"bad header": "value"}
+    with pytest.raises(ConfigError, match="Header 名称"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${unknown}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${UNKNOWN}"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+    value["extra_headers"] = {"x-session": "${session_id"}
+    with pytest.raises(ConfigError, match="占位符"):
+        load_llm_preset(write_preset(tmp_path, value))
 
 
 def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
@@ -64,12 +88,38 @@ def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
     assert preset.definition["max_output_tokens"] == 65536
 
 
+def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["max_output_tokens"] = 0
+
+    preset = load_llm_preset(write_preset(tmp_path, value))
+
+    assert preset.definition["max_output_tokens"] == 0
+
+
+def test_preset_v5_requires_per_key_concurrency(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 5
+    value["max_parallel_per_key"] = 2
+    preset = load_llm_preset(write_preset(tmp_path, value))
+    assert preset.definition["max_parallel_per_key"] == 2
+
+
+def test_preset_v5_rejects_invalid_per_key_concurrency(tmp_path: Path) -> None:
+    value = preset_definition()
+    value["schema_version"] = 5
+    value["max_parallel_per_key"] = 0
+    with pytest.raises(ConfigError, match="max_parallel_per_key"):
+        load_llm_preset(write_preset(tmp_path, value))
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
         ({"extra_body": []}, "extra_body 必须是 JSON 对象"),
         ({"extra_body": {"secret": "${api_key}"}}, "不允许模板占位符"),
         ({"context_window_tokens": 0}, "context_window_tokens 必须是正整数"),
+        ({"max_output_tokens": -1}, "max_output_tokens 必须是非负整数"),
         ({"requests_per_minute": -1}, "requests_per_minute 必须是非负整数"),
         ({"token_safety_factor": 0}, "token_safety_factor 必须大于 0"),
         ({"base_url": "not-a-url"}, "base_url 必须是有效"),
@@ -109,10 +159,11 @@ def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> N
     value.pop("stream")
     value.pop("stream_endpoint")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 4
+    assert preset.definition["schema_version"] == 5
     assert preset.definition["stream"] is False
     assert preset.definition["stream_endpoint"] == ""
     assert preset.definition["stream_read_timeout_enabled"] is True
+    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
 
 
 def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None:
@@ -120,8 +171,9 @@ def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None
     value["schema_version"] = 3
     value.pop("stream_read_timeout_enabled")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 4
+    assert preset.definition["schema_version"] == 5
     assert preset.definition["stream_read_timeout_enabled"] is True
+    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
 
 
 @pytest.mark.parametrize(
@@ -185,7 +237,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 4"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 5"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -234,9 +286,11 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     assert "model" not in raw["llm"]
 
     first = load_project_config(project, presets_root=app_root)
+    assert first["execution"]["max_parallel_per_key"] == 4
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))
+    definition["extra_headers"] = {}
     definition["model"] = "changed-model"
     definition["extra_body"] = {"provider": {"order": ["google"]}}
     preset_file.write_text(json.dumps(definition), encoding="utf-8")

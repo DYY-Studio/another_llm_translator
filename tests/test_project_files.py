@@ -33,12 +33,10 @@ from app.sqlite_storage import (
     replace_source,
     write_json,
 )
-from app.stages import (
-    export_project,
-    inspect_full,
-    run_apply,
-    run_terminology,
-)
+from app.project_export import export_project
+from app.stages import inspect_full
+from app.stage_review import run_apply
+from app.stage_terminology import run_terminology
 from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_foundation import make_app_root
 

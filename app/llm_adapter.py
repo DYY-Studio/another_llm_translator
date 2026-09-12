@@ -112,6 +112,9 @@ class JSONLLMAdapter:
         max_output_tokens: int,
         stream: bool,
         extra_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        session_id: str | None = None,
+        request_id: str | None = None,
     ) -> tuple[dict[str, str], dict[str, Any]]:
         values: dict[str, Any] = {
             "api_key": api_key,
@@ -126,6 +129,27 @@ class JSONLLMAdapter:
             name: _render_header(value, values)
             for name, value in self.headers_template.items()
         }
+        if extra_headers:
+            existing = {name.lower() for name in headers}
+            rendered: dict[str, str] = {}
+            values.update({"session_id": session_id, "request_id": request_id})
+            for name, template in extra_headers.items():
+                if name.lower() in existing or name.lower() in {
+                    key.lower() for key in rendered
+                }:
+                    raise ConfigError("LLM Preset extra_headers Header 冲突")
+                placeholders = re.findall(r"\$\{([^}]*)\}", template)
+                if template.count("${") != len(placeholders):
+                    raise ConfigError("LLM Preset extra_headers 包含无效占位符")
+                unknown = set(placeholders) - {"session_id", "request_id"}
+                if unknown:
+                    raise ConfigError("LLM Preset extra_headers 包含未知占位符")
+                if "session_id" in placeholders and session_id is None:
+                    raise ConfigError("LLM Preset extra_headers 缺少 session_id")
+                if "request_id" in placeholders and request_id is None:
+                    raise ConfigError("LLM Preset extra_headers 缺少 request_id")
+                rendered[name] = _render_header(template, values)
+            headers.update(rendered)
         body = _render_body(deepcopy(self.body_template), values)
         if stream:
             if self.streaming_spec is None:
@@ -751,7 +775,14 @@ def _render_header(template: str, values: dict[str, Any]) -> str:
 
 def _render_body(value: Any, values: dict[str, Any]) -> Any:
     if isinstance(value, dict):
-        return {key: _render_body(child, values) for key, child in value.items()}
+        return {
+            key: _render_body(child, values)
+            for key, child in value.items()
+            if not (
+                child == "${max_output_tokens}"
+                and values["max_output_tokens"] == 0
+            )
+        }
     if isinstance(value, list):
         return [_render_body(child, values) for child in value]
     if isinstance(value, str):

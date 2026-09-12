@@ -6,23 +6,35 @@ from pathlib import Path
 
 import pytest
 
+from app.errors import ProjectError, StorageError
 from app.execution import stage_result_path
-from app.errors import StorageError
 from app.project import init_project
 from app.sqlite_storage import (
     append_jsonl,
     compact_project_database,
     ensure_supported,
     latest_stage_summary,
+    mark_content_summaries_source_changed,
+    publish_content_summary_fulls,
     query_segments,
-    read_json,
+    read_content_summaries,
     read_files,
+    read_json,
     read_jsonl,
-    read_segments,
     read_segment_sources,
+    read_segments,
+    read_summary_participation,
+    read_summary_runs,
     record_header,
+    replace_source,
+    segment_count,
+    segment_ids,
+    write_content_summary,
     write_json,
+    write_summary_participation,
+    write_summary_run,
 )
+from app.summary_provenance import build_provenance, digest
 from tests.test_foundation import make_app_root
 
 
@@ -37,6 +49,66 @@ def create_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def _summary_artifact(
+    project_id: str,
+    summary_id: str,
+    *,
+    kind: str,
+    status: str = "completed",
+    text: str | None = None,
+    file_id: str = "F0001",
+    part_id: str = "document",
+    source_changed: bool = False,
+    created_at: str = "2024-01-01T00:00:00+00:00",
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    record = record_header(
+        "content_summary",
+        project_id,
+        record_id=summary_id,
+        kind=kind,
+        file_id=file_id,
+        part_id=part_id,
+        status=status,
+        text=text if text is not None else summary_id,
+        source_range={
+            "file_id": file_id,
+            "part_id": part_id,
+            "segment_ids": [f"{summary_id}-SEGMENT"],
+            "segments": [],
+        },
+        source_digest=f"sha256:{summary_id}-source",
+        input_digest=f"sha256:{summary_id}-input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+        source_changed=source_changed,
+    )
+    record["created_at"] = created_at
+    record["updated_at"] = updated_at or created_at
+    return record
+
+
+def _attach_provenance(
+    artifact: dict[str, object],
+    origin: str,
+    children: list[dict[str, object]],
+) -> dict[str, object]:
+    provenance, input_digest = build_provenance(origin, children)
+    artifact["provenance"] = provenance
+    artifact["input_digest"] = input_digest
+    return artifact
+
+
+def _summary_child(artifact: dict[str, object]) -> dict[str, object]:
+    return {
+        "record_id": artifact["record_id"],
+        "kind": artifact["kind"],
+        "text": artifact["text"],
+        "source_digest": artifact["source_digest"],
+        "source_range": artifact["source_range"],
+    }
 
 
 def create_v2_project(tmp_path: Path, *, conflict: bool = False) -> tuple[Path, dict, dict, dict]:
@@ -192,6 +264,476 @@ def create_v2_project(tmp_path: Path, *, conflict: bool = False) -> tuple[Path, 
     return project, file_record, segment_record, stage_record
 
 
+def test_summary_participation_and_artifacts_persist_provenance(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+
+    write_summary_participation(
+        project,
+        [
+            {"file_id": "F0001", "part_id": "document", "selected": True},
+            {"file_id": "F0001", "part_id": "appendix", "selected": False},
+        ],
+    )
+    summary = record_header(
+        "content_summary",
+        project_id,
+        record_id="SUMMARY-F0001-DOCUMENT-FRAGMENT",
+        kind="fragment",
+        file_id="F0001",
+        part_id="document",
+        status="completed",
+        text="A short summary.",
+        source_range={"segment_ids": ["F0001-S000001"]},
+        source_digest="sha256:source",
+        input_digest="sha256:input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+        run_id="SUMMARY-RUN-1",
+        refs=["F0001-S000001"],
+    )
+    write_content_summary(project, summary)
+
+    assert read_summary_participation(project) == [
+        {"file_id": "F0001", "part_id": "appendix", "selected": False},
+        {"file_id": "F0001", "part_id": "document", "selected": True},
+    ]
+    stored = read_content_summaries(project)
+    assert len(stored) == 1
+    assert stored[0]["record_id"] == summary["record_id"]
+    assert stored[0]["kind"] == "fragment"
+    assert stored[0]["source_range"] == summary["source_range"]
+    assert stored[0]["source_digest"] == summary["source_digest"]
+    assert stored[0]["input_digest"] == summary["input_digest"]
+    assert stored[0]["prompt_digest"] == summary["prompt_digest"]
+    assert stored[0]["model"] == summary["model"]
+    assert stored[0]["refs"] == summary["refs"]
+    assert stored[0]["source_changed"] is False
+
+
+def test_publish_fulls_prunes_unreachable_summary_history_and_keeps_active_states(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+
+    reachable_fragment_a = _summary_artifact(
+        project_id, "FRAGMENT-REACHABLE-A", kind="fragment"
+    )
+    reachable_fragment_b = _summary_artifact(
+        project_id, "FRAGMENT-REACHABLE-B", kind="fragment"
+    )
+    reachable_leaf = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-REACHABLE-LEAF", kind="reduction"),
+        "llm",
+        [_summary_child(reachable_fragment_a), _summary_child(reachable_fragment_b)],
+    )
+    reachable_root = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "REDUCTION-REACHABLE-ROOT",
+            kind="reduction",
+            status="stale",
+        ),
+        "llm",
+        [_summary_child(reachable_leaf)],
+    )
+    completed_unreachable_fragment = _summary_artifact(
+        project_id, "FRAGMENT-COMPLETED-UNREACHABLE", kind="fragment"
+    )
+    stale_fragment = _summary_artifact(
+        project_id, "FRAGMENT-STALE-UNREACHABLE", kind="fragment", status="stale"
+    )
+    changed_fragment = _summary_artifact(
+        project_id,
+        "FRAGMENT-SOURCE-CHANGED-UNREACHABLE",
+        kind="fragment",
+        source_changed=True,
+    )
+    old_reduction = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-COMPLETED-UNREACHABLE", kind="reduction"),
+        "llm",
+        [_summary_child(completed_unreachable_fragment)],
+    )
+    old_stale_reduction = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "REDUCTION-STALE-UNREACHABLE",
+            kind="reduction",
+            status="stale",
+        ),
+        "llm",
+        [_summary_child(completed_unreachable_fragment)],
+    )
+    full_one = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-ONE",
+            kind="full",
+            created_at="2024-01-01T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(old_reduction)],
+    )
+    full_two = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-TWO",
+            kind="full",
+            created_at="2024-01-02T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_root)],
+    )
+    full_three = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-THREE",
+            kind="full",
+            created_at="2024-01-03T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_fragment_a)],
+    )
+    full_four = _attach_provenance(
+        _summary_artifact(
+            project_id,
+            "FULL-FOUR",
+            kind="full",
+            created_at="2024-01-04T00:00:00+00:00",
+        ),
+        "llm",
+        [_summary_child(reachable_root)],
+    )
+    nonterminal_records = [
+        _summary_artifact(
+            project_id, "FRAGMENT-DRAFT", kind="fragment", status="draft"
+        ),
+        _summary_artifact(
+            project_id, "FRAGMENT-RUNNING", kind="fragment", status="running"
+        ),
+        _summary_artifact(
+            project_id, "FRAGMENT-FAILED", kind="fragment", status="failed"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-DRAFT", kind="reduction", status="draft"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-RUNNING", kind="reduction", status="running"
+        ),
+        _summary_artifact(
+            project_id, "REDUCTION-FAILED", kind="reduction", status="failed"
+        ),
+        _summary_artifact(project_id, "FULL-DRAFT", kind="full", status="draft"),
+        _summary_artifact(project_id, "FULL-RUNNING", kind="full", status="running"),
+        _summary_artifact(project_id, "FULL-FAILED", kind="full", status="failed"),
+    ]
+    for artifact in [
+        reachable_fragment_a,
+        reachable_fragment_b,
+        reachable_leaf,
+        reachable_root,
+        completed_unreachable_fragment,
+        stale_fragment,
+        changed_fragment,
+        old_reduction,
+        old_stale_reduction,
+        full_one,
+        full_two,
+        full_three,
+        *nonterminal_records,
+    ]:
+        write_content_summary(project, artifact)
+
+    report = publish_content_summary_fulls(project, [full_four])
+
+    assert report == {"deleted": 5, "skipped": []}
+    stored = {str(item["record_id"]): item for item in read_content_summaries(project)}
+    assert set(stored) == {
+        "FULL-TWO",
+        "FULL-THREE",
+        "FULL-FOUR",
+        "FULL-DRAFT",
+        "FULL-RUNNING",
+        "FULL-FAILED",
+        "REDUCTION-REACHABLE-LEAF",
+        "REDUCTION-REACHABLE-ROOT",
+        "FRAGMENT-REACHABLE-A",
+        "FRAGMENT-REACHABLE-B",
+        "FRAGMENT-COMPLETED-UNREACHABLE",
+        "FRAGMENT-DRAFT",
+        "FRAGMENT-RUNNING",
+        "FRAGMENT-FAILED",
+        "REDUCTION-DRAFT",
+        "REDUCTION-RUNNING",
+        "REDUCTION-FAILED",
+    }
+    assert stored["FULL-TWO"]["status"] == "stale"
+    assert stored["FULL-THREE"]["status"] == "stale"
+    assert stored["FULL-FOUR"]["status"] == "completed"
+    assert stored["REDUCTION-REACHABLE-ROOT"]["status"] == "stale"
+    assert stored["FRAGMENT-COMPLETED-UNREACHABLE"]["status"] == "completed"
+
+
+def test_publish_fulls_skips_boundary_when_retained_provenance_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    fragment = _summary_artifact(project_id, "FRAGMENT-VALID", kind="fragment")
+    stale_fragment = _summary_artifact(
+        project_id, "FRAGMENT-STALE", kind="fragment", status="stale"
+    )
+    reduction = _attach_provenance(
+        _summary_artifact(project_id, "REDUCTION-OLD", kind="reduction"),
+        "llm",
+        [_summary_child(stale_fragment)],
+    )
+
+    def full(summary_id: str, created_at: str) -> dict[str, object]:
+        return _attach_provenance(
+            _summary_artifact(
+                project_id,
+                summary_id,
+                kind="full",
+                created_at=created_at,
+            ),
+            "llm",
+            [_summary_child(fragment)],
+        )
+
+    full_one = full("FULL-ONE", "2024-01-01T00:00:00+00:00")
+    full_two = full("FULL-TWO", "2024-01-02T00:00:00+00:00")
+    invalid_full = _summary_artifact(
+        project_id,
+        "FULL-INVALID",
+        kind="full",
+        created_at="2024-01-03T00:00:00+00:00",
+    )
+    invalid_full["provenance"] = {
+        "origin": "llm",
+        "artifact_ids": ["MISSING"],
+        "source_ranges": [{}],
+        "dependencies": [
+            {
+                "record_id": "MISSING",
+                "kind": "fragment",
+                "text_digest": "sha256:text",
+                "source_digest": "sha256:source",
+            }
+        ],
+    }
+    invalid_full["input_digest"] = digest(invalid_full["provenance"]["dependencies"])
+    full_four = full("FULL-FOUR", "2024-01-04T00:00:00+00:00")
+    for artifact in [fragment, stale_fragment, reduction, full_one, full_two, invalid_full]:
+        write_content_summary(project, artifact)
+
+    report = publish_content_summary_fulls(project, [full_four])
+
+    assert report == {
+        "deleted": 0,
+        "skipped": [
+            {
+                "file_id": "F0001",
+                "part_id": "document",
+                "reason": "provenance_unavailable",
+            }
+        ],
+    }
+    stored = {str(item["record_id"]): item for item in read_content_summaries(project)}
+    assert set(stored) == {
+        "FRAGMENT-VALID",
+        "FRAGMENT-STALE",
+        "REDUCTION-OLD",
+        "FULL-ONE",
+        "FULL-TWO",
+        "FULL-INVALID",
+        "FULL-FOUR",
+    }
+    assert stored["FULL-ONE"]["status"] == "stale"
+    assert stored["FULL-TWO"]["status"] == "stale"
+    assert stored["FULL-INVALID"]["status"] == "stale"
+    assert stored["FULL-FOUR"]["status"] == "completed"
+
+
+def test_summary_run_metadata_is_queryable_without_using_run_chunks(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    run = record_header(
+        "summary_run",
+        project_id,
+        record_id="SUMMARY-RUN-1",
+        run_id="SUMMARY-RUN-1",
+        mode="fragment",
+        status="running",
+        source_ranges=[{"file_id": "F0001", "part_id": "document"}],
+        input_digest="sha256:input",
+        prompt_digest="sha256:prompt",
+        model="test-model",
+        selected_count=1,
+    )
+
+    write_summary_run(project, run)
+
+    stored = read_summary_runs(project)
+    assert len(stored) == 1
+    assert stored[0]["run_id"] == "SUMMARY-RUN-1"
+    assert stored[0]["mode"] == "fragment"
+    assert stored[0]["source_ranges"] == run["source_ranges"]
+    assert stored[0]["selected_count"] == 1
+
+
+def test_source_change_keeps_summary_and_can_mark_only_selected_boundaries(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    for part_id, summary_id in (
+        ("document", "SUMMARY-DOCUMENT"),
+        ("appendix", "SUMMARY-APPENDIX"),
+    ):
+        write_content_summary(
+            project,
+            record_header(
+                "content_summary",
+                project_id,
+                record_id=summary_id,
+                kind="full",
+                file_id="F0001",
+                part_id=part_id,
+                status="completed",
+                text=f"Summary for {part_id}",
+                source_range={"segment_ids": ["F0001-S000001"]},
+                source_digest=f"sha256:{part_id}",
+                input_digest="sha256:input",
+                prompt_digest="sha256:prompt",
+                model="test-model",
+            ),
+        )
+
+    replace_source(
+        project,
+        read_files(project),
+        read_segments(project),
+        read_json(project, project / "project.json"),
+    )
+    mark_content_summaries_source_changed(
+        project, [{"file_id": "F0001", "part_id": "document"}]
+    )
+
+    stored = {
+        item["part_id"]: item for item in read_content_summaries(project)
+    }
+    assert set(stored) == {"document", "appendix"}
+    assert stored["document"]["source_changed"] is True
+    assert stored["appendix"]["source_changed"] is False
+
+
+def test_v3_upgrade_makes_consistent_backup_before_schema_change(
+    tmp_path: Path,
+) -> None:
+    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+
+    backup_path = ensure_supported(project)
+
+    assert backup_path is not None
+    assert backup_path.is_file()
+    assert backup_path.parent == project / "snapshots" / "storage_migrations"
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "4"
+        assert database.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_summaries'"
+        ).fetchone() is not None
+    with sqlite3.connect(backup_path) as backup:
+        assert backup.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "2"
+
+
+def test_v2_upgrade_rolls_back_all_ddl_after_mid_migration_foreign_key_failure(
+    tmp_path: Path,
+) -> None:
+    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("PRAGMA foreign_keys = ON")
+        database.execute(
+            "CREATE TABLE migration_probe(segment_id TEXT REFERENCES segments(segment_id))"
+        )
+        database.execute(
+            "INSERT INTO migration_probe(segment_id) VALUES ('F0001-S000001')"
+        )
+        database.commit()
+
+    with pytest.raises(StorageError, match="FOREIGN KEY"):
+        ensure_supported(project)
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "2"
+        assert database.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='segments_v3'"
+        ).fetchone() is None
+        assert database.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_summaries'"
+        ).fetchone() is None
+        assert database.execute(
+            "SELECT source FROM segments WHERE segment_id='F0001-S000001'"
+        ).fetchone()[0] == "source"
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("DROP TABLE migration_probe")
+        database.commit()
+    ensure_supported(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "4"
+
+
+def test_schema_version_rejects_non_numeric_value_as_project_error(
+    tmp_path: Path,
+) -> None:
+    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute(
+            "UPDATE schema_meta SET value='future' WHERE key='schema_version'"
+        )
+        database.commit()
+
+    with pytest.raises(ProjectError, match="schema_version.*future"):
+        ensure_supported(project)
+
+
+def test_schema_upgrade_backup_oserror_is_storage_error_with_project_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    target = project / "snapshots" / "storage_migrations"
+    original_mkdir = Path.mkdir
+
+    def fail_backup_dir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == target:
+            raise OSError("read-only")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_backup_dir)
+
+    with pytest.raises(StorageError, match=str(project)):
+        ensure_supported(project)
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "2"
+
+
 def test_v2_migrates_payloads_and_preserves_public_records(tmp_path: Path) -> None:
     project, file_record, segment_record, stage_record = create_v2_project(tmp_path)
 
@@ -200,7 +742,7 @@ def test_v2_migrates_payloads_and_preserves_public_records(tmp_path: Path) -> No
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "3"
+        ).fetchone()[0] == "4"
         assert "payload_json" not in {
             row[1] for row in database.execute("PRAGMA table_info(segments)")
         }
@@ -532,7 +1074,7 @@ def test_v1_project_migrates_file_order_and_drops_dead_indexes(
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()["value"]
-        assert version == "3"
+        assert version == "4"
         columns = {
             str(row["name"]) for row in connection.execute("PRAGMA table_info(segments)")
         }
@@ -550,8 +1092,40 @@ def test_v1_project_migrates_file_order_and_drops_dead_indexes(
         "F0001-S000001",
     ]
     assert [
-        item["segment_id"] for item in query_segments(project, file_id="F0002")
+        item["segment_id"]
+        for item in query_segments(
+            project, file_id="F0002", part_id="document"
+        )
     ] == ["F0002-S000001"]
+
+
+def test_segment_queries_filter_by_file_and_part_pair(tmp_path: Path) -> None:
+    project = create_project(tmp_path, "first\nsecond\nthird")
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        connection.executemany(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            [
+                ("chapter-1", "F0001-S000001"),
+                ("chapter-2", "F0001-S000002"),
+                ("chapter-1", "F0001-S000003"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert segment_count(project, file_id="F0001", part_id="chapter-1") == 2
+    assert [
+        item["segment_id"]
+        for item in query_segments(
+            project, file_id="F0001", part_id="chapter-2"
+        )
+    ] == ["F0001-S000002"]
+    assert segment_ids(project, file_id="F0001", part_id="chapter-1") == [
+        "F0001-S000001",
+        "F0001-S000003",
+    ]
 
 
 def test_latest_stage_summary_preserves_completed_after_failed_and_reset_voids(

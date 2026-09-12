@@ -1,0 +1,1 @@
+仅概括本次 source_segments 的核心内容，忠实、简洁，不补写未被输入支持的事实；应覆盖所有 source_segments。不要把 reference_context 当作概括来源，也不要从概括内容反向提取术语。

@@ -1,7 +1,11 @@
 # Adapter 契约
 
-本文区分已实现的契约与 provisional 设计。实现行为以测试和
-[`MINIMAL.md`](MINIMAL.md) 为准。
+本文是 LLM Adapter、Document Adapter、可信 Python 插件和 LLM Preset 协议的唯一权威文档。
+协议字段、版本、能力、错误边界和兼容范围只在此定义；测试用于验证本契约，不能以其他文档
+中的重复描述覆盖它。
+
+稳定产品语义见[最小产品规范](MINIMAL.md)，用户配置和操作见[用户指南](USER_GUIDE.md)，
+尚未实现的协议方向与稳定门槛见[产品路线图](ROADMAP.md)。
 
 ## 1. 声明式 JSON LLM Adapter（已实现）
 
@@ -73,6 +77,8 @@
 - body 支持 `${model}`、`${system}`、`${messages}`、`${temperature}`、
   `${max_output_tokens}`、`${stream}`。占位符必须独占一个 JSON 字符串值，
   替换后保留数组、数字和布尔类型。
+- 当 Preset 的 `max_output_tokens` 为 `0` 时，值为 `${max_output_tokens}` 的
+  body 对象字段会被省略；自定义常量字段保持原样。
 - Header 可使用上述占位符及 `${api_key}`；嵌入字符串时结果为字符串。
 - 未知字段、未知占位符、混合 body 文本占位符和非法 schema 立即失败。
 
@@ -157,7 +163,7 @@ Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随�
 ### 指纹与密钥
 
 阶段指纹包含 Adapter ID、全局定义内容 Hash、Preset ID 和 Preset 内容 Hash。
-Run 快照保存定义原文，但不解析或保存环境变量中的 API Key。调试请求记录
+Run 快照保存定义原文，但不解析或保存 credential 引用所指向的 API Key。调试请求记录
 仍经过敏感 Header 清理。
 
 ### 模型发现与 usage 映射
@@ -183,15 +189,16 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
   组成，Header 复用顶层 `headers` 模板；渲染时只提供 `${api_key}`，
   含其他占位符的 Header 在触发模型发现时明确失败。
 - Web 触发模型发现时提交当前 Preset 草稿并执行与保存相同的严格校验；探测
-  使用草稿中的 Adapter、Base URL、API Key 环境变量名、代理和超时，但不保存
-  草稿。路径 Preset ID 与草稿 ID 不一致时立即拒绝。
+  使用草稿中的 Adapter、Base URL、credential 引用、代理和超时，并按必填的
+  `key_index`（从 1 开始）只使用所选 Key，但不保存草稿。路径 Preset ID 与草稿
+  ID 不一致时立即拒绝；Key 缺失、格式错误或序号越界均立即报告。
 - Preset 编辑器保留可手工输入的模型 ID；发现结果在字段下方按名称或 ID
   本地搜索。选择结果只更新当前草稿并收起列表，必须显式保存才会生效。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
   剥离（如 Gemini 的 `models/`）。条目缺少 ID 或响应形状非法时快速失败。
-- 缺少 `models` 规格、缺失 API Key 环境变量、HTTP 错误或网络异常都明确
+- 缺少 `models` 规格、缺失或格式错误的 credential、HTTP 错误或网络异常都明确
   报告，不猜测、不 fallback。请求使用 Preset 的代理与超时设置。
 
 Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
@@ -206,10 +213,10 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 }
 ```
 
-- 三个指针均可选；任一成功响应的已声明指针缺失或值非法（非非负整数）时，
-  整个任务标记为「usage 不可用」且公开计数归零，不展示部分合计，也不使用
-  本地启发式估算冒充端点账单。
-- 宿主在每个成功请求后累计规范化计数，任务结束时写入任务摘要与 Run
+- 三个指针均可选；任一成功或失败尝试的已声明指针缺失或值非法（非非负整数）时，
+  任务标记为 partial；保留已观测计数但吞吐量不可用，不使用本地启发式估算冒充
+  端点账单。完全没有可观测 usage 时显示 unavailable。
+- 宿主在每个尝试收到 usage 后累计规范化计数，任务结束时写入任务摘要与 Run
   `manifest.json` 的 `usage` 字段。Adapter 未声明 `usage` 时任务与 Run
   摘要不包含 usage 字段。
 - 主请求的限速、重试与错误语义不受影响。
@@ -312,6 +319,12 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 `ImportedFile` 可选返回与 `segments` 一一对应的 `segment_part_ids`。省略时宿主将所有 Segment 归入 `document`；提供时每项必须是非空字符串。
 
 宿主把该值写入 Segment 的 `part_id`，并以 `(file_id, part_id)` 限制 Chunk、LLM 请求和参考上下文。这不会改变 File 的存储、选择、调度或导出边界；旧项目缺少有效 `part_id` 时要求重新创建，不从 locator 推测或迁移。
+
+“内容概括 · 实验”直接复用这条通用边界契约。Adapter 不需要实现概括专用方法，也
+不需要声明章节；每个 `(file_id, part_id)` 可独立生成片段概括、聚合和 Markdown 导出。
+`model_sources` 只作为模型输入格式，不改变持久化的原文 Segment。宿主保存原文和实际
+模型文本的摘要及引用范围；当外部 Adapter 的 `model_source` 需要拆分而无法安全保留
+原始定位时，概括请求明确失败，不猜测字符级映射。
 
 每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
 `source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
@@ -502,26 +515,15 @@ class MyValidator:
 导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或
 运行期设置。不要依赖未文档化的内部对象。
 
-## 4. Python LLM Adapter（provisional，未实现）
+## 4. LLM Preset（已实现）
 
-未来 Python LLM Adapter 仍只负责：
-
-- 将规范化 model/messages/temperature/max output/stream 转成 HTTP 请求规格；
-- 将宿主取得的响应转成 content 或规范错误类别。
-
-它不得自行创建 HTTP Client、发送请求、限速、重试、写 Run 或读取密钥存储。
-具体 Python 方法签名、错误类型和配置接口必须等待第一个 JSON 模板无法支持的
-真实端点，再与第二个实现共同验证；当前不提供动态加载器或兼容承诺。
-
-## 5. LLM Preset（已实现）
-
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、鉴权环境变量名、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
 Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
 
-当前 Preset schema 为 4。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。
+当前 Preset schema 为 5。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2/3 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 4，分别补入非流式默认值与 `stream_read_timeout_enabled = true`；Run 内历史 v2/v3 快照只在内存中补齐默认值，不改写审计文件。
+schema 2/3/4 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 5，补入流式默认值和 `max_parallel_per_key = max_parallel`；Run 内历史快照只在内存中补齐默认值，不改写审计文件。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
@@ -545,13 +547,29 @@ Preset 还可保存 `extra_body` JSON 对象，用于 OpenRouter provider order 
 Run 快照和阶段指纹，因此不得保存密钥。非对象、非法 JSON、占位符和字段冲突
 都必须在创建 Run 或发送请求前拒绝。
 
+Preset 也可提供可选的 `extra_headers` 对象，为 Provider 添加自定义请求头：
+
+```json
+{
+  "x-opencode-session": "${session_id}",
+  "x-opencode-request": "${request_id}"
+}
+```
+
+`${session_id}` 使用当前 Run ID，`${request_id}` 使用当前 Req ID；附加 Header 只
+用于 LLM 生成请求，模型列表探测不携带。固定值会保存，请勿填写 API Key；鉴权继续
+使用 credential/Adapter。Header 名称与 Adapter 默认 Header 冲突（大小写不敏感）时
+必须快速失败。
+
 Preset 修改立即影响所有引用项目，不维护版本历史。Adapter 修改立即影响
 所有引用 Preset。项目缺少其引用的全局 Adapter 时明确失败，不自动补齐或
 改用其他 Preset。项目、全局模板和 Run 续作只接受命名 Preset，不支持内联
 连接配置。
 
-### 未实现能力
+### Preset 多 API Key
 
-单 Preset 多 API Key 尚未实现。Preset 仍只记录一个凭据引用；
-每 Key 限流、调度、失效恢复和 Run 审计必须先形成可测试规则。该能力不提供
-Provider fallback，也不静默吞掉鉴权或配额错误。
+Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按行解析为 API Key
+列表。每个 Key 独立使用 RPM/ITPM 窗口和单 Key 并发上限，同时受 Preset 总并发
+上限约束。401/403 只隔离本次执行中的当前 Key，429 冷却并轮换，400/404 或协议、
+配置错误直接失败，不提供 Provider fallback。Run 收尾会按 Key 追加安全审计，绝不
+保存 Key 原文、摘要或跨执行健康状态。

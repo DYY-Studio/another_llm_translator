@@ -69,6 +69,108 @@ def test_json_adapter_renders_typed_values_and_custom_fields(
     assert response.reasoning_content is None
 
 
+def test_json_adapter_renders_preset_extra_headers_with_request_ids(
+    tmp_path: Path,
+) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, definition()))
+    headers, _ = adapter.build_request(
+        api_key="secret",
+        model="model-a",
+        messages=[],
+        temperature=0.2,
+        max_output_tokens=100,
+        stream=False,
+        extra_headers={
+            "x-opencode-session": "${session_id}",
+            "x-opencode-request": "req=${request_id}",
+        },
+        session_id="RUN-1",
+        request_id="REQ-1",
+    )
+    assert headers["x-opencode-session"] == "RUN-1"
+    assert headers["x-opencode-request"] == "req=REQ-1"
+
+
+def test_json_adapter_rejects_extra_header_collision(tmp_path: Path) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, definition()))
+    with pytest.raises(ConfigError, match="Header 冲突"):
+        adapter.build_request(
+            api_key="secret",
+            model="model-a",
+            messages=[],
+            temperature=0.2,
+            max_output_tokens=100,
+            stream=False,
+            extra_headers={"authorization": "Bearer other"},
+        )
+
+
+def test_json_adapter_requires_ids_for_extra_header_placeholders(
+    tmp_path: Path,
+) -> None:
+    adapter = load_json_adapter(write_adapter(tmp_path, definition()))
+    with pytest.raises(ConfigError, match="缺少 session_id"):
+        adapter.build_request(
+            api_key="secret",
+            model="model-a",
+            messages=[],
+            temperature=0.2,
+            max_output_tokens=100,
+            stream=False,
+            extra_headers={"x-session": "${session_id}"},
+        )
+
+
+def test_json_adapter_omits_zero_output_limit_from_nested_body(
+    tmp_path: Path,
+) -> None:
+    value = definition()
+    value["body"]["sampling"]["fixed_output"] = 42
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model-a",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.25,
+        max_output_tokens=0,
+        stream=False,
+    )
+
+    assert body == {
+        "deployment": "model-a",
+        "input": {
+            "conversation": [{"role": "user", "content": "hello"}]
+        },
+        "sampling": {"temperature": 0.25, "fixed_output": 42},
+        "streaming": False,
+        "reasoning_effort": "high",
+    }
+
+
+def test_json_adapter_omits_zero_output_limit_from_stream_request() -> None:
+    adapter = load_json_adapter(
+        Path(__file__).parents[1] / "llm_adapters" / "openai-compatible.json"
+    )
+
+    _, body = adapter.build_request(
+        api_key="secret",
+        model="model-a",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.25,
+        max_output_tokens=0,
+        stream=True,
+    )
+
+    assert body == {
+        "model": "model-a",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.25,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
