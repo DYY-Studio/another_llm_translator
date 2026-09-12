@@ -795,7 +795,8 @@ h3 { margin-bottom: 10px; font-size: 13px; }
 .history-scope-list > div { display: grid; grid-template-columns: minmax(100px, 180px) minmax(0, 1fr); gap: 10px; padding: 7px 9px; border: 1px solid var(--row-border); background: var(--surface-raised); }
 .history-scope-list dt { font-weight: 650; }
 .history-scope-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); }
-.history-warning-list { display: grid; gap: 5px; margin: 0; padding-left: 20px; }
+.history-warning-list { min-width: 0; display: grid; gap: 5px; margin: 0; padding-left: 20px; }
+.history-warning-list li { min-width: 0; overflow-wrap: anywhere; }
 .history-execution-panel { min-width: 0; display: grid; gap: 12px; }
 .history-execution-selector { display: flex; flex-wrap: wrap; gap: 7px; }
 .history-execution-selector, .history-execution-meta { min-width: 0; }
@@ -1261,7 +1262,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .page { padding: 24px 16px; }
   .diagnostics-page { padding: 20px 12px 70px; }
   .diagnostics-heading { margin-bottom: 16px; }
-  .diagnostics-shell-heading { display: grid; gap: 12px; }
+  .diagnostics-shell-heading { grid-template-columns: 100%; display: grid; gap: 12px; }
   .diagnostics-subtabs { width: 100%; gap: 16px; }
   .diagnostics-subtabs button { flex: 1; }
   .diagnostics-view-content { display: block; }
@@ -1273,7 +1274,7 @@ h3 { margin-bottom: 10px; font-size: 13px; }
   .diagnostics-panel { height: auto; min-height: 0; }
   .diagnostics-log { height: 360px; flex: none; }
   .request-groups.has-requests { height: 420px; flex: none; }
-  .history-heading, .history-detail-heading { display: grid; gap: 10px; }
+  .history-heading, .history-detail-heading { display: grid; gap: 10px; grid-template-columns: 100%; }
   .history-heading .quiet-button, .history-detail-actions { justify-content: flex-start; }
   .history-filters { display: grid; grid-template-columns: 1fr; }
   .history-filters label { min-width: 0; }
