@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import re
 import tomllib
@@ -585,6 +586,7 @@ def _resolve_llm_config(
             key: definition[key]
             for key in (
                 "token_safety_factor",
+                "target_chunk_input_tokens",
                 "requests_per_minute",
                 "input_tokens_per_minute",
                 "max_parallel",
@@ -595,6 +597,19 @@ def _resolve_llm_config(
     )
     config["_llm_preset_id"] = preset.preset_id
     config["_llm_preset_hash"] = preset.digest
+    fingerprint_definition = {
+        key: value
+        for key, value in definition.items()
+        if key != "target_chunk_input_tokens"
+    }
+    config["_llm_preset_stage_hash"] = "sha256:" + hashlib.sha256(
+        json.dumps(
+            fingerprint_definition,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     config["_llm_preset_definition"] = definition
     config["_llm_extra_body"] = definition["extra_body"]
     config["_llm_extra_headers"] = definition["extra_headers"]

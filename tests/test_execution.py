@@ -89,7 +89,7 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
         (ROOT / "prompts" / "translation.zh-CN.middle.txt").read_text(encoding="utf-8"),
     )
     original = stage_fingerprint(first, "translation", prompt, terms_revision=1)
-    first["chunking"]["target_chunk_input_tokens"] = 100
+    first["execution"]["target_chunk_input_tokens"] = 100
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
     first["chunking"]["cross_boundary_batching"] = ["translation"]
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
@@ -1015,7 +1015,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
                 }
             )
     current = config()
-    current["chunking"]["target_chunk_input_tokens"] = 600
+    current["execution"]["target_chunk_input_tokens"] = 600
     work = [item for item in source if not item["is_empty"]]
     plans = build_chunk_plans(
         work,
@@ -1046,7 +1046,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
 
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
     current = config()
-    current["chunking"]["target_chunk_input_tokens"] = 50
+    current["execution"]["target_chunk_input_tokens"] = 50
     source = [segments()[0]]
     plans = build_chunk_plans(
         source,
@@ -1067,7 +1067,7 @@ def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
 
 def test_chunk_builder_splits_without_duplicating_segments() -> None:
     current = config()
-    current["chunking"]["target_chunk_input_tokens"] = 75
+    current["execution"]["target_chunk_input_tokens"] = 75
     prompt = full_prompt("translation", "Translate.")
     work = [segments()[2], segments()[3], segments()[4]]
 

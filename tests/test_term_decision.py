@@ -803,7 +803,7 @@ def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["chunking"]["target_chunk_input_tokens"] = 50
+    config["execution"]["target_chunk_input_tokens"] = 50
     config["llm"]["context_window_tokens"] = 100
     config["llm"]["context_safety_margin_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
@@ -866,7 +866,7 @@ def test_decision_batch_overflow_policy_controls_local_planning(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["chunking"]["target_chunk_input_tokens"] = 50
+    config["execution"]["target_chunk_input_tokens"] = 50
     config["llm"]["context_window_tokens"] = 120
     config["llm"]["context_safety_margin_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0

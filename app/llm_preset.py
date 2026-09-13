@@ -23,6 +23,7 @@ _PRESET_KEYS = frozenset(
         "credential",
         "proxy_url",
         "context_window_tokens",
+        "target_chunk_input_tokens",
         "max_output_tokens",
         "context_safety_margin_tokens",
         "token_safety_factor",
@@ -65,20 +66,21 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version not in {2, 3, 4, 5}:
+    if schema_version not in {2, 3, 4, 5, 6}:
         raise ConfigError(
-            "LLM Preset schema_version 必须是 5；v1 的 api_key_env 字段已移除，"
+            "LLM Preset schema_version 必须是 6；v1 的 api_key_env 字段已移除，"
             "请改用显式 credential 引用"
         )
-    if schema_version in {2, 3, 4}:
+    if schema_version in {2, 3, 4, 5}:
         value = deepcopy(value)
-        value["schema_version"] = 5
+        value["schema_version"] = 6
         if schema_version == 2:
             value.setdefault("stream", False)
             value.setdefault("stream_endpoint", "")
         if schema_version in {2, 3}:
             value.setdefault("stream_read_timeout_enabled", True)
         value.setdefault("max_parallel_per_key", value.get("max_parallel"))
+        value.setdefault("target_chunk_input_tokens", 8192)
     value.setdefault("extra_headers", {})
     unknown = set(value) - _PRESET_KEYS
     missing = _PRESET_KEYS - set(value)
@@ -152,6 +154,7 @@ def load_llm_preset(path: Path) -> LLMPreset:
             raise ConfigError("LLM Preset proxy_url 必须是有效的 HTTP/HTTPS URL")
     for key in (
         "context_window_tokens",
+        "target_chunk_input_tokens",
         "max_parallel",
         "max_parallel_per_key",
     ):

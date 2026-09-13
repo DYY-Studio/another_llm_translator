@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "preset_id": "google-gemini",
   "adapter_id": "google-gemini",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
@@ -7,6 +7,7 @@
   "model": "gemini-2.5-flash",
   "proxy_url": "",
   "context_window_tokens": 1048576,
+  "target_chunk_input_tokens": 8192,
   "max_output_tokens": 8192,
   "context_safety_margin_tokens": 512,
   "token_safety_factor": 1.25,

@@ -275,7 +275,7 @@ def _related_anchors(
     return [*direct, *related][:RELATED_ANCHOR_LIMIT]
 
 def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
-    soft_target = int(config["chunking"]["target_chunk_input_tokens"])
+    soft_target = int(config["execution"]["target_chunk_input_tokens"])
     context_limit = int(config["llm"]["context_window_tokens"]) - int(
         config["llm"]["context_safety_margin_tokens"]
     )
