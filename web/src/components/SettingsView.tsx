@@ -455,7 +455,6 @@ function PresetSettings({ language }: { language: Language }) {
             <div className="config-grid preset-fields">
               <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
               <Field label="Base URL" help={translate("preset.baseUrlHint", language)}><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
-              <Field label="Endpoint" help={translate("preset.endpointHint", language)}><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
               <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}>
                 <div className="credential-selector">
                   <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
@@ -501,13 +500,6 @@ function PresetSettings({ language }: { language: Language }) {
                 help={translate("preset.streamReadTimeoutHint", language)}
                 onChange={(value) => updateConnection((draft) => { draft.stream_read_timeout_enabled = value; })}
               />
-              <Field label={translate("preset.streamEndpoint", language)} help={translate("preset.streamEndpointHint", language)}>
-                <input
-                  value={preset.stream_endpoint}
-                  disabled={!preset.stream}
-                  onChange={(event) => updateConnection((draft) => { draft.stream_endpoint = event.target.value; })}
-                />
-              </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
               <label className="code-field preset-extra"><span>{translate("preset.extraHeaders", language)}</span><small>{translate("preset.extraHeadersHint", language)}</small><textarea spellCheck={false} value={extraHeaders} onChange={(event) => setExtraHeaders(event.target.value)} /></label>
             </div>
