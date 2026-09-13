@@ -54,12 +54,12 @@ Windows 和 Linux 桌面版本当前尚未公开提供。其他平台可以使�
 
 ## 2. 配置模型连接与凭据
 
-首次翻译前，至少需要一个可用的 LLM Preset。Preset 保存端点、模型、限流参数、Adapter
+首次翻译前，至少需要一个可用的 LLM Preset。Preset 保存端点、模型、Chunk 输入目标、限流参数、Adapter
 和凭据引用，但不保存 API Key 本身。
 
 1. 打开右上角“设置”。不需要先打开项目也可以编辑全局设置。
 2. 进入全局 Preset 管理，选择一个内置示例或创建同名用户版本。
-3. 填写实际的 API 端点、模型和限流参数，并确认 Adapter 与端点协议匹配。RPM 和
+3. 填写实际的 API 端点、模型、目标 Chunk 输入 Token 和限流参数，并确认 Adapter 与端点协议匹配。目标值会用于该 Preset 所在阶段的 Chunk 分组；它不在项目设置中配置。RPM 和
    ITPM 按每个 Key 独立计算；“总并发”限制整个 Preset，“单 Key 并发”限制每个 Key。
    如果 Adapter 支持 SSE，可在 Preset 中开启“流式请求”；需要独立路径时再填写
    流式 Endpoint，留空表示复用普通 Endpoint。

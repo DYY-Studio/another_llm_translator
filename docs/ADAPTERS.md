@@ -519,11 +519,11 @@ class MyValidator:
 
 Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
-Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
+Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
 
-当前 Preset schema 为 5。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 6。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2/3/4 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 5，补入流式默认值和 `max_parallel_per_key = max_parallel`；Run 内历史快照只在内存中补齐默认值，不改写审计文件。
+schema 2–5 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 6，补入缺失字段；`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史快照只在内存中补齐默认值，不改写审计文件。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
