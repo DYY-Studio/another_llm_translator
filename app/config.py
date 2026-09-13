@@ -41,7 +41,6 @@ SCHEMA: dict[str, Any] = {
     },
     "execution": {"scheduling_mode": None},
     "chunking": {
-        "target_chunk_input_tokens": None,
         "allow_split_oversized_segment": None,
         "cross_boundary_batching": None,
     },
@@ -142,6 +141,8 @@ def is_well_formed_language_tag(value: str) -> bool:
 
 def _reject_unknown(value: dict[str, Any], schema: dict[str, Any], path: str) -> None:
     unknown = set(value) - set(schema)
+    if path == "config.chunking":
+        unknown.discard("target_chunk_input_tokens")
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise ConfigError(f"未知配置键 {path}: {joined}")
@@ -195,10 +196,7 @@ def validate_config(config: dict[str, Any]) -> None:
             codecs.lookup(config[section][key])
         except LookupError as exc:
             raise ConfigError(f"{section}.{key} 不是可用编码") from exc
-    for section, key in (
-        ("chunking", "target_chunk_input_tokens"),
-        ("retry", "http_max_attempts"),
-    ):
+    for section, key in (("retry", "http_max_attempts"),):
         value = config[section][key]
         if (
             not isinstance(value, int)
@@ -379,6 +377,11 @@ def dump_config(config: dict[str, Any]) -> str:
         for key, child_schema in schema.items():
             if child_schema is None:
                 lines.append(f"{key} = {_toml_scalar(value[key])}")
+        if path == ("chunking",) and "target_chunk_input_tokens" in value:
+            lines.append(
+                "target_chunk_input_tokens = "
+                + _toml_scalar(value["target_chunk_input_tokens"])
+            )
         for key, child_schema in schema.items():
             if child_schema is not None:
                 write_table((*path, key), value[key], child_schema)

@@ -2224,17 +2224,13 @@ async def test_oversized_segment_is_split_and_saved_once(
         " \t\u3000" + "A" * 5000,
         encoding="utf-8-sig",
     )
-    config_path = project / "config.toml"
-    text = config_path.read_text(encoding="utf-8")
     use_llm_preset(
         tmp_path,
         context_window_tokens=1200,
         max_output_tokens=300,
         context_safety_margin_tokens=100,
+        target_chunk_input_tokens=700,
     )
-    for key, value in (("target_chunk_input_tokens", "700"),):
-        text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
-    config_path.write_text(text, encoding="utf-8")
     requested_ids: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

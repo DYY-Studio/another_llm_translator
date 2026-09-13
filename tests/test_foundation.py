@@ -222,11 +222,6 @@ def test_config_accepts_selectable_terminology_settings(
             "未知配置键",
         ),
         (
-            "target_chunk_input_tokens = 11000",
-            "target_chunk_input_tokens = 1.5",
-            "target_chunk_input_tokens 必须是正整数",
-        ),
-        (
             'alias_primary_collision = "merge"',
             'alias_primary_collision = "guess"',
             "alias_primary_collision 必须是 conflict 或 merge",

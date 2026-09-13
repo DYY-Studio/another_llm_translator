@@ -814,7 +814,6 @@ export interface ProjectConfig {
     scheduling_mode: "ordered_by_file" | "parallel";
   };
   chunking: {
-    target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
     cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
   };
@@ -883,6 +882,7 @@ export interface LLMPreset {
   credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
+  target_chunk_input_tokens: number;
   max_output_tokens: number;
   context_safety_margin_tokens: number;
   token_safety_factor: number;

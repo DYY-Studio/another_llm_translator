@@ -366,6 +366,42 @@ def test_preset_chunk_target_changes_execution_not_stage_fingerprint(
     assert stage_fingerprint(second, "translation", "prompt") == fingerprint
 
 
+def test_legacy_project_chunk_target_is_preserved_but_ignored(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="legacy-project-chunk-target",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    new_config = load_config(project / "config.toml")
+    assert "target_chunk_input_tokens" not in new_config["chunking"]
+    legacy_text = (project / "config.toml").read_text(encoding="utf-8")
+    legacy_text = legacy_text.replace(
+        "target_chunk_input_tokens = 11000\n", ""
+    ).replace(
+        "[chunking]\n",
+        '[chunking]\ntarget_chunk_input_tokens = "ignored"\n',
+    )
+    (project / "config.toml").write_text(legacy_text, encoding="utf-8")
+
+    legacy_config = load_config(project / "config.toml")
+    (project / "config.toml").write_text(
+        dump_config(legacy_config), encoding="utf-8"
+    )
+    resolved = load_project_config(project, presets_root=app_root)
+
+    assert 'target_chunk_input_tokens = "ignored"' in (
+        project / "config.toml"
+    ).read_text(encoding="utf-8")
+    assert resolved["execution"]["target_chunk_input_tokens"] == 8192
+
+
 def test_project_resolves_stage_preset_override_and_inherits_global(
     tmp_path: Path,
 ) -> None:

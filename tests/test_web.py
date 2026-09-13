@@ -2351,7 +2351,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
             encoding="utf-8"
         )
     )
-    assert stored_legacy["schema_version"] == 5
+    assert stored_legacy["schema_version"] == 6
     assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
 
     conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
