@@ -39,6 +39,8 @@ _PRESET_KEYS = frozenset(
         "stream_read_timeout_enabled",
     }
 )
+_LEGACY_ENDPOINT_KEYS = frozenset({"endpoint", "stream_endpoint"})
+_REQUIRED_PRESET_KEYS = _PRESET_KEYS - _LEGACY_ENDPOINT_KEYS
 
 
 @dataclass(frozen=True)
@@ -66,14 +68,14 @@ def load_llm_preset(path: Path) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version not in {2, 3, 4, 5, 6}:
+    if schema_version not in {2, 3, 4, 5, 6, 7}:
         raise ConfigError(
-            "LLM Preset schema_version 必须是 6；v1 的 api_key_env 字段已移除，"
+            "LLM Preset schema_version 必须是 7；v1 的 api_key_env 字段已移除，"
             "请改用显式 credential 引用"
         )
-    if schema_version in {2, 3, 4, 5}:
+    if schema_version in {2, 3, 4, 5, 6}:
         value = deepcopy(value)
-        value["schema_version"] = 6
+        value["schema_version"] = 7
         if schema_version == 2:
             value.setdefault("stream", False)
             value.setdefault("stream_endpoint", "")
@@ -83,7 +85,7 @@ def load_llm_preset(path: Path) -> LLMPreset:
         value.setdefault("target_chunk_input_tokens", 8192)
     value.setdefault("extra_headers", {})
     unknown = set(value) - _PRESET_KEYS
-    missing = _PRESET_KEYS - set(value)
+    missing = _REQUIRED_PRESET_KEYS - set(value)
     if unknown:
         raise ConfigError(
             f"LLM Preset 包含未知字段：{', '.join(sorted(unknown))}"
@@ -98,18 +100,12 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError(
             "LLM Preset stream_read_timeout_enabled 必须是布尔值"
         )
-    stream_endpoint = value["stream_endpoint"]
-    if not isinstance(stream_endpoint, str):
-        raise ConfigError("LLM Preset stream_endpoint 必须是字符串")
-    if stream_endpoint and not stream_endpoint.strip():
-        raise ConfigError("LLM Preset stream_endpoint 不能为空白")
     preset_id = value["preset_id"]
     if not isinstance(preset_id, str) or not _PRESET_ID_RE.fullmatch(preset_id):
         raise ConfigError("LLM Preset preset_id 格式无效")
     for key in (
         "adapter_id",
         "base_url",
-        "endpoint",
         "model",
     ):
         if not isinstance(value[key], str) or not value[key].strip():
@@ -126,17 +122,6 @@ def load_llm_preset(path: Path) -> LLMPreset:
         or not credential["name"].strip()
     ):
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
-    if "${" in value["endpoint"].replace("${model}", ""):
-        raise ConfigError("LLM Preset endpoint 只允许 ${model} 占位符")
-    if "${" in stream_endpoint.replace("${model}", ""):
-        raise ConfigError("LLM Preset stream_endpoint 只允许 ${model} 占位符")
-    if (
-        "://" in value["endpoint"]
-        or "://" in stream_endpoint
-        or value["endpoint"].startswith("//")
-        or stream_endpoint.startswith("//")
-    ):
-        raise ConfigError("LLM Preset endpoint 必须是相对路径")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
     parsed_base = urlsplit(value["base_url"])
@@ -202,11 +187,22 @@ def load_llm_preset(path: Path) -> LLMPreset:
         unknown = set(placeholders) - {"session_id", "request_id"}
         if unknown:
             raise ConfigError("LLM Preset extra_headers 包含未知占位符")
+    digest_definition = {
+        key: child
+        for key, child in value.items()
+        if key not in _LEGACY_ENDPOINT_KEYS
+    }
+    digest_bytes = json.dumps(
+        digest_definition,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return LLMPreset(
         preset_id=preset_id,
         adapter_id=value["adapter_id"],
         definition=deepcopy(value),
-        digest=f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        digest=f"sha256:{hashlib.sha256(digest_bytes).hexdigest()}",
     )
 
 
@@ -235,7 +231,7 @@ def _reject_placeholders(value: Any) -> None:
 def endpoint_url(
     base_url: str, endpoint: str, model: str | None = None
 ) -> str:
-    """Join a preset's base_url and endpoint into a request URL."""
+    """Join a base URL and relative endpoint into a request URL."""
     if model is not None:
         endpoint = str(endpoint).replace("${model}", str(model))
     return str(base_url).rstrip("/") + "/" + str(endpoint).lstrip("/")

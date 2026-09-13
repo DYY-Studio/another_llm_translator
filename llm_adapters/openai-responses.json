@@ -1,6 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "adapter_id": "openai-responses",
+  "endpoint": "/responses",
   "headers": {
     "Authorization": "Bearer ${api_key}"
   },
@@ -25,6 +26,7 @@
   },
   "streaming": {
     "transport": "sse",
+    "endpoint": "/responses",
     "request_body": {},
     "content_events": [
       {

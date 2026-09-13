@@ -565,12 +565,14 @@ def _resolve_llm_config(
     preset: LLMPreset,
 ) -> dict[str, Any]:
     definition = preset.definition
+    adapter = load_json_adapter(adapter_file)
+    if adapter.adapter_id != preset.adapter_id:
+        raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
     config["llm"].update(
         {
             key: definition[key]
             for key in (
                 "base_url",
-                "endpoint",
                 "model",
                 "credential",
                 "proxy_url",
@@ -578,10 +580,15 @@ def _resolve_llm_config(
                 "max_output_tokens",
                 "context_safety_margin_tokens",
                 "stream",
-                "stream_endpoint",
                 "stream_read_timeout_enabled",
             )
         }
+    )
+    config["llm"]["endpoint"] = adapter.endpoint
+    config["llm"]["stream_endpoint"] = (
+        adapter.streaming_spec["endpoint"]
+        if adapter.streaming_spec is not None
+        else ""
     )
     config["llm"]["adapter"] = preset.adapter_id
     config["execution"].update(
@@ -603,7 +610,7 @@ def _resolve_llm_config(
     fingerprint_definition = {
         key: value
         for key, value in definition.items()
-        if key != "target_chunk_input_tokens"
+        if key not in {"target_chunk_input_tokens", "endpoint", "stream_endpoint"}
     }
     config["_llm_preset_stage_hash"] = "sha256:" + hashlib.sha256(
         json.dumps(
@@ -616,12 +623,6 @@ def _resolve_llm_config(
     config["_llm_preset_definition"] = definition
     config["_llm_extra_body"] = definition["extra_body"]
     config["_llm_extra_headers"] = definition["extra_headers"]
-    adapter_id = str(config["llm"]["adapter"])
-    adapter = load_json_adapter(adapter_file)
-    if adapter.adapter_id != adapter_id:
-        raise ConfigError(
-            "LLM Adapter 文件中的 adapter_id 与配置不一致"
-        )
     config["_llm_adapter"] = adapter
     config["_llm_adapter_hash"] = adapter.digest
     stream = bool(config["llm"].get("stream", False))

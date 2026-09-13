@@ -762,9 +762,9 @@ def register_resource_routes(
             request_id="REQ-PREVIEW",
         )
         endpoint = (
-            preset.definition["stream_endpoint"]
-            if preset.definition["stream"] and preset.definition["stream_endpoint"]
-            else preset.definition["endpoint"]
+            adapter.streaming_spec["endpoint"]
+            if preset.definition["stream"] and adapter.streaming_spec is not None
+            else adapter.endpoint
         )
         return {
             "url": endpoint_url(

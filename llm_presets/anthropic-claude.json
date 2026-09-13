@@ -1,9 +1,8 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "preset_id": "anthropic-claude",
   "adapter_id": "anthropic",
   "base_url": "https://api.anthropic.com/v1",
-  "endpoint": "/messages",
   "model": "claude-sonnet-4-5",
   "proxy_url": "",
   "context_window_tokens": 200000,
@@ -17,7 +16,6 @@
   "max_parallel_per_key": 4,
   "request_timeout_seconds": 120,
   "stream": false,
-  "stream_endpoint": "",
   "stream_read_timeout_enabled": true,
   "extra_body": {},
   "credential": {

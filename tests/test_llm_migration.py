@@ -13,7 +13,7 @@ from app.user_config import default_user_root
 ROOT = Path(__file__).parents[1]
 
 
-def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
+def test_llm_resource_migration_upgrades_presets_but_not_adapter(
     tmp_path: Path,
 ) -> None:
     root = default_user_root(base=tmp_path)
@@ -24,19 +24,19 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     )
     preset["schema_version"] = 2
     preset.pop("stream")
-    preset.pop("stream_endpoint")
+    preset.pop("stream_endpoint", None)
     preset.pop("target_chunk_input_tokens")
     (root / "llm_presets" / "custom.json").write_text(
         json.dumps(preset), encoding="utf-8"
     )
-    preset_v3 = json.loads(
+    preset_v6 = json.loads(
         (ROOT / "llm_presets" / "default.json").read_text("utf-8")
     )
-    preset_v3["schema_version"] = 3
-    preset_v3.pop("stream_read_timeout_enabled")
-    preset_v3.pop("target_chunk_input_tokens")
-    (root / "llm_presets" / "custom-v3.json").write_text(
-        json.dumps(preset_v3), encoding="utf-8"
+    preset_v6["schema_version"] = 6
+    preset_v6["endpoint"] = "/legacy-endpoint"
+    preset_v6["stream_endpoint"] = "/legacy-stream-endpoint"
+    (root / "llm_presets" / "custom-v6.json").write_text(
+        json.dumps(preset_v6), encoding="utf-8"
     )
     adapter = json.loads(
         (ROOT / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
@@ -47,7 +47,7 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
         json.dumps(adapter), encoding="utf-8"
     )
 
-    assert migrate_llm_resources(base=tmp_path) == 3
+    assert migrate_llm_resources(base=tmp_path) == 2
     assert migrate_llm_resources(base=tmp_path) == 0
     upgraded_preset = json.loads(
         (root / "llm_presets" / "custom.json").read_text("utf-8")
@@ -55,20 +55,21 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     upgraded_adapter = json.loads(
         (root / "llm_adapters" / "custom.json").read_text("utf-8")
     )
-    assert upgraded_preset["schema_version"] == 6
+    assert upgraded_preset["schema_version"] == 7
     assert upgraded_preset["stream"] is False
     assert upgraded_preset["stream_endpoint"] == ""
     assert upgraded_preset["stream_read_timeout_enabled"] is True
     assert upgraded_preset["target_chunk_input_tokens"] == 8192
-    upgraded_v3 = json.loads(
-        (root / "llm_presets" / "custom-v3.json").read_text("utf-8")
+    upgraded_v6 = json.loads(
+        (root / "llm_presets" / "custom-v6.json").read_text("utf-8")
     )
-    assert upgraded_v3["schema_version"] == 6
-    assert upgraded_v3["stream_read_timeout_enabled"] is True
+    assert upgraded_v6["schema_version"] == 7
+    assert upgraded_v6["endpoint"] == "/legacy-endpoint"
+    assert upgraded_v6["stream_endpoint"] == "/legacy-stream-endpoint"
     assert upgraded_preset == load_llm_preset(
         root / "llm_presets" / "custom.json"
     ).definition
-    assert upgraded_adapter["schema_version"] == 2
+    assert upgraded_adapter["schema_version"] == 1
     assert "streaming" not in upgraded_adapter
 
 
@@ -84,14 +85,14 @@ def test_llm_resource_migration_uses_user_root_override_without_base(
     )
     value["schema_version"] = 2
     value.pop("stream")
-    value.pop("stream_endpoint")
+    value.pop("stream_endpoint", None)
     value.pop("target_chunk_input_tokens")
     (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
 
     assert migrate_llm_resources() == 1
     assert (
         json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
-        == 6
+        == 7
     )
 
 
@@ -111,7 +112,7 @@ def test_llm_resource_migration_upgrades_v4_per_key_concurrency(
 
     assert migrate_llm_resources(base=tmp_path) == 1
     upgraded = json.loads((presets / "default.json").read_text("utf-8"))
-    assert upgraded["schema_version"] == 6
+    assert upgraded["schema_version"] == 7
     assert upgraded["max_parallel_per_key"] == upgraded["max_parallel"]
 
 
@@ -140,7 +141,7 @@ def test_llm_resource_migration_reports_atomic_write_failure(
     )
     value["schema_version"] = 2
     value.pop("stream")
-    value.pop("stream_endpoint")
+    value.pop("stream_endpoint", None)
     value.pop("target_chunk_input_tokens")
     path = presets / "default.json"
     path.write_text(json.dumps(value), encoding="utf-8")

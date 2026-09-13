@@ -1,6 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "adapter_id": "openai-compatible",
+  "endpoint": "/chat/completions",
   "headers": {
     "Authorization": "Bearer ${api_key}"
   },
@@ -28,6 +29,7 @@
   },
   "streaming": {
     "transport": "sse",
+    "endpoint": "/chat/completions",
     "request_body": {
       "stream_options": {
         "include_usage": true
