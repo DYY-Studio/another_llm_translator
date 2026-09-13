@@ -664,7 +664,9 @@ def stage_fingerprint(
             "llm_adapter": config["llm"]["adapter"],
             "llm_adapter_hash": config.get("_llm_adapter_hash"),
             "llm_preset": config.get("_llm_preset_id"),
-            "llm_preset_hash": config.get("_llm_preset_hash"),
+            "llm_preset_hash": config.get(
+                "_llm_preset_stage_hash", config.get("_llm_preset_hash")
+            ),
             "prompt_rules_version": PROMPT_RULES_VERSION,
             "prompt_languages": prompt_languages or {},
             "temperature": config["llm"][temperature_key],
@@ -976,7 +978,7 @@ def iter_chunk_plans(
         - config["llm"]["context_safety_margin_tokens"]
     )
     target_limits = [
-        config["chunking"]["target_chunk_input_tokens"],
+        config["execution"]["target_chunk_input_tokens"],
         input_limit,
     ]
     if config["execution"]["input_tokens_per_minute"] > 0:

@@ -25,6 +25,7 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     preset["schema_version"] = 2
     preset.pop("stream")
     preset.pop("stream_endpoint")
+    preset.pop("target_chunk_input_tokens")
     (root / "llm_presets" / "custom.json").write_text(
         json.dumps(preset), encoding="utf-8"
     )
@@ -33,6 +34,7 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     )
     preset_v3["schema_version"] = 3
     preset_v3.pop("stream_read_timeout_enabled")
+    preset_v3.pop("target_chunk_input_tokens")
     (root / "llm_presets" / "custom-v3.json").write_text(
         json.dumps(preset_v3), encoding="utf-8"
     )
@@ -53,14 +55,15 @@ def test_llm_resource_migration_upgrades_preset_and_adapter_idempotently(
     upgraded_adapter = json.loads(
         (root / "llm_adapters" / "custom.json").read_text("utf-8")
     )
-    assert upgraded_preset["schema_version"] == 5
+    assert upgraded_preset["schema_version"] == 6
     assert upgraded_preset["stream"] is False
     assert upgraded_preset["stream_endpoint"] == ""
     assert upgraded_preset["stream_read_timeout_enabled"] is True
+    assert upgraded_preset["target_chunk_input_tokens"] == 8192
     upgraded_v3 = json.loads(
         (root / "llm_presets" / "custom-v3.json").read_text("utf-8")
     )
-    assert upgraded_v3["schema_version"] == 5
+    assert upgraded_v3["schema_version"] == 6
     assert upgraded_v3["stream_read_timeout_enabled"] is True
     assert upgraded_preset == load_llm_preset(
         root / "llm_presets" / "custom.json"
@@ -82,12 +85,13 @@ def test_llm_resource_migration_uses_user_root_override_without_base(
     value["schema_version"] = 2
     value.pop("stream")
     value.pop("stream_endpoint")
+    value.pop("target_chunk_input_tokens")
     (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
 
     assert migrate_llm_resources() == 1
     assert (
         json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
-        == 5
+        == 6
     )
 
 
@@ -102,11 +106,12 @@ def test_llm_resource_migration_upgrades_v4_per_key_concurrency(
     )
     value["schema_version"] = 4
     value.pop("max_parallel_per_key")
+    value.pop("target_chunk_input_tokens")
     (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
 
     assert migrate_llm_resources(base=tmp_path) == 1
     upgraded = json.loads((presets / "default.json").read_text("utf-8"))
-    assert upgraded["schema_version"] == 5
+    assert upgraded["schema_version"] == 6
     assert upgraded["max_parallel_per_key"] == upgraded["max_parallel"]
 
 
@@ -136,6 +141,7 @@ def test_llm_resource_migration_reports_atomic_write_failure(
     value["schema_version"] = 2
     value.pop("stream")
     value.pop("stream_endpoint")
+    value.pop("target_chunk_input_tokens")
     path = presets / "default.json"
     path.write_text(json.dumps(value), encoding="utf-8")
 

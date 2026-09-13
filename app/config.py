@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import re
 import tomllib
@@ -40,7 +41,6 @@ SCHEMA: dict[str, Any] = {
     },
     "execution": {"scheduling_mode": None},
     "chunking": {
-        "target_chunk_input_tokens": None,
         "allow_split_oversized_segment": None,
         "cross_boundary_batching": None,
     },
@@ -141,6 +141,8 @@ def is_well_formed_language_tag(value: str) -> bool:
 
 def _reject_unknown(value: dict[str, Any], schema: dict[str, Any], path: str) -> None:
     unknown = set(value) - set(schema)
+    if path == "config.chunking":
+        unknown.discard("target_chunk_input_tokens")
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise ConfigError(f"未知配置键 {path}: {joined}")
@@ -194,10 +196,7 @@ def validate_config(config: dict[str, Any]) -> None:
             codecs.lookup(config[section][key])
         except LookupError as exc:
             raise ConfigError(f"{section}.{key} 不是可用编码") from exc
-    for section, key in (
-        ("chunking", "target_chunk_input_tokens"),
-        ("retry", "http_max_attempts"),
-    ):
+    for section, key in (("retry", "http_max_attempts"),):
         value = config[section][key]
         if (
             not isinstance(value, int)
@@ -378,6 +377,11 @@ def dump_config(config: dict[str, Any]) -> str:
         for key, child_schema in schema.items():
             if child_schema is None:
                 lines.append(f"{key} = {_toml_scalar(value[key])}")
+        if path == ("chunking",) and "target_chunk_input_tokens" in value:
+            lines.append(
+                "target_chunk_input_tokens = "
+                + _toml_scalar(value["target_chunk_input_tokens"])
+            )
         for key, child_schema in schema.items():
             if child_schema is not None:
                 write_table((*path, key), value[key], child_schema)
@@ -585,6 +589,7 @@ def _resolve_llm_config(
             key: definition[key]
             for key in (
                 "token_safety_factor",
+                "target_chunk_input_tokens",
                 "requests_per_minute",
                 "input_tokens_per_minute",
                 "max_parallel",
@@ -595,6 +600,19 @@ def _resolve_llm_config(
     )
     config["_llm_preset_id"] = preset.preset_id
     config["_llm_preset_hash"] = preset.digest
+    fingerprint_definition = {
+        key: value
+        for key, value in definition.items()
+        if key != "target_chunk_input_tokens"
+    }
+    config["_llm_preset_stage_hash"] = "sha256:" + hashlib.sha256(
+        json.dumps(
+            fingerprint_definition,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     config["_llm_preset_definition"] = definition
     config["_llm_extra_body"] = definition["extra_body"]
     config["_llm_extra_headers"] = definition["extra_headers"]
