@@ -259,6 +259,18 @@ def register_plugin(
     return descriptor
 
 
+def test_contract_requires_runtime_model_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Document adapters must provide the v12 runtime render boundary."""
+    register_plugin(monkeypatch, RecordDocumentAdapter())
+
+    from app.plugins import load_plugins
+
+    with pytest.raises(ConfigError, match="render_model_source"):
+        load_plugins()
+
+
 def write_record(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
