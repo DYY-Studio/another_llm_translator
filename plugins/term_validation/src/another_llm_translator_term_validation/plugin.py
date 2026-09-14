@@ -53,6 +53,6 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
         version="0.1.0",
-        protocol_version=11,
+        protocol_version=12,
         translation_validators=(PreferredTermUsageValidator(),),
     )

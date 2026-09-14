@@ -138,7 +138,7 @@ def _project_context(
             )
         adapter = get_document_adapter(str(file_record["document_adapter_id"]))
         raw_run_options = (
-            state_record.get("run_options") if isinstance(state_record, dict) else None
+            state_record.get("run_options") if isinstance(state_record, dict) else {}
         )
         if raw_run_options is not None and (
             not isinstance(raw_run_options, dict)
@@ -146,7 +146,7 @@ def _project_context(
         ):
             raise ConfigError(f"Document Adapter 状态缺少有效 run_options：{file_id}")
         run_options = validate_document_run_options(adapter, raw_run_options)
-        if raw_run_options is None:
+        if state_record is not None and raw_run_options is None:
             raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
         adapter_options[file_id] = run_options
         for segment in (item for item in segments if str(item["file_id"]) == file_id):

@@ -254,14 +254,27 @@ class SRTDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str | None:
-        del stage, language, opaque_state
+        del stage, language, opaque_state, run_options
         return None
 
-    def normalize_model_output(
-        self, *, segment: dict[str, Any], text: str, stage: str
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str:
-        del stage
+        del opaque_state, run_options
+        value = segment.get("model_source")
+        return value if isinstance(value, str) else str(segment["source"])
+
+    def normalize_model_output(
+        self, *, segment: dict[str, Any], text: str, stage: str,
+        opaque_state: dict[str, Any] | None, run_options: dict[str, str]
+    ) -> str:
+        del stage, opaque_state, run_options
         return _validate_output_text(
             text, context=str(segment.get("segment_id", "unknown"))
         )

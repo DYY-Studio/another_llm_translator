@@ -922,7 +922,7 @@ def test_epub_inline_text_forms_one_segment_and_preserves_tag_skeleton(
         )
 
 
-def test_epub_markers_persist_model_source_and_strip_valid_output(
+def test_epub_markers_render_only_for_the_frozen_file_options(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "markers.epub"
@@ -950,12 +950,9 @@ def test_epub_markers_persist_model_source_and_strip_valid_output(
     assert project is not None
     segments = read_segments(project)
     assert segments[0]["source"] == "A B C"
-    assert segments[0]["model_source"] == (
-        "A <em1><strong2>B</strong2></em1> C"
-    )
-    loaded = __import__("app.project", fromlist=["load_segments"]).load_segments(project)
-    assert loaded[0]["_format_markers"]
-    context_config, _, _, _ = _project_context(project, stage="translation")
+    assert "model_source" not in segments[0]
+    context_config, _, _, loaded = _project_context(project, stage="translation")
+    assert loaded[0]["model_source"] == "A <em1><strong2>B</strong2></em1> C"
     assert "<em1>" in context_config[
         "_document_adapter_prompt_requirements"
     ]["F0001"]["en"]
@@ -964,6 +961,8 @@ def test_epub_markers_persist_model_source_and_strip_valid_output(
         segment=loaded[0],
         text="A <em1><strong2>B</strong2></em1> C",
         stage="translation",
+        opaque_state=loaded[0]["_adapter_state"],
+        run_options=loaded[0]["_adapter_run_options"],
     ) == "A B C"
 
 
