@@ -272,7 +272,8 @@ class SRTDocumentAdapter:
 
     def normalize_model_output(
         self, *, segment: dict[str, Any], text: str, stage: str,
-        opaque_state: dict[str, Any] | None, run_options: dict[str, str]
+        opaque_state: dict[str, Any] | None = None,
+        run_options: dict[str, str] | None = None,
     ) -> str:
         del stage, opaque_state, run_options
         return _validate_output_text(

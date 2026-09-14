@@ -837,7 +837,7 @@ def test_epub_parts_follow_xhtml_files_without_splitting_the_file(
         "OEBPS/text/ch2.xhtml",
         "OEBPS/text/ch2.xhtml",
     ]
-    assert files[0]["document_adapter_version"] == "0.5"
+    assert files[0]["document_adapter_version"] == "0.6"
 
 
 @pytest.mark.parametrize("parts", [(), ("only-one",), ("", "two")])
@@ -972,6 +972,7 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
         stage="translation",
         language="zh-CN",
         opaque_state={"inline_format_mode": "plain"},
+        run_options={"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"},
     ) is None
     strict = adapter.model_prompt_requirements(
         stage="translation",
@@ -980,6 +981,7 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
             "inline_format_mode": "markers",
             "inline_format_policy": "strict",
         },
+        run_options={"ruby_mode": "aozora", "inline_format_mode": "markers", "inline_format_policy": "strict"},
     )
     assert strict is not None
     assert "必须保留所有已有标记" in strict
@@ -990,6 +992,7 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
             "inline_format_mode": "markers",
             "inline_format_policy": "tiered",
         },
+        run_options={"ruby_mode": "aozora", "inline_format_mode": "markers", "inline_format_policy": "tiered"},
     )
     assert tiered is not None
     assert "may be omitted as a whole" in tiered
@@ -1001,6 +1004,7 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
             "inline_format_mode": "markers",
             "inline_format_policy": "strict",
         },
+        run_options={"ruby_mode": "aozora", "inline_format_mode": "markers", "inline_format_policy": "strict"},
     )
     assert terminology is not None
     assert "Keep every existing marker" in terminology
@@ -1029,13 +1033,12 @@ def test_epub_markers_reject_unknown_or_broken_output(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    segment = __import__("app.project", fromlist=["load_segments"]).load_segments(project)[0]
+    _, _, _, context_segments = _project_context(project, stage="translation")
+    segment = context_segments[0]
     adapter = get_document_adapter("epub")
     for value in ("<strong1>Text", "<unknown1>Text</unknown1>", "<strong1>Text</em1>"):
         with pytest.raises(IncompleteError):
-            adapter.normalize_model_output(
-                segment=segment, text=value, stage="translation"
-            )
+                adapter.normalize_model_output(segment=segment, text=value, stage="translation", opaque_state=segment["_adapter_state"], run_options=segment["_adapter_run_options"])
 
 
 def test_epub_inline_runs_respect_blocks_and_line_breaks(tmp_path: Path) -> None:
@@ -1271,7 +1274,7 @@ RUBY_XHTML = (
             "compact",
             ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
         ),
-        ("base_only", ["彼は漢字を読む。", "特別だ。"]),
+        ("base_only", ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"]),
     ],
 )
 def test_epub_ruby_modes_form_semantic_segments(
@@ -1281,12 +1284,12 @@ def test_epub_ruby_modes_form_semantic_segments(
     make_epub(source, xhtml=RUBY_XHTML)
 
     imported = get_document_adapter("epub").import_sources(
-        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+            [str(source)], recursive=False, config={}, options={}
     )
 
     assert list(imported.files[0].segments) == expected
     assert imported.files[0].opaque_state is not None
-    assert imported.files[0].opaque_state["ruby_mode"] == mode
+    assert "ruby_mode" not in imported.files[0].opaque_state
 
 
 @pytest.mark.parametrize(
@@ -1314,11 +1317,12 @@ def test_epub_model_only_ruby_modes_keep_aozora_source(
     source = tmp_path / f"ruby-model-{mode}.epub"
     make_epub(source, xhtml=RUBY_XHTML)
 
-    imported = get_document_adapter("epub").import_sources(
-        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
-    )
+    adapter = get_document_adapter("epub")
+    imported = adapter.import_sources([str(source)], recursive=False, config={}, options={})
 
-    assert list(imported.files[0].model_sources or ()) == expected
+    state = imported.files[0].opaque_state
+    assert state is not None
+    assert [adapter.render_model_source(segment={"line_index": index, "source": value}, opaque_state=state, run_options={"ruby_mode": mode, "inline_format_mode": "plain", "inline_format_policy": "tiered"}) for index, value in enumerate(imported.files[0].segments)] == expected
 
 
 @pytest.mark.parametrize(
@@ -1445,7 +1449,7 @@ def test_epub_import_compacts_consecutive_emphasis_ruby(
     )
 
     assert imported.files[0].segments == ("｜强调《・》",)
-    assert imported.files[0].model_sources == (expected_model,)
+    assert imported.files[0].model_sources == (None,)
 
 
 def test_epub_emphasis_compaction_stops_at_controlled_format_boundary(
@@ -1475,9 +1479,11 @@ def test_epub_emphasis_compaction_stops_at_controlled_format_boundary(
     assert imported.files[0].segments == (
         "｜强《・》｜调《・》",
     )
-    assert imported.files[0].model_sources == (
+    state = imported.files[0].opaque_state
+    assert state is not None
+    assert get_document_adapter("epub").render_model_source(segment={"line_index": 0, "source": imported.files[0].segments[0]}, opaque_state=state, run_options={"ruby_mode": "short_xml", "inline_format_mode": "markers", "inline_format_policy": "strict"}) == (
         "<em1><r><b>强</b><y>・</y></r></em1>"
-        "<r><b>调</b><y>・</y></r>",
+        "<r><b>调</b><y>・</y></r>"
     )
 
 

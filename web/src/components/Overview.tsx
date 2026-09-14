@@ -9,6 +9,7 @@ import type { ProjectOverview, ProjectSummary } from "../types";
 import { ProjectBar } from "./ProjectPicker";
 import { InputQueue, AddFilesDialog } from "./ProjectInputs";
 import { ReplacementDialog } from "./ReplacementDialog";
+import { RunOptionsDialog } from "./RunOptionsDialog";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -58,6 +59,8 @@ export function Overview({
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [addFilesOpen, setAddFilesOpen] = useState(false);
   const [replacementTarget, setReplacementTarget] = useState<ProjectFile | null>(null);
+  const [runOptionsFile, setRunOptionsFile] = useState<ProjectFile | null>(null);
+  const [runOptionsAdapter, setRunOptionsAdapter] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -133,6 +136,7 @@ export function Overview({
     ? filesInOrder(value.files, optimisticOrder.after)
     : value.files;
   const fileIds = orderedFiles.map((item) => item.file_id);
+  const adaptersWithRunOptions = [...new Set(orderedFiles.filter((item) => item.has_run_options).map((item) => item.document_adapter_id))];
   const draggedFileIdSet = new Set(draggedFileIds);
   const buttonReorderMode = buttonReorder?.project === project;
   const selectedReorderFileIds = buttonReorderMode
@@ -415,6 +419,7 @@ export function Overview({
           <button className="primary-button" disabled={busy || compacting || buttonReorderMode} onClick={openAddFiles}>
             {translate("overview.addFiles", language)}
           </button>
+          {adaptersWithRunOptions.map((adapterId) => <button key={adapterId} className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => setRunOptionsAdapter(adapterId)}>统一设置 {adapterId.toUpperCase()}</button>)}
           <button className="danger-button" disabled={busy || compacting || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             {translate("overview.remove", language)}
           </button>
@@ -518,6 +523,7 @@ export function Overview({
               >
                 {translate("overview.replace", language)}
               </button>
+              {item.has_run_options && <button type="button" className="quiet-button file-row-replace" disabled={busy || compacting || buttonReorderMode} onClick={(event) => { event.stopPropagation(); setRunOptionsFile(item); }}>设置</button>}
             </div>
           ))}
         </div>
@@ -558,6 +564,8 @@ export function Overview({
           }}
         />
       )}
+      {runOptionsFile && <RunOptionsDialog project={project} fileId={runOptionsFile.file_id} language={language} onClose={() => setRunOptionsFile(null)} onSaved={onFilesChanged} />}
+      {runOptionsAdapter && <RunOptionsDialog project={project} adapterId={runOptionsAdapter} language={language} onClose={() => setRunOptionsAdapter(null)} onSaved={onFilesChanged} />}
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>

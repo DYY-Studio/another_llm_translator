@@ -148,7 +148,7 @@ class EPUBDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
-        run_options: dict[str, str],
+        run_options: dict[str, str] | None = None,
     ) -> str | None:
         if stage not in {
             "terminology",
@@ -159,6 +159,7 @@ class EPUBDocumentAdapter:
             return None
         if not isinstance(opaque_state, dict):
             raise ConfigError("EPUB Document Adapter 状态无效")
+        run_options = run_options or {"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"}
         ruby_mode = run_options["ruby_mode"]
         requirements: list[str] = []
         if ruby_mode == "short_xml":
@@ -242,11 +243,12 @@ class EPUBDocumentAdapter:
         self,
         *,
         segment: dict[str, Any],
-        opaque_state: dict[str, Any] | None,
-        run_options: dict[str, str],
+        opaque_state: dict[str, Any] | None = None,
+        run_options: dict[str, str] | None = None,
     ) -> str:
         if not isinstance(opaque_state, dict):
             raise IncompleteError("EPUB Document Adapter 状态损坏")
+        run_options = run_options or {"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"}
         ruby_mode = run_options["ruby_mode"]
         inline_format_mode = run_options["inline_format_mode"]
         inline_format_policy = run_options["inline_format_policy"]
@@ -345,10 +347,11 @@ class EPUBDocumentAdapter:
         segment: dict[str, Any],
         text: str,
         stage: str,
-        opaque_state: dict[str, Any] | None,
-        run_options: dict[str, str],
+        opaque_state: dict[str, Any] | None = None,
+        run_options: dict[str, str] | None = None,
     ) -> str:
         del stage
+        run_options = run_options or {"ruby_mode": str(segment.get("_ruby_mode", "aozora")), "inline_format_mode": "plain", "inline_format_policy": "tiered"}
         ruby_mode = run_options["ruby_mode"]
         locators = opaque_state.get("locators") if isinstance(opaque_state, dict) else None
         index = segment.get("line_index")
