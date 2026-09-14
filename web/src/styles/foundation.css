@@ -1,0 +1,92 @@
+:root {
+  font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: var(--canvas);
+  font-synthesis: none;
+  color-scheme: light;
+  --text: #172033;
+  --canvas: #f5f7fb;
+  --accent: #175ee8;
+  --accent-hover: #0d50cc;
+  --accent-soft: #edf3ff;
+  --accent-text: #0955dd;
+  --border: #dce2eb;
+  --row-border: #e6eaf0;
+  --input-border: #cfd7e4;
+  --muted: #6b7485;
+  --surface: #ffffff;
+  --surface-soft: #f7f9fc;
+  --surface-raised: #f9fafc;
+  --hover: #f0f4fb;
+  --selected: #f0f5ff;
+  --sidebar: #f8faff;
+  --brand: #14264a;
+  --danger: #c83232;
+  --success: #18834b;
+  --status-idle: #9aa3b2;
+  --status-success: #18a05e;
+  --status-warning: #e87816;
+  --disabled-bg: #f5f6f8;
+  --disabled-text: #7b8493;
+  --disabled-button: #b7c2d3;
+  --on-accent: #ffffff;
+  --focus-ring: rgba(23, 94, 232, .12);
+  --info-border: #bed2f6;
+  --info-bg: #eef5ff;
+  --info-text: #24528f;
+  --warning-border: #f0c58d;
+  --warning-bg: #fff7ea;
+  --warning-text: #84501b;
+  --warning-choice: #d7a665;
+  --danger-border: #e1a7a7;
+  --danger-bg: #fff0f0;
+  --backdrop: rgba(14, 25, 43, .3);
+  --modal-shadow: rgba(20, 35, 60, .2);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --text: #e5eaf3;
+  --canvas: #0e131c;
+  --accent: #72a5ff;
+  --accent-hover: #8db6ff;
+  --accent-soft: #172b4d;
+  --accent-text: #8cb5ff;
+  --border: #303948;
+  --row-border: #293241;
+  --input-border: #465267;
+  --muted: #9ba7ba;
+  --surface: #151b25;
+  --surface-soft: #1a2230;
+  --surface-raised: #1b2330;
+  --hover: #202a38;
+  --selected: #1b2d4a;
+  --sidebar: #111823;
+  --brand: #e7eefb;
+  --danger: #ff8b8b;
+  --success: #64ce91;
+  --status-idle: #7f8b9d;
+  --status-success: #4fc486;
+  --status-warning: #f1a14b;
+  --disabled-bg: #202734;
+  --disabled-text: #8995a8;
+  --disabled-button: #4d596b;
+  --on-accent: #08152d;
+  --focus-ring: rgba(114, 165, 255, .22);
+  --info-border: #345987;
+  --info-bg: #182b43;
+  --info-text: #a9c9f1;
+  --warning-border: #79562e;
+  --warning-bg: #302517;
+  --warning-text: #efc58d;
+  --warning-choice: #9d7240;
+  --danger-border: #794a50;
+  --danger-bg: #351f24;
+  --backdrop: rgba(0, 0, 0, .58);
+  --modal-shadow: rgba(0, 0, 0, .45);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 360px; min-height: 100vh; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
