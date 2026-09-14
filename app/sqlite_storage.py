@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 STAGES = frozenset(
     {
@@ -915,6 +915,80 @@ def _backup_before_schema_upgrade(project: Path, version: int) -> Path:
     return backup_path
 
 
+def _migrate_v4_to_v5(connection: sqlite3.Connection, project: Path) -> None:
+    """Move host-owned run options out of adapter-private state in one txn."""
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    files = connection.execute(
+        "SELECT file_id, payload_json FROM files ORDER BY file_order"
+    ).fetchall()
+    for file_row in files:
+        file_id = str(file_row["file_id"])
+        file_payload = _load(str(file_row["payload_json"]))
+        adapter_id = str(file_payload.get("document_adapter_id", ""))
+        adapter = get_document_adapter(adapter_id)
+        defaults = validate_document_run_options(adapter, {})
+        state_row = connection.execute(
+            "SELECT payload_json FROM adapter_states WHERE file_id = ?", (file_id,)
+        ).fetchone()
+        if state_row is None:
+            if defaults:
+                raise StorageError(f"Document Adapter 状态缺失：{file_id}")
+            continue
+        state_payload = _load(str(state_row["payload_json"]))
+        state_payload["run_options"] = defaults
+        if adapter_id == "epub":
+            stored_name = file_payload.get("stored_name")
+            if not isinstance(stored_name, str) or not stored_name:
+                raise StorageError(f"EPUB 源副本路径缺失：{file_id}")
+            source = project / "input" / stored_name
+            if not source.is_file() or source.is_symlink():
+                raise StorageError(f"EPUB 源副本缺失或无效：{file_id}")
+            imported = adapter.import_sources(
+                [str(source)], recursive=False, config={}, options={}
+            ).files[0]
+            old = connection.execute(
+                "SELECT segment_id, part_id FROM segments WHERE file_id = ? ORDER BY line_index",
+                (file_id,),
+            ).fetchall()
+            if (
+                len(old) != len(imported.segments)
+                or imported.segment_part_ids is None
+                or any(str(row["part_id"]) != imported.segment_part_ids[index] for index, row in enumerate(old))
+            ):
+                raise StorageError(f"EPUB Segment 定位与重建结果不一致：{file_id}")
+            state_payload["state"] = imported.opaque_state
+            file_payload["document_adapter_version"] = adapter.version
+            connection.execute(
+                "UPDATE files SET payload_json = ? WHERE file_id = ?",
+                (_json(file_payload), file_id),
+            )
+            connection.executemany(
+                "UPDATE segments SET source = ?, is_empty = ?, model_source = NULL WHERE segment_id = ?",
+                [
+                    (text, int(not text or text.isspace()), str(row["segment_id"]))
+                    for text, row in zip(imported.segments, old, strict=True)
+                ],
+            )
+        connection.execute(
+            "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+            (_json(state_payload), file_id),
+        )
+    running = connection.execute(
+        "SELECT run_id, payload_json FROM runs WHERE status = 'running'"
+    ).fetchall()
+    for row in running:
+        payload = _load(str(row["payload_json"]))
+        payload.update(
+            status="interrupted",
+            error_message="Document Adapter 运行协议已升级、必须新建 Run",
+        )
+        connection.execute(
+            "UPDATE runs SET status = 'interrupted', payload_json = ? WHERE run_id = ?",
+            (_json(payload), str(row["run_id"])),
+        )
+
+
 def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) -> Path | None:
     """Ensure the project database matches SCHEMA_VERSION.
 
@@ -930,7 +1004,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {1, 2, 3, SCHEMA_VERSION}:
+    elif version not in {1, 2, 3, 4, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -951,6 +1025,8 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             _migrate_legacy_to_v3(connection)
         else:
             _create_tables(connection)
+        if version == 4:
+            _migrate_v4_to_v5(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
