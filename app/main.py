@@ -20,6 +20,10 @@ from .project import (
     init_project,
     prepare_file_replacement,
     remove_project_files,
+    file_run_options,
+    update_file_run_options,
+    update_adapter_run_options,
+    load_source_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
@@ -102,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     files_remove.add_argument("project")
     files_remove.add_argument("file_ids", nargs="+")
+
+    files_options = subparsers.add_parser("files-options", help="查看或更新 File 运行设置")
+    files_options.add_argument("project")
+    target = files_options.add_mutually_exclusive_group(required=True)
+    target.add_argument("--file-id")
+    target.add_argument("--document-adapter")
+    files_options.add_argument("--adapter-option", dest="adapter_options", action="append", metavar="ADAPTER.OPTION=VALUE")
 
     files_replace = subparsers.add_parser(
         "files-replace", help="用新源文件原位替换项目中的一个文件"
@@ -352,6 +363,31 @@ def run(argv: list[str] | None = None) -> int:
             summary["removed_files"],
             summary["removed_segments"],
         )
+        return 0
+    if args.command == "files-options":
+        project = _resolve_project(args)
+        requested = parse_adapter_option_args(args.adapter_options) if args.adapter_options else {}
+        if args.file_id:
+            file_record = next((item for item in load_source_files(project) if str(item["file_id"]) == args.file_id), None)
+            if file_record is None:
+                raise UsageError(f"未知文件 ID：{args.file_id}")
+            adapter_id = str(file_record["document_adapter_id"])
+            options = requested.get(adapter_id, {})
+            if set(requested) - {adapter_id}:
+                raise UsageError("选项必须属于目标 File 的 Document Adapter")
+            with project_write_lock(project):
+                values = update_file_run_options(project, args.file_id, options) if options else file_run_options(project, args.file_id)
+            emit_summary({"file_id": args.file_id, "adapter_id": adapter_id, "values": values})
+            return 0
+        adapter_id = args.document_adapter
+        if set(requested) - {adapter_id}:
+            raise UsageError("选项必须属于目标 Document Adapter")
+        targets = [str(item["file_id"]) for item in load_source_files(project) if str(item["document_adapter_id"]) == adapter_id]
+        if not targets:
+            raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+        with project_write_lock(project):
+            values = update_adapter_run_options(project, adapter_id, requested.get(adapter_id, {})) if requested else {file_id: file_run_options(project, file_id) for file_id in targets}
+        emit_summary({"adapter_id": adapter_id, "files": values})
         return 0
     if args.command == "files-replace":
         project = _resolve_project(args)

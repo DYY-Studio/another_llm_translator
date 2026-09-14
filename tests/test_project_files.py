@@ -720,14 +720,13 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
     assert project is not None
 
     preserved = prepare_file_replacement(project, "F0001", replacement)
-    assert preserved.impact["previous_adapter_options"] == {
+    assert preserved.impact["previous_adapter_options"] == {}
+    assert preserved.impact["previous_run_options"] == {
         "ruby_mode": "base_only",
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
-    assert preserved.impact["replacement_adapter_options"] == preserved.impact[
-        "previous_adapter_options"
-    ]
+    assert preserved.impact["replacement_run_options"] == preserved.impact["previous_run_options"]
     assert preserved.impact["changed_adapter_options"] == []
 
     overridden = prepare_file_replacement(
@@ -736,12 +735,12 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
         replacement,
         adapter_options={"epub": {"ruby_mode": "short_xml"}},
     )
-    assert overridden.impact["replacement_adapter_options"] == {
+    assert overridden.impact["replacement_run_options"] == {
         "ruby_mode": "short_xml",
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
-    assert overridden.impact["changed_adapter_options"] == ["ruby_mode"]
+    assert overridden.impact["changed_adapter_options"] == []
 
 
 def test_file_replacement_supports_legacy_epub_parenthetical_state(

@@ -1035,14 +1035,14 @@ def file_run_options(project: Path, file_id: str) -> dict[str, str]:
     )
     if file_record is None:
         raise UsageError(f"未知文件 ID：{file_id}")
+    from .plugins import get_document_adapter, validate_document_run_options
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
     state = read_adapter_state(project, file_id)
+    if state is None and not adapter.run_options:
+        return {}
     if not isinstance(state, dict) or not isinstance(state.get("run_options"), dict):
         raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
-    from .plugins import get_document_adapter, validate_document_run_options
-
-    return validate_document_run_options(
-        get_document_adapter(str(file_record["document_adapter_id"])), state["run_options"]
-    )
+    return validate_document_run_options(adapter, state["run_options"])
 
 
 def update_file_run_options(
@@ -1072,14 +1072,28 @@ def update_adapter_run_options(
     project: Path, adapter_id: str, options: dict[str, str]
 ) -> dict[str, dict[str, str]]:
     """Apply one partial map to every current File of an Adapter."""
-    targets = [
-        str(item["file_id"])
-        for item in load_source_files(project)
-        if str(item["document_adapter_id"]) == adapter_id
-    ]
+    metadata, files, segments = _source_records(project)
+    targets = [str(item["file_id"]) for item in files if str(item["document_adapter_id"]) == adapter_id]
     if not targets:
         raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
-    return {file_id: update_file_run_options(project, file_id, options) for file_id in targets}
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    adapter = get_document_adapter(adapter_id)
+    states: list[dict[str, Any]] = []
+    result: dict[str, dict[str, str]] = {}
+    for item in files:
+        file_id = str(item["file_id"])
+        state = read_adapter_state(project, file_id)
+        if state is None:
+            continue
+        if file_id in targets:
+            current = file_run_options(project, file_id)
+            current = validate_document_run_options(adapter, {**current, **options})
+            state = {**state, "run_options": current}
+            result[file_id] = current
+        states.append(state)
+    replace_source(project, files, segments, metadata, states)
+    return result
 
 
 def prepare_file_replacement(
@@ -1112,6 +1126,11 @@ def prepare_file_replacement(
     if adapter_options and set(adapter_options) - {adapter_id}:
         raise UsageError("替换只能使用目标 Document Adapter 的选项")
     adapter = get_document_adapter(adapter_id)
+    overrides = (adapter_options or {}).get(adapter_id, {})
+    import_ids = {option.option_id for option in adapter.import_options}
+    run_ids = {option.option_id for option in adapter.run_options}
+    if set(overrides) - import_ids - run_ids:
+        raise UsageError("替换包含未知 Document Adapter 选项")
     previous_state = _adapter_opaque_state(
         read_adapter_state(project, file_id)
     )
@@ -1122,7 +1141,13 @@ def prepare_file_replacement(
     replacement_adapter_options = document_adapter_replacement_options(
         adapter,
         opaque_state=previous_state,
-        overrides=(adapter_options or {}).get(adapter_id),
+        overrides={key: value for key, value in overrides.items() if key in import_ids},
+    )
+    previous_run_options = file_run_options(project, file_id)
+    from .plugins import validate_document_run_options
+    replacement_run_options = validate_document_run_options(
+        adapter,
+        {**previous_run_options, **{key: value for key, value in overrides.items() if key in run_ids}},
     )
     temporary_root = Path(tempfile.mkdtemp(prefix="translator-replacement-"))
     staged_input = temporary_root / input_path.name
@@ -1135,7 +1160,7 @@ def prepare_file_replacement(
             recursive=False,
             config=config,
             document_adapter_id=adapter_id,
-            adapter_options={adapter_id: replacement_adapter_options},
+            adapter_options={adapter_id: {**replacement_adapter_options, **replacement_run_options}},
             allow_replacement_choices=True,
         )
         if len(imports) != 1:
@@ -1197,6 +1222,7 @@ def prepare_file_replacement(
                     adapter_version=adapter.version,
                     file_id=file_id,
                     state=imported.opaque_state,
+                    run_options=imported.run_options or {},
                 ),
             )
         source_snapshot = _replacement_source_snapshot(
@@ -1215,6 +1241,8 @@ def prepare_file_replacement(
         impact["file_id"] = file_id
         impact["previous_adapter_options"] = previous_adapter_options
         impact["replacement_adapter_options"] = replacement_adapter_options
+        impact["previous_run_options"] = previous_run_options
+        impact["replacement_run_options"] = replacement_run_options
         impact["changed_adapter_options"] = sorted(
             option_id
             for option_id, value in replacement_adapter_options.items()

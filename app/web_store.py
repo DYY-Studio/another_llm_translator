@@ -9,7 +9,7 @@ from .documents import compact_emphasis_aozora
 from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
-from .plugins import normalize_model_text
+from .plugins import get_document_adapter, normalize_model_text
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
@@ -454,6 +454,9 @@ class WebStore:
                 "file_order": item["file_order"],
                 "name": item["original_name"],
                 "document_adapter_id": item["document_adapter_id"],
+                "has_run_options": bool(
+                    get_document_adapter(str(item["document_adapter_id"])).run_options
+                ),
                 "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
                 "size_bytes": _stored_source_size(
                     self.project, item.get("stored_name")

@@ -33,6 +33,9 @@ from .project import (
     natural_path_key,
     prepare_file_replacement,
     prompt_file,
+    file_run_options,
+    update_file_run_options,
+    update_adapter_run_options,
     remove_project_files,
     reorder_project_files,
     resolve_project,
@@ -377,6 +380,47 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             if item["adapter_id"] == adapter_id
         )
         return {"adapter": summary, "values": values}
+
+    def run_options_payload(root: Path, file_id: str) -> dict[str, Any]:
+        file_record = next((item for item in load_source_files(root) if str(item["file_id"]) == file_id), None)
+        if file_record is None:
+            raise UsageError(f"未知文件 ID：{file_id}")
+        adapter_id = str(file_record["document_adapter_id"])
+        adapter = get_document_adapter(adapter_id)
+        summary = next(item for item in document_adapter_summaries() if item["adapter_id"] == adapter_id)
+        return {"adapter": summary, "file_id": file_id, "values": file_run_options(root, file_id)}
+
+    @app.get("/api/v1/projects/{name}/files/{file_id}/run-options")
+    async def get_file_run_options(name: str, file_id: str) -> dict[str, Any]:
+        return run_options_payload(project(name), file_id)
+
+    @app.put("/api/v1/projects/{name}/files/{file_id}/run-options")
+    async def put_file_run_options(name: str, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        options = payload.get("options")
+        if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
+            raise UsageError("options 必须是字符串键值对象")
+        root = project(name)
+        with project_write_lock(root):
+            values = update_file_run_options(root, file_id, options)
+        return {**run_options_payload(root, file_id), "values": values}
+
+    @app.get("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
+    async def get_adapter_run_options(name: str, adapter_id: str) -> dict[str, Any]:
+        root = project(name)
+        files = [item for item in load_source_files(root) if str(item["document_adapter_id"]) == adapter_id]
+        if not files:
+            raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+        return {"adapter_id": adapter_id, "files": [{"file_id": str(item["file_id"]), "name": str(item["original_name"]), "values": file_run_options(root, str(item["file_id"]))} for item in files]}
+
+    @app.put("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
+    async def put_adapter_run_options(name: str, adapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        options = payload.get("options")
+        if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
+            raise UsageError("options 必须是字符串键值对象")
+        root = project(name)
+        with project_write_lock(root):
+            values = update_adapter_run_options(root, adapter_id, options)
+        return {"adapter_id": adapter_id, "files": values}
 
     @app.post("/api/v1/projects")
     async def create_project(

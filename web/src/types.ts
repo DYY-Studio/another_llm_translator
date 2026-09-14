@@ -148,6 +148,7 @@ export interface ProjectOverview {
     file_order: number;
     name: string;
     document_adapter_id: string;
+    has_run_options: boolean;
     part_ids: string[];
     size_bytes: number;
   }>;
