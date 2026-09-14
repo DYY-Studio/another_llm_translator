@@ -52,6 +52,7 @@ from .llm_keys import KeyPool
 from .logging_utils import get_logger
 from .plugins import (
     get_document_adapter,
+    validate_document_run_options,
 )
 from .project import (
     PROMPT_LANGUAGES,
@@ -111,7 +112,7 @@ def _project_context(
     metadata = read_json(project, project / "project.json")
     files = load_source_files(project)
     segments = load_segments(project)
-    adapter_options: dict[str, dict[str, Any]] = {}
+    adapter_options: dict[str, dict[str, str]] = {}
     adapters: dict[str, dict[str, str]] = {}
     adapter_prompt_requirements: dict[str, dict[str, str]] = {}
     for file_record in files:
@@ -135,24 +136,34 @@ def _project_context(
             raise ConfigError(
                 f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
             )
-        if isinstance(state, dict):
-            adapter_options[file_id] = {
-                key: state[key]
-                for key in (
-                    "ruby_mode",
-                    "inline_format_mode",
-                    "inline_format_policy",
+        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+        raw_run_options = (
+            state_record.get("run_options") if isinstance(state_record, dict) else None
+        )
+        if raw_run_options is not None and (
+            not isinstance(raw_run_options, dict)
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in raw_run_options.items())
+        ):
+            raise ConfigError(f"Document Adapter 状态缺少有效 run_options：{file_id}")
+        run_options = validate_document_run_options(adapter, raw_run_options)
+        if raw_run_options is None:
+            raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
+        adapter_options[file_id] = run_options
+        for segment in (item for item in segments if str(item["file_id"]) == file_id):
+            segment["_adapter_state"] = state
+            segment["_adapter_run_options"] = run_options
+            if stage is not None:
+                segment["model_source"] = adapter.render_model_source(
+                    segment=segment, opaque_state=state, run_options=run_options
                 )
-                if key in state
-            }
         if stage is not None:
-            adapter = get_document_adapter(str(file_record["document_adapter_id"]))
             requirements: dict[str, str] = {}
             for language in PROMPT_LANGUAGES:
                 requirement = adapter.model_prompt_requirements(
                     stage=stage,
                     language=language,
                     opaque_state=state,
+                    run_options=run_options,
                 )
                 if requirement is not None and not isinstance(requirement, str):
                     raise ConfigError(

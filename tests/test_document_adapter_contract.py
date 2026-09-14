@@ -62,9 +62,23 @@ class RecordDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, object] | None,
+        run_options: dict[str, str],
     ) -> str | None:
-        del stage, language, opaque_state
+        del stage, language, opaque_state, run_options
         return None
+
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, object],
+        opaque_state: dict[str, object] | None,
+        run_options: dict[str, str],
+    ) -> str:
+        del opaque_state
+        source = str(segment["source"])
+        if run_options["line_ending"] == "crlf" and source.strip():
+            return f"<k{int(segment['line_index']) + 1}>{source}</k{int(segment['line_index']) + 1}>"
+        return source
 
     def replacement_options(
         self, *, opaque_state: dict[str, object] | None
@@ -73,13 +87,13 @@ class RecordDocumentAdapter:
             raise IncompleteError("Record 文件缺少 Document Adapter 状态")
         return {
             "source_style": str(opaque_state.get("source_style", "plain")),
-            "line_ending": str(opaque_state.get("line_ending", "lf")),
         }
 
     def normalize_model_output(
-        self, *, segment: dict[str, object], text: str, stage: str
+        self, *, segment: dict[str, object], text: str, stage: str,
+        opaque_state: dict[str, object] | None, run_options: dict[str, str]
     ) -> str:
-        del segment, stage
+        del segment, stage, opaque_state, run_options
         parts: list[str] = []
         stack: list[str] = []
         cursor = 0
@@ -123,7 +137,6 @@ class RecordDocumentAdapter:
         if path.suffix.casefold() not in self.extensions:
             raise UsageError(f"Record Adapter 只接受 {sorted(self.extensions)} 文件：{path}")
         source_style = options["source_style"]
-        line_ending = options.get("line_ending", "lf")
         header: dict[str, str] = {}
         segments: list[str] = []
         parts: list[str] = []
@@ -160,7 +173,7 @@ class RecordDocumentAdapter:
                     encoding_confidence=1.0,
                     opaque_state={
                         "name": header.get("name"),
-                        "line_ending": line_ending,
+                        "line_ending": "lf",
                     },
                 ),
             ),
@@ -263,7 +276,10 @@ def test_contract_requires_runtime_model_renderer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Document adapters must provide the v12 runtime render boundary."""
-    register_plugin(monkeypatch, RecordDocumentAdapter())
+    class MissingRenderer(RecordDocumentAdapter):
+        render_model_source = None
+
+    register_plugin(monkeypatch, MissingRenderer())
 
     from app.plugins import load_plugins
 
@@ -356,7 +372,8 @@ def test_contract_import_by_id_applies_options_and_model_sources(
     assert "model_source" not in segments[1]
     assert segments[2]["model_source"] == "<k3>line three</k3>"
     state = read_json(project, project / "source/adapters/record/F0001.json")
-    assert state["state"] == {"name": None, "line_ending": "crlf"}
+    assert state["state"] == {"name": None, "line_ending": "lf"}
+    assert state["run_options"] == {"line_ending": "crlf"}
 
 
 def test_contract_rejects_unknown_or_invalid_options(
@@ -366,7 +383,7 @@ def test_contract_rejects_unknown_or_invalid_options(
     app_root = make_app_root(tmp_path)
     source = tmp_path / "book.rec"
     write_record(source, "line one")
-    with pytest.raises(UsageError, match="未知导入选项"):
+    with pytest.raises(UsageError, match="未知选项"):
         init_project(
             [str(source)],
             name="demo",
@@ -417,7 +434,7 @@ def test_contract_translation_uses_model_source_and_normalizes_output(
         app_root=app_root,
         projects_root=tmp_path / "projects",
         document_adapter_id="record",
-        adapter_options={"record": {"source_style": "marked"}},
+        adapter_options={"record": {"source_style": "marked", "line_ending": "crlf"}},
     )
     assert project is not None
     seen_sources: list[str] = []
@@ -473,7 +490,7 @@ def test_contract_translation_uses_model_source_and_normalizes_output(
     )
 
 
-def test_contract_run_options_baked_at_import_drive_export(
+def test_contract_run_options_do_not_change_adapter_export_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     register_plugin(monkeypatch, RecordDocumentAdapter())
@@ -518,7 +535,7 @@ def test_contract_run_options_baked_at_import_drive_export(
     export_project(project, "translated", bilingual=False, allow_missing=False)
     written = project / "output" / "translated" / "book.rec"
     assert written.read_bytes() == (
-        "\ufeff# name: demo\r\n译文:line one\r\n译文:line two".encode("utf-8")
+        "\ufeff# name: demo\n译文:line one\n译文:line two".encode("utf-8")
     )
 
 
@@ -573,7 +590,7 @@ def test_contract_corrupt_state_blocks_export_without_output(
         },
     )
 
-    with pytest.raises(IncompleteError, match="line_ending"):
+    with pytest.raises(ConfigError, match="run_options"):
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
@@ -660,12 +677,11 @@ def test_contract_cli_adapter_option_reaches_import_options(
 @pytest.mark.parametrize(
     ("values", "message"),
     [
-        ({"source_style": "plain"}, "不完整"),
         (
-            {"source_style": "plain", "line_ending": "lf", "extra": "x"},
+            {"source_style": "plain", "extra": "x"},
             "不完整",
         ),
-        ({"source_style": "invalid", "line_ending": "lf"}, "取值无效"),
+        ({"source_style": "invalid"}, "取值无效"),
     ],
 )
 def test_document_adapter_replacement_options_require_exact_valid_values(

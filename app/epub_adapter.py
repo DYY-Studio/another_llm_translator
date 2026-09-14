@@ -102,7 +102,8 @@ class EPUBDocumentAdapter:
     readable_versions = frozenset({"0.3", "0.4", "0.5"})
     capabilities = frozenset({"import", "translated_export", "bilingual_export"})
     extensions = frozenset({".epub"})
-    import_options = (
+    import_options = ()
+    run_options = (
         DocumentChoiceOption(
             option_id="ruby_mode",
             label="Ruby 表示",
@@ -124,8 +125,6 @@ class EPUBDocumentAdapter:
                 ("markers", "受控标记"),
             ),
         ),
-    )
-    run_options = (
         DocumentChoiceOption(
             option_id="inline_format_policy",
             label="内联格式保留策略",
@@ -142,20 +141,7 @@ class EPUBDocumentAdapter:
     ) -> dict[str, str]:
         if not isinstance(opaque_state, dict):
             raise ConfigError("EPUB Document Adapter 状态无效")
-        defaults = {
-            "ruby_mode": "aozora",
-            "inline_format_mode": "plain",
-            "inline_format_policy": "tiered",
-        }
-        values: dict[str, str] = {}
-        for option_id, default in defaults.items():
-            value = opaque_state.get(option_id, default)
-            if not isinstance(value, str):
-                raise ConfigError(
-                    f"EPUB Document Adapter 状态选项无效：{option_id}"
-                )
-            values[option_id] = value
-        return values
+        return {}
 
     def model_prompt_requirements(
         self,
@@ -163,6 +149,7 @@ class EPUBDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str | None:
         if stage not in {
             "terminology",
@@ -173,7 +160,7 @@ class EPUBDocumentAdapter:
             return None
         if not isinstance(opaque_state, dict):
             raise ConfigError("EPUB Document Adapter 状态无效")
-        ruby_mode = opaque_state.get("ruby_mode", "aozora")
+        ruby_mode = run_options["ruby_mode"]
         requirements: list[str] = []
         if ruby_mode == "short_xml":
             requirements.append(
@@ -209,10 +196,10 @@ class EPUBDocumentAdapter:
                     "\\|, \\⟦, and \\⟧."
                 )
             )
-        policy = opaque_state.get("inline_format_policy", "tiered")
+        policy = run_options["inline_format_policy"]
         if policy not in {"tiered", "strict"}:
             raise ConfigError(f"EPUB 内联格式策略无效：{policy}")
-        if opaque_state.get("inline_format_mode") != "markers":
+        if run_options["inline_format_mode"] != "markers":
             return " ".join(requirements) or None
         if language == "zh-CN":
             if policy == "strict":
@@ -253,10 +240,11 @@ class EPUBDocumentAdapter:
         return " ".join(requirements)
 
     def normalize_model_output(
-        self, *, segment: dict[str, Any], text: str, stage: str
+        self, *, segment: dict[str, Any], text: str, stage: str,
+        opaque_state: dict[str, Any] | None, run_options: dict[str, str],
     ) -> str:
-        del stage
-        ruby_mode = segment.get("_ruby_mode")
+        del stage, opaque_state
+        ruby_mode = run_options["ruby_mode"]
         marker_ids = {
             str(item["id"])
             for item in segment.get("_format_markers", [])
@@ -270,6 +258,17 @@ class EPUBDocumentAdapter:
             compact_emphasis_aozora(text), segment.get("_format_markers", [])
         )
 
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
+    ) -> str:
+        del opaque_state, run_options
+        value = segment.get("model_source")
+        return value if isinstance(value, str) else str(segment["source"])
+
     def import_sources(
         self,
         inputs: list[str],
@@ -279,9 +278,9 @@ class EPUBDocumentAdapter:
         options: dict[str, str],
     ) -> DocumentImport:
         del config
-        ruby_mode = options["ruby_mode"]
-        inline_format_mode = options.get("inline_format_mode", "plain")
-        inline_format_policy = options.get("inline_format_policy", "tiered")
+        ruby_mode = "aozora"
+        inline_format_mode = "plain"
+        inline_format_policy = "tiered"
         if recursive:
             raise UsageError("EPUB Adapter 不支持目录递归发现")
         if len(inputs) != 1:

@@ -274,7 +274,7 @@ def _import_project_inputs(
     from .plugins import (
         get_document_adapter,
         get_document_adapter_for_extension,
-        validate_document_import_options,
+        split_document_adapter_options,
     )
 
     option_values = adapter_options or {}
@@ -285,17 +285,16 @@ def _import_project_inputs(
             raise UsageError(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
+        import_options, run_options = split_document_adapter_options(
+            adapter, option_values.get(adapter.adapter_id)
+        )
         imported = adapter.import_sources(
             inputs,
             recursive=recursive,
             config=config,
-            options=validate_document_import_options(
-                adapter,
-                option_values.get(adapter.adapter_id),
-                allow_replacement_choices=allow_replacement_choices,
-            ),
+            options=import_options,
         )
-        files = [_normalize_imported_file(item) for item in imported.files]
+        files = [replace(_normalize_imported_file(item), run_options=run_options) for item in imported.files]
         if original_names is not None:
             if len(files) != len(original_names):
                 raise UsageError("Adapter 返回文件数与输入相对路径数量不一致")
@@ -315,15 +314,14 @@ def _import_project_inputs(
             raise UsageError(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
+        import_options, run_options = split_document_adapter_options(
+            adapter, option_values.get(adapter.adapter_id)
+        )
         imported = adapter.import_sources(
             [str(source.path)],
             recursive=False,
             config=config,
-            options=validate_document_import_options(
-                adapter,
-                option_values.get(adapter.adapter_id),
-                allow_replacement_choices=allow_replacement_choices,
-            ),
+            options=import_options,
         )
         if len(imported.files) != 1:
             raise UsageError(
@@ -335,6 +333,7 @@ def _import_project_inputs(
                 replace(
                     _normalize_imported_file(imported.files[0]),
                     original_name=source.original_name,
+                    run_options=run_options,
                 ),
             )
         )
@@ -380,9 +379,21 @@ class TXTDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str | None:
-        del stage, language, opaque_state
+        del stage, language, opaque_state, run_options
         return None
+
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
+    ) -> str:
+        del opaque_state, run_options
+        value = segment.get("model_source")
+        return value if isinstance(value, str) else str(segment["source"])
 
     def replacement_options(
         self, *, opaque_state: dict[str, Any] | None
@@ -647,6 +658,7 @@ def init_project(
                         adapter_version=document_adapter.version,
                         file_id=file_id,
                         state=item.opaque_state,
+                        run_options=item.run_options or {},
                     )
                 )
             file_records.append(
@@ -1015,6 +1027,61 @@ def _adapter_opaque_state(
     return nested if isinstance(nested, dict) else state
 
 
+def file_run_options(project: Path, file_id: str) -> dict[str, str]:
+    """Return the complete, validated host-owned run options for one File."""
+    file_record = next(
+        (item for item in load_source_files(project) if str(item["file_id"]) == file_id),
+        None,
+    )
+    if file_record is None:
+        raise UsageError(f"未知文件 ID：{file_id}")
+    state = read_adapter_state(project, file_id)
+    if not isinstance(state, dict) or not isinstance(state.get("run_options"), dict):
+        raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    return validate_document_run_options(
+        get_document_adapter(str(file_record["document_adapter_id"])), state["run_options"]
+    )
+
+
+def update_file_run_options(
+    project: Path, file_id: str, options: dict[str, str]
+) -> dict[str, str]:
+    """Partially update one File without touching adapter-private state or segments."""
+    metadata, files, segments = _source_records(project)
+    record = _replacement_file(files, file_id)
+    current = file_run_options(project, file_id)
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    adapter = get_document_adapter(str(record["document_adapter_id"]))
+    resolved = validate_document_run_options(adapter, {**current, **options})
+    states: list[dict[str, Any]] = []
+    for item in files:
+        state = read_adapter_state(project, str(item["file_id"]))
+        if state is None:
+            continue
+        if str(item["file_id"]) == file_id:
+            state = {**state, "run_options": resolved}
+        states.append(state)
+    replace_source(project, files, segments, metadata, states)
+    return resolved
+
+
+def update_adapter_run_options(
+    project: Path, adapter_id: str, options: dict[str, str]
+) -> dict[str, dict[str, str]]:
+    """Apply one partial map to every current File of an Adapter."""
+    targets = [
+        str(item["file_id"])
+        for item in load_source_files(project)
+        if str(item["document_adapter_id"]) == adapter_id
+    ]
+    if not targets:
+        raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+    return {file_id: update_file_run_options(project, file_id, options) for file_id in targets}
+
+
 def prepare_file_replacement(
     project: Path,
     file_id: str,
@@ -1335,6 +1402,7 @@ def add_project_files(
                         adapter_version=adapter.version,
                         file_id=file_id,
                         state=item.opaque_state,
+                        run_options=item.run_options or {},
                     )
                 )
             file_record = record_header(
