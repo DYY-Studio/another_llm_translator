@@ -17,8 +17,9 @@
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "adapter_id": "openai-compatible",
+  "endpoint": "/chat/completions",
   "headers": {
     "Authorization": "Bearer ${api_key}"
   },
@@ -65,9 +66,9 @@
 
 ### 请求边界
 
-- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。API 版本前缀
-  （如 `/v1`、`/v1beta`）写入 `base_url`，`endpoint` 必须是相对路径。
-- Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
+- 请求地址只由当前 Preset 的 `base_url` 与 Adapter 的 `endpoint` 组成。API 版本前缀
+  （如 `/v1`、`/v1beta`）写入 `base_url`，Adapter `endpoint` 必须是相对路径。
+- Adapter `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
   `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
 - 未声明 `streaming` 的 Adapter 只支持普通 JSON POST；声明后可由 Preset 显式
@@ -87,13 +88,14 @@
 
 ### SSE 流式规则（可选）
 
-schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
 `streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
 
 ```json
 {
   "streaming": {
     "transport": "sse",
+    "endpoint": "/chat/completions",
     "request_body": {"stream_options": {"include_usage": true}},
     "content_events": [
       {"pointer": "/choices/0/delta/content"}
@@ -120,7 +122,9 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 }
 ```
 
-`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset `extra_body` 的顶层字段冲突。
+`streaming.endpoint` 是启用流式请求时使用的必填相对路径，与顶层 `endpoint` 使用相同
+占位符规则；即使两种请求使用同一路径也必须显式声明。`request_body` 只在流式请求加入，
+不能与基础 `body` 或 Preset `extra_body` 的顶层字段冲突。
 
 `content_events` 必须非空；每项以 `pointer` 指向字符串增量，可选 `when` 条件为 `{"pointer": "...", "equals": <primitive>}` 或 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，未知事件忽略。
 
@@ -235,7 +239,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
 
   未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
+- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Adapter `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
 
   不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
 - `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
@@ -244,7 +248,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
 
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
 ## 2. Document Adapter（Beta）
 
@@ -517,13 +521,13 @@ class MyValidator:
 
 ## 4. LLM Preset（已实现）
 
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
 Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
 
-当前 Preset schema 为 6。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 7。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2–5 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 6，补入缺失字段；`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史快照只在内存中补齐默认值，不改写审计文件。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
+schema 2–6 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 7，补入缺失字段；旧 `endpoint` 与 `stream_endpoint` 字段原样保留，但不校验、不参与请求或指纹。`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史 Preset 快照只在内存中补齐默认值，不改写审计文件；schema 1/2 Adapter 快照不兼容 schema 3，不从 Preset 回退 Endpoint。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 

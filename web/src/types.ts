@@ -873,11 +873,10 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 5;
+  schema_version: 7;
   preset_id: string;
   adapter_id: string;
   base_url: string;
-  endpoint: string;
   model: string;
   credential: LLMCredential;
   proxy_url: string;
@@ -892,7 +891,6 @@ export interface LLMPreset {
   max_parallel_per_key: number;
   request_timeout_seconds: number;
   stream: boolean;
-  stream_endpoint: string;
   stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
   extra_headers: Record<string, string>;

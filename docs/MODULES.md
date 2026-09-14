@@ -134,7 +134,7 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ### `app/llm_preset.py` 与 `app/llm_keys.py`
 
-`llm_preset.py` 解析连接、模型、限流和凭据引用；`llm_keys.py` 管理一次执行中的多 Key 选择、
+`llm_preset.py` 解析 Base URL、模型、限流和凭据引用；`llm_keys.py` 管理一次执行中的多 Key 选择、
 限流、冷却和安全审计。二者不读取或写入阶段结果。
 
 ### `app/llm_client.py`

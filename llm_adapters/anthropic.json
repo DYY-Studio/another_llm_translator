@@ -1,6 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "adapter_id": "anthropic",
+  "endpoint": "/messages",
   "messages_format": "anthropic",
   "headers": {
     "x-api-key": "${api_key}",
@@ -27,6 +28,7 @@
   },
   "streaming": {
     "transport": "sse",
+    "endpoint": "/messages",
     "request_body": {},
     "content_events": [
       {

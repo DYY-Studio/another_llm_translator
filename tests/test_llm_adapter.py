@@ -17,8 +17,9 @@ def write_adapter(tmp_path: Path, value: dict[str, object]) -> Path:
 
 def definition() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 3,
         "adapter_id": "custom-json",
+        "endpoint": "/generate",
         "headers": {
             "Authorization": "Bearer ${api_key}",
             "X-Model": "${model}",
@@ -35,6 +36,51 @@ def definition() -> dict[str, object]:
         },
         "response_content_pointer": "/result/0/text",
     }
+
+
+def test_adapter_schema_v3_owns_request_endpoints(tmp_path: Path) -> None:
+    value = definition()
+    value["endpoint"] = "/models/${model}:generate"
+    value["streaming"] = {
+        "transport": "sse",
+        "endpoint": "/models/${model}:stream",
+        "content_events": [{"pointer": "/delta"}],
+        "terminal": {"sentinel": "[DONE]"},
+    }
+
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+
+    assert adapter.endpoint == "/models/${model}:generate"
+    assert adapter.streaming_spec is not None
+    assert adapter.streaming_spec["endpoint"] == "/models/${model}:stream"
+
+
+def test_adapter_rejects_legacy_schema_without_endpoints(tmp_path: Path) -> None:
+    value = definition()
+    value["schema_version"] = 2
+    value.pop("endpoint")
+    with pytest.raises(ConfigError, match="schema_version 必须是 3"):
+        load_json_adapter(write_adapter(tmp_path, value))
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "https://provider.example/generate",
+        "//provider.example/generate",
+        "/models/${other}:generate",
+        "/models/${model",
+    ],
+)
+def test_adapter_rejects_invalid_endpoint(
+    tmp_path: Path, endpoint: str
+) -> None:
+    value = definition()
+    value["endpoint"] = endpoint
+
+    with pytest.raises(ConfigError, match="endpoint"):
+        load_json_adapter(write_adapter(tmp_path, value))
 
 
 def test_json_adapter_renders_typed_values_and_custom_fields(
@@ -648,9 +694,9 @@ def test_json_adapter_usage_mapping_rejects_invalid(
 
 def streaming_definition() -> dict[str, object]:
     value = definition()
-    value["schema_version"] = 2
     value["streaming"] = {
         "transport": "sse",
+        "endpoint": "/stream",
         "request_body": {"stream_options": {"include_usage": True}},
         "content_events": [
             {
@@ -748,6 +794,13 @@ def test_json_adapter_streaming_rejects_body_conflicts_and_bad_matched_events(
     ("mutate", "message"),
     [
         (lambda value: value["streaming"].update({"transport": "json"}), "transport"),
+        (lambda value: value["streaming"].pop("endpoint"), "缺少字段：endpoint"),
+        (
+            lambda value: value["streaming"].update(
+                {"endpoint": "https://provider.example/stream"}
+            ),
+            "endpoint 必须是相对路径",
+        ),
         (lambda value: value["streaming"].update({"content_events": []}), "非空数组"),
         (lambda value: value["streaming"].update({"terminal": {"exists": True}}), "必须声明 sentinel 或 when"),
         (

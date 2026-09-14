@@ -1,9 +1,8 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "preset_id": "google-gemini",
   "adapter_id": "google-gemini",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
-  "endpoint": "/models/${model}:generateContent",
   "model": "gemini-2.5-flash",
   "proxy_url": "",
   "context_window_tokens": 1048576,
@@ -17,7 +16,6 @@
   "max_parallel_per_key": 4,
   "request_timeout_seconds": 120,
   "stream": false,
-  "stream_endpoint": "/models/${model}:streamGenerateContent?alt=sse",
   "stream_read_timeout_enabled": true,
   "extra_body": {},
   "credential": {

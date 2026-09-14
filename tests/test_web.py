@@ -2329,9 +2329,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
     assert preview["headers"]["Authorization"] == "Bearer ***"
-    assert preview["url"] == (
-        "https://example.com/v1/v1/models/provider/model:stream"
-    )
+    assert preview["url"] == "https://example.com/v1/chat/completions"
     assert preview["body"]["provider"] == custom["extra_body"]["provider"]
     assert preview["body"]["model"] == "provider/model"
     assert preview["transport"] == "sse"
@@ -2351,7 +2349,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
             encoding="utf-8"
         )
     )
-    assert stored_legacy["schema_version"] == 6
+    assert stored_legacy["schema_version"] == 7
     assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
 
     conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}

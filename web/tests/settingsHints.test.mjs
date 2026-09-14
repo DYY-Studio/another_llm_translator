@@ -26,7 +26,6 @@ const hintKeys = [
   "settings.enableDebugHint",
   "settings.debugInjectionHint",
   "preset.adapterHint",
-  "preset.endpointHint",
   "preset.credentialHint",
   "preset.proxyUrlHint",
   "preset.contextWindowHint",
