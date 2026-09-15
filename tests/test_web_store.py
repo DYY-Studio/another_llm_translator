@@ -21,6 +21,7 @@ from app.sqlite_storage import (
 from app.project_export import export_project
 from app.term_library import TermNormalization, load_terms
 from app.term_matching import match_terms
+from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_foundation import make_app_root
 
 
@@ -36,6 +37,106 @@ def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def _replace_epub_state_run_options(
+    project: Path, run_options: dict[str, str]
+) -> None:
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    opaque_state = state.get("state")
+    assert isinstance(opaque_state, dict)
+    for option_id in ("ruby_mode", "inline_format_mode", "inline_format_policy"):
+        opaque_state.pop(option_id, None)
+    state["state"] = opaque_state
+    state["run_options"] = run_options
+    write_json(project, state_path, state)
+
+
+def test_web_store_save_translation_uses_persisted_epub_run_options(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-ruby-options",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    _replace_epub_state_run_options(
+        project,
+        {
+            "ruby_mode": "short_xml",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
+    )
+
+    result = WebStore(project).save_translation(
+        {
+            "segment_id": "F0001-S000001",
+            "text": "<r><b>汉字</b><y>hànzì</y></r>",
+        }
+    )
+
+    assert result["text"] == "｜汉字《hànzì》"
+
+
+def test_web_store_save_review_uses_persisted_epub_run_options_for_markers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "markers.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A <em>B</em> C</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-marker-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    _replace_epub_state_run_options(
+        project,
+        {
+            "ruby_mode": "aozora",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+    store = WebStore(project)
+    store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "base"}
+    )
+
+    result = store.save_review(
+        {
+            "stage": "proofreading",
+            "segment_id": "F0001-S000001",
+            "review_status": "suggested",
+            "suggested_text": "甲 <em1>乙</em1> 丙",
+            "reason": None,
+            "apply": False,
+        }
+    )
+
+    assert result["suggestion"]["suggested_text"] == "甲 乙 丙"
 
 
 def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> None:

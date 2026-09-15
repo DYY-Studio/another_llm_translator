@@ -1339,10 +1339,27 @@ def test_epub_model_ruby_output_normalizes_to_aozora(
     adapter = get_document_adapter("epub")
 
     assert adapter.normalize_model_output(
-        segment={"source": "source", "_ruby_mode": mode},
+        segment={"source": "source"},
         text=model_text,
         stage="translation",
+        opaque_state=None,
+        run_options={
+            "ruby_mode": mode,
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
     ) in {"｜汉字 & 词《hànzì》", "｜汉|字《hànzì》"}
+
+
+def test_epub_model_output_rejects_incomplete_run_options() -> None:
+    with pytest.raises(ConfigError, match="run_options"):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source"},
+            text="source",
+            stage="translation",
+            opaque_state=None,
+            run_options={"ruby_mode": "aozora"},
+        )
 
 
 def test_epub_compact_ruby_round_trips_escaped_literal_text() -> None:
@@ -1350,9 +1367,15 @@ def test_epub_compact_ruby_round_trips_escaped_literal_text() -> None:
     model_text = aozora_to_model_ruby(source, "compact")
 
     assert get_document_adapter("epub").normalize_model_output(
-        segment={"source": source, "_ruby_mode": "compact"},
+        segment={"source": source},
         text=model_text,
         stage="translation",
+        opaque_state=None,
+        run_options={
+            "ruby_mode": "compact",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
     ) == source
 
 
@@ -1361,9 +1384,15 @@ def test_epub_compact_ruby_unescapes_plain_literal_text() -> None:
     model_text = escape_model_ruby_literal(source, "compact")
 
     assert get_document_adapter("epub").normalize_model_output(
-        segment={"source": source, "_ruby_mode": "compact"},
+        segment={"source": source},
         text=model_text,
         stage="translation",
+        opaque_state=None,
+        run_options={
+            "ruby_mode": "compact",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
     ) == source
 
 
@@ -1373,9 +1402,15 @@ def test_epub_compact_ruby_rejects_invalid_literal_escapes(
 ) -> None:
     with pytest.raises(IncompleteError):
         get_document_adapter("epub").normalize_model_output(
-            segment={"source": "source", "_ruby_mode": "compact"},
+            segment={"source": "source"},
             text=model_text,
             stage="translation",
+            opaque_state=None,
+            run_options={
+                "ruby_mode": "compact",
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            },
         )
 
 
@@ -1393,9 +1428,15 @@ def test_epub_model_ruby_output_rejects_broken_structure(
 ) -> None:
     with pytest.raises(IncompleteError):
         get_document_adapter("epub").normalize_model_output(
-            segment={"source": "source", "_ruby_mode": mode},
+            segment={"source": "source"},
             text=model_text,
             stage="translation",
+            opaque_state=None,
+            run_options={
+                "ruby_mode": mode,
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            },
         )
 
 

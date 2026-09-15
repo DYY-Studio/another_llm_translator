@@ -347,21 +347,44 @@ class EPUBDocumentAdapter:
         segment: dict[str, Any],
         text: str,
         stage: str,
-        opaque_state: dict[str, Any] | None = None,
-        run_options: dict[str, str] | None = None,
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str:
         del stage
-        run_options = run_options or {"ruby_mode": str(segment.get("_ruby_mode", "aozora")), "inline_format_mode": "plain", "inline_format_policy": "tiered"}
+        required_options = {
+            "ruby_mode",
+            "inline_format_mode",
+            "inline_format_policy",
+        }
+        if set(run_options) != required_options or any(
+            not isinstance(value, str) for value in run_options.values()
+        ):
+            raise ConfigError("EPUB Document Adapter run_options 不完整")
         ruby_mode = run_options["ruby_mode"]
-        locators = opaque_state.get("locators") if isinstance(opaque_state, dict) else None
-        index = segment.get("line_index")
-        locator = (
-            locators[index].get("slot")
-            if isinstance(locators, list) and isinstance(index, int)
-            and 0 <= index < len(locators) and isinstance(locators[index], dict)
-            else None
-        )
-        formats = locator.get("formats", []) if isinstance(locator, dict) else []
+        if ruby_mode not in {"aozora", "short_xml", "compact", "base_only"}:
+            raise ConfigError(f"EPUB Ruby 模型表示无效：{ruby_mode}")
+        formats = segment.get("_format_markers")
+        if formats is None:
+            if isinstance(opaque_state, dict):
+                locators = opaque_state.get("locators")
+                index = segment.get("line_index")
+                if (
+                    not isinstance(locators, list)
+                    or not isinstance(index, int)
+                    or not 0 <= index < len(locators)
+                ):
+                    raise IncompleteError("EPUB Segment 缺少内联格式状态")
+                locator = locators[index]
+                slot = locator.get("slot") if isinstance(locator, dict) else None
+                if not isinstance(slot, dict):
+                    raise IncompleteError("EPUB Segment 缺少内联格式状态")
+                formats = slot.get("formats", [])
+            elif run_options["inline_format_mode"] == "markers":
+                raise IncompleteError("EPUB Segment 缺少内联格式状态")
+            else:
+                formats = []
+        if not isinstance(formats, list):
+            raise IncompleteError("EPUB 内联格式状态损坏")
         marker_ids = {
             str(item["id"])
             for item in formats
@@ -425,7 +448,6 @@ class EPUBDocumentAdapter:
                         continue
                 for locator, source, model_source in _text_slots(
                     text_root,
-                    ruby_mode="aozora",
                     ruby_retention="preserve",
                     inline_format_mode="markers",
                     inline_format_policy="strict",
@@ -636,7 +658,6 @@ class EPUBDocumentAdapter:
                         str(segment.get("_adapter_source", segment["source"])),
                         target,
                         bilingual=bilingual,
-                        ruby_mode=str(state.get("ruby_mode", "")),
                     )
                 if not bilingual:
                     ruby_items.sort(
@@ -651,7 +672,6 @@ class EPUBDocumentAdapter:
                             slot,
                             target,
                             bilingual=bilingual,
-                            ruby_mode=str(state.get("ruby_mode", "")),
                         )
                     else:
                         _set_composite_slot(
@@ -660,7 +680,6 @@ class EPUBDocumentAdapter:
                             str(segment.get("_adapter_source", segment["source"])),
                             target,
                             bilingual=bilingual,
-                            ruby_mode=str(state.get("ruby_mode", "")),
                         )
                 ElementTree.register_namespace("", _XHTML_NAMESPACE)
                 ElementTree.register_namespace("epub", _EPUB_NAMESPACE)
@@ -1327,7 +1346,6 @@ def _first_ruby_path(raw: Any) -> tuple[int, ...]:
 def _text_slots(
     root: ElementTree.Element,
     *,
-    ruby_mode: str,
     ruby_retention: str = "preserve",
     inline_format_mode: str = "plain",
     inline_format_policy: str = "tiered",
@@ -1347,14 +1365,6 @@ def _text_slots(
         return len(path) >= len(ancestor) and path[: len(ancestor)] == ancestor
 
     def model_run() -> tuple[str, list[dict[str, Any]]]:
-        has_ruby = any(
-            isinstance(locator, dict) and locator.get("kind") == "ruby"
-            for locator, _ in semantic_run
-        )
-        if inline_format_mode != "markers" and not (
-            has_ruby and ruby_mode in {"short_xml", "compact"}
-        ):
-            return "", []
         entries: list[dict[str, Any]] = []
         for path, name in format_elements:
             indexes = [
@@ -1401,24 +1411,22 @@ def _text_slots(
             ):
                 parts.append(f"</{item['id']}>")
         rendered = "".join(parts)
-        if ruby_mode not in {"aozora", "short_xml", "compact"}:
-            return rendered, entries
         converted: list[str] = []
         cursor = 0
         for match in _INLINE_MARKER_RE.finditer(rendered):
             literal = compact_emphasis_aozora(rendered[cursor : match.start()])
             converted.append(
-                aozora_to_model_ruby(literal, ruby_mode)
+                aozora_to_model_ruby(literal, "aozora")
                 if "｜" in literal
-                else escape_model_ruby_literal(literal, ruby_mode)
+                else escape_model_ruby_literal(literal, "aozora")
             )
             converted.append(match.group())
             cursor = match.end()
         literal = compact_emphasis_aozora(rendered[cursor:])
         converted.append(
-            aozora_to_model_ruby(literal, ruby_mode)
+            aozora_to_model_ruby(literal, "aozora")
             if "｜" in literal
-            else escape_model_ruby_literal(literal, ruby_mode)
+            else escape_model_ruby_literal(literal, "aozora")
         )
         return "".join(converted), entries
 
@@ -1648,8 +1656,6 @@ def _render_ruby(
     reading = "／".join(reading_groups)
     if ruby_mode == "base_only":
         return base
-    if ruby_mode == "parenthetical":
-        return f"{base}（{reading}）"
     return f"｜{base}《{reading}》"
 
 
@@ -1694,9 +1700,7 @@ def _set_regular_slot(
     target: str,
     *,
     bilingual: bool,
-    ruby_mode: str = "",
 ) -> None:
-    del ruby_mode
     fragments, found_ruby = parse_aozora_text(target)
     if found_ruby:
         _set_regular_aozora(
@@ -2077,7 +2081,6 @@ def _set_composite_slot(
     target: str,
     *,
     bilingual: bool,
-    ruby_mode: str = "",
 ) -> None:
     slots, members = _resolve_composite_members(root, raw)
     if not any(kind == "ruby" for kind, _ in members):
@@ -2085,7 +2088,6 @@ def _set_composite_slot(
         return
     if compact_emphasis_aozora(_composite_source(slots, members)) != compact_emphasis_aozora(source):
         raise IncompleteError("EPUB 复合 Segment 与原文不一致")
-    del ruby_mode
     _, found_ruby = parse_aozora_text(target)
     if found_ruby:
         _set_composite_aozora(
@@ -2152,12 +2154,10 @@ def _set_ruby_slot(
     target: str,
     *,
     bilingual: bool,
-    ruby_mode: str = "",
 ) -> None:
     if not isinstance(raw, dict):
         raise IncompleteError("EPUB Ruby 定位 slot 损坏")
     parent, ruby = _resolve_ruby_slot(root, raw)
-    del ruby_mode
     fragments, found_ruby = parse_aozora_text(target)
     if found_ruby:
         ruby_tail = ruby.tail or ""
