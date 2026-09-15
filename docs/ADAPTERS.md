@@ -274,6 +274,10 @@ class DocumentAdapter(Protocol):
         run_options: dict[str, str]
     ) -> str: ...
 
+    def segment_format_count(
+        *, segment: dict, opaque_state: dict | None
+    ) -> int: ...
+
     def normalize_model_output(
         *, segment: dict, text: str, stage: str,
         opaque_state: dict | None, run_options: dict[str, str]
@@ -489,7 +493,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=11,
+        protocol_version=12,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -498,7 +502,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `11`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `12`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
 
 上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 

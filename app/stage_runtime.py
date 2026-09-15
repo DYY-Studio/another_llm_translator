@@ -1240,8 +1240,8 @@ def _split_segment_source(
     if isinstance(existing_model_source, str):
         if existing_model_source != original_source:
             raise ConfigError(
-                "Document Adapter 提供的 model_source 无法验证切片映射；"
-                "请在 Adapter 中提供可验证切片或关闭概括拆分"
+                "当前 Document Adapter 运行格式无法安全映射超长 Segment 的切片；"
+                "请缩短 Segment、提高模型上下文限制，或关闭超长 Segment 拆分"
             )
         result["model_source"] = source
     return result
