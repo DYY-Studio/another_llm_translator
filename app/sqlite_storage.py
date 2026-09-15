@@ -553,6 +553,20 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
             "UPDATE runs SET status = 'interrupted', payload_json = ? WHERE run_id = ?",
             (_json(payload), str(row["run_id"])),
         )
+    summary_running = connection.execute(
+        "SELECT run_id, payload_json FROM summary_runs WHERE status = 'running'"
+    ).fetchall()
+    for row in summary_running:
+        payload = _load(str(row["payload_json"]))
+        payload.update(
+            status="interrupted",
+            error_message="Document Adapter 运行协议已升级、必须新建 Run",
+        )
+        connection.execute(
+            "UPDATE summary_runs SET status = 'interrupted', updated_at = ?, "
+            "payload_json = ? WHERE run_id = ?",
+            (utc_now(), _json(payload), str(row["run_id"])),
+        )
 
 
 def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) -> Path | None:

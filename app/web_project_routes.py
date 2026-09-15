@@ -294,8 +294,6 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             if connection is not None:
                 connection.close()
         if schema_version is not None and schema_version not in {
-            1,
-            2,
             3,
             4,
             SCHEMA_VERSION,

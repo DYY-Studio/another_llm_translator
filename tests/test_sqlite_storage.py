@@ -655,7 +655,12 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         assert state_row is not None
         state_payload = json.loads(str(state_row["payload_json"]))
         state_payload["adapter_version"] = "0.5"
-        state_payload.pop("run_options", None)
+        state_payload["run_options"] = {
+            "ruby_mode": "compact",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        }
+        state_payload["state"]["ruby_mode"] = "compact"
         segment_ids = [
             str(row[0])
             for row in database.execute(
@@ -674,6 +679,29 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
             (json.dumps(state_payload), str(file_row["file_id"])),
         )
+        if version == 3:
+            database.execute("DROP TABLE summary_runs")
+            database.execute("DROP TABLE content_summaries")
+            database.execute("DROP TABLE summary_participation")
+        else:
+            database.execute(
+                "INSERT INTO summary_runs("
+                "run_id, mode, status, source_ranges_json, input_digest, "
+                "prompt_digest, model, started_at, updated_at, payload_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "SUMMARY-MIGRATION",
+                    "fragment",
+                    "running",
+                    "[]",
+                    "sha256:input",
+                    "sha256:prompt",
+                    "test-model",
+                    "2026-09-15T00:00:00+00:00",
+                    "2026-09-15T00:00:00+00:00",
+                    json.dumps({"run_id": "SUMMARY-MIGRATION", "status": "running"}),
+                ),
+            )
         database.execute(
             "INSERT INTO runs(run_id, stage, status, started_at, payload_json) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -718,6 +746,7 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             "inline_format_mode": "plain",
             "inline_format_policy": "tiered",
         }
+        assert state_payload["state"].get("ruby_mode") != "compact"
         assert [
             str(row[0])
             for row in database.execute(
@@ -731,6 +760,20 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         assert json.loads(str(run["payload_json"]))["error_message"] == (
             "Document Adapter 运行协议已升级、必须新建 Run"
         )
+        if version == 3:
+            assert database.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'summary_runs'"
+            ).fetchone() is not None
+        else:
+            summary_run = database.execute(
+                "SELECT status, payload_json FROM summary_runs "
+                "WHERE run_id = 'SUMMARY-MIGRATION'"
+            ).fetchone()
+            assert summary_run["status"] == "interrupted"
+            assert json.loads(str(summary_run["payload_json"]))["error_message"] == (
+                "Document Adapter 运行协议已升级、必须新建 Run"
+            )
 
 
 @pytest.mark.parametrize("version", [1, 2])

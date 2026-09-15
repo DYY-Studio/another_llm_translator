@@ -651,6 +651,29 @@ def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     assert not (project / "snapshots" / "storage_migrations").exists()
 
 
+@pytest.mark.parametrize("schema_version", ["1", "2"])
+def test_web_project_list_rejects_unsupported_legacy_schema(
+    tmp_path: Path, schema_version: str
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    connection = sqlite3.connect(project / "project.sqlite")
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (schema_version,),
+            )
+    finally:
+        connection.close()
+
+    client = TestClient(create_app(projects_root=projects_root))
+
+    listed = client.get("/api/v1/projects")
+
+    assert listed.status_code == 400
+    assert "schema_version" in listed.json()["error"]
+
+
 def test_web_segment_query_does_not_collect_project_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
