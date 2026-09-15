@@ -1,28 +1,27 @@
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
+
 from .documents import (
     DocumentExportJob,
     document_adapter_reads_version,
     publish_document_exports,
 )
-from .errors import (
-    ExportError,
-    UsageError,
-)
+from .errors import ExportError, UsageError
 from .execution import (
     classify_stage,
     load_stage_history,
 )
 from .logging_utils import get_logger
-from .plugins import (
-    get_document_adapter,
-)
-from .sqlite_storage import (
-    read_json,
+from .plugins import get_document_adapter
+from .sqlite_storage import read_json
+from .stage_runtime import (
+    _project_context,
+    _require_nonempty_segments,
+    _restore_leading_whitespace,
 )
 
-from .stage_runtime import (_project_context, _require_nonempty_segments, _restore_leading_whitespace)
 
 def export_project(
     project: Path,
@@ -206,12 +205,17 @@ def export_project(
             if state_path is not None:
                 state_record = read_json(project, project / str(state_path))
                 if (
-                    state_record.get("adapter_id") != adapter_id
+                    not isinstance(state_record, dict)
+                    or state_record.get("adapter_id") != adapter_id
                     or str(state_record.get("adapter_version"))
                     != project_version
                     or state_record.get("file_id")
                     not in {None, file_record["file_id"]}
-                    or not isinstance(state_record.get("state"), dict)
+                    or "state" not in state_record
+                    or (
+                        state_record["state"] is not None
+                        and not isinstance(state_record["state"], dict)
+                    )
                 ):
                     raise ExportError(
                         f"Document Adapter 状态损坏或版本不匹配："

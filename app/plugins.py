@@ -376,7 +376,10 @@ def validate_document_run_options(
 
 
 def split_document_adapter_options(
-    adapter: DocumentAdapter, values: dict[str, str] | None
+    adapter: DocumentAdapter,
+    values: dict[str, str] | None,
+    *,
+    allow_replacement_choices: bool = False,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Validate the shared input shape and keep import/run ownership separate."""
     provided = values or {}
@@ -386,7 +389,14 @@ def split_document_adapter_options(
         raise UsageError(f"{adapter.adapter_id} 包含未知选项：{', '.join(unknown)}")
     imports = {key: value for key, value in provided.items() if key in {option.option_id for option in adapter.import_options}}
     runs = {key: value for key, value in provided.items() if key in {option.option_id for option in adapter.run_options}}
-    return validate_document_import_options(adapter, imports), validate_document_run_options(adapter, runs)
+    return (
+        validate_document_import_options(
+            adapter,
+            imports,
+            allow_replacement_choices=allow_replacement_choices,
+        ),
+        validate_document_run_options(adapter, runs),
+    )
 
 
 def document_adapter_replacement_options(

@@ -284,7 +284,9 @@ def _import_project_inputs(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
         import_options, run_options = split_document_adapter_options(
-            adapter, option_values.get(adapter.adapter_id)
+            adapter,
+            option_values.get(adapter.adapter_id),
+            allow_replacement_choices=allow_replacement_choices,
         )
         imported = adapter.import_sources(
             inputs,
@@ -313,7 +315,9 @@ def _import_project_inputs(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
         import_options, run_options = split_document_adapter_options(
-            adapter, option_values.get(adapter.adapter_id)
+            adapter,
+            option_values.get(adapter.adapter_id),
+            allow_replacement_choices=allow_replacement_choices,
         )
         imported = adapter.import_sources(
             [str(source.path)],

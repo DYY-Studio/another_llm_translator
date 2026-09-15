@@ -1,18 +1,19 @@
 from __future__ import annotations
+
 import json
 import os
 import secrets
-import sqlite3
 import shutil
+import sqlite3
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from .errors import (
-    UsageError,
-)
+
+from .errors import ConfigError, UsageError
 from .locking import project_write_lock
 from .plugins import (
     document_adapter_replacement_options,
@@ -21,25 +22,25 @@ from .plugins import (
     get_document_adapter_for_extension,
 )
 from .project import (
-    FileReplacementPlan,
     PROMPT_LANGUAGES,
     PROMPT_RESOURCE_STAGES,
+    FileReplacementPlan,
     add_project_files,
     apply_file_replacement,
     delete_project,
     ensure_missing_summary_prompts,
+    file_run_options,
     init_project,
     load_source_files,
     natural_path_key,
     prepare_file_replacement,
     prompt_file,
-    file_run_options,
-    update_file_run_options,
-    update_adapter_run_options,
     remove_project_files,
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
+    update_adapter_run_options,
+    update_file_run_options,
 )
 from .sqlite_storage import (
     SCHEMA_VERSION,
@@ -51,6 +52,7 @@ from .sqlite_storage import (
 )
 from .user_config import user_root
 from .web_store import WebStore
+
 
 @dataclass
 class ReplacementPreviewSession:
@@ -362,11 +364,14 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         adapter_id = str(file_record["document_adapter_id"])
         adapter = get_document_adapter(adapter_id)
         state = read_adapter_state(root, file_id)
-        opaque_state = (
-            state.get("state")
-            if isinstance(state, dict) and isinstance(state.get("state"), dict)
-            else state
-        )
+        if state is None:
+            opaque_state = None
+        elif not isinstance(state, dict) or "state" not in state:
+            raise ConfigError(f"Document Adapter 状态缺少 state：{file_id}")
+        else:
+            opaque_state = state["state"]
+            if opaque_state is not None and not isinstance(opaque_state, dict):
+                raise ConfigError(f"Document Adapter 状态无效：{file_id}")
         values = document_adapter_replacement_options(
             adapter,
             opaque_state=opaque_state,

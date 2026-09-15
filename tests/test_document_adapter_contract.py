@@ -8,10 +8,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import ConfigError, IncompleteError, UsageError
-from app.execution import Scope, create_run, stage_fingerprint
+from app.execution import Scope, create_run, stage_fingerprint, stage_result_path
 from app.main import run
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -19,6 +20,7 @@ from app.plugins import (
     document_adapter_replacement_options,
 )
 from app.project import (
+    _import_project_inputs,
     file_run_options,
     init_project,
     load_segments,
@@ -26,9 +28,10 @@ from app.project import (
     update_file_run_options,
 )
 from app.project_export import export_project
-from app.sqlite_storage import read_json, write_json
+from app.sqlite_storage import append_jsonl, read_json, record_header, write_json
 from app.stage_runtime import _project_context
 from app.stage_translation import run_translation
+from app.web import create_app
 from tests.helpers import llm_jsonl
 from tests.test_documents import FakeEntryPoint
 from tests.test_foundation import make_app_root
@@ -275,6 +278,10 @@ class StatelessRunOptionsAdapter(RecordDocumentAdapter):
         ),
     )
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.export_states: list[dict[str, object] | None] = []
+
     def import_sources(
         self,
         inputs: list[str],
@@ -316,6 +323,43 @@ class StatelessRunOptionsAdapter(RecordDocumentAdapter):
     ) -> str:
         del opaque_state, run_options
         return str(segment["source"])
+
+    def export_sources(
+        self,
+        *,
+        project: Path,
+        staging_dir: Path,
+        file: dict[str, object],
+        segments: list[dict[str, object]],
+        output_text: dict[str, str],
+        bilingual: bool,
+        output_encoding: str,
+        target_language: str,
+        target_language_tag: str,
+        opaque_state: dict[str, object] | None,
+    ) -> list[Path]:
+        del project, bilingual, output_encoding, target_language, target_language_tag
+        self.export_states.append(opaque_state)
+        relative = Path(str(file["original_name"]))
+        destination = staging_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            "\n".join(output_text[str(item["segment_id"])] for item in segments),
+            encoding="utf-8",
+        )
+        return [relative]
+
+
+class ReplacementStateProbeAdapter(StatelessRunOptionsAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.replacement_states: list[dict[str, object] | None] = []
+
+    def replacement_options(
+        self, *, opaque_state: dict[str, object] | None
+    ) -> dict[str, str]:
+        self.replacement_states.append(opaque_state)
+        return {}
 
 
 def test_contract_stateless_run_options_persist_and_update(
@@ -385,6 +429,122 @@ def test_contract_stateless_run_options_are_frozen_in_run_manifest(
     assert manifest["document_adapter_options"] == {
         "F0001": {"mode": "strict"}
     }
+
+
+def test_contract_stateless_state_null_reaches_export_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = StatelessRunOptionsAdapter()
+    register_plugin(monkeypatch, adapter)
+    source = tmp_path / "book.srec"
+    source.write_text("line one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="stateless-export",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+    )
+    assert project is not None
+    metadata = read_json(project, project / "project.json")
+    segment = load_segments(project)[0]
+    append_jsonl(
+        project,
+        stage_result_path(project, "translation"),
+        record_header(
+            "stage_result",
+            str(metadata["project_id"]),
+            stage="translation",
+            segment_id=segment["segment_id"],
+            status="completed",
+            text="translated",
+            validation_status="passed",
+            validation_findings=[],
+            stage_fingerprint="sha256:test",
+            terms_revision=0,
+            run_id="RUN-TEST",
+            request_id="REQ-TEST",
+        ),
+    )
+
+    result = export_project(
+        project, "translated", bilingual=False, allow_missing=False
+    )
+
+    assert (project / result["written"][0]).read_text(encoding="utf-8") == "translated"
+    assert adapter.export_states == [None]
+
+
+def test_web_replacement_options_passes_only_opaque_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = ReplacementStateProbeAdapter()
+    register_plugin(monkeypatch, adapter)
+    source = tmp_path / "book.srec"
+    source.write_text("line one", encoding="utf-8")
+    app_root = make_app_root(tmp_path)
+    project, _ = init_project(
+        [str(source)],
+        name="stateless-web-replacement",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+    )
+    assert project is not None
+
+    client = TestClient(
+        create_app(
+            projects_root=project.parent,
+            app_root=app_root,
+        )
+    )
+    response = client.get(
+        "/api/v1/projects/stateless-web-replacement/files/F0001/"
+        "replacement-options"
+    )
+
+    assert response.status_code == 200
+    assert adapter.replacement_states == [None]
+
+
+def test_replacement_import_accepts_replacement_choices_only_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LegacySourceStyleAdapter(RecordDocumentAdapter):
+        adapter_id = "legacy-record"
+        extensions = frozenset({".lrec"})
+        import_options = (
+            DocumentChoiceOption(
+                option_id="source_style",
+                label="来源样式",
+                default="plain",
+                choices=(("plain", "纯文本"), ("marked", "受控标记")),
+                replacement_choices=(("legacy", "旧样式"),),
+            ),
+        )
+
+    register_plugin(monkeypatch, LegacySourceStyleAdapter())
+    source = tmp_path / "book.lrec"
+    write_record(source, "line one")
+    options = {"legacy-record": {"source_style": "legacy"}}
+
+    with pytest.raises(UsageError, match="取值无效"):
+        _import_project_inputs(
+            [str(source)],
+            recursive=False,
+            config={},
+            document_adapter_id="legacy-record",
+            adapter_options=options,
+        )
+    imported, _ = _import_project_inputs(
+        [str(source)],
+        recursive=False,
+        config={},
+        document_adapter_id="legacy-record",
+        adapter_options=options,
+        allow_replacement_choices=True,
+    )
+    assert imported[0][1].opaque_state == {"name": None, "line_ending": "lf"}
 
 
 @pytest.mark.parametrize(
