@@ -953,7 +953,9 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "document",
     ]
     assert overview["segments"][0]["translation"] is None
+    assert overview["segments"][0]["format_count"] == 0
     assert store.segment_detail("F0001-S000001")["part_id"] == "document"
+    assert store.segment_detail("F0001-S000001")["format_count"] == 0
     assert overview["segments"][0]["reviews"]["proofreading"] == {
         "base": None,
         "suggestion": None,
@@ -961,6 +963,125 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "outdated": False,
         "applied_current": False,
     }
+
+
+def test_web_store_format_count_is_zero_for_unformatted_epub_segment(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "plain.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>Plain text</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-none",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    store = WebStore(project)
+
+    assert store.overview()["segments"][0]["format_count"] == 0
+    assert store.segment_detail("F0001-S000001")["format_count"] == 0
+
+
+def test_web_store_format_count_reports_all_epub_format_ranges(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "formatted.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A <em>B</em> <strong>C</strong></p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-many",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    store = WebStore(project)
+
+    overview_segment = store.overview()["segments"][0]
+    detail = store.segment_detail("F0001-S000001")
+
+    assert overview_segment["format_count"] == 2
+    assert detail["format_count"] == 2
+    assert "formats" not in overview_segment
+    assert "formats" not in detail
+
+
+def test_web_store_format_count_uses_each_file_state(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.epub"
+    second = tmp_path / "second.epub"
+    make_epub(
+        first,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p><em>First</em></p></body></html>"
+        ),
+    )
+    make_epub(
+        second,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>Second</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(first)],
+        name="web-format-count-cross-file",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_project_files(project, [str(second)])
+
+    counts = {
+        item["file_id"]: item["format_count"]
+        for item in WebStore(project).overview()["segments"]
+    }
+
+    assert counts == {"F0001": 1, "F0002": 0}
+
+
+def test_web_store_format_count_rejects_damaged_locator_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "damaged.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-damaged",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    opaque_state = state["state"]
+    assert isinstance(opaque_state, dict)
+    opaque_state["locators"][0]["slot"]["formats"] = {"invalid": True}
+    write_json(project, state_path, state)
+
+    with pytest.raises(ProjectError, match="格式"):
+        WebStore(project).overview()
 
 
 def test_web_store_overview_reports_storage_and_source_file_sizes(

@@ -209,6 +209,56 @@ class WebStore:
         segment["_adapter_run_options"] = dict(run_options)
         return segment
 
+    def _format_counts(self, segments: list[dict[str, Any]]) -> dict[str, int]:
+        current_files = load_source_files(self.project)
+        files_by_id = {str(item["file_id"]): item for item in current_files}
+        contexts: dict[str, dict[str, Any] | None] = {}
+        counts: dict[str, int] = {}
+        for segment in segments:
+            file_id = str(segment["file_id"])
+            file_record = files_by_id.get(file_id)
+            if file_record is None:
+                raise ProjectError(f"Segment 引用了未知 File：{file_id}")
+            if file_id not in contexts:
+                contexts[file_id] = _read_adapter_context(
+                    self.project, file_record
+                )[0]
+            opaque_state = contexts[file_id]
+            if opaque_state is None or "locators" not in opaque_state:
+                counts[str(segment["segment_id"])] = 0
+                continue
+            locators = opaque_state["locators"]
+            if not isinstance(locators, list):
+                raise ProjectError(
+                    f"Document Adapter locators 状态损坏：{file_id}"
+                )
+            line_index = segment.get("line_index")
+            if not isinstance(line_index, int) or isinstance(line_index, bool):
+                raise ProjectError(f"Segment 行索引无效：{segment['segment_id']}")
+            if not 0 <= line_index < len(locators):
+                raise ProjectError(
+                    f"Document Adapter locator 缺失：{segment['segment_id']}"
+                )
+            locator = locators[line_index]
+            if not isinstance(locator, dict):
+                raise ProjectError(
+                    f"Document Adapter locator 状态损坏：{segment['segment_id']}"
+                )
+            slot = locator.get("slot")
+            if not isinstance(slot, dict):
+                raise ProjectError(
+                    "Document Adapter locator slot 状态损坏："
+                    f"{segment['segment_id']}"
+                )
+            formats = slot.get("formats", [])
+            if not isinstance(formats, list):
+                raise ProjectError(
+                    "Document Adapter 格式范围状态损坏："
+                    f"{segment['segment_id']}"
+                )
+            counts[str(segment["segment_id"])] = len(formats)
+        return counts
+
     def _base_results(
         self, stage: str, segment_ids_filter: list[str] | None = None
     ) -> dict[str, dict[str, Any]]:
@@ -376,6 +426,7 @@ class WebStore:
             search=search,
             stage=stage,
         )
+        format_counts = self._format_counts(window)
         window_ids = [str(item["segment_id"]) for item in window]
         histories = {
             target: self._history(target, window_ids)
@@ -406,7 +457,7 @@ class WebStore:
                     "line_index": item["line_index"],
                     "source": item["source"],
                     "model_source": item.get("model_source"),
-                    "format_count": 0,
+                    "format_count": format_counts[segment_id],
                     "completed": {
                         stage: segment_id in history
                         for stage, history in histories.items()
@@ -536,6 +587,7 @@ class WebStore:
             line_index=int(segment["line_index"]),
         )
         context_segments = [*before_segments, *after_segments]
+        format_counts = self._format_counts([segment, *context_segments])
         segment_filter = [
             segment_id,
             *(str(item["segment_id"]) for item in context_segments),
@@ -550,14 +602,24 @@ class WebStore:
                 "polishing_applied",
             )
         }
-        detail = self._segment_detail_view(segment, histories)
+        detail = self._segment_detail_view(
+            segment, histories, format_count=format_counts[str(segment["segment_id"])]
+        )
         detail["context"] = {
             "before": [
-                self._segment_detail_view(item, histories)
+                self._segment_detail_view(
+                    item,
+                    histories,
+                    format_count=format_counts[str(item["segment_id"])],
+                )
                 for item in before_segments
             ],
             "after": [
-                self._segment_detail_view(item, histories)
+                self._segment_detail_view(
+                    item,
+                    histories,
+                    format_count=format_counts[str(item["segment_id"])],
+                )
                 for item in after_segments
             ],
         }
@@ -567,6 +629,8 @@ class WebStore:
         self,
         segment: dict[str, Any],
         histories: dict[str, dict[str, dict[str, Any]]],
+        *,
+        format_count: int,
     ) -> dict[str, Any]:
         segment_id = str(segment["segment_id"])
         return {
@@ -576,7 +640,7 @@ class WebStore:
             "line_index": segment["line_index"],
             "source": segment["source"],
             "model_source": segment.get("model_source"),
-            "format_count": 0,
+            "format_count": format_count,
             "translation": self._result_view(
                 histories["translation"].get(segment_id)
             ),
