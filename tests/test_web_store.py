@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import TermGroupError, UsageError
+from app.errors import ProjectError, TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
-from app.project import add_project_files, init_project
+from app.project import add_project_files, init_project, update_file_run_options
 from app.sqlite_storage import (
     query_segments,
     read_files,
@@ -137,6 +137,63 @@ def test_web_store_save_review_uses_persisted_epub_run_options_for_markers(
     )
 
     assert result["suggestion"]["suggested_text"] == "甲 乙 丙"
+
+
+def test_web_store_save_reads_current_run_options_after_store_init(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-current-options",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    store = WebStore(project)
+    update_file_run_options(project, "F0001", {"ruby_mode": "compact"})
+
+    result = store.save_translation(
+        {
+            "segment_id": "F0001-S000001",
+            "text": "⟦R:汉字|Y:hànzì⟧",
+        }
+    )
+
+    assert result["text"] == "｜汉字《hànzì》"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("adapter_id", "txt"), ("adapter_version", "0.0")],
+)
+def test_web_store_rejects_adapter_state_not_owned_by_file(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    source = tmp_path / "state.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-state-validation",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state[field] = value
+    write_json(project, state_path, state)
+
+    store = WebStore(project)
+    with pytest.raises(ProjectError, match="状态"):
+        store.save_translation(
+            {"segment_id": "F0001-S000001", "text": "text"}
+        )
 
 
 def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> None:

@@ -356,35 +356,39 @@ class EPUBDocumentAdapter:
             "inline_format_mode",
             "inline_format_policy",
         }
-        if set(run_options) != required_options or any(
+        if not isinstance(run_options, dict) or set(run_options) != required_options or any(
             not isinstance(value, str) for value in run_options.values()
         ):
             raise ConfigError("EPUB Document Adapter run_options 不完整")
         ruby_mode = run_options["ruby_mode"]
         if ruby_mode not in {"aozora", "short_xml", "compact", "base_only"}:
             raise ConfigError(f"EPUB Ruby 模型表示无效：{ruby_mode}")
-        formats = segment.get("_format_markers")
-        if formats is None:
-            if isinstance(opaque_state, dict):
-                locators = opaque_state.get("locators")
-                index = segment.get("line_index")
-                if (
-                    not isinstance(locators, list)
-                    or not isinstance(index, int)
-                    or not 0 <= index < len(locators)
-                ):
-                    raise IncompleteError("EPUB Segment 缺少内联格式状态")
-                locator = locators[index]
-                slot = locator.get("slot") if isinstance(locator, dict) else None
-                if not isinstance(slot, dict):
-                    raise IncompleteError("EPUB Segment 缺少内联格式状态")
-                formats = slot.get("formats", [])
-            elif run_options["inline_format_mode"] == "markers":
+        inline_format_mode = run_options["inline_format_mode"]
+        if inline_format_mode not in {"plain", "markers"}:
+            raise ConfigError(f"EPUB 内联格式模式无效：{inline_format_mode}")
+        inline_format_policy = run_options["inline_format_policy"]
+        if inline_format_policy not in {"tiered", "strict"}:
+            raise ConfigError(f"EPUB 内联格式策略无效：{inline_format_policy}")
+        formats: list[dict[str, Any]] = []
+        if inline_format_mode == "markers":
+            if not isinstance(opaque_state, dict):
                 raise IncompleteError("EPUB Segment 缺少内联格式状态")
-            else:
-                formats = []
-        if not isinstance(formats, list):
-            raise IncompleteError("EPUB 内联格式状态损坏")
+            locators = opaque_state.get("locators")
+            index = segment.get("line_index")
+            if (
+                not isinstance(locators, list)
+                or not isinstance(index, int)
+                or not 0 <= index < len(locators)
+            ):
+                raise IncompleteError("EPUB Segment 缺少内联格式状态")
+            locator = locators[index]
+            slot = locator.get("slot") if isinstance(locator, dict) else None
+            if not isinstance(slot, dict):
+                raise IncompleteError("EPUB Segment 缺少内联格式状态")
+            raw_formats = slot.get("formats", [])
+            if not isinstance(raw_formats, list):
+                raise IncompleteError("EPUB 内联格式状态损坏")
+            formats = raw_formats
         marker_ids = {
             str(item["id"])
             for item in formats

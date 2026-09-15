@@ -1362,6 +1362,30 @@ def test_epub_model_output_rejects_incomplete_run_options() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("option_id", "value"),
+    [("inline_format_mode", "invalid"), ("inline_format_policy", "invalid")],
+)
+def test_epub_model_output_rejects_invalid_inline_run_options(
+    option_id: str, value: str
+) -> None:
+    run_options = {
+        "ruby_mode": "aozora",
+        "inline_format_mode": "plain",
+        "inline_format_policy": "tiered",
+    }
+    run_options[option_id] = value
+
+    with pytest.raises(ConfigError, match="EPUB 内联格式"):
+        get_document_adapter("epub").normalize_model_output(
+            segment={"source": "source"},
+            text="source",
+            stage="translation",
+            opaque_state=None,
+            run_options=run_options,
+        )
+
+
 def test_epub_compact_ruby_round_trips_escaped_literal_text() -> None:
     source = "前｜汉《hàn》后\\|字⟦R:字|Y:读⟧⟧\\"
     model_text = aozora_to_model_ruby(source, "compact")

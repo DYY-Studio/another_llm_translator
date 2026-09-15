@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
-from .documents import compact_emphasis_aozora
 from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
@@ -79,6 +78,44 @@ def _stored_source_size(project: Path, stored_name: object) -> int:
         raise ProjectError(f"无法读取项目源文件大小：{stored_name}: {exc}") from exc
 
 
+def _read_adapter_context(
+    project: Path, file_record: dict[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    file_id = str(file_record["file_id"])
+    adapter_id = str(file_record["document_adapter_id"])
+    adapter = get_document_adapter(adapter_id)
+    state_path = file_record.get("document_adapter_state")
+    state_record = read_adapter_state(project, file_id)
+    if state_record is None:
+        if state_path is not None or adapter.run_options:
+            raise ProjectError(f"Document Adapter 状态缺失：{file_id}")
+        return None, {}
+    if state_path is None:
+        raise ProjectError(f"Document Adapter 状态路径缺失：{file_id}")
+    if (
+        state_record.get("adapter_id") != adapter_id
+        or str(state_record.get("adapter_version"))
+        != str(file_record.get("document_adapter_version"))
+        or str(state_record.get("file_id")) != file_id
+        or "state" not in state_record
+        or "run_options" not in state_record
+    ):
+        raise ProjectError(f"Document Adapter 状态归属或版本不匹配：{file_id}")
+    opaque_state = state_record["state"]
+    if opaque_state is not None and not isinstance(opaque_state, dict):
+        raise ProjectError(f"Document Adapter 状态无效：{file_id}")
+    raw_run_options = state_record["run_options"]
+    if not isinstance(raw_run_options, dict):
+        raise ProjectError(f"Document Adapter run_options 无效：{file_id}")
+    try:
+        run_options = validate_document_run_options(
+            adapter, raw_run_options, use_defaults=False
+        )
+    except UsageError as exc:
+        raise ProjectError(f"Document Adapter run_options 无效：{file_id}") from exc
+    return opaque_state, run_options
+
+
 class WebStore:
     """Web 工作台使用的项目读写与视图存储。"""
 
@@ -87,40 +124,6 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
-        self._adapter_context: dict[
-            str, tuple[dict[str, Any] | None, dict[str, str]]
-        ] = {}
-        for file_record in self.files:
-            file_id = str(file_record["file_id"])
-            adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-            state_record = read_adapter_state(project, file_id)
-            if state_record is None:
-                if adapter.run_options:
-                    raise ProjectError(
-                        f"Document Adapter 状态缺少 run_options：{file_id}"
-                    )
-                self._adapter_context[file_id] = (None, {})
-                continue
-            opaque_state = state_record.get("state")
-            if opaque_state is not None and not isinstance(opaque_state, dict):
-                raise ProjectError(f"Document Adapter 状态无效：{file_id}")
-            raw_run_options = state_record.get("run_options")
-            if raw_run_options is None and not adapter.run_options:
-                run_options: dict[str, str] = {}
-            else:
-                if not isinstance(raw_run_options, dict):
-                    raise ProjectError(
-                        f"Document Adapter run_options 无效：{file_id}"
-                    )
-                try:
-                    run_options = validate_document_run_options(
-                        adapter, raw_run_options, use_defaults=False
-                    )
-                except UsageError as exc:
-                    raise ProjectError(
-                        f"Document Adapter run_options 无效：{file_id}"
-                    ) from exc
-            self._adapter_context[file_id] = (opaque_state, run_options)
 
     @property
     def project_id(self) -> str:
@@ -136,16 +139,6 @@ class WebStore:
             if record.get("status") == "reset":
                 continue
             item = dict(record)
-            file_id = str(segment_id).split("-S", 1)[0]
-            run_options = self._adapter_context.get(file_id, (None, {}))[1]
-            if run_options.get("ruby_mode") in {
-                "aozora",
-                "short_xml",
-                "compact",
-            }:
-                for key in ("text", "suggested_text"):
-                    if isinstance(item.get(key), str):
-                        item[key] = compact_emphasis_aozora(str(item[key]))
             result[segment_id] = item
         return result
 
@@ -187,47 +180,33 @@ class WebStore:
             terms_revision=self._terms_revision(),
         )
 
-    def _require_segment(self, segment_id: object) -> dict[str, Any]:
+    def _require_segment(
+        self,
+        segment_id: object,
+        *,
+        files: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(segment_id, str):
             raise UsageError(f"未知或空 Segment：{segment_id}")
         segment = get_segment(self.project, segment_id)
         if segment is None or segment.get("is_empty"):
             raise UsageError(f"未知或空 Segment：{segment_id}")
-        context = self._adapter_context.get(str(segment["file_id"]))
-        if context is None:
-            raise ProjectError(
-                f"Segment 引用了没有 Adapter 状态的 File：{segment['file_id']}"
-            )
-        opaque_state, run_options = context
-        segment["_adapter_state"] = opaque_state
-        segment["_adapter_run_options"] = dict(run_options)
+        current_files = files if files is not None else load_source_files(self.project)
         file_record = next(
             (
                 item
-                for item in self.files
+                for item in current_files
                 if str(item["file_id"]) == str(segment["file_id"])
             ),
             None,
         )
-        if file_record is not None and file_record.get("document_adapter_id") == "epub":
-            if not isinstance(opaque_state, dict):
-                raise ProjectError(f"EPUB Document Adapter 状态无效：{segment_id}")
-            locators = opaque_state.get("locators")
-            line_index = segment.get("line_index")
-            if not isinstance(locators, list) or not isinstance(line_index, int):
-                raise ProjectError(f"Document Adapter 定位状态无效：{segment_id}")
-            if not 0 <= line_index < len(locators):
-                raise ProjectError(f"Document Adapter 定位状态缺少 Segment：{segment_id}")
-            locator = locators[line_index]
-            slot = locator.get("slot") if isinstance(locator, dict) else None
-            if not isinstance(slot, dict):
-                raise ProjectError(f"Document Adapter 定位 slot 无效：{segment_id}")
-            formats = slot.get("formats", [])
-            if not isinstance(formats, list):
-                raise ProjectError(f"Document Adapter formats 无效：{segment_id}")
-            segment["_format_markers"] = formats
-        if run_options.get("ruby_mode") in {"aozora", "short_xml", "compact"}:
-            segment["source"] = compact_emphasis_aozora(str(segment["source"]))
+        if file_record is None:
+            raise ProjectError(f"Segment 引用了未知 File：{segment['file_id']}")
+        opaque_state, run_options = _read_adapter_context(
+            self.project, file_record
+        )
+        segment["_adapter_state"] = opaque_state
+        segment["_adapter_run_options"] = dict(run_options)
         return segment
 
     def _base_results(
@@ -632,11 +611,12 @@ class WebStore:
 
     def _save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
         segment_id = payload.get("segment_id")
-        segment = self._require_segment(segment_id)
+        files = load_source_files(self.project)
+        segment = self._require_segment(segment_id, files=files)
         text = payload.get("text")
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
-        text = normalize_model_text(self.files, segment, text, "translation")
+        text = normalize_model_text(files, segment, text, "translation")
         findings = validate_translation_text(
             self._translation_validation_context(segment, text),
             self.config["_translation_validator_instances"],
@@ -668,7 +648,8 @@ class WebStore:
         if stage not in REVIEW_STAGES:
             raise UsageError(f"不支持的建议阶段：{stage}")
         segment_id = payload.get("segment_id")
-        segment = self._require_segment(segment_id)
+        files = load_source_files(self.project)
+        segment = self._require_segment(segment_id, files=files)
         base = self._base_results(stage, [str(segment_id)]).get(str(segment_id))
         if base is None:
             raise UsageError("当前 Segment 缺少可用基准结果")
@@ -680,7 +661,8 @@ class WebStore:
             if not isinstance(suggested_text, str) or not suggested_text:
                 raise UsageError("suggested 状态需要非空建议文本")
             suggested_text = normalize_model_text(
-                self.files, segment,
+                files,
+                segment,
                 suggested_text,
                 str(stage),
             )
