@@ -259,6 +259,7 @@ Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` �
 class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
+    readable_versions: frozenset[str]
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
@@ -278,11 +279,6 @@ class DocumentAdapter(Protocol):
         *, segment: dict, opaque_state: dict | None
     ) -> int: ...
 
-    def normalize_model_output(
-        *, segment: dict, text: str, stage: str,
-        opaque_state: dict | None, run_options: dict[str, str]
-    ) -> str: ...
-
     def replacement_options(
         *, opaque_state: dict | None
     ) -> dict[str, str]: ...
@@ -295,7 +291,7 @@ class DocumentAdapter(Protocol):
 
 宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `12`；旧协议插件会快速失败，不保留旧调用路径。
 
-`render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 与可选的 `normalize_model_output` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+`render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。`normalize_model_output` 是可选方法；实现时接收相同快照，未实现时宿主原样使用模型文本。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
 内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`，并原样返回模型源文。
 
