@@ -259,7 +259,6 @@ Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` �
 class DocumentAdapter(Protocol):
     adapter_id: str
     version: str
-    readable_versions: frozenset[str]
     capabilities: frozenset[str]
     extensions: frozenset[str]
     import_options: tuple[DocumentChoiceOption, ...]
@@ -286,6 +285,23 @@ class DocumentAdapter(Protocol):
     def import_sources(...) -> DocumentImport: ...
     def export_sources(...) -> list[Path]: ...
 ```
+
+可选属性 `readable_versions: frozenset[str]` 声明当前实现可安全读取的历史版本；未声明时只读取与 `version` 相同的状态，声明时必须包含当前 `version`。
+
+可选的模型输出规范化方法签名为：
+
+```python
+def normalize_model_output(
+    *,
+    segment: dict,
+    text: str,
+    stage: str,
+    opaque_state: dict | None,
+    run_options: dict[str, str],
+) -> str: ...
+```
+
+未实现时宿主原样使用模型文本。
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
@@ -368,7 +384,7 @@ CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=
 
 ### 版本与升级策略
 
-Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明 `readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
+Adapter 默认只能读取与自身 `version` 相同的 File 状态；可选的 `readable_versions` 语义见上文。这只表示当前实现能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
 
 File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。外部 Adapter 未声明时仍保持严格相等语义。
 
