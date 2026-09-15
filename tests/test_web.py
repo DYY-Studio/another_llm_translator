@@ -610,7 +610,7 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", None])
+@pytest.mark.parametrize("schema_version", ["3", "4", None])
 def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
