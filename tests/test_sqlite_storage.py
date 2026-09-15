@@ -633,68 +633,179 @@ def test_source_change_keeps_summary_and_can_mark_only_selected_boundaries(
     assert stored["appendix"]["source_changed"] is False
 
 
-def test_v3_upgrade_makes_consistent_backup_before_schema_change(
-    tmp_path: Path,
+@pytest.mark.parametrize("version", [3, 4])
+def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
+    tmp_path: Path, version: int
 ) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.row_factory = sqlite3.Row
+        file_row = database.execute(
+            "SELECT file_id, payload_json FROM files"
+        ).fetchone()
+        assert file_row is not None
+        file_payload = json.loads(str(file_row["payload_json"]))
+        file_payload["document_adapter_version"] = "0.5"
+        state_row = database.execute(
+            "SELECT payload_json FROM adapter_states WHERE file_id = ?",
+            (str(file_row["file_id"]),),
+        ).fetchone()
+        assert state_row is not None
+        state_payload = json.loads(str(state_row["payload_json"]))
+        state_payload["adapter_version"] = "0.5"
+        state_payload.pop("run_options", None)
+        segment_ids = [
+            str(row[0])
+            for row in database.execute(
+                "SELECT segment_id FROM segments ORDER BY line_index"
+            )
+        ]
+        database.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+            (str(version),),
+        )
+        database.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_payload), str(file_row["file_id"])),
+        )
+        database.execute(
+            "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(state_payload), str(file_row["file_id"])),
+        )
+        database.execute(
+            "INSERT INTO runs(run_id, stage, status, started_at, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "RUN-MIGRATION",
+                "translation",
+                "running",
+                "2026-09-15T00:00:00+00:00",
+                json.dumps({"run_id": "RUN-MIGRATION", "status": "running"}),
+            ),
+        )
+        database.commit()
 
     backup_path = ensure_supported(project)
 
-    assert backup_path is not None
-    assert backup_path.is_file()
-    assert backup_path.parent == project / "snapshots" / "storage_migrations"
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "5"
-        assert database.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_summaries'"
-        ).fetchone() is not None
+    assert backup_path is not None and backup_path.is_file()
     with sqlite3.connect(backup_path) as backup:
         assert backup.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
-
-
-def test_v2_upgrade_rolls_back_all_ddl_after_mid_migration_foreign_key_failure(
-    tmp_path: Path,
-) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+        ).fetchone()[0] == str(version)
+        assert [
+            str(row[0])
+            for row in backup.execute(
+                "SELECT segment_id FROM segments ORDER BY line_index"
+            )
+        ] == segment_ids
     with sqlite3.connect(project / "project.sqlite") as database:
-        database.execute("PRAGMA foreign_keys = ON")
-        database.execute(
-            "CREATE TABLE migration_probe(segment_id TEXT REFERENCES segments(segment_id))"
-        )
-        database.execute(
-            "INSERT INTO migration_probe(segment_id) VALUES ('F0001-S000001')"
-        )
-        database.commit()
-
-    with pytest.raises(StorageError, match="FOREIGN KEY"):
-        ensure_supported(project)
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
-        assert database.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='segments_v3'"
-        ).fetchone() is None
-        assert database.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_summaries'"
-        ).fetchone() is None
-        assert database.execute(
-            "SELECT source FROM segments WHERE segment_id='F0001-S000001'"
-        ).fetchone()[0] == "source"
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        database.execute("DROP TABLE migration_probe")
-        database.commit()
-    ensure_supported(project)
-    with sqlite3.connect(project / "project.sqlite") as database:
+        database.row_factory = sqlite3.Row
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0] == "5"
+        file_payload = json.loads(
+            database.execute("SELECT payload_json FROM files").fetchone()[0]
+        )
+        state_payload = json.loads(
+            database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+        )
+        assert file_payload["document_adapter_version"] == "0.6"
+        assert state_payload["adapter_version"] == "0.6"
+        assert state_payload["run_options"] == {
+            "ruby_mode": "aozora",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        }
+        assert [
+            str(row[0])
+            for row in database.execute(
+                "SELECT segment_id FROM segments ORDER BY line_index"
+            )
+        ] == segment_ids
+        run = database.execute(
+            "SELECT status, payload_json FROM runs WHERE run_id = 'RUN-MIGRATION'"
+        ).fetchone()
+        assert run["status"] == "interrupted"
+        assert json.loads(str(run["payload_json"]))["error_message"] == (
+            "Document Adapter 运行协议已升级、必须新建 Run"
+        )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_v1_and_v2_projects_are_rejected_without_mutation(
+    tmp_path: Path, version: int
+) -> None:
+    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+            (str(version),),
+        )
+        database.commit()
+
+    with pytest.raises(ProjectError, match="schema_version.*重新创建项目"):
+        ensure_supported(project)
+
+    assert not (project / "snapshots" / "storage_migrations").exists()
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(version)
+
+
+def test_epub_upgrade_failure_rolls_back_and_keeps_backup(tmp_path: Path) -> None:
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.row_factory = sqlite3.Row
+        file_row = database.execute(
+            "SELECT file_id, payload_json FROM files"
+        ).fetchone()
+        assert file_row is not None
+        file_payload = json.loads(str(file_row["payload_json"]))
+        file_payload["document_adapter_version"] = "0.5"
+        state_payload = json.loads(
+            database.execute(
+                "SELECT payload_json FROM adapter_states WHERE file_id = ?",
+                (str(file_row["file_id"]),),
+            ).fetchone()[0]
+        )
+        state_payload["adapter_version"] = "0.5"
+        database.execute(
+            "UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'"
+        )
+        database.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_payload), str(file_row["file_id"])),
+        )
+        database.execute(
+            "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(state_payload), str(file_row["file_id"])),
+        )
+        database.execute(
+            "UPDATE segments SET part_id = 'missing.xhtml' WHERE file_id = ?",
+            (str(file_row["file_id"]),),
+        )
+        database.commit()
+
+    with pytest.raises(StorageError, match="Segment 定位"):
+        ensure_supported(project)
+
+    backups = list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+    assert len(backups) == 1
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "4"
+        assert database.execute(
+            "SELECT part_id FROM segments"
+        ).fetchone()[0] == "missing.xhtml"
+        assert json.loads(
+            database.execute("SELECT payload_json FROM files").fetchone()[0]
+        )["document_adapter_version"] == "0.5"
 
 
 def test_schema_version_rejects_non_numeric_value_as_project_error(
@@ -709,77 +820,6 @@ def test_schema_version_rejects_non_numeric_value_as_project_error(
 
     with pytest.raises(ProjectError, match="schema_version.*future"):
         ensure_supported(project)
-
-
-def test_schema_upgrade_backup_oserror_is_storage_error_with_project_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
-    target = project / "snapshots" / "storage_migrations"
-    original_mkdir = Path.mkdir
-
-    def fail_backup_dir(path: Path, *args: object, **kwargs: object) -> None:
-        if path == target:
-            raise OSError("read-only")
-        original_mkdir(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", fail_backup_dir)
-
-    with pytest.raises(StorageError, match=str(project)):
-        ensure_supported(project)
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
-
-
-def test_v2_migrates_payloads_and_preserves_public_records(tmp_path: Path) -> None:
-    project, file_record, segment_record, stage_record = create_v2_project(tmp_path)
-
-    ensure_supported(project)
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "5"
-        assert "payload_json" not in {
-            row[1] for row in database.execute("PRAGMA table_info(segments)")
-        }
-        assert database.execute(
-            "SELECT payload_json FROM stage_results"
-        ).fetchone()[0] == json.dumps(
-            {
-                "text": "translated",
-                "stage_fingerprint": "sha256:test",
-                "run_id": "RUN-TEST",
-                "extra_payload": "kept",
-                "created_at": stage_record["created_at"],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-    assert read_files(project) == [file_record]
-    assert read_segments(project) == [segment_record]
-    assert read_jsonl(project, stage_result_path(project, "translation")) == [stage_record]
-
-
-def test_v2_migration_rejects_sql_payload_conflict_without_changes(tmp_path: Path) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(
-        tmp_path, conflict=True
-    )
-
-    with pytest.raises(StorageError, match="segments/F0001-S000001.source"):
-        ensure_supported(project)
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
-        assert database.execute(
-            "SELECT source FROM segments"
-        ).fetchone()[0] == "source"
 
 
 def test_compact_project_database_reclaims_deleted_pages(tmp_path: Path) -> None:
@@ -1010,93 +1050,6 @@ def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
         assert "record_type" not in payloads[kind]
         assert "project_id" not in payloads[kind]
     assert payloads["terms"]["record_id"] == "TERMS-TEST"
-
-
-def test_v1_project_migrates_file_order_and_drops_dead_indexes(
-    tmp_path: Path,
-) -> None:
-    project = tmp_path / "legacy"
-    project.mkdir()
-    database = sqlite3.connect(project / "project.sqlite")
-    try:
-        database.executescript(
-            """
-            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE files (
-                file_id TEXT PRIMARY KEY,
-                file_order INTEGER NOT NULL UNIQUE,
-                payload_json TEXT NOT NULL
-            );
-            CREATE TABLE segments (
-                segment_id TEXT PRIMARY KEY,
-                file_id TEXT NOT NULL,
-                line_index INTEGER NOT NULL,
-                part_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                is_empty INTEGER NOT NULL,
-                model_source TEXT,
-                payload_json TEXT NOT NULL,
-                UNIQUE(file_id, line_index)
-            );
-            CREATE INDEX segments_file_order ON segments(file_id, line_index);
-            CREATE INDEX segments_source_search ON segments(source);
-            INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1');
-            """
-        )
-        database.executemany(
-            "INSERT INTO files(file_id, file_order, payload_json) VALUES (?, ?, ?)",
-            [
-                ("F0001", 2, '{"file_id":"F0001"}'),
-                ("F0002", 1, '{"file_id":"F0002"}'),
-            ],
-        )
-        database.executemany(
-            """
-            INSERT INTO segments(
-                segment_id, file_id, line_index, part_id, source, is_empty,
-                model_source, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                ("F0001-S000001", "F0001", 0, "document", "first", 0, None, '{"segment_id":"F0001-S000001"}'),
-                ("F0002-S000001", "F0002", 0, "document", "second", 0, None, '{"segment_id":"F0002-S000001"}'),
-            ],
-        )
-        database.commit()
-    finally:
-        database.close()
-
-    ensure_supported(project)
-
-    connection = sqlite3.connect(project / "project.sqlite")
-    try:
-        connection.row_factory = sqlite3.Row
-        version = connection.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()["value"]
-        assert version == "5"
-        columns = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(segments)")
-        }
-        assert "file_order" not in columns
-        assert "payload_json" not in columns
-        indexes = {
-            str(row["name"]) for row in connection.execute("PRAGMA index_list(segments)")
-        }
-        assert "segments_source_search" not in indexes
-    finally:
-        connection.close()
-
-    assert [item["segment_id"] for item in query_segments(project)] == [
-        "F0002-S000001",
-        "F0001-S000001",
-    ]
-    assert [
-        item["segment_id"]
-        for item in query_segments(
-            project, file_id="F0002", part_id="document"
-        )
-    ] == ["F0002-S000001"]
 
 
 def test_segment_queries_filter_by_file_and_part_pair(tmp_path: Path) -> None:

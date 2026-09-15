@@ -1359,7 +1359,7 @@ def test_web_open_project_rejects_active_task_with_repair_message(
     )
 
 
-def test_web_open_project_surfaces_storage_upgrade_backup_warning(
+def test_web_open_project_rejects_unsupported_storage_schema(
     tmp_path: Path,
 ) -> None:
     from tests.test_sqlite_storage import create_v2_project
@@ -1399,10 +1399,8 @@ def test_web_open_project_surfaces_storage_upgrade_backup_warning(
         create_app(projects_root=projects_root, app_root=app_root)
     )
     opened = client.post("/api/v1/projects/open", json={"path": str(target)})
-    assert opened.status_code == 200
-    warnings = opened.json()["warnings"]
-    assert any("snapshots/storage_migrations" in item for item in warnings)
-    assert any("已升级" in item for item in warnings)
+    assert opened.status_code == 400
+    assert "schema_version" in opened.json()["error"]
 
 
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
