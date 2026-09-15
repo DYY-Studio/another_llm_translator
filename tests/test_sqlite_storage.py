@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from app.sqlite_storage import (
     publish_content_summary_fulls,
     query_segments,
     read_content_summaries,
+    read_adapter_state,
     read_files,
     read_json,
     read_jsonl,
@@ -849,6 +852,281 @@ def test_epub_upgrade_failure_rolls_back_and_keeps_backup(tmp_path: Path) -> Non
         assert json.loads(
             database.execute("SELECT payload_json FROM files").fetchone()[0]
         )["document_adapter_version"] == "0.5"
+
+
+def _downgrade_epub_project_to_v4(project: Path) -> None:
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.row_factory = sqlite3.Row
+        file_row = database.execute(
+            "SELECT file_id, payload_json FROM files"
+        ).fetchone()
+        assert file_row is not None
+        file_payload = json.loads(str(file_row["payload_json"]))
+        file_payload["document_adapter_version"] = "0.5"
+        state_row = database.execute(
+            "SELECT payload_json FROM adapter_states WHERE file_id = ?",
+            (str(file_row["file_id"]),),
+        ).fetchone()
+        assert state_row is not None
+        state_payload = json.loads(str(state_row["payload_json"]))
+        state_payload["adapter_version"] = "0.5"
+        database.execute(
+            "UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'"
+        )
+        database.execute(
+            "UPDATE files SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(file_payload, ensure_ascii=False), str(file_row["file_id"])),
+        )
+        database.execute(
+            "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+            (json.dumps(state_payload, ensure_ascii=False), str(file_row["file_id"])),
+        )
+        database.commit()
+
+    from app import sqlite_storage
+
+    sqlite_storage._SUPPORTED_CACHE.discard(sqlite_storage.database_path(project))
+
+
+def _migration_history_rows(project: Path) -> dict[str, list[tuple[object, ...]]]:
+    with sqlite3.connect(project / "project.sqlite") as database:
+        return {
+            table: [
+                tuple(row)
+                for row in database.execute(
+                    f"SELECT * FROM {table} ORDER BY rowid"
+                ).fetchall()
+            ]
+            for table in (
+                "stage_results",
+                "terminology_scans",
+                "terminology_candidates",
+            )
+        }
+
+
+def _add_terminology_history(project: Path) -> None:
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute(
+            "INSERT INTO terminology_scans("
+            "record_id, active_task_id, segment_id, status, payload_json"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (
+                "SCAN-MIGRATION",
+                "TERM-TASK-MIGRATION",
+                "F0001-S000001",
+                "completed",
+                json.dumps({"marker": "scan"}),
+            ),
+        )
+        database.execute(
+            "INSERT INTO terminology_candidates("
+            "record_id, active_task_id, payload_json"
+            ") VALUES (?, ?, ?)",
+            (
+                "CANDIDATE-MIGRATION",
+                "TERM-TASK-MIGRATION",
+                json.dumps({"marker": "candidate"}),
+            ),
+        )
+        database.commit()
+
+
+def test_epub_v4_migration_keeps_legacy_parts_when_new_nav_is_present(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import add_translations, init_epub, make_epub
+
+    project = init_epub(tmp_path)
+    add_translations(project)
+    new_source = tmp_path / "book-with-nav.epub"
+    make_epub(
+        new_source,
+        nav_xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><ol>'
+            b'<li><a href="text/ch1.xhtml">Contents</a></li>'
+            b'<li><a href="text/ch1.xhtml#chapter">Chapter One</a></li>'
+            b"</ol></nav></body></html>"
+        ),
+    )
+    with sqlite3.connect(project / "project.sqlite") as database:
+        stored_name = json.loads(
+            database.execute("SELECT payload_json FROM files").fetchone()[0]
+        )["stored_name"]
+    (project / "input" / stored_name).write_bytes(new_source.read_bytes())
+    _add_terminology_history(project)
+    history_before = _migration_history_rows(project)
+    _downgrade_epub_project_to_v4(project)
+
+    ensure_supported(project)
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "5"
+    segments = read_segments(project)
+    assert [item["segment_id"] for item in segments] == [
+        "F0001-S000001",
+        "F0001-S000002",
+    ]
+    assert [item["part_id"] for item in segments] == [
+        "OEBPS/text/ch1.xhtml",
+        "OEBPS/text/ch1.xhtml",
+    ]
+    state = read_adapter_state(project, "F0001")
+    assert state is not None
+    assert len(state["state"]["locators"]) == 2
+    assert all(
+        locator["path"] == "OEBPS/text/ch1.xhtml"
+        for locator in state["state"]["locators"]
+    )
+    with zipfile.ZipFile(project / "input" / stored_name) as archive:
+        assert "OEBPS/nav.xhtml" in archive.namelist()
+    assert _migration_history_rows(project) == history_before
+
+
+def test_epub_v4_migration_accepts_emphasis_compaction_and_preserves_history(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import add_translations, make_epub
+
+    source = tmp_path / "emphasis.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<ruby>强<rt>・</rt></ruby><ruby>调<rt>・</rt></ruby>"
+            "</p></body></html>"
+        ).encode(),
+    )
+    new_source = tmp_path / "emphasis-with-nav.epub"
+    make_epub(
+        new_source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<ruby>强<rt>・</rt></ruby><ruby>调<rt>・</rt></ruby>"
+            "</p></body></html>"
+        ).encode(),
+        nav_xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><ol>'
+            b'<li><a href="text/ch1.xhtml">Contents</a></li>'
+            b"</ol></nav></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="emphasis",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_translations(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        stored_name = json.loads(
+            database.execute("SELECT payload_json FROM files").fetchone()[0]
+        )["stored_name"]
+    (project / "input" / stored_name).write_bytes(new_source.read_bytes())
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute(
+            "UPDATE segments SET source = '｜强《・》｜调《・・》'"
+        )
+        database.commit()
+    history_before = _migration_history_rows(project)
+    _downgrade_epub_project_to_v4(project)
+
+    ensure_supported(project)
+
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "5"
+    segments = read_segments(project)
+    assert [item["segment_id"] for item in segments] == ["F0001-S000001"]
+    assert [item["source"] for item in segments] == ["｜强调《・》"]
+    assert _migration_history_rows(project) == history_before
+
+
+def test_epub_v4_migration_accepts_reverse_emphasis_compaction_at_format_boundary(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import make_epub
+
+    source = tmp_path / "boundary.epub"
+    make_epub(
+        source,
+        xhtml=(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
+            "<span><ruby>誰でも<rt>・</rt></ruby></span>"
+            "<span><ruby>自由に<rt>・</rt></ruby></span>"
+            "</p></body></html>"
+        ).encode(),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="boundary",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute(
+            "UPDATE segments SET source = '｜誰でも自由に《・》'"
+        )
+        database.commit()
+    _downgrade_epub_project_to_v4(project)
+
+    ensure_supported(project)
+
+    segments = read_segments(project)
+    assert [item["segment_id"] for item in segments] == ["F0001-S000001"]
+    assert [item["source"] for item in segments] == [
+        "｜誰でも《・》｜自由に《・》"
+    ]
+    state = read_adapter_state(project, "F0001")
+    assert state is not None
+    assert state["state"]["locators"][0]["slot"]["kind"] == "composite"
+
+
+def test_epub_v4_migration_rejects_non_ruby_source_without_mutation(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import add_translations, init_epub, make_epub
+
+    project = init_epub(tmp_path)
+    add_translations(project)
+    new_source = tmp_path / "changed.epub"
+    make_epub(
+        new_source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<h1>Changed Chapter</h1><p>Hello world.</p>"
+            b"</body></html>"
+        ),
+    )
+    with sqlite3.connect(project / "project.sqlite") as database:
+        stored_name = json.loads(
+            database.execute("SELECT payload_json FROM files").fetchone()[0]
+        )["stored_name"]
+    (project / "input" / stored_name).write_bytes(new_source.read_bytes())
+    history_before = _migration_history_rows(project)
+    _downgrade_epub_project_to_v4(project)
+    database_hash_before = hashlib.sha256(
+        (project / "project.sqlite").read_bytes()
+    ).hexdigest()
+
+    with pytest.raises(StorageError, match="Segment 源文本"):
+        ensure_supported(project)
+
+    assert hashlib.sha256((project / "project.sqlite").read_bytes()).hexdigest() == (
+        database_hash_before
+    )
+    assert _migration_history_rows(project) == history_before
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "4"
 
 
 def test_schema_version_rejects_non_numeric_value_as_project_error(

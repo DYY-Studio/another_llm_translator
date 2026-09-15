@@ -482,6 +482,7 @@ def _backup_before_schema_upgrade(project: Path, version: int) -> Path:
 
 def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
     """Move host-owned run options out of adapter-private state in one txn."""
+    from .documents import compact_emphasis_aozora
     from .plugins import get_document_adapter, validate_document_run_options
 
     files = connection.execute(
@@ -513,16 +514,53 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
                 [str(source)], recursive=False, config={}, options={}
             ).files[0]
             old = connection.execute(
-                "SELECT segment_id, part_id FROM segments WHERE file_id = ? ORDER BY line_index",
+                "SELECT segment_id, part_id, source FROM segments "
+                "WHERE file_id = ? ORDER BY line_index",
                 (file_id,),
             ).fetchall()
+            imported_parts = imported.segment_part_ids
+            imported_state = imported.opaque_state
+            imported_locators = (
+                imported_state.get("locators")
+                if isinstance(imported_state, dict)
+                else None
+            )
             if (
-                len(old) != len(imported.segments)
-                or imported.segment_part_ids is None
-                or any(str(row["part_id"]) != imported.segment_part_ids[index] for index, row in enumerate(old))
+                imported_parts is None
+                or len(imported_parts) != len(imported.segments)
+                or not isinstance(imported_state, dict)
+                or not isinstance(imported_locators, list)
+                or len(imported_locators) != len(imported.segments)
+                or any(
+                    not isinstance(locator, dict) for locator in imported_locators
+                )
             ):
+                raise StorageError(f"EPUB Segment 定位无法同步过滤：{file_id}")
+
+            old_part_ids = {str(row["part_id"]) for row in old}
+            retained_indexes = [
+                index
+                for index, part_id in enumerate(imported_parts)
+                if part_id in old_part_ids
+            ]
+            retained_parts = [imported_parts[index] for index in retained_indexes]
+            old_parts = [str(row["part_id"]) for row in old]
+            if len(old) != len(retained_indexes) or old_parts != retained_parts:
                 raise StorageError(f"EPUB Segment 定位与重建结果不一致：{file_id}")
-            state_payload["state"] = imported.opaque_state
+            retained_segments = [imported.segments[index] for index in retained_indexes]
+            for old_row, new_source in zip(old, retained_segments, strict=True):
+                old_source = str(old_row["source"])
+                if (
+                    old_source != new_source
+                    and compact_emphasis_aozora(old_source) != new_source
+                    and compact_emphasis_aozora(new_source) != old_source
+                ):
+                    raise StorageError(f"EPUB Segment 源文本不一致：{file_id}")
+            imported_state = dict(imported_state)
+            imported_state["locators"] = [
+                imported_locators[index] for index in retained_indexes
+            ]
+            state_payload["state"] = imported_state
             state_payload["adapter_version"] = adapter.version
             file_payload["document_adapter_version"] = adapter.version
             connection.execute(
@@ -533,7 +571,7 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
                 "UPDATE segments SET source = ?, is_empty = ?, model_source = NULL WHERE segment_id = ?",
                 [
                     (text, int(not text or text.isspace()), str(row["segment_id"]))
-                    for text, row in zip(imported.segments, old, strict=True)
+                    for text, row in zip(retained_segments, old, strict=True)
                 ],
             )
         connection.execute(
