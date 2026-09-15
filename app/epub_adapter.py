@@ -362,9 +362,7 @@ class EPUBDocumentAdapter:
         slot = record.get("slot") if isinstance(record, dict) else None
         if not isinstance(slot, dict):
             raise ProjectError("EPUB Segment 缺少运行时定位状态")
-        if "formats" not in slot:
-            raise ProjectError("EPUB Segment 缺少内联格式状态")
-        formats = slot["formats"]
+        formats = slot.get("formats", [])
         if not isinstance(formats, list) or any(
             not isinstance(item, dict)
             or not isinstance(item.get("id"), str)
@@ -1554,7 +1552,8 @@ def _text_slots(
             }
             for item in semantic_run
         ]
-        locator["formats"] = formats
+        if formats:
+            locator["formats"] = formats
         values.append((locator, source, model_source or None))
         semantic_run.clear()
         format_elements.clear()
