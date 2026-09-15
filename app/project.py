@@ -397,6 +397,15 @@ class TXTDocumentAdapter:
         value = segment.get("model_source")
         return value if isinstance(value, str) else str(segment["source"])
 
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int:
+        del segment, opaque_state
+        return 0
+
     def replacement_options(
         self, *, opaque_state: dict[str, Any] | None
     ) -> dict[str, str]:

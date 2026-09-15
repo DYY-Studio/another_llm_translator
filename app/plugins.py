@@ -207,6 +207,11 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     f"Document Adapter 缺少 render_model_source："
                     f"{adapter.adapter_id}"
                 )
+            if not callable(getattr(adapter, "segment_format_count", None)):
+                raise ConfigError(
+                    f"Document Adapter 缺少 segment_format_count："
+                    f"{adapter.adapter_id}"
+                )
             if not callable(getattr(adapter, "replacement_options", None)):
                 raise ConfigError(
                     f"Document Adapter 缺少 replacement_options："
@@ -300,6 +305,24 @@ def normalize_model_text(
         opaque_state=segment.get("_adapter_state"),
         run_options=segment.get("_adapter_run_options", {}),
     )
+
+
+def document_adapter_segment_format_count(
+    adapter: DocumentAdapter,
+    *,
+    segment: dict[str, Any],
+    opaque_state: dict[str, Any] | None,
+) -> int:
+    value = adapter.segment_format_count(
+        segment=segment,
+        opaque_state=opaque_state,
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProjectError(
+            "Document Adapter segment_format_count 必须返回非负整数："
+            f"{adapter.adapter_id}"
+        )
+    return value
 
 
 def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:

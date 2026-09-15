@@ -270,6 +270,15 @@ class SRTDocumentAdapter:
         value = segment.get("model_source")
         return value if isinstance(value, str) else str(segment["source"])
 
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int:
+        del segment, opaque_state
+        return 0
+
     def normalize_model_output(
         self, *, segment: dict[str, Any], text: str, stage: str,
         opaque_state: dict[str, Any] | None = None,

@@ -310,6 +310,13 @@ class DocumentAdapter(Protocol):
         run_options: dict[str, str],
     ) -> str: ...
 
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int: ...
+
     def replacement_options(
         self,
         *,

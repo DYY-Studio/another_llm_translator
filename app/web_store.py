@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
+from .documents import DocumentAdapter
 from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
 from .plugins import (
+    document_adapter_segment_format_count,
     get_document_adapter,
     normalize_model_text,
     validate_document_run_options,
@@ -80,7 +82,7 @@ def _stored_source_size(project: Path, stored_name: object) -> int:
 
 def _read_adapter_context(
     project: Path, file_record: dict[str, Any]
-) -> tuple[dict[str, Any] | None, dict[str, str]]:
+) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
     file_id = str(file_record["file_id"])
     adapter_id = str(file_record["document_adapter_id"])
     adapter = get_document_adapter(adapter_id)
@@ -89,7 +91,7 @@ def _read_adapter_context(
     if state_record is None:
         if state_path is not None or adapter.run_options:
             raise ProjectError(f"Document Adapter 状态缺失：{file_id}")
-        return None, {}
+        return adapter, None, {}
     if state_path is None:
         raise ProjectError(f"Document Adapter 状态路径缺失：{file_id}")
     if (
@@ -113,7 +115,7 @@ def _read_adapter_context(
         )
     except UsageError as exc:
         raise ProjectError(f"Document Adapter run_options 无效：{file_id}") from exc
-    return opaque_state, run_options
+    return adapter, opaque_state, run_options
 
 
 class WebStore:
@@ -202,7 +204,7 @@ class WebStore:
         )
         if file_record is None:
             raise ProjectError(f"Segment 引用了未知 File：{segment['file_id']}")
-        opaque_state, run_options = _read_adapter_context(
+        _, opaque_state, run_options = _read_adapter_context(
             self.project, file_record
         )
         segment["_adapter_state"] = opaque_state
@@ -212,7 +214,7 @@ class WebStore:
     def _format_counts(self, segments: list[dict[str, Any]]) -> dict[str, int]:
         current_files = load_source_files(self.project)
         files_by_id = {str(item["file_id"]): item for item in current_files}
-        contexts: dict[str, dict[str, Any] | None] = {}
+        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None]] = {}
         counts: dict[str, int] = {}
         for segment in segments:
             file_id = str(segment["file_id"])
@@ -220,43 +222,18 @@ class WebStore:
             if file_record is None:
                 raise ProjectError(f"Segment 引用了未知 File：{file_id}")
             if file_id not in contexts:
-                contexts[file_id] = _read_adapter_context(
+                adapter, opaque_state, _ = _read_adapter_context(
                     self.project, file_record
-                )[0]
-            opaque_state = contexts[file_id]
-            if opaque_state is None or "locators" not in opaque_state:
-                counts[str(segment["segment_id"])] = 0
-                continue
-            locators = opaque_state["locators"]
-            if not isinstance(locators, list):
-                raise ProjectError(
-                    f"Document Adapter locators 状态损坏：{file_id}"
                 )
-            line_index = segment.get("line_index")
-            if not isinstance(line_index, int) or isinstance(line_index, bool):
-                raise ProjectError(f"Segment 行索引无效：{segment['segment_id']}")
-            if not 0 <= line_index < len(locators):
-                raise ProjectError(
-                    f"Document Adapter locator 缺失：{segment['segment_id']}"
+                contexts[file_id] = (adapter, opaque_state)
+            adapter, opaque_state = contexts[file_id]
+            counts[str(segment["segment_id"])] = (
+                document_adapter_segment_format_count(
+                    adapter,
+                    segment=segment,
+                    opaque_state=opaque_state,
                 )
-            locator = locators[line_index]
-            if not isinstance(locator, dict):
-                raise ProjectError(
-                    f"Document Adapter locator 状态损坏：{segment['segment_id']}"
-                )
-            slot = locator.get("slot")
-            if not isinstance(slot, dict):
-                raise ProjectError(
-                    "Document Adapter locator slot 状态损坏："
-                    f"{segment['segment_id']}"
-                )
-            formats = slot.get("formats", [])
-            if not isinstance(formats, list):
-                raise ProjectError(
-                    "Document Adapter 格式范围状态损坏："
-                    f"{segment['segment_id']}"
-                )
-            counts[str(segment["segment_id"])] = len(formats)
+            )
         return counts
 
     def _base_results(

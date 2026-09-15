@@ -1059,8 +1059,9 @@ def test_web_store_format_count_uses_each_file_state(
     assert counts == {"F0001": 1, "F0002": 0}
 
 
+@pytest.mark.parametrize("corruption", ["missing", "invalid"])
 def test_web_store_format_count_rejects_damaged_locator_state(
-    tmp_path: Path,
+    tmp_path: Path, corruption: str
 ) -> None:
     source = tmp_path / "damaged.epub"
     make_epub(source, xhtml=RUBY_XHTML)
@@ -1077,10 +1078,37 @@ def test_web_store_format_count_rejects_damaged_locator_state(
     state = read_json(project, state_path)
     opaque_state = state["state"]
     assert isinstance(opaque_state, dict)
-    opaque_state["locators"][0]["slot"]["formats"] = {"invalid": True}
+    slot = opaque_state["locators"][0]["slot"]
+    if corruption == "missing":
+        del slot["formats"]
+    else:
+        slot["formats"] = {"invalid": True}
     write_json(project, state_path, state)
 
     with pytest.raises(ProjectError, match="格式"):
+        WebStore(project).overview()
+
+
+def test_web_store_epub_format_count_rejects_missing_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "missing-state.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-missing-state",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["state"] = None
+    write_json(project, state_path, state)
+
+    with pytest.raises(ProjectError, match="状态"):
         WebStore(project).overview()
 
 

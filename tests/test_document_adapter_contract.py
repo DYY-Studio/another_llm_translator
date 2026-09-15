@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -32,6 +33,7 @@ from app.sqlite_storage import append_jsonl, read_json, record_header, write_jso
 from app.stage_runtime import _project_context
 from app.stage_translation import run_translation
 from app.web import create_app
+from app.web_store import WebStore
 from tests.helpers import llm_jsonl
 from tests.test_documents import FakeEntryPoint
 from tests.test_foundation import make_app_root
@@ -88,6 +90,15 @@ class RecordDocumentAdapter:
         if run_options["line_ending"] == "crlf" and source.strip():
             return f"<k{int(segment['line_index']) + 1}>{source}</k{int(segment['line_index']) + 1}>"
         return source
+
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, object],
+        opaque_state: dict[str, object] | None,
+    ) -> int:
+        del segment, opaque_state
+        return 0
 
     def replacement_options(
         self, *, opaque_state: dict[str, object] | None
@@ -348,6 +359,35 @@ class StatelessRunOptionsAdapter(RecordDocumentAdapter):
             encoding="utf-8",
         )
         return [relative]
+
+
+class OpaqueLocatorRecordAdapter(StatelessRunOptionsAdapter):
+    adapter_id = "opaque-locator-record"
+    extensions = frozenset({".olr"})
+
+    def import_sources(
+        self,
+        inputs: list[str],
+        *,
+        recursive: bool,
+        config: dict[str, object],
+        options: dict[str, str],
+    ) -> DocumentImport:
+        imported = super().import_sources(
+            inputs,
+            recursive=recursive,
+            config=config,
+            options=options,
+        )
+        item = imported.files[0]
+        return DocumentImport(
+            files=(
+                replace(
+                    item,
+                    opaque_state={"locators": {"private": "state"}},
+                ),
+            ),
+        )
 
 
 class ReplacementStateProbeAdapter(StatelessRunOptionsAdapter):
@@ -646,6 +686,38 @@ def test_contract_requires_runtime_model_renderer(
 
     with pytest.raises(ConfigError, match="render_model_source"):
         load_plugins()
+
+
+def test_contract_requires_segment_format_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingFormatCounter(RecordDocumentAdapter):
+        segment_format_count = None
+
+    register_plugin(monkeypatch, MissingFormatCounter())
+
+    from app.plugins import load_plugins
+
+    with pytest.raises(ConfigError, match="segment_format_count"):
+        load_plugins()
+
+
+def test_contract_web_store_does_not_interpret_adapter_locator_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_plugin(monkeypatch, OpaqueLocatorRecordAdapter())
+    source = tmp_path / "book.olr"
+    source.write_text("line one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="opaque-locators",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="opaque-locator-record",
+    )
+    assert project is not None
+
+    assert WebStore(project).overview()["segments"][0]["format_count"] == 0
 
 
 def write_record(path: Path, content: str) -> None:

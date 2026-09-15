@@ -341,6 +341,43 @@ class EPUBDocumentAdapter:
                 output.append(f"</{item['id']}>")
         return "".join(output)
 
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int:
+        if not isinstance(opaque_state, dict):
+            raise ProjectError("EPUB Document Adapter 状态损坏")
+        locators = opaque_state.get("locators")
+        index = segment.get("line_index")
+        if (
+            not isinstance(locators, list)
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(locators)
+        ):
+            raise ProjectError("EPUB Segment 缺少运行时定位状态")
+        record = locators[index]
+        slot = record.get("slot") if isinstance(record, dict) else None
+        if not isinstance(slot, dict):
+            raise ProjectError("EPUB Segment 缺少运行时定位状态")
+        if "formats" not in slot:
+            raise ProjectError("EPUB Segment 缺少内联格式状态")
+        formats = slot["formats"]
+        if not isinstance(formats, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not isinstance(item.get("tag"), str)
+            or not isinstance(item.get("start"), int)
+            or isinstance(item.get("start"), bool)
+            or not isinstance(item.get("end"), int)
+            or isinstance(item.get("end"), bool)
+            for item in formats
+        ):
+            raise ProjectError("EPUB 内联格式状态损坏")
+        return len(formats)
+
     def normalize_model_output(
         self,
         *,
@@ -1517,8 +1554,7 @@ def _text_slots(
             }
             for item in semantic_run
         ]
-        if formats:
-            locator["formats"] = formats
+        locator["formats"] = formats
         values.append((locator, source, model_source or None))
         semantic_run.clear()
         format_elements.clear()
