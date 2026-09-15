@@ -383,7 +383,7 @@ def run(argv: list[str] | None = None) -> int:
                 values = update_file_run_options(project, args.file_id, options) if options else file_run_options(project, args.file_id)
             emit_summary({
                 "adapter": adapter_summaries[adapter_id],
-                "target": {"file_id": args.file_id, "name": file_record["name"]},
+                "target": {"file_id": args.file_id, "name": file_record["original_name"]},
                 "values": values,
             })
             return 0
@@ -402,7 +402,7 @@ def run(argv: list[str] | None = None) -> int:
         emit_summary({
             "adapter": adapter_summaries[adapter_id],
             "targets": [
-                {"file_id": item["file_id"], "name": item["name"]}
+                {"file_id": item["file_id"], "name": item["original_name"]}
                 for item in target_records
             ],
             "values": values,
