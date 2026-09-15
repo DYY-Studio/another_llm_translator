@@ -743,7 +743,7 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
     assert overridden.impact["changed_adapter_options"] == []
 
 
-def test_file_replacement_supports_legacy_epub_parenthetical_state(
+def test_file_replacement_ignores_legacy_epub_private_run_state(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "book.epub"
@@ -779,15 +779,9 @@ def test_file_replacement_supports_legacy_epub_parenthetical_state(
         adapter_options={"epub": {"ruby_mode": "aozora"}},
     )
     try:
-        assert preserved.impact["previous_adapter_options"]["ruby_mode"] == (
-            "parenthetical"
-        )
-        assert preserved.impact["replacement_adapter_options"]["ruby_mode"] == (
-            "parenthetical"
-        )
-        assert overridden.impact["replacement_adapter_options"]["ruby_mode"] == (
-            "aozora"
-        )
+        assert preserved.impact["previous_run_options"]["ruby_mode"] == "aozora"
+        assert preserved.impact["replacement_run_options"]["ruby_mode"] == "aozora"
+        assert overridden.impact["replacement_run_options"]["ruby_mode"] == "aozora"
     finally:
         preserved.cleanup()
         overridden.cleanup()
@@ -835,7 +829,7 @@ def test_file_replacement_rejects_stale_adapter_state_snapshot(
         first.cleanup()
         second.cleanup()
     state = read_json(project, project / "source/adapters/epub/F0001.json")
-    assert state["state"]["inline_format_policy"] == "strict"
+    assert state["run_options"]["inline_format_policy"] == "strict"
 
 
 def test_file_replacement_restores_source_when_publish_fails(

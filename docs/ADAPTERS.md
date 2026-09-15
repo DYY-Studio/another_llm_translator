@@ -265,8 +265,19 @@ class DocumentAdapter(Protocol):
     run_options: tuple[DocumentChoiceOption, ...]
 
     def model_prompt_requirements(
-        *, stage: str, language: str, opaque_state: dict | None
+        *, stage: str, language: str, opaque_state: dict | None,
+        run_options: dict[str, str]
     ) -> str | None: ...
+
+    def render_model_source(
+        *, segment: dict, opaque_state: dict | None,
+        run_options: dict[str, str]
+    ) -> str: ...
+
+    def normalize_model_output(
+        *, segment: dict, text: str, stage: str,
+        opaque_state: dict | None, run_options: dict[str, str]
+    ) -> str: ...
 
     def replacement_options(
         *, opaque_state: dict | None
@@ -278,11 +289,11 @@ class DocumentAdapter(Protocol):
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `11`；旧协议插件会快速失败。
+宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `12`；旧协议插件会快速失败，不保留旧调用路径。
 
-`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+`render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 与可选的 `normalize_model_output` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
-青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，不通过此方法重复声明。内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
+内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`，并原样返回模型源文。
 
 所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
 
@@ -326,25 +337,21 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 
 “内容概括 · 实验”直接复用这条通用边界契约。Adapter 不需要实现概括专用方法，也
 不需要声明章节；每个 `(file_id, part_id)` 可独立生成片段概括、聚合和 Markdown 导出。
-`model_sources` 只作为模型输入格式，不改变持久化的原文 Segment。宿主保存原文和实际
-模型文本的摘要及引用范围；当外部 Adapter 的 `model_source` 需要拆分而无法安全保留
-原始定位时，概括请求明确失败，不猜测字符级映射。
+持久化 Segment 原文不随运行设置改变。运行时模型文本由 `render_model_source` 生成；宿主保存原文和实际模型文本的摘要及引用范围。当转换后的文本无法安全映射到切片时，概括请求明确失败，不猜测字符级映射。
 
-每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
-`source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
-ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
+每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其与完整的字符串 `run_options` 映射分别保存为状态记录的 `state` 与 `run_options` 字段，并在 File 记录中保存 Adapter ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释 `state` 内部字段。
 
-Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项由 Adapter 固化在 File 的 `opaque_state`。
+Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并严格校验取值；导入选项只传入 `import_sources()`，运行选项只写在 File 状态记录外层，绝不混入 `opaque_state`。
 
-`replacement_options()` 用 File 的 `opaque_state` 恢复当前 File 的全部导入和运行选项。它必须返回与声明完全一致的字符串键值，并由宿主再次校验取值；缺失、额外、类型错误或非法值都直接失败，不静默使用声明默认值。Adapter 可以在读取旧的、仍可读状态时按该版本既有语义提供默认值。
+`replacement_options()` 只用 File 的 `opaque_state` 恢复当前导入选项。运行选项由宿主从状态记录外层恢复；替换时两类选项都可覆盖，未覆盖值沿用当前 File。缺失、额外、类型错误或非法值都直接失败。
 
 仅供受控替换使用的历史选项可以声明为 `replacement_choices`；它们不会出现在新导入选项中，但会在逐 File 替换对话框中作为当前值保留并允许用户改为现行选项。
 
-普通设置修改不会追溯既有 File。`files-replace` 是受控重新导入：替换预览通过逐 File 的 `replacement-options` API 显示当前值，用户可以修改任意已声明选项；未覆盖的选项沿用当前 File 值，确认前会展示旧值、新值和变化键。新选项随后固化到新的 `opaque_state`，不需要迁移既有项目。
+概览可逐 File 修改运行选项，也可按 Adapter 对项目内全部当前 File 部分覆盖；批量操作没有文件筛选。运行选项的修改不改写 Segment、定位状态或既有结果。`files-replace` 是受控重新导入：替换预览显示当前值，未覆盖值沿用当前 File，确认前会展示导入设置与运行设置的变化。
 
 CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。
 
-两者构建同一形状，取值语义统一在宿主 `validate_document_import_options` 边界校验。
+两者构建同一形状，取值语义统一在宿主的导入与运行选项边界校验。CLI 的 `files-options` 可逐 File 查看/部分更新，或按 Adapter 对项目内全部当前 File 查看/部分更新。
 
 ### 契约测试
 
@@ -354,7 +361,7 @@ CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=
 - 按扩展名与显式 ID 导入、选项校验与透传；
 - `opaque_state` 存储往返及 `part_id`/`model_source` 落地；
 - 翻译时应用 `normalize_model_output`，以及双语和纯译文导出；
-- 运行选项固化、指纹跟踪；
+- 运行选项的 File 存储、动态渲染、冻结快照和指纹跟踪；
 - Adapter 缺失、版本不匹配、状态损坏和能力不足。
 
 任何标准第三方 Adapter 必须通过该套件的通用路径。
@@ -371,7 +378,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 11。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 12。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -392,7 +399,7 @@ HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.5
+### EPUB 0.6
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序、导航资源以及 Segment 到 XHTML/NCX 文本流和 `text`/`tail` 槽位的定位。
 
@@ -422,11 +429,11 @@ NCX 可无 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `n
 
 普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出保留源槽并在末槽后写入译文。
 
-Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`。
+Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽。新导入总是保存青空 Ruby 的规范 Segment 原文与完整 locator。`ruby_mode` 是 File 级运行选项，可选 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`。
 
-除 `base_only` 完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。
+除 `base_only` 只从模型输入删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。这些转换与输出规范化都只发生在冻结的运行上下文。
 
-新导入不再提供 `parenthetical`；EPUB 0.5 可直接读取和导出既有 0.3/0.4 File，包括旧 `parenthetical` 状态，但不迁移或改写。旧 File 需重新导入才会生成目录 Segment。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
+新导入不提供 `parenthetical`。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
 
 纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个 Segment 末尾追加普通译文。
 
@@ -444,7 +451,7 @@ base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
 
 该匹配规则不改写 Segment 原文或发送给模型的 `source`。
 
-当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是默认值，模型只看到净文本。
+`inline_format_mode=markers` 与 `inline_format_policy=tiered|strict` 也是 File 级运行选项。marker 在运行时生成，EPUB 不持久化依赖这些选项的 `model_source`；`plain` 是默认值，模型只看到净文本。
 
 `tiered` 要求语义关键标签保留，表现层标签可整体省略；`strict` 要求全部源标签保留。
 

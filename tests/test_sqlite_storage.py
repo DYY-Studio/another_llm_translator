@@ -646,7 +646,7 @@ def test_v3_upgrade_makes_consistent_backup_before_schema_change(
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "4"
+        ).fetchone()[0] == "5"
         assert database.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='content_summaries'"
         ).fetchone() is not None
@@ -694,7 +694,7 @@ def test_v2_upgrade_rolls_back_all_ddl_after_mid_migration_foreign_key_failure(
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "4"
+        ).fetchone()[0] == "5"
 
 
 def test_schema_version_rejects_non_numeric_value_as_project_error(
@@ -742,7 +742,7 @@ def test_v2_migrates_payloads_and_preserves_public_records(tmp_path: Path) -> No
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "4"
+        ).fetchone()[0] == "5"
         assert "payload_json" not in {
             row[1] for row in database.execute("PRAGMA table_info(segments)")
         }
@@ -1074,7 +1074,7 @@ def test_v1_project_migrates_file_order_and_drops_dead_indexes(
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()["value"]
-        assert version == "4"
+        assert version == "5"
         columns = {
             str(row["name"]) for row in connection.execute("PRAGMA table_info(segments)")
         }

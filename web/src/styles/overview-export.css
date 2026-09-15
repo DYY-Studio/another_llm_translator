@@ -76,8 +76,12 @@
 .file-row-meta { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .file-row-meta small { white-space: nowrap; }
 .file-row-meta .file-row-size { color: var(--text); font-variant-numeric: tabular-nums; }
-.file-row-replace { align-self: center; margin-right: 10px; padding: 6px 9px; white-space: nowrap; }
-.run-options-modal { width: min(560px, calc(100vw - 32px)); }
+.file-row-actions { align-self: center; display: flex; gap: 7px; margin-right: 10px; }
+.file-row-replace, .file-row-settings { padding: 6px 9px; white-space: nowrap; }
+.run-options-bulk { white-space: nowrap; }
+.run-options-modal { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 20px); display: flex; flex-direction: column; overflow: hidden; }
+.run-options-content { min-height: 0; overflow: auto; }
+.run-options-modal .modal-actions { flex: none; }
 .run-options-files { max-height: 220px; overflow: auto; display: grid; gap: 4px; margin: 12px 0; padding: 9px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
 .file-list span { color: var(--muted); }
 .file-list .empty-file-state { grid-template-columns: 1fr; gap: 6px; padding-block: 24px; color: var(--muted); }

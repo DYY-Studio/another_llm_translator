@@ -35,7 +35,8 @@ from .llm_keys import KeyPool
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .logging_utils import get_logger
-from .project import load_segments, load_source_files
+from .project import file_run_options, load_segments, load_source_files
+from .plugins import get_document_adapter
 from .sqlite_storage import (
     latest_stage_summary,
     read_content_summaries,
@@ -72,6 +73,42 @@ def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
             model=config["llm"]["model"],
         ),
     }
+
+
+def _document_adapter_run_option_summary(project: Path) -> list[dict[str, Any]]:
+    """Return a compact, adapter-neutral view for run confirmation."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for file_record in load_source_files(project):
+        grouped.setdefault(str(file_record["document_adapter_id"]), []).append(file_record)
+    summary: list[dict[str, Any]] = []
+    for adapter_id, files in grouped.items():
+        adapter = get_document_adapter(adapter_id)
+        if not adapter.run_options:
+            continue
+        values = [file_run_options(project, str(item["file_id"])) for item in files]
+        summary.append(
+            {
+                "adapter_id": adapter_id,
+                "file_count": len(files),
+                "options": [
+                    {
+                        "option_id": option.option_id,
+                        "label": option.label,
+                        "value": (
+                            values[0][option.option_id]
+                            if all(
+                                item[option.option_id]
+                                == values[0][option.option_id]
+                                for item in values[1:]
+                            )
+                            else None
+                        ),
+                    }
+                    for option in adapter.run_options
+                ],
+            }
+        )
+    return summary
 
 
 def _require_decision_library(project: Path) -> dict[str, Any]:
@@ -247,6 +284,7 @@ def task_options(
             "current_fingerprint_completed": 0,
             "mismatched_fingerprint_completed": 0,
             "running_run": running_run,
+            "document_adapter_run_options": _document_adapter_run_option_summary(project),
             "has_pending_draft": current_decision_draft(project) is not None,
             "estimated_requests": int(plan["estimated_requests"]) if plan else 0,
             "estimated_input_tokens": (
@@ -298,6 +336,7 @@ def task_options(
             "current_fingerprint_completed": len(boundaries & full),
             "mismatched_fingerprint_completed": 0,
             "running_run": running_run,
+            "document_adapter_run_options": _document_adapter_run_option_summary(project),
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
@@ -343,6 +382,7 @@ def task_options(
             0, completed - current_completed
         ),
         "running_run": _running_run(project, stage, config),
+        "document_adapter_run_options": _document_adapter_run_option_summary(project),
     }
     if stage == "terminology" and include_summaries:
         participation = read_summary_participation(project)

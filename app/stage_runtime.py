@@ -94,8 +94,30 @@ _VALIDATION_REPAIR = {
 }
 
 
+def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str, str]] | None:
+    if run_id is None:
+        return None
+    raw = read_json(project, project / "runs" / run_id / "manifest.json").get(
+        "document_adapter_options"
+    )
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Run 缺少 Document Adapter 运行设置快照：{run_id}")
+    result: dict[str, dict[str, str]] = {}
+    for file_id, values in raw.items():
+        if not isinstance(file_id, str) or not isinstance(values, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in values.items()
+        ):
+            raise ConfigError(f"Run 的 Document Adapter 运行设置快照无效：{run_id}")
+        result[file_id] = values
+    return result
+
+
 def _project_context(
-    project: Path, *, stage: str | None = None
+    project: Path,
+    *,
+    stage: str | None = None,
+    frozen_run_options: dict[str, dict[str, str]] | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -138,8 +160,12 @@ def _project_context(
             )
         adapter = get_document_adapter(str(file_record["document_adapter_id"]))
         raw_run_options = (
-            state_record.get("run_options") if isinstance(state_record, dict) else {}
+            frozen_run_options.get(file_id)
+            if frozen_run_options is not None
+            else state_record.get("run_options") if isinstance(state_record, dict) else {}
         )
+        if frozen_run_options is not None and raw_run_options is None:
+            raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
         if raw_run_options is not None and (
             not isinstance(raw_run_options, dict)
             or any(not isinstance(key, str) or not isinstance(value, str) for key, value in raw_run_options.items())
@@ -1191,9 +1217,7 @@ def _split_segment_source(
         "source": source,
         "_original_segment_id": original_id,
     }
-    if segment.get("_ruby_mode") in {"short_xml", "compact"}:
-        result["model_source"] = segment_model_text(result, source)
-    elif isinstance(existing_model_source, str):
+    if isinstance(existing_model_source, str):
         if existing_model_source != original_source:
             raise ConfigError(
                 "Document Adapter 提供的 model_source 无法验证切片映射；"

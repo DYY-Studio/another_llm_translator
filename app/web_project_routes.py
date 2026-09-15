@@ -372,6 +372,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             adapter,
             opaque_state=opaque_state,
         )
+        values.update(file_run_options(root, file_id))
         summary = next(
             item
             for item in document_adapter_summaries(

@@ -1582,7 +1582,7 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
         "extensions"
     ] == [".text", ".txt"]
     assert next(item for item in adapters if item["adapter_id"] == "epub")[
-        "import_options"
+        "run_options"
     ][0]["default"] == "aozora"
     validators = client.get("/api/v1/translation-validators").json()[
         "validators"
@@ -1636,7 +1636,7 @@ def test_web_creates_mixed_project_from_queued_folder_inputs(
     ]
 
 
-def test_web_applies_epub_import_options_without_project_level_settings(
+def test_web_persists_epub_file_run_options_without_project_level_settings(
     tmp_path: Path,
 ) -> None:
     projects_root = tmp_path / "projects"
@@ -1667,7 +1667,7 @@ def test_web_applies_epub_import_options_without_project_level_settings(
     assert "adapter_options" not in read_json(project, project / "project.json")
     file_record = read_files(project)[0]
     state = read_json(project, project / str(file_record["document_adapter_state"]))
-    assert state["state"]["ruby_mode"] == "short_xml"
+    assert state["run_options"]["ruby_mode"] == "short_xml"
 
 
 def test_web_replacement_options_use_file_values_and_preview_overrides(
@@ -1706,7 +1706,7 @@ def test_web_replacement_options_use_file_values_and_preview_overrides(
     }
     ruby_options = next(
         item
-        for item in options.json()["adapter"]["import_options"]
+        for item in options.json()["adapter"]["run_options"]
         if item["option_id"] == "ruby_mode"
     )
     assert "parenthetical" not in {
@@ -1723,70 +1723,16 @@ def test_web_replacement_options_use_file_values_and_preview_overrides(
         files={"file": ("revised.epub", epub.read_bytes(), "application/epub+zip")},
     )
     assert preview.status_code == 200
-    assert preview.json()["previous_adapter_options"] == options.json()["values"]
-    assert preview.json()["replacement_adapter_options"] == {
+    assert preview.json()["previous_adapter_options"] == {}
+    assert preview.json()["replacement_adapter_options"] == {}
+    assert preview.json()["previous_run_options"] == options.json()["values"]
+    assert preview.json()["replacement_run_options"] == {
         "ruby_mode": "short_xml",
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
-    assert preview.json()["changed_adapter_options"] == ["ruby_mode"]
-
-
-def test_web_replacement_preserves_legacy_epub_option_values(
-    tmp_path: Path,
-) -> None:
-    projects_root = tmp_path / "projects"
-    epub = tmp_path / "ruby.epub"
-    revised = tmp_path / "ruby-revised.epub"
-    make_epub(epub, xhtml=RUBY_XHTML)
-    make_epub(revised, xhtml=RUBY_XHTML)
-    client = TestClient(create_app(projects_root=projects_root))
-    created = client.post(
-        "/api/v1/projects",
-        data={"name": "ruby-legacy-replace"},
-        files=[("files", ("ruby.epub", epub.read_bytes(), "application/epub+zip"))],
-    )
-    assert created.status_code == 200
-    project = projects_root / "ruby-legacy-replace"
-    file_record = read_files(project)[0]
-    file_record["document_adapter_version"] = "0.3"
-    state_path = project / str(file_record["document_adapter_state"])
-    state_record = read_json(project, state_path)
-    state_record["adapter_version"] = "0.3"
-    state_record["state"]["ruby_mode"] = "parenthetical"
-    with sqlite3.connect(project / "project.sqlite") as connection:
-        connection.execute(
-            "UPDATE files SET payload_json = ? WHERE file_id = ?",
-            (json.dumps(file_record, ensure_ascii=False), file_record["file_id"]),
-        )
-    write_json(project, state_path, state_record)
-
-    options = client.get(
-        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-options"
-    )
-    assert options.status_code == 200
-    assert options.json()["values"]["ruby_mode"] == "parenthetical"
-    ruby_choices = next(
-        item
-        for item in options.json()["adapter"]["import_options"]
-        if item["option_id"] == "ruby_mode"
-    )["choices"]
-    assert "parenthetical" in {choice["value"] for choice in ruby_choices}
-
-    preview = client.post(
-        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview",
-        data={"adapter_options": json.dumps({"epub": options.json()["values"]})},
-        files={"file": ("ruby-revised.epub", revised.read_bytes(), "application/epub+zip")},
-    )
-    assert preview.status_code == 200
-    assert preview.json()["replacement_adapter_options"]["ruby_mode"] == (
-        "parenthetical"
-    )
-    deleted = client.delete(
-        "/api/v1/projects/ruby-legacy-replace/files/F0001/replacement-preview/"
-        + preview.json()["preview_id"]
-    )
-    assert deleted.status_code == 200
+    assert preview.json()["changed_adapter_options"] == []
+    assert preview.json()["changed_run_options"] == ["ruby_mode"]
 
 
 def test_web_exposes_epub_xhtml_parts_without_splitting_the_file(
@@ -1880,12 +1826,12 @@ def test_web_rejects_malformed_or_unknown_import_options(tmp_path: Path) -> None
     assert malformed.status_code == 400
     assert "必须是对象" in malformed.json()["error"]
     assert unknown.status_code == 400
-    assert "未知导入选项" in unknown.json()["error"]
+    assert "未知选项" in unknown.json()["error"]
     assert not (projects_root / "bad-json").exists()
     assert not (projects_root / "bad-option").exists()
 
 
-def test_web_applies_import_options_when_adding_project_files(
+def test_web_persists_run_options_when_adding_project_files(
     tmp_path: Path,
 ) -> None:
     projects_root, _ = make_project(tmp_path)
@@ -1906,9 +1852,15 @@ def test_web_applies_import_options_when_adding_project_files(
     assert response.status_code == 200
     overview = client.get("/api/v1/projects/sample").json()
     assert [item["source"] for item in overview["segments"][-2:]] == [
-        "彼は漢字を読む。",
-        "特別だ。",
+        "彼は｜漢字《かんじ》を読む。",
+        "｜特別《スペシャル／とくべつ》だ。",
     ]
+    epub_file = next(
+        item for item in overview["files"] if item["document_adapter_id"] == "epub"
+    )
+    assert client.get(
+        f"/api/v1/projects/sample/files/{epub_file['file_id']}/run-options"
+    ).json()["values"]["ruby_mode"] == "base_only"
 
 
 def test_web_rejects_queued_path_collision_before_creating_project(
@@ -4381,7 +4333,7 @@ def test_web_selection_snapshot_includes_document_adapter_state(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
-    state["state"]["ruby_mode"] = "base_only"
+    state["run_options"]["ruby_mode"] = "base_only"
     write_json(project, state_path, state)
 
     after = web_tasks_module._selection_snapshot(project, Scope())

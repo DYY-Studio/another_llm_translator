@@ -14,6 +14,7 @@ from .i18n import cli_language
 from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
+from .plugins import document_adapter_summaries
 from .project import (
     add_project_files,
     apply_file_replacement,
@@ -367,6 +368,9 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == "files-options":
         project = _resolve_project(args)
         requested = parse_adapter_option_args(args.adapter_options) if args.adapter_options else {}
+        adapter_summaries = {
+            str(item["adapter_id"]): item for item in document_adapter_summaries()
+        }
         if args.file_id:
             file_record = next((item for item in load_source_files(project) if str(item["file_id"]) == args.file_id), None)
             if file_record is None:
@@ -377,17 +381,32 @@ def run(argv: list[str] | None = None) -> int:
                 raise UsageError("选项必须属于目标 File 的 Document Adapter")
             with project_write_lock(project):
                 values = update_file_run_options(project, args.file_id, options) if options else file_run_options(project, args.file_id)
-            emit_summary({"file_id": args.file_id, "adapter_id": adapter_id, "values": values})
+            emit_summary({
+                "adapter": adapter_summaries[adapter_id],
+                "target": {"file_id": args.file_id, "name": file_record["name"]},
+                "values": values,
+            })
             return 0
         adapter_id = args.document_adapter
         if set(requested) - {adapter_id}:
             raise UsageError("选项必须属于目标 Document Adapter")
-        targets = [str(item["file_id"]) for item in load_source_files(project) if str(item["document_adapter_id"]) == adapter_id]
+        target_records = [
+            item for item in load_source_files(project)
+            if str(item["document_adapter_id"]) == adapter_id
+        ]
+        targets = [str(item["file_id"]) for item in target_records]
         if not targets:
             raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
         with project_write_lock(project):
             values = update_adapter_run_options(project, adapter_id, requested.get(adapter_id, {})) if requested else {file_id: file_run_options(project, file_id) for file_id in targets}
-        emit_summary({"adapter_id": adapter_id, "files": values})
+        emit_summary({
+            "adapter": adapter_summaries[adapter_id],
+            "targets": [
+                {"file_id": item["file_id"], "name": item["name"]}
+                for item in target_records
+            ],
+            "values": values,
+        })
         return 0
     if args.command == "files-replace":
         project = _resolve_project(args)

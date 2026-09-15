@@ -588,6 +588,11 @@ export interface TaskOptions {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
   };
+  document_adapter_run_options?: Array<{
+    adapter_id: string;
+    file_count: number;
+    options: Array<{ option_id: string; label: string; value: string | null }>;
+  }>;
   running_run: {
     run_id: string;
     started_at: string | null;

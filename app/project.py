@@ -17,7 +17,6 @@ from .documents import (
     DocumentAdapter,
     DocumentImport,
     ImportedFile,
-    compact_emphasis_aozora,
     decode_plaintext,
 )
 from .errors import (
@@ -833,6 +832,7 @@ def _replacement_source_snapshot(
     *,
     source_digest: str | None = None,
     adapter_state: dict[str, Any] | None = None,
+    run_options: dict[str, str] | None = None,
 ) -> str:
     return _replacement_digest(
         {
@@ -851,6 +851,7 @@ def _replacement_source_snapshot(
                 )
             },
             "adapter_state": adapter_state,
+            "run_options": run_options,
             "source_digest": source_digest,
             "segments": [
                 {
@@ -1230,6 +1231,7 @@ def prepare_file_replacement(
             old_segments,
             source_digest=old_input_digest,
             adapter_state=previous_state,
+            run_options=previous_run_options,
         )
         impact = _replacement_impact(
             project,
@@ -1247,6 +1249,11 @@ def prepare_file_replacement(
             option_id
             for option_id, value in replacement_adapter_options.items()
             if previous_adapter_options.get(option_id) != value
+        )
+        impact["changed_run_options"] = sorted(
+            option_id
+            for option_id, value in replacement_run_options.items()
+            if previous_run_options.get(option_id) != value
         )
         return FileReplacementPlan(
             project=project.resolve(),
@@ -1302,6 +1309,7 @@ def apply_file_replacement(
         current_segments,
         source_digest=current_input_digest,
         adapter_state=current_state,
+        run_options=file_run_options(root, plan.file_id),
     ) != plan.source_snapshot:
         raise UsageError("项目源文件已变化，请重新生成替换预览")
     if _replacement_input_digest(plan.staged_input) != plan.input_digest:

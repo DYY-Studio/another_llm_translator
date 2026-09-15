@@ -2238,7 +2238,7 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
 
 
 @pytest.mark.asyncio
-async def test_external_model_source_refuses_unverifiable_runtime_split(
+async def test_external_runtime_renderer_splits_at_segment_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2275,17 +2275,17 @@ async def test_external_model_source_refuses_unverifiable_runtime_split(
     os.environ["LLM_API_KEY"] = "test"
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
-        with pytest.raises(ConfigError, match="model_source.*切片"):
-            await run_terminology(
-                project, Scope(), http_client=client, include_summaries=True
-            )
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_summaries=True
+        )
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
-    assert requests[0] == ["<k1>ABCDEFGH</k1>", "<k2>IJKL</k2>"]
-    assert requests[1:] == [["<k1>ABCDEFGH</k1>"]]
+    assert result["failed"] == 3
+    assert requests[0] == ["ABCDEFGH", "IJKL"]
     assert read_summary_runs(project)[0]["status"] == "failed"
-    assert read_content_summaries(project, kind="fragment") == []
+    fragments = read_content_summaries(project, kind="fragment")
+    assert fragments and all(item["status"] == "failed" for item in fragments)
 
 
 @pytest.mark.asyncio
@@ -2615,7 +2615,7 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
         app_root=make_app_root(tmp_path),
         projects_root=tmp_path / "projects",
         document_adapter_id="record",
-        adapter_options={"record": {"source_style": "marked"}},
+        adapter_options={"record": {"line_ending": "crlf"}},
     )
     assert project is not None
     write_summary_participation(

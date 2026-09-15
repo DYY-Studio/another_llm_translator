@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Any
 from .documents import (
     DocumentExportJob,
-    compact_emphasis_aozora,
     document_adapter_reads_version,
     publish_document_exports,
 )
@@ -140,14 +139,6 @@ def export_project(
                 str(segment["source"]),
                 output_text[segment_id],
             )
-            if segment.get("_ruby_mode") in {
-                "aozora",
-                "short_xml",
-                "compact",
-            }:
-                output_text[segment_id] = compact_emphasis_aozora(
-                    output_text[segment_id]
-                )
         if record is not None:
             lineage = result_lineage(record)
             if any(

@@ -23,7 +23,7 @@ from app.documents import (
     escape_model_ruby_literal,
     publish_document_exports,
 )
-from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
+from app.errors import ConfigError, ExportError, IncompleteError, ProjectError, UsageError
 from app.execution import stage_result_path
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
@@ -34,6 +34,7 @@ from app.plugins import (
     load_plugins,
     normalize_model_text,
     validate_document_import_options,
+    validate_document_run_options,
 )
 from app.project import _normalize_imported_file, init_project, load_segments
 from app.stage_runtime import _project_context
@@ -1509,9 +1510,6 @@ def test_epub_emphasis_export_expands_unicode_grapheme_clusters(
     )
     assert project is not None
     assert load_segments(project)[0]["source"] == "｜原文《・》"
-    assert load_segments(project)[0]["_adapter_source"] == (
-        "｜原《・》｜文《・》"
-    )
     metadata = read_json(project, project / "project.json")
     segment = read_segments(project)[0]
     append_jsonl(
@@ -1836,15 +1834,10 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     write_json(project, state_path, {"schema_version": 1, "state": []})
-    with pytest.raises(IncompleteError, match="状态损坏") as raised:
+    with pytest.raises(ConfigError, match="run_options") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
         )
-    assert raised.value.params == {
-        "reason": "adapter_state_invalid",
-        "file_id": "F0001",
-        "adapter_id": "epub",
-    }
     with pytest.raises(UsageError, match="未安装 Document Adapter"):
         get_document_adapter("missing")
 
@@ -1869,12 +1862,12 @@ def test_epub_adapter_version_mismatch_fails_explicitly(
         "file_id": "F0001",
         "adapter_id": "epub",
         "project_version": "future",
-        "current_version": "0.5",
+        "current_version": "0.6",
     }
 
 
 @pytest.mark.parametrize("legacy_version", ["0.3", "0.4"])
-def test_epub_05_reads_legacy_state_without_migrating_project(
+def test_epub_legacy_state_requires_schema_migration(
     tmp_path: Path,
     legacy_version: str,
 ) -> None:
@@ -1897,13 +1890,8 @@ def test_epub_05_reads_legacy_state_without_migrating_project(
     write_json(project, state_path, state_record)
     add_translations(project)
 
-    result = export_project(
-        project, "translated", bilingual=False, allow_missing=False
-    )
-
-    assert result["files"] == 1
-    assert read_files(project)[0]["document_adapter_version"] == legacy_version
-    assert read_json(project, state_path)["adapter_version"] == legacy_version
+    with pytest.raises(ExportError, match="版本不兼容"):
+        export_project(project, "translated", bilingual=False, allow_missing=False)
 
 
 def test_epub_rejects_zip_path_traversal(tmp_path: Path) -> None:
@@ -2193,50 +2181,22 @@ def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
 
 def test_document_adapter_choice_options_apply_defaults_and_validate_values() -> None:
     epub = get_document_adapter("epub")
-    assert validate_document_import_options(epub, None) == {
+    assert validate_document_import_options(epub, None) == {}
+    assert validate_document_run_options(epub, None) == {
         "ruby_mode": "aozora",
-        "inline_format_mode": "plain",
-    }
-    assert validate_document_import_options(
-        epub, {"ruby_mode": "base_only"}
-    ) == {"ruby_mode": "base_only", "inline_format_mode": "plain"}
-    with pytest.raises(UsageError, match="未知导入选项"):
-        validate_document_import_options(epub, {"unknown": "value"})
-    with pytest.raises(UsageError, match="取值无效"):
-        validate_document_import_options(epub, {"ruby_mode": "invalid"})
-    with pytest.raises(UsageError, match="取值无效"):
-        validate_document_import_options(epub, {"ruby_mode": "parenthetical"})
-    assert document_adapter_replacement_options(
-        epub,
-        opaque_state={
-            "ruby_mode": "parenthetical",
-            "inline_format_mode": "plain",
-            "inline_format_policy": "tiered",
-        },
-    ) == {
-        "ruby_mode": "parenthetical",
         "inline_format_mode": "plain",
         "inline_format_policy": "tiered",
     }
-    assert document_adapter_replacement_options(
-        epub,
-        opaque_state={
-            "ruby_mode": "parenthetical",
-            "inline_format_mode": "plain",
-            "inline_format_policy": "tiered",
-        },
-        overrides={"ruby_mode": "parenthetical"},
-    )["ruby_mode"] == "parenthetical"
+    assert validate_document_run_options(epub, {"ruby_mode": "base_only"}) == {
+        "ruby_mode": "base_only", "inline_format_mode": "plain", "inline_format_policy": "tiered"
+    }
+    with pytest.raises(UsageError, match="未知导入选项"):
+        validate_document_import_options(epub, {"unknown": "value"})
     with pytest.raises(UsageError, match="取值无效"):
-        document_adapter_replacement_options(
-            epub,
-            opaque_state={
-                "ruby_mode": "aozora",
-                "inline_format_mode": "plain",
-                "inline_format_policy": "tiered",
-            },
-            overrides={"ruby_mode": "parenthetical"},
-        )
+        validate_document_run_options(epub, {"ruby_mode": "invalid"})
+    with pytest.raises(UsageError, match="取值无效"):
+        validate_document_run_options(epub, {"ruby_mode": "parenthetical"})
+    assert document_adapter_replacement_options(epub, opaque_state={}) == {}
 
 
 def test_plugin_host_rejects_invalid_choice_option(

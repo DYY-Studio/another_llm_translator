@@ -2083,7 +2083,7 @@ def _set_composite_slot(
     if not any(kind == "ruby" for kind, _ in members):
         _set_regular_slot(root, raw, source, target, bilingual=bilingual)
         return
-    if _composite_source(slots, members) != source:
+    if compact_emphasis_aozora(_composite_source(slots, members)) != compact_emphasis_aozora(source):
         raise IncompleteError("EPUB 复合 Segment 与原文不一致")
     del ruby_mode
     _, found_ruby = parse_aozora_text(target)
