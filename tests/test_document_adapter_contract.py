@@ -11,17 +11,23 @@ import pytest
 
 from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import ConfigError, IncompleteError, UsageError
-from app.execution import Scope, stage_fingerprint
+from app.execution import Scope, create_run, stage_fingerprint
 from app.main import run
 from app.plugins import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
     document_adapter_replacement_options,
 )
-from app.project import init_project, load_segments, load_source_files
+from app.project import (
+    file_run_options,
+    init_project,
+    load_segments,
+    load_source_files,
+    update_file_run_options,
+)
+from app.project_export import export_project
 from app.sqlite_storage import read_json, write_json
 from app.stage_runtime import _project_context
-from app.project_export import export_project
 from app.stage_translation import run_translation
 from tests.helpers import llm_jsonl
 from tests.test_documents import FakeEntryPoint
@@ -254,6 +260,201 @@ class ImportOnlyRecordAdapter(RecordDocumentAdapter):
         return super().import_sources(
             inputs, recursive=recursive, config=config, options={"source_style": "plain"}
         )
+
+
+class StatelessRunOptionsAdapter(RecordDocumentAdapter):
+    adapter_id = "stateless-record"
+    extensions = frozenset({".srec"})
+    import_options = ()
+    run_options = (
+        DocumentChoiceOption(
+            option_id="mode",
+            label="模式",
+            default="normal",
+            choices=(("normal", "普通"), ("strict", "严格")),
+        ),
+    )
+
+    def import_sources(
+        self,
+        inputs: list[str],
+        *,
+        recursive: bool,
+        config: dict[str, object],
+        options: dict[str, str],
+    ) -> DocumentImport:
+        del recursive, config, options
+        path = Path(inputs[0])
+        segments = tuple(path.read_text(encoding="utf-8").splitlines())
+        return DocumentImport(
+            files=(
+                ImportedFile(
+                    source_path=path,
+                    original_name=path.name,
+                    segments=segments,
+                    segment_part_ids=tuple("document" for _ in segments),
+                    encoding_detected="plain",
+                    encoding_used="utf-8",
+                    encoding_confidence=1.0,
+                    opaque_state=None,
+                ),
+            ),
+        )
+
+    def replacement_options(
+        self, *, opaque_state: dict[str, object] | None
+    ) -> dict[str, str]:
+        del opaque_state
+        return {}
+
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, object],
+        opaque_state: dict[str, object] | None,
+        run_options: dict[str, str],
+    ) -> str:
+        del opaque_state, run_options
+        return str(segment["source"])
+
+
+def test_contract_stateless_run_options_persist_and_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_plugin(monkeypatch, StatelessRunOptionsAdapter())
+    source = tmp_path / "book.srec"
+    source.write_text("line one\nline two", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="stateless",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+    )
+    assert project is not None
+
+    file_record = load_source_files(project)[0]
+    assert file_record["document_adapter_state"] == (
+        "source/adapters/stateless-record/F0001.json"
+    )
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
+    assert state["state"] is None
+    assert state["run_options"] == {"mode": "normal"}
+    assert file_run_options(project, "F0001") == {"mode": "normal"}
+
+    before = load_segments(project)
+    assert update_file_run_options(project, "F0001", {"mode": "strict"}) == {
+        "mode": "strict"
+    }
+    assert load_segments(project) == before
+    state = read_json(project, project / str(file_record["document_adapter_state"]))
+    assert state["state"] is None
+    assert state["run_options"] == {"mode": "strict"}
+
+
+def test_contract_stateless_run_options_are_frozen_in_run_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_plugin(monkeypatch, StatelessRunOptionsAdapter())
+    source = tmp_path / "book.srec"
+    source.write_text("line one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="stateless-run",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+        adapter_options={"stateless-record": {"mode": "strict"}},
+    )
+    assert project is not None
+    config, metadata, _, segments = _project_context(project, stage="translation")
+    run_id, run_dir = create_run(
+        project,
+        config=config,
+        stage="translation",
+        fingerprint="test-fingerprint",
+        prompt=None,
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+    )
+    assert run_id
+    assert metadata["project_id"]
+    assert segments[0]["_adapter_run_options"] == {"mode": "strict"}
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["document_adapter_options"] == {
+        "F0001": {"mode": "strict"}
+    }
+
+
+@pytest.mark.parametrize(
+    "run_options",
+    [
+        {},
+        {"mode": "normal", "unknown": "x"},
+        {"mode": "invalid"},
+    ],
+)
+def test_contract_persisted_run_options_must_be_complete_and_valid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_options: dict[str, str],
+) -> None:
+    register_plugin(monkeypatch, StatelessRunOptionsAdapter())
+    source = tmp_path / "book.srec"
+    source.write_text("line one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="invalid-state",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+    )
+    assert project is not None
+    file_record = load_source_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["run_options"] = run_options
+    write_json(project, state_path, state)
+
+    with pytest.raises(ConfigError, match="run_options"):
+        file_run_options(project, "F0001")
+    with pytest.raises(ConfigError, match="run_options"):
+        _project_context(
+            project,
+            stage="translation",
+            frozen_run_options={"F0001": run_options},
+        )
+
+
+def test_contract_render_model_source_must_return_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class InvalidRenderer(StatelessRunOptionsAdapter):
+        def render_model_source(
+            self,
+            *,
+            segment: dict[str, object],
+            opaque_state: dict[str, object] | None,
+            run_options: dict[str, str],
+        ) -> str:
+            del segment, opaque_state, run_options
+            return None  # type: ignore[return-value]
+
+    register_plugin(monkeypatch, InvalidRenderer())
+    source = tmp_path / "book.srec"
+    source.write_text("line one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="invalid-renderer",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+        document_adapter_id="stateless-record",
+    )
+    assert project is not None
+
+    with pytest.raises(ConfigError, match="render_model_source"):
+        _project_context(project, stage="translation")
 
 
 def register_plugin(

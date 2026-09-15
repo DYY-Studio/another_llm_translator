@@ -22,7 +22,6 @@ from .documents import (
 from .errors import (
     ConfigError,
     ExportError,
-    IncompleteError,
     ProjectError,
     UsageError,
 )
@@ -641,7 +640,7 @@ def init_project(
 
             segments = item.segments
             state_path = None
-            if item.opaque_state is not None:
+            if item.opaque_state is not None or item.run_options:
                 state_path = (
                     Path("source")
                     / "adapters"
@@ -1024,8 +1023,12 @@ def _adapter_opaque_state(
 ) -> dict[str, Any] | None:
     if state is None:
         return None
-    nested = state.get("state")
-    return nested if isinstance(nested, dict) else state
+    if "state" not in state:
+        return state
+    nested = state["state"]
+    if nested is not None and not isinstance(nested, dict):
+        raise ConfigError("Document Adapter 状态缺少有效 state")
+    return nested if isinstance(nested, dict) else None
 
 
 def file_run_options(project: Path, file_id: str) -> dict[str, str]:
@@ -1043,7 +1046,14 @@ def file_run_options(project: Path, file_id: str) -> dict[str, str]:
         return {}
     if not isinstance(state, dict) or not isinstance(state.get("run_options"), dict):
         raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
-    return validate_document_run_options(adapter, state["run_options"])
+    try:
+        return validate_document_run_options(
+            adapter, state["run_options"], use_defaults=False
+        )
+    except UsageError as exc:
+        raise ConfigError(
+            f"Document Adapter run_options 无效：{file_id}"
+        ) from exc
 
 
 def update_file_run_options(
@@ -1085,13 +1095,17 @@ def update_adapter_run_options(
     for item in files:
         file_id = str(item["file_id"])
         state = read_adapter_state(project, file_id)
-        if state is None:
-            continue
         if file_id in targets:
             current = file_run_options(project, file_id)
             current = validate_document_run_options(adapter, {**current, **options})
+            if state is None:
+                if adapter.run_options:
+                    raise ConfigError(f"Document Adapter 状态缺失：{file_id}")
+                continue
             state = {**state, "run_options": current}
             result[file_id] = current
+        elif state is None:
+            continue
         states.append(state)
     replace_source(project, files, segments, metadata, states)
     return result
@@ -1202,7 +1216,7 @@ def prepare_file_replacement(
             next_segment_sequence=next_sequence,
         )
         state_path = old_file.get("document_adapter_state")
-        if imported.opaque_state is None:
+        if imported.opaque_state is None and not imported.run_options:
             new_file["document_adapter_state"] = None
             adapter_states: tuple[dict[str, Any], ...] = ()
         else:
@@ -1422,7 +1436,7 @@ def add_project_files(
             staged_input.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item.source_path, staged_input)
             state_path = None
-            if item.opaque_state is not None:
+            if item.opaque_state is not None or item.run_options:
                 state_path = (
                     Path("source")
                     / "adapters"

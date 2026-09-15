@@ -343,8 +343,13 @@ def validate_document_import_options(
 
 
 def validate_document_run_options(
-    adapter: DocumentAdapter, values: dict[str, str] | None
+    adapter: DocumentAdapter,
+    values: dict[str, str] | None,
+    *,
+    use_defaults: bool = True,
 ) -> dict[str, str]:
+    if values is not None and not isinstance(values, dict):
+        raise UsageError(f"{adapter.adapter_id} 运行选项格式无效")
     provided = values or {}
     declarations = {option.option_id: option for option in adapter.run_options}
     unknown = sorted(set(provided) - set(declarations))
@@ -352,7 +357,18 @@ def validate_document_run_options(
         raise UsageError(f"{adapter.adapter_id} 包含未知运行选项：{', '.join(unknown)}")
     resolved: dict[str, str] = {}
     for option_id, option in declarations.items():
-        value = provided.get(option_id, option.default)
+        if option_id not in provided:
+            if not use_defaults:
+                raise UsageError(
+                    f"{adapter.adapter_id} run_options 缺少选项：{option_id}"
+                )
+            value = option.default
+        else:
+            value = provided[option_id]
+        if not isinstance(value, str):
+            raise UsageError(
+                f"{adapter.adapter_id}.{option_id} 运行选项值格式无效"
+            )
         if value not in {item[0] for item in option.choices}:
             raise UsageError(f"{adapter.adapter_id}.{option_id} 取值无效：{value}")
         resolved[option_id] = value
