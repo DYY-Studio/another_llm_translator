@@ -156,6 +156,8 @@ Preset 可以显式关闭连续读取超时，但不会取消连接超时。
 每次移动都会立即保存，失败时恢复移动前顺序。重排不会改变文件身份，也不会删除已有译文、
 历史结果或该文件的导入设置。
 
+具有运行格式设置的文件会显示“设置”。可以逐 File 修改，或使用概览顶部的“统一设置”按 Document Adapter 对项目内该 Adapter 的全部当前 File 部分覆盖；批量操作不会依据当前勾选的文件筛选。运行格式设置只影响之后新建的 Run，不会改写原文、定位状态或既有结果；运行确认框会只读显示统一值或“存在多种值”，可返回概览调整。
+
 > [!WARNING]
 > 请勿手工修改项目中的 `project.sqlite` 或 `input/` 内容。源文不支持增量更新；
 > 需要修改时，通常应重新创建项目或重新导入文件。
@@ -329,9 +331,8 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会翻译�
 - 支持 OPF 2.0/3.0、spine XHTML、EPUB 3 `properties="nav"` 导航 XHTML 和 EPUB 2/3 NCX；目录资源会作为待翻译内容。
 - 非 spine 目录资源排在正文前，spine 内 nav 保持原位置且不重复；保留文档 part 边界及导航链接、元数据和其他未翻译资源。
 - 既有 EPUB 项目能否直接读取由当前 Adapter 的版本契约决定；需要重新导入时会明确提示，
-  不会静默转换。具体兼容范围见[Adapter 契约](ADAPTERS.md#epub-05)。
-- 普通设置修改不会追溯既有 File。替换源文件时，替换对话框会载入该 File 当前的导入选项，
-  允许编辑并在确认前展示变化和受影响内容。
+  不会静默转换。具体兼容范围见[Adapter 契约](ADAPTERS.md#epub-06)。
+- 替换源文件时，替换对话框会载入该 File 当前的导入设置和运行格式设置，允许编辑并在确认前展示变化和受影响内容。
 
 #### Ruby 标签转换
 
@@ -348,6 +349,10 @@ TXT、EPUB 和 SRT 会按各自 Document Adapter 重建。EPUB 导出会翻译�
 | short_xml | `<r><b>base</b><y>reading</y></r>` | `<r><b>漢字</b><y>かんじ</y></r>` | ✅ |
 | compact | `⟦R:base\|Y:reading⟧` | `⟦R:漢字\|Y:かんじ⟧` | ✅ |
 | base_only | `base` | `漢字` | - |
+
+如果 Adapter 为模型生成的运行文本与 Segment 原文不同，系统无法安全把超长 Segment 拆成可
+恢复的切片，运行会明确失败，不会猜测定位或截断内容。请缩短 Segment、提高模型上下文限制，
+或关闭超长 Segment 拆分；原文与模型文本一致时仍可按上下文限制拆分。
 
 不同模型处理这些格式的正确率可能不同。
 
@@ -481,10 +486,25 @@ python -m app.main files-replace novel F0001 chapter-1-revised.txt --yes
 替换时 `--adapter-option ADAPTER.OPTION=VALUE` 只覆盖指定选项；未指定选项沿用
 目标 File 的当前值。Web 替换对话框具有相同语义，并在确认前展示选项变化。
 
+可以用 `files-options` 查看或修改 File 的运行格式设置：
+
+```bash
+python -m app.main files-options novel --file-id F0001
+python -m app.main files-options novel --file-id F0001 \
+  --adapter-option epub.ruby_mode=short_xml
+python -m app.main files-options novel --document-adapter epub
+python -m app.main files-options novel --document-adapter epub \
+  --adapter-option epub.inline_format_mode=markers
+```
+
+`--file-id` 只作用于一个 File；`--document-adapter` 作用于项目内该 Adapter 的全部当前
+File。省略 `--adapter-option` 时只查看设置；指定它时只覆盖列出的选项，其他选项保持原值。
+设置变化只影响之后新建的 Run，不改写 Segment、定位状态或历史结果。
+
 项目存在运行中的任务或未发布的术语扫描候选时，必须先结束该任务或发布/丢弃候选。
 历史阶段结果和既有输出不会被自动删除，已发布术语也不会因源文件替换而自动移除。
 
-EPUB 可以显式指定 Adapter 和导入选项：
+EPUB 可以显式指定 Adapter 和运行格式设置：
 
 ```bash
 python -m app.main init book.epub \

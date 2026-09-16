@@ -299,7 +299,7 @@
   .overview-file-list .file-row-select > span:not(.file-row-meta):not(.file-row-reorder-check) { grid-column: 1; grid-row: 1; }
   .overview-file-list .file-row-select > strong { grid-column: 2; grid-row: 1; }
   .overview-file-list .file-row-meta { position: static; grid-column: 2; grid-row: 2; justify-content: flex-start; }
-  .overview-file-list .file-row-replace { z-index: 1; grid-column: 2; grid-row: 2; align-self: end; justify-self: end; margin: 0 10px 8px; }
+  .overview-file-list .file-row-actions { z-index: 1; grid-column: 2; grid-row: 2; align-self: end; justify-self: end; margin: 0 10px 8px; }
   .overview-file-list .file-row-select.reorder-select { grid-template-columns: 22px 64px minmax(0, 1fr); gap: 8px; }
   .overview-file-list .file-row-select.reorder-select .file-row-reorder-check { grid-column: 1; grid-row: 1; }
   .overview-file-list .file-row-select.reorder-select > span:not(.file-row-meta):not(.file-row-reorder-check) { grid-column: 2; grid-row: 1; }

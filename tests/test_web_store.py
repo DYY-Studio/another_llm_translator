@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import TermGroupError, UsageError
+from app.errors import ProjectError, TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
-from app.project import add_project_files, init_project
+from app.project import add_project_files, init_project, update_file_run_options
 from app.sqlite_storage import (
     query_segments,
     read_files,
@@ -21,6 +21,7 @@ from app.sqlite_storage import (
 from app.project_export import export_project
 from app.term_library import TermNormalization, load_terms
 from app.term_matching import match_terms
+from tests.test_documents import RUBY_XHTML, make_epub
 from tests.test_foundation import make_app_root
 
 
@@ -36,6 +37,163 @@ def create_web_store_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
     )
     assert project is not None
     return project
+
+
+def _replace_epub_state_run_options(
+    project: Path, run_options: dict[str, str]
+) -> None:
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    opaque_state = state.get("state")
+    assert isinstance(opaque_state, dict)
+    for option_id in ("ruby_mode", "inline_format_mode", "inline_format_policy"):
+        opaque_state.pop(option_id, None)
+    state["state"] = opaque_state
+    state["run_options"] = run_options
+    write_json(project, state_path, state)
+
+
+def test_web_store_save_translation_uses_persisted_epub_run_options(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-ruby-options",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    _replace_epub_state_run_options(
+        project,
+        {
+            "ruby_mode": "short_xml",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        },
+    )
+
+    result = WebStore(project).save_translation(
+        {
+            "segment_id": "F0001-S000001",
+            "text": "<r><b>汉字</b><y>hànzì</y></r>",
+        }
+    )
+
+    assert result["text"] == "｜汉字《hànzì》"
+
+
+def test_web_store_save_review_uses_persisted_epub_run_options_for_markers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "markers.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A <em>B</em> C</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-marker-options",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    _replace_epub_state_run_options(
+        project,
+        {
+            "ruby_mode": "aozora",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
+        },
+    )
+    store = WebStore(project)
+    store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "base"}
+    )
+
+    result = store.save_review(
+        {
+            "stage": "proofreading",
+            "segment_id": "F0001-S000001",
+            "review_status": "suggested",
+            "suggested_text": "甲 <em1>乙</em1> 丙",
+            "reason": None,
+            "apply": False,
+        }
+    )
+
+    assert result["suggestion"]["suggested_text"] == "甲 乙 丙"
+
+
+def test_web_store_save_reads_current_run_options_after_store_init(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruby.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-current-options",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "short_xml"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    store = WebStore(project)
+    update_file_run_options(project, "F0001", {"ruby_mode": "compact"})
+
+    result = store.save_translation(
+        {
+            "segment_id": "F0001-S000001",
+            "text": "⟦R:汉字|Y:hànzì⟧",
+        }
+    )
+
+    assert result["text"] == "｜汉字《hànzì》"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("adapter_id", "txt"), ("adapter_version", "0.0")],
+)
+def test_web_store_rejects_adapter_state_not_owned_by_file(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    source = tmp_path / "state.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-state-validation",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state[field] = value
+    write_json(project, state_path, state)
+
+    store = WebStore(project)
+    with pytest.raises(ProjectError, match="状态"):
+        store.save_translation(
+            {"segment_id": "F0001-S000001", "text": "text"}
+        )
 
 
 def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> None:
@@ -795,7 +953,9 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "document",
     ]
     assert overview["segments"][0]["translation"] is None
+    assert overview["segments"][0]["format_count"] == 0
     assert store.segment_detail("F0001-S000001")["part_id"] == "document"
+    assert store.segment_detail("F0001-S000001")["format_count"] == 0
     assert overview["segments"][0]["reviews"]["proofreading"] == {
         "base": None,
         "suggestion": None,
@@ -803,6 +963,178 @@ def test_web_store_overview_excludes_empty_segments_and_preserves_order(
         "outdated": False,
         "applied_current": False,
     }
+
+
+def test_web_store_format_count_is_zero_for_unformatted_epub_segment(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "plain.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>Plain text</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-none",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    store = WebStore(project)
+
+    assert store.overview()["segments"][0]["format_count"] == 0
+    assert store.segment_detail("F0001-S000001")["format_count"] == 0
+
+
+def test_web_store_format_count_accepts_missing_epub_formats(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy-no-formats.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-legacy-no-formats",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    opaque_state = state["state"]
+    assert isinstance(opaque_state, dict)
+    slot = opaque_state["locators"][0]["slot"]
+    assert isinstance(slot, dict)
+    slot.pop("formats", None)
+    write_json(project, state_path, state)
+
+    store = WebStore(project)
+
+    assert store.overview()["segments"][0]["format_count"] == 0
+    assert store.segment_detail("F0001-S000001")["format_count"] == 0
+
+
+def test_web_store_format_count_reports_all_epub_format_ranges(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "formatted.epub"
+    make_epub(
+        source,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>A <em>B</em> <strong>C</strong></p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-many",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    store = WebStore(project)
+
+    overview_segment = store.overview()["segments"][0]
+    detail = store.segment_detail("F0001-S000001")
+
+    assert overview_segment["format_count"] == 2
+    assert detail["format_count"] == 2
+    assert "formats" not in overview_segment
+    assert "formats" not in detail
+
+
+def test_web_store_format_count_uses_each_file_state(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.epub"
+    second = tmp_path / "second.epub"
+    make_epub(
+        first,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p><em>First</em></p></body></html>"
+        ),
+    )
+    make_epub(
+        second,
+        xhtml=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p>Second</p></body></html>"
+        ),
+    )
+    project, _ = init_project(
+        [str(first)],
+        name="web-format-count-cross-file",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    add_project_files(project, [str(second)])
+
+    counts = {
+        item["file_id"]: item["format_count"]
+        for item in WebStore(project).overview()["segments"]
+    }
+
+    assert counts == {"F0001": 1, "F0002": 0}
+
+
+def test_web_store_format_count_rejects_damaged_locator_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "damaged.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-damaged",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    opaque_state = state["state"]
+    assert isinstance(opaque_state, dict)
+    slot = opaque_state["locators"][0]["slot"]
+    slot["formats"] = {"invalid": True}
+    write_json(project, state_path, state)
+
+    with pytest.raises(ProjectError, match="格式"):
+        WebStore(project).overview()
+
+
+def test_web_store_epub_format_count_rejects_missing_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "missing-state.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="web-format-count-missing-state",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    file_record = read_files(project)[0]
+    state_path = project / str(file_record["document_adapter_state"])
+    state = read_json(project, state_path)
+    state["state"] = None
+    write_json(project, state_path, state)
+
+    with pytest.raises(ProjectError, match="状态"):
+        WebStore(project).overview()
 
 
 def test_web_store_overview_reports_storage_and_source_file_sizes(

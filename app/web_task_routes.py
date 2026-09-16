@@ -127,7 +127,6 @@ def _safe_document_adapters(value: Any) -> dict[str, dict[str, str]]:
 
 
 def _safe_document_options(value: Any) -> dict[str, dict[str, Any]]:
-    allowed = {"ruby_mode", "inline_format_mode", "inline_format_policy"}
     if not isinstance(value, dict):
         return {}
     result: dict[str, dict[str, Any]] = {}
@@ -135,9 +134,7 @@ def _safe_document_options(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(file_id, str) or not isinstance(item, dict):
             continue
         result[file_id] = {
-            key: item[key]
-            for key in allowed
-            if key in item and isinstance(item[key], (bool, int, float, str))
+            key: item[key] for key in item if isinstance(key, str) and isinstance(item[key], str)
         }
     return result
 

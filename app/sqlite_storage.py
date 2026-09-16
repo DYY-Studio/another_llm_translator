@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 STAGES = frozenset(
     {
@@ -417,36 +417,6 @@ _SUMMARY_RUN_RESIDUAL_FIELDS = (
 )
 
 
-def _check_mirrors(
-    value: dict[str, Any], expected: dict[str, Any], location: str
-) -> None:
-    for key, actual in expected.items():
-        if key not in value:
-            continue
-        expected_value = bool(actual) if key == "is_empty" else actual
-        if value[key] != expected_value:
-            raise StorageError(
-                f"SQLite SQL/Payload 字段不一致：{location}.{key}: "
-                f"SQL={expected_value!r}, payload={value[key]!r}"
-            )
-
-
-def _common_expected(
-    project_id: str | None,
-    *,
-    record_type: str | None = None,
-    record_id: str | None = None,
-) -> dict[str, Any]:
-    expected: dict[str, Any] = {"schema_version": 1}
-    if project_id is not None:
-        expected["project_id"] = project_id
-    if record_type is not None:
-        expected["record_type"] = record_type
-    if record_id is not None:
-        expected["record_id"] = record_id
-    return expected
-
-
 def _stage_record_type(status: Any) -> str | None:
     if status == "reset":
         return "stage_reset"
@@ -461,411 +431,6 @@ def _terms_record_type(key: str) -> str:
         "overrides": "terminology_overrides",
         "active_task": "terminology_task",
     }[key]
-
-
-def _migrate_legacy_to_v3(connection: sqlite3.Connection) -> None:
-    """Validate and rewrite v1/v2 rows into the relation-first v3 layout."""
-    project_id = _project_id(connection)
-    files = connection.execute(
-        "SELECT file_id, file_order, payload_json FROM files"
-    ).fetchall()
-    segment_columns = {
-        str(item["name"])
-        for item in connection.execute("PRAGMA table_info(segments)")
-    }
-    segment_file_order = (
-        "segments.file_order"
-        if "file_order" in segment_columns
-        else "files.file_order"
-    )
-    segments = connection.execute(
-        f"""SELECT segments.segment_id, segments.file_id,
-                  {segment_file_order} AS file_order, segments.line_index,
-                  segments.part_id, segments.source, segments.is_empty,
-                  segments.model_source, segments.payload_json
-           FROM segments
-           JOIN files ON files.file_id = segments.file_id"""
-    ).fetchall()
-    adapter_states = connection.execute(
-        "SELECT file_id, payload_json FROM adapter_states"
-    ).fetchall()
-    stage_results = connection.execute(
-        """SELECT sequence, record_id, stage, segment_id, status, payload_json
-           FROM stage_results ORDER BY sequence"""
-    ).fetchall()
-    scans = connection.execute(
-        """SELECT sequence, record_id, active_task_id, segment_id, status,
-                  payload_json FROM terminology_scans ORDER BY sequence"""
-    ).fetchall()
-    candidates = connection.execute(
-        """SELECT sequence, record_id, active_task_id, payload_json
-           FROM terminology_candidates ORDER BY sequence"""
-    ).fetchall()
-    runs = connection.execute(
-        "SELECT run_id, stage, status, started_at, payload_json FROM runs"
-    ).fetchall()
-    chunks = connection.execute(
-        """SELECT sequence, record_id, run_id, payload_json
-           FROM run_chunks ORDER BY sequence"""
-    ).fetchall()
-    terms = connection.execute(
-        "SELECT key, payload_json FROM terms_state WHERE payload_json IS NOT NULL"
-    ).fetchall()
-
-    file_payloads: list[tuple[str, str]] = []
-    for row in files:
-        value = _load(str(row["payload_json"]))
-        file_id = str(row["file_id"])
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="source_file",
-                    record_id=f"FILE-{file_id}",
-                ),
-                "file_id": file_id,
-                "file_order": int(row["file_order"]),
-            },
-            f"files/{file_id}",
-        )
-        file_payloads.append(
-            (file_id, _residual(value, _FILE_RESIDUAL_FIELDS))
-        )
-
-    segment_rows: list[tuple[Any, ...]] = []
-    for row in segments:
-        value = _load(str(row["payload_json"]))
-        segment_id = str(row["segment_id"])
-        expected = {
-            **_common_expected(
-                project_id,
-                record_type="source_segment",
-                record_id=segment_id,
-            ),
-            "segment_id": segment_id,
-            "file_id": str(row["file_id"]),
-            "file_order": int(row["file_order"]),
-            "line_index": int(row["line_index"]),
-            "part_id": str(row["part_id"]),
-            "source": str(row["source"]),
-            "is_empty": bool(row["is_empty"]),
-            "model_source": row["model_source"],
-        }
-        _check_mirrors(value, expected, f"segments/{segment_id}")
-        segment_rows.append(
-            (
-                segment_id,
-                str(row["file_id"]),
-                int(row["line_index"]),
-                str(row["part_id"]),
-                str(row["source"]),
-                int(bool(row["is_empty"])),
-                row["model_source"],
-                value.get("created_at"),
-            )
-        )
-
-    adapter_payloads: list[tuple[str, str]] = []
-    for row in adapter_states:
-        file_id = str(row["file_id"])
-        value = _load(str(row["payload_json"]))
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="document_adapter_state",
-                    record_id=f"DOCUMENT-{file_id}",
-                ),
-                "file_id": file_id,
-            },
-            f"adapter_states/{file_id}",
-        )
-        adapter_payloads.append(
-            (file_id, _residual(value, _ADAPTER_RESIDUAL_FIELDS))
-        )
-
-    stage_payloads: list[tuple[Any, ...]] = []
-    for row in stage_results:
-        value = _load(str(row["payload_json"]))
-        record_id = str(row["record_id"])
-        stage = str(row["stage"])
-        status = row["status"]
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type=_stage_record_type(status),
-                    record_id=record_id,
-                ),
-                "stage": stage,
-                "segment_id": row["segment_id"],
-                "status": status,
-            },
-            f"stage_results/{record_id}",
-        )
-        stage_payloads.append(
-            (
-                int(row["sequence"]),
-                record_id,
-                stage,
-                row["segment_id"],
-                status,
-                _residual(value, _STAGE_RESIDUAL_FIELDS),
-            )
-        )
-
-    scan_payloads: list[tuple[Any, ...]] = []
-    for row in scans:
-        value = _load(str(row["payload_json"]))
-        record_id = str(row["record_id"])
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="terminology_scan",
-                    record_id=record_id,
-                ),
-                "stage": "terminology",
-                "active_task_id": str(row["active_task_id"]),
-                "segment_id": row["segment_id"],
-                "status": row["status"],
-            },
-            f"terminology_scans/{record_id}",
-        )
-        scan_payloads.append(
-            (
-                int(row["sequence"]),
-                record_id,
-                str(row["active_task_id"]),
-                row["segment_id"],
-                row["status"],
-                _residual(value, _SCAN_RESIDUAL_FIELDS),
-            )
-        )
-
-    candidate_payloads: list[tuple[Any, ...]] = []
-    for row in candidates:
-        value = _load(str(row["payload_json"]))
-        record_id = str(row["record_id"])
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="terminology_candidates",
-                    record_id=record_id,
-                ),
-                "stage": "terminology",
-                "status": "completed",
-                "active_task_id": str(row["active_task_id"]),
-            },
-            f"terminology_candidates/{record_id}",
-        )
-        candidate_payloads.append(
-            (
-                int(row["sequence"]),
-                record_id,
-                str(row["active_task_id"]),
-                _residual(value, _CANDIDATE_RESIDUAL_FIELDS),
-            )
-        )
-
-    run_payloads: list[tuple[str, str, str, str | None, str]] = []
-    for row in runs:
-        value = _load(str(row["payload_json"]))
-        run_id = str(row["run_id"])
-        started_at = row["started_at"]
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="run",
-                    record_id=run_id,
-                ),
-                "run_id": run_id,
-                "stage": str(row["stage"]),
-                "status": str(row["status"]),
-                "created_at": started_at,
-            },
-            f"runs/{run_id}",
-        )
-        run_payloads.append(
-            (
-                run_id,
-                str(row["stage"]),
-                str(row["status"]),
-                started_at,
-                _residual(value, _RUN_RESIDUAL_FIELDS),
-            )
-        )
-
-    chunk_payloads: list[tuple[Any, ...]] = []
-    for row in chunks:
-        value = _load(str(row["payload_json"]))
-        record_id = str(row["record_id"])
-        _check_mirrors(
-            value,
-            {
-                **_common_expected(
-                    project_id,
-                    record_type="chunk_manifest",
-                    record_id=record_id,
-                ),
-                "run_id": str(row["run_id"]),
-            },
-            f"run_chunks/{record_id}",
-        )
-        chunk_payloads.append(
-            (
-                int(row["sequence"]),
-                record_id,
-                str(row["run_id"]),
-                _residual(value, _CHUNK_RESIDUAL_FIELDS),
-            )
-        )
-
-    term_payloads: list[tuple[str, str]] = []
-    for row in terms:
-        key = str(row["key"])
-        value = _load(str(row["payload_json"]))
-        _check_mirrors(
-            value,
-            _common_expected(project_id, record_type=_terms_record_type(key)),
-            f"terms_state/{key}",
-        )
-        term_payloads.append(
-            (key, _residual(value, _TERMS_RESIDUAL_FIELDS))
-        )
-
-    connection.execute(
-        """CREATE TABLE segments_v3 (
-            segment_id TEXT PRIMARY KEY,
-            file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-            line_index INTEGER NOT NULL,
-            part_id TEXT NOT NULL,
-            source TEXT NOT NULL,
-            is_empty INTEGER NOT NULL,
-            model_source TEXT,
-            created_at TEXT,
-            UNIQUE(file_id, line_index)
-        )"""
-    )
-    connection.executemany(
-        """INSERT INTO segments_v3(
-            segment_id,file_id,line_index,part_id,source,is_empty,model_source,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        segment_rows,
-    )
-    connection.execute("DROP TABLE segments")
-    connection.execute("ALTER TABLE segments_v3 RENAME TO segments")
-
-    connection.execute(
-        """CREATE TABLE stage_results_v3 (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id TEXT NOT NULL UNIQUE,
-            stage TEXT NOT NULL,
-            segment_id TEXT,
-            status TEXT,
-            payload_json TEXT NOT NULL
-        )"""
-    )
-    connection.executemany(
-        """INSERT INTO stage_results_v3(
-            sequence,record_id,stage,segment_id,status,payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?)""",
-        stage_payloads,
-    )
-    connection.execute("DROP TABLE stage_results")
-    connection.execute("ALTER TABLE stage_results_v3 RENAME TO stage_results")
-    connection.execute(
-        """CREATE TABLE terminology_scans_v3 (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id TEXT NOT NULL UNIQUE,
-            active_task_id TEXT NOT NULL,
-            segment_id TEXT,
-            status TEXT,
-            payload_json TEXT NOT NULL
-        )"""
-    )
-    connection.executemany(
-        """INSERT INTO terminology_scans_v3(
-            sequence,record_id,active_task_id,segment_id,status,payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?)""",
-        scan_payloads,
-    )
-    connection.execute("DROP TABLE terminology_scans")
-    connection.execute("ALTER TABLE terminology_scans_v3 RENAME TO terminology_scans")
-    connection.execute(
-        """CREATE TABLE terminology_candidates_v3 (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id TEXT NOT NULL UNIQUE,
-            active_task_id TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )"""
-    )
-    connection.executemany(
-        """INSERT INTO terminology_candidates_v3(
-            sequence,record_id,active_task_id,payload_json
-        ) VALUES (?, ?, ?, ?)""",
-        candidate_payloads,
-    )
-    connection.execute("DROP TABLE terminology_candidates")
-    connection.execute(
-        "ALTER TABLE terminology_candidates_v3 RENAME TO terminology_candidates"
-    )
-    connection.execute(
-        """CREATE TABLE run_chunks_v3 (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id TEXT NOT NULL UNIQUE,
-            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-            payload_json TEXT NOT NULL
-        )"""
-    )
-    connection.executemany(
-        """INSERT INTO run_chunks_v3(
-            sequence,record_id,run_id,payload_json
-        ) VALUES (?, ?, ?, ?)""",
-        chunk_payloads,
-    )
-    connection.execute("DROP TABLE run_chunks")
-    connection.execute("ALTER TABLE run_chunks_v3 RENAME TO run_chunks")
-
-    connection.executemany(
-        "UPDATE files SET payload_json = ? WHERE file_id = ?",
-        [(payload, file_id) for file_id, payload in file_payloads],
-    )
-    connection.executemany(
-        "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
-        [(payload, file_id) for file_id, payload in adapter_payloads],
-    )
-    connection.executemany(
-        "UPDATE runs SET payload_json = ? WHERE run_id = ?",
-        [(payload, run_id) for run_id, _stage, _status, _started, payload in run_payloads],
-    )
-    connection.executemany(
-        "UPDATE terms_state SET payload_json = ? WHERE key = ?",
-        [(payload, key) for key, payload in term_payloads],
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS stage_results_stage_segment "
-        "ON stage_results(stage, segment_id, sequence)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS terminology_scans_task_segment "
-        "ON terminology_scans(active_task_id, segment_id, sequence)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS terminology_candidates_task "
-        "ON terminology_candidates(active_task_id, sequence)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS run_chunks_run ON run_chunks(run_id, sequence)"
-    )
 
 
 def _schema_version(connection: sqlite3.Connection) -> int | None:
@@ -915,6 +480,133 @@ def _backup_before_schema_upgrade(project: Path, version: int) -> Path:
     return backup_path
 
 
+def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
+    """Move host-owned run options out of adapter-private state in one txn."""
+    from .documents import compact_emphasis_aozora
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    files = connection.execute(
+        "SELECT file_id, payload_json FROM files ORDER BY file_order"
+    ).fetchall()
+    for file_row in files:
+        file_id = str(file_row["file_id"])
+        file_payload = _load(str(file_row["payload_json"]))
+        adapter_id = str(file_payload.get("document_adapter_id", ""))
+        adapter = get_document_adapter(adapter_id)
+        defaults = validate_document_run_options(adapter, {})
+        state_row = connection.execute(
+            "SELECT payload_json FROM adapter_states WHERE file_id = ?", (file_id,)
+        ).fetchone()
+        if state_row is None:
+            if defaults:
+                raise StorageError(f"Document Adapter 状态缺失：{file_id}")
+            continue
+        state_payload = _load(str(state_row["payload_json"]))
+        state_payload["run_options"] = defaults
+        if adapter_id == "epub":
+            stored_name = file_payload.get("stored_name")
+            if not isinstance(stored_name, str) or not stored_name:
+                raise StorageError(f"EPUB 源副本路径缺失：{file_id}")
+            source = project / "input" / stored_name
+            if not source.is_file() or source.is_symlink():
+                raise StorageError(f"EPUB 源副本缺失或无效：{file_id}")
+            imported = adapter.import_sources(
+                [str(source)], recursive=False, config={}, options={}
+            ).files[0]
+            old = connection.execute(
+                "SELECT segment_id, part_id, source FROM segments "
+                "WHERE file_id = ? ORDER BY line_index",
+                (file_id,),
+            ).fetchall()
+            imported_parts = imported.segment_part_ids
+            imported_state = imported.opaque_state
+            imported_locators = (
+                imported_state.get("locators")
+                if isinstance(imported_state, dict)
+                else None
+            )
+            if (
+                imported_parts is None
+                or len(imported_parts) != len(imported.segments)
+                or not isinstance(imported_state, dict)
+                or not isinstance(imported_locators, list)
+                or len(imported_locators) != len(imported.segments)
+                or any(
+                    not isinstance(locator, dict) for locator in imported_locators
+                )
+            ):
+                raise StorageError(f"EPUB Segment 定位无法同步过滤：{file_id}")
+
+            old_part_ids = {str(row["part_id"]) for row in old}
+            retained_indexes = [
+                index
+                for index, part_id in enumerate(imported_parts)
+                if part_id in old_part_ids
+            ]
+            retained_parts = [imported_parts[index] for index in retained_indexes]
+            old_parts = [str(row["part_id"]) for row in old]
+            if len(old) != len(retained_indexes) or old_parts != retained_parts:
+                raise StorageError(f"EPUB Segment 定位与重建结果不一致：{file_id}")
+            retained_segments = [imported.segments[index] for index in retained_indexes]
+            for old_row, new_source in zip(old, retained_segments, strict=True):
+                old_source = str(old_row["source"])
+                if (
+                    old_source != new_source
+                    and compact_emphasis_aozora(old_source) != new_source
+                    and compact_emphasis_aozora(new_source) != old_source
+                ):
+                    raise StorageError(f"EPUB Segment 源文本不一致：{file_id}")
+            imported_state = dict(imported_state)
+            imported_state["locators"] = [
+                imported_locators[index] for index in retained_indexes
+            ]
+            state_payload["state"] = imported_state
+            state_payload["adapter_version"] = adapter.version
+            file_payload["document_adapter_version"] = adapter.version
+            connection.execute(
+                "UPDATE files SET payload_json = ? WHERE file_id = ?",
+                (_json(file_payload), file_id),
+            )
+            connection.executemany(
+                "UPDATE segments SET source = ?, is_empty = ?, model_source = NULL WHERE segment_id = ?",
+                [
+                    (text, int(not text or text.isspace()), str(row["segment_id"]))
+                    for text, row in zip(retained_segments, old, strict=True)
+                ],
+            )
+        connection.execute(
+            "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+            (_json(state_payload), file_id),
+        )
+    running = connection.execute(
+        "SELECT run_id, payload_json FROM runs WHERE status = 'running'"
+    ).fetchall()
+    for row in running:
+        payload = _load(str(row["payload_json"]))
+        payload.update(
+            status="interrupted",
+            error_message="Document Adapter 运行协议已升级、必须新建 Run",
+        )
+        connection.execute(
+            "UPDATE runs SET status = 'interrupted', payload_json = ? WHERE run_id = ?",
+            (_json(payload), str(row["run_id"])),
+        )
+    summary_running = connection.execute(
+        "SELECT run_id, payload_json FROM summary_runs WHERE status = 'running'"
+    ).fetchall()
+    for row in summary_running:
+        payload = _load(str(row["payload_json"]))
+        payload.update(
+            status="interrupted",
+            error_message="Document Adapter 运行协议已升级、必须新建 Run",
+        )
+        connection.execute(
+            "UPDATE summary_runs SET status = 'interrupted', updated_at = ?, "
+            "payload_json = ? WHERE run_id = ?",
+            (utc_now(), _json(payload), str(row["run_id"])),
+        )
+
+
 def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) -> Path | None:
     """Ensure the project database matches SCHEMA_VERSION.
 
@@ -930,7 +622,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {1, 2, 3, SCHEMA_VERSION}:
+    elif version not in {3, 4, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -946,11 +638,8 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         # version check and sqlite's online backup.
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
-        if version in {1, 2}:
-            _create_tables(connection)
-            _migrate_legacy_to_v3(connection)
-        else:
-            _create_tables(connection)
+        _create_tables(connection)
+        _migrate_to_v5(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",

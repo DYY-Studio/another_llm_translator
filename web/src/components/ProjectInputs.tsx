@@ -165,24 +165,32 @@ export function InputQueue({
       {!folderSelectionSupported && <small className="muted">{translate("inputQueue.noFolderSupport", language)}</small>}
       {message && <button type="button" className="input-queue-message" onClick={() => setMessage("")}>{message}</button>}
       {adapters.flatMap((adapter) => queuedAdapters.has(adapter.adapter_id)
-        ? [...adapter.import_options, ...adapter.run_options].map((option) => (
-          <label className="input-queue-option" key={`${adapter.adapter_id}.${option.option_id}`}>
-            {option.label}
-            <select
-              disabled={disabled}
-              value={options[adapter.adapter_id]?.[option.option_id] ?? option.default}
-              onChange={(event) => onOptionsChange({
-                ...options,
-                [adapter.adapter_id]: {
-                  ...options[adapter.adapter_id],
-                  [option.option_id]: event.target.value,
-                },
-              })}
-            >
-              {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
-            </select>
-            <small>{translate("inputQueue.optionHint", language)}</small>
-          </label>
+        ? ([
+          ["导入设置", adapter.import_options],
+          ["运行格式设置", adapter.run_options],
+        ] as const).filter(([, definitions]) => definitions.length).map(([heading, definitions]) => (
+          <fieldset className="input-queue-options" key={`${adapter.adapter_id}.${heading}`}>
+            <legend>{adapter.adapter_id.toUpperCase()} · {heading}</legend>
+            {definitions.map((option) => (
+              <label className="input-queue-option" key={`${adapter.adapter_id}.${option.option_id}`}>
+                {option.label}
+                <select
+                  disabled={disabled}
+                  value={options[adapter.adapter_id]?.[option.option_id] ?? option.default}
+                  onChange={(event) => onOptionsChange({
+                    ...options,
+                    [adapter.adapter_id]: {
+                      ...options[adapter.adapter_id],
+                      [option.option_id]: event.target.value,
+                    },
+                  })}
+                >
+                  {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
+                </select>
+                <small>{translate("inputQueue.optionHint", language)}</small>
+              </label>
+            ))}
+          </fieldset>
         ))
         : [])}
       <div className="input-queue-list">

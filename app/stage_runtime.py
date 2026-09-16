@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import sys
@@ -8,7 +9,9 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple
+
 import httpx
+
 from .config import load_project_config
 from .documents import (
     aozora_safe_split_positions,
@@ -45,13 +48,14 @@ from .execution import (
     segment_model_source,
     segment_model_text,
 )
-from .llm_client import LLMClient, SlidingWindowLimiter
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
-from .llm_response import TerminologyResponseMode
+from .llm_client import LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
+from .llm_response import TerminologyResponseMode
 from .logging_utils import get_logger
 from .plugins import (
     get_document_adapter,
+    validate_document_run_options,
 )
 from .project import (
     PROMPT_LANGUAGES,
@@ -93,8 +97,30 @@ _VALIDATION_REPAIR = {
 }
 
 
+def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str, str]] | None:
+    if run_id is None:
+        return None
+    raw = read_json(project, project / "runs" / run_id / "manifest.json").get(
+        "document_adapter_options"
+    )
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Run 缺少 Document Adapter 运行设置快照：{run_id}")
+    result: dict[str, dict[str, str]] = {}
+    for file_id, values in raw.items():
+        if not isinstance(file_id, str) or not isinstance(values, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in values.items()
+        ):
+            raise ConfigError(f"Run 的 Document Adapter 运行设置快照无效：{run_id}")
+        result[file_id] = values
+    return result
+
+
 def _project_context(
-    project: Path, *, stage: str | None = None
+    project: Path,
+    *,
+    stage: str | None = None,
+    frozen_run_options: dict[str, dict[str, str]] | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -111,7 +137,7 @@ def _project_context(
     metadata = read_json(project, project / "project.json")
     files = load_source_files(project)
     segments = load_segments(project)
-    adapter_options: dict[str, dict[str, Any]] = {}
+    adapter_options: dict[str, dict[str, str]] = {}
     adapters: dict[str, dict[str, str]] = {}
     adapter_prompt_requirements: dict[str, dict[str, str]] = {}
     for file_record in files:
@@ -127,32 +153,55 @@ def _project_context(
             else None
         )
         state = state_record.get("state") if isinstance(state_record, dict) else None
-        if (
-            stage is not None
-            and state_record is not None
-            and not isinstance(state, dict)
-        ):
+        if stage is not None and state is not None and not isinstance(state, dict):
             raise ConfigError(
                 f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
             )
-        if isinstance(state, dict):
-            adapter_options[file_id] = {
-                key: state[key]
-                for key in (
-                    "ruby_mode",
-                    "inline_format_mode",
-                    "inline_format_policy",
+        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+        if frozen_run_options is not None:
+            raw_run_options = frozen_run_options.get(file_id)
+            if raw_run_options is None:
+                raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
+        elif state_record is None:
+            raw_run_options = {}
+        else:
+            raw_run_options = state_record.get("run_options")
+            if raw_run_options is None:
+                if adapter.run_options:
+                    raise ConfigError(
+                        f"Document Adapter 状态缺少 run_options：{file_id}"
+                    )
+                raw_run_options = {}
+        try:
+            run_options = validate_document_run_options(
+                adapter, raw_run_options, use_defaults=False
+            )
+        except UsageError as exc:
+            raise ConfigError(
+                f"Document Adapter run_options 无效：{file_id}"
+            ) from exc
+        adapter_options[file_id] = run_options
+        for segment in (item for item in segments if str(item["file_id"]) == file_id):
+            segment["_adapter_state"] = state
+            segment["_adapter_run_options"] = run_options
+            if stage is not None:
+                rendered_model_source = adapter.render_model_source(
+                    segment=segment, opaque_state=state, run_options=run_options
                 )
-                if key in state
-            }
+                if not isinstance(rendered_model_source, str):
+                    raise ConfigError(
+                        "Document Adapter render_model_source 必须返回字符串："
+                        f"{file_record['document_adapter_id']}"
+                    )
+                segment["model_source"] = rendered_model_source
         if stage is not None:
-            adapter = get_document_adapter(str(file_record["document_adapter_id"]))
             requirements: dict[str, str] = {}
             for language in PROMPT_LANGUAGES:
                 requirement = adapter.model_prompt_requirements(
                     stage=stage,
                     language=language,
                     opaque_state=state,
+                    run_options=run_options,
                 )
                 if requirement is not None and not isinstance(requirement, str):
                     raise ConfigError(
@@ -162,6 +211,14 @@ def _project_context(
                 if requirement:
                     requirements[language] = requirement
             adapter_prompt_requirements[file_id] = requirements
+    if frozen_run_options is not None:
+        expected_file_ids = {str(item["file_id"]) for item in files}
+        unknown_file_ids = sorted(set(frozen_run_options) - expected_file_ids)
+        if unknown_file_ids:
+            raise ConfigError(
+                "Run 的 Document Adapter 运行设置快照包含未知 File："
+                f"{', '.join(unknown_file_ids)}"
+            )
     config["_document_adapter_options"] = adapter_options
     config["_document_adapters"] = adapters
     if stage is not None:
@@ -1180,13 +1237,11 @@ def _split_segment_source(
         "source": source,
         "_original_segment_id": original_id,
     }
-    if segment.get("_ruby_mode") in {"short_xml", "compact"}:
-        result["model_source"] = segment_model_text(result, source)
-    elif isinstance(existing_model_source, str):
+    if isinstance(existing_model_source, str):
         if existing_model_source != original_source:
             raise ConfigError(
-                "Document Adapter 提供的 model_source 无法验证切片映射；"
-                "请在 Adapter 中提供可验证切片或关闭概括拆分"
+                "当前 Document Adapter 运行格式无法安全映射超长 Segment 的切片；"
+                "请缩短 Segment、提高模型上下文限制，或关闭超长 Segment 拆分"
             )
         result["model_source"] = source
     return result

@@ -9,6 +9,7 @@ import type { ProjectOverview, ProjectSummary } from "../types";
 import { ProjectBar } from "./ProjectPicker";
 import { InputQueue, AddFilesDialog } from "./ProjectInputs";
 import { ReplacementDialog } from "./ReplacementDialog";
+import { RunOptionsDialog } from "./RunOptionsDialog";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -58,6 +59,8 @@ export function Overview({
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
   const [addFilesOpen, setAddFilesOpen] = useState(false);
   const [replacementTarget, setReplacementTarget] = useState<ProjectFile | null>(null);
+  const [runOptionsFile, setRunOptionsFile] = useState<ProjectFile | null>(null);
+  const [runOptionsBulkOpen, setRunOptionsBulkOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -133,6 +136,7 @@ export function Overview({
     ? filesInOrder(value.files, optimisticOrder.after)
     : value.files;
   const fileIds = orderedFiles.map((item) => item.file_id);
+  const adaptersWithRunOptions = [...new Set(orderedFiles.filter((item) => item.has_run_options).map((item) => item.document_adapter_id))];
   const draggedFileIdSet = new Set(draggedFileIds);
   const buttonReorderMode = buttonReorder?.project === project;
   const selectedReorderFileIds = buttonReorderMode
@@ -415,6 +419,7 @@ export function Overview({
           <button className="primary-button" disabled={busy || compacting || buttonReorderMode} onClick={openAddFiles}>
             {translate("overview.addFiles", language)}
           </button>
+          {adaptersWithRunOptions.length > 0 && <button className="quiet-button run-options-bulk" disabled={busy || compacting || buttonReorderMode} onClick={() => setRunOptionsBulkOpen(true)}>{translate("runOptions.bulkButton", language)}</button>}
           <button className="danger-button" disabled={busy || compacting || buttonReorderMode || selection.selectedKeys.size === 0} onClick={() => setRemoving(true)}>
             {translate("overview.remove", language)}
           </button>
@@ -507,17 +512,20 @@ export function Overview({
                   <small className="file-row-size">{formatSize(item.size_bytes)}</small>
                 </span>
               </button>
-              <button
-                type="button"
-                className="quiet-button file-row-replace"
-                disabled={busy || compacting || buttonReorderMode}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openReplacement(item);
-                }}
-              >
-                {translate("overview.replace", language)}
-              </button>
+              <span className="file-row-actions">
+                <button
+                  type="button"
+                  className="quiet-button file-row-replace"
+                  disabled={busy || compacting || buttonReorderMode}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openReplacement(item);
+                  }}
+                >
+                  {translate("overview.replace", language)}
+                </button>
+                {item.has_run_options && <button type="button" className="quiet-button file-row-settings" disabled={busy || compacting || buttonReorderMode} onClick={(event) => { event.stopPropagation(); setRunOptionsFile(item); }}>{translate("runOptions.fileButton", language)}</button>}
+              </span>
             </div>
           ))}
         </div>
@@ -558,6 +566,8 @@ export function Overview({
           }}
         />
       )}
+      {runOptionsFile && <RunOptionsDialog project={project} fileId={runOptionsFile.file_id} language={language} onClose={() => setRunOptionsFile(null)} onSaved={onFilesChanged} />}
+      {runOptionsBulkOpen && <RunOptionsDialog project={project} bulkAdapterIds={adaptersWithRunOptions} language={language} onClose={() => setRunOptionsBulkOpen(false)} onSaved={onFilesChanged} />}
       {removing && (
         <div className="modal-backdrop" onMouseDown={() => setRemoving(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>

@@ -1,18 +1,19 @@
 from __future__ import annotations
+
 import json
 import os
 import secrets
-import sqlite3
 import shutil
+import sqlite3
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from .errors import (
-    UsageError,
-)
+
+from .errors import ConfigError, UsageError
 from .locking import project_write_lock
 from .plugins import (
     document_adapter_replacement_options,
@@ -21,13 +22,14 @@ from .plugins import (
     get_document_adapter_for_extension,
 )
 from .project import (
-    FileReplacementPlan,
     PROMPT_LANGUAGES,
     PROMPT_RESOURCE_STAGES,
+    FileReplacementPlan,
     add_project_files,
     apply_file_replacement,
     delete_project,
     ensure_missing_summary_prompts,
+    file_run_options,
     init_project,
     load_source_files,
     natural_path_key,
@@ -37,6 +39,8 @@ from .project import (
     reorder_project_files,
     resolve_project,
     resolve_project_parent,
+    update_adapter_run_options,
+    update_file_run_options,
 )
 from .sqlite_storage import (
     SCHEMA_VERSION,
@@ -48,6 +52,7 @@ from .sqlite_storage import (
 )
 from .user_config import user_root
 from .web_store import WebStore
+
 
 @dataclass
 class ReplacementPreviewSession:
@@ -291,9 +296,8 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             if connection is not None:
                 connection.close()
         if schema_version is not None and schema_version not in {
-            1,
-            2,
             3,
+            4,
             SCHEMA_VERSION,
         }:
             raise UsageError(
@@ -360,15 +364,19 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         adapter_id = str(file_record["document_adapter_id"])
         adapter = get_document_adapter(adapter_id)
         state = read_adapter_state(root, file_id)
-        opaque_state = (
-            state.get("state")
-            if isinstance(state, dict) and isinstance(state.get("state"), dict)
-            else state
-        )
+        if state is None:
+            opaque_state = None
+        elif not isinstance(state, dict) or "state" not in state:
+            raise ConfigError(f"Document Adapter 状态缺少 state：{file_id}")
+        else:
+            opaque_state = state["state"]
+            if opaque_state is not None and not isinstance(opaque_state, dict):
+                raise ConfigError(f"Document Adapter 状态无效：{file_id}")
         values = document_adapter_replacement_options(
             adapter,
             opaque_state=opaque_state,
         )
+        values.update(file_run_options(root, file_id))
         summary = next(
             item
             for item in document_adapter_summaries(
@@ -377,6 +385,47 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             if item["adapter_id"] == adapter_id
         )
         return {"adapter": summary, "values": values}
+
+    def run_options_payload(root: Path, file_id: str) -> dict[str, Any]:
+        file_record = next((item for item in load_source_files(root) if str(item["file_id"]) == file_id), None)
+        if file_record is None:
+            raise UsageError(f"未知文件 ID：{file_id}")
+        adapter_id = str(file_record["document_adapter_id"])
+        adapter = get_document_adapter(adapter_id)
+        summary = next(item for item in document_adapter_summaries() if item["adapter_id"] == adapter_id)
+        return {"adapter": summary, "file_id": file_id, "values": file_run_options(root, file_id)}
+
+    @app.get("/api/v1/projects/{name}/files/{file_id}/run-options")
+    async def get_file_run_options(name: str, file_id: str) -> dict[str, Any]:
+        return run_options_payload(project(name), file_id)
+
+    @app.put("/api/v1/projects/{name}/files/{file_id}/run-options")
+    async def put_file_run_options(name: str, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        options = payload.get("options")
+        if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
+            raise UsageError("options 必须是字符串键值对象")
+        root = project(name)
+        with project_write_lock(root):
+            values = update_file_run_options(root, file_id, options)
+        return {**run_options_payload(root, file_id), "values": values}
+
+    @app.get("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
+    async def get_adapter_run_options(name: str, adapter_id: str) -> dict[str, Any]:
+        root = project(name)
+        files = [item for item in load_source_files(root) if str(item["document_adapter_id"]) == adapter_id]
+        if not files:
+            raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+        return {"adapter_id": adapter_id, "files": [{"file_id": str(item["file_id"]), "name": str(item["original_name"]), "values": file_run_options(root, str(item["file_id"]))} for item in files]}
+
+    @app.put("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
+    async def put_adapter_run_options(name: str, adapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        options = payload.get("options")
+        if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
+            raise UsageError("options 必须是字符串键值对象")
+        root = project(name)
+        with project_write_lock(root):
+            values = update_adapter_run_options(root, adapter_id, options)
+        return {"adapter_id": adapter_id, "files": values}
 
     @app.post("/api/v1/projects")
     async def create_project(

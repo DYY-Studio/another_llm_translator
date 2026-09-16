@@ -2238,7 +2238,7 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
 
 
 @pytest.mark.asyncio
-async def test_external_model_source_refuses_unverifiable_runtime_split(
+async def test_external_model_source_refuses_unsafe_oversized_split(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2254,7 +2254,7 @@ async def test_external_model_source_refuses_unverifiable_runtime_split(
         app_root=make_app_root(tmp_path),
         projects_root=tmp_path / "projects",
         document_adapter_id="record",
-        adapter_options={"record": {"source_style": "marked"}},
+        adapter_options={"record": {"source_style": "plain", "line_ending": "crlf"}},
     )
     assert project is not None
     write_summary_participation(
@@ -2275,7 +2275,10 @@ async def test_external_model_source_refuses_unverifiable_runtime_split(
     os.environ["LLM_API_KEY"] = "test"
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
-        with pytest.raises(ConfigError, match="model_source.*切片"):
+        with pytest.raises(
+            ConfigError,
+            match="运行格式.*无法安全映射.*缩短 Segment.*提高.*关闭",
+        ):
             await run_terminology(
                 project, Scope(), http_client=client, include_summaries=True
             )
@@ -2615,7 +2618,7 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
         app_root=make_app_root(tmp_path),
         projects_root=tmp_path / "projects",
         document_adapter_id="record",
-        adapter_options={"record": {"source_style": "marked"}},
+        adapter_options={"record": {"line_ending": "crlf"}},
     )
     assert project is not None
     write_summary_participation(

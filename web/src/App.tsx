@@ -694,6 +694,7 @@ export default function App() {
           language={language}
           onClose={() => setRunOptions(null)}
           onStart={startRun}
+          onOpenOverview={() => { setRunOptions(null); navigateStage("overview"); }}
         />
       )}
     </>

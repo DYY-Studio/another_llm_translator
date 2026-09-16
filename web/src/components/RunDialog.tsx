@@ -16,11 +16,13 @@ export function RunDialog({
   options,
   onClose,
   onStart,
+  onOpenOverview,
   language,
 }: {
   options: TaskOptions;
   onClose: () => void;
   onStart: (decision: RunDecision) => void;
+  onOpenOverview?: () => void;
   language: Language;
 }) {
   const [runAction, setRunAction] = useState<"resume" | "decline" | null>(
@@ -86,6 +88,14 @@ export function RunDialog({
           <span><strong>{options.pending}</strong>{translate("runDialog.pending", language)}</span>
           <span><strong>{options.failed}</strong>{translate("runDialog.failed", language)}</span>
         </div>
+        {(options.document_adapter_run_options?.length ?? 0) > 0 && (
+          <section className="run-adapter-options" aria-label={translate("runOptions.summaryTitle", language)}>
+            <div><strong>{translate("runOptions.summaryTitle", language)}</strong>{onOpenOverview && <button className="link-button" onClick={onOpenOverview}>{translate("runOptions.openOverview", language)}</button>}</div>
+            {options.document_adapter_run_options?.map((adapter) => (
+              <p key={adapter.adapter_id}><code>{adapter.adapter_id}</code> · {translate("runOptions.fileCount", language, { count: adapter.file_count })}: {adapter.options.map((option) => `${option.label}: ${option.value ?? translate("runOptions.multiple", language)}`).join(" · ")}</p>
+            ))}
+          </section>
+        )}
         {decisionMode && <div className="run-decision-info">
           <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>

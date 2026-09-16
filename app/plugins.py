@@ -17,7 +17,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 11
+PLUGIN_PROTOCOL_VERSION = 12
 PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 
@@ -202,6 +202,16 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                     f"Document Adapter 缺少 model_prompt_requirements："
                     f"{adapter.adapter_id}"
                 )
+            if not callable(getattr(adapter, "render_model_source", None)):
+                raise ConfigError(
+                    f"Document Adapter 缺少 render_model_source："
+                    f"{adapter.adapter_id}"
+                )
+            if not callable(getattr(adapter, "segment_format_count", None)):
+                raise ConfigError(
+                    f"Document Adapter 缺少 segment_format_count："
+                    f"{adapter.adapter_id}"
+                )
             if not callable(getattr(adapter, "replacement_options", None)):
                 raise ConfigError(
                     f"Document Adapter 缺少 replacement_options："
@@ -288,8 +298,31 @@ def normalize_model_text(
         raise ProjectError(f"模型文本引用了未知文件：{file_id}")
     adapter = get_document_adapter(str(file_record["document_adapter_id"]))
     return normalize_document_output(
-        adapter, segment=segment, text=text, stage=stage
+        adapter,
+        segment=segment,
+        text=text,
+        stage=stage,
+        opaque_state=segment.get("_adapter_state"),
+        run_options=segment.get("_adapter_run_options", {}),
     )
+
+
+def document_adapter_segment_format_count(
+    adapter: DocumentAdapter,
+    *,
+    segment: dict[str, Any],
+    opaque_state: dict[str, Any] | None,
+) -> int:
+    value = adapter.segment_format_count(
+        segment=segment,
+        opaque_state=opaque_state,
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProjectError(
+            "Document Adapter segment_format_count 必须返回非负整数："
+            f"{adapter.adapter_id}"
+        )
+    return value
 
 
 def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
@@ -311,10 +344,6 @@ def validate_document_import_options(
     declarations = {
         option.option_id: option for option in adapter.import_options
     }
-    run_options = getattr(adapter, "run_options", ())
-    declarations.update(
-        {option.option_id: option for option in run_options}
-    )
     unknown = sorted(set(provided) - set(declarations))
     if unknown:
         raise UsageError(
@@ -333,19 +362,64 @@ def validate_document_import_options(
                 f"{adapter.adapter_id}.{option_id} 取值无效：{value}"
             )
         resolved[option_id] = value
-    for option in run_options:
-        if option.option_id not in provided:
-            continue
-        value = provided[option.option_id]
-        choices = {choice_id for choice_id, _ in option.choices}
-        if allow_replacement_choices:
-            choices.update(choice_id for choice_id, _ in option.replacement_choices)
-        if value not in choices:
-            raise UsageError(
-                f"{adapter.adapter_id}.{option.option_id} 取值无效：{value}"
-            )
-        resolved[option.option_id] = value
     return resolved
+
+
+def validate_document_run_options(
+    adapter: DocumentAdapter,
+    values: dict[str, str] | None,
+    *,
+    use_defaults: bool = True,
+) -> dict[str, str]:
+    if values is not None and not isinstance(values, dict):
+        raise UsageError(f"{adapter.adapter_id} 运行选项格式无效")
+    provided = values or {}
+    declarations = {option.option_id: option for option in adapter.run_options}
+    unknown = sorted(set(provided) - set(declarations))
+    if unknown:
+        raise UsageError(f"{adapter.adapter_id} 包含未知运行选项：{', '.join(unknown)}")
+    resolved: dict[str, str] = {}
+    for option_id, option in declarations.items():
+        if option_id not in provided:
+            if not use_defaults:
+                raise UsageError(
+                    f"{adapter.adapter_id} run_options 缺少选项：{option_id}"
+                )
+            value = option.default
+        else:
+            value = provided[option_id]
+        if not isinstance(value, str):
+            raise UsageError(
+                f"{adapter.adapter_id}.{option_id} 运行选项值格式无效"
+            )
+        if value not in {item[0] for item in option.choices}:
+            raise UsageError(f"{adapter.adapter_id}.{option_id} 取值无效：{value}")
+        resolved[option_id] = value
+    return resolved
+
+
+def split_document_adapter_options(
+    adapter: DocumentAdapter,
+    values: dict[str, str] | None,
+    *,
+    allow_replacement_choices: bool = False,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Validate the shared input shape and keep import/run ownership separate."""
+    provided = values or {}
+    declared = {option.option_id for option in (*adapter.import_options, *adapter.run_options)}
+    unknown = sorted(set(provided) - declared)
+    if unknown:
+        raise UsageError(f"{adapter.adapter_id} 包含未知选项：{', '.join(unknown)}")
+    imports = {key: value for key, value in provided.items() if key in {option.option_id for option in adapter.import_options}}
+    runs = {key: value for key, value in provided.items() if key in {option.option_id for option in adapter.run_options}}
+    return (
+        validate_document_import_options(
+            adapter,
+            imports,
+            allow_replacement_choices=allow_replacement_choices,
+        ),
+        validate_document_run_options(adapter, runs),
+    )
 
 
 def document_adapter_replacement_options(
@@ -363,10 +437,7 @@ def document_adapter_replacement_options(
         raise ConfigError(
             f"Document Adapter 替换选项返回值无效：{adapter.adapter_id}"
         )
-    declared = {
-        option.option_id
-        for option in (*adapter.import_options, *getattr(adapter, "run_options", ()))
-    }
+    declared = {option.option_id for option in adapter.import_options}
     if set(values) != declared:
         raise ConfigError(
             f"Document Adapter 替换选项不完整：{adapter.adapter_id}"
@@ -401,7 +472,7 @@ def _validate_replacement_overrides(
 ) -> dict[str, str]:
     declarations = {
         option.option_id: option
-        for option in (*adapter.import_options, *getattr(adapter, "run_options", ()))
+        for option in adapter.import_options
     }
     unknown = sorted(set(overrides) - set(declarations))
     if unknown:

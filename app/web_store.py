@@ -5,11 +5,16 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_project_config
-from .documents import compact_emphasis_aozora
+from .documents import DocumentAdapter
 from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
-from .plugins import normalize_model_text
+from .plugins import (
+    document_adapter_segment_format_count,
+    get_document_adapter,
+    normalize_model_text,
+    validate_document_run_options,
+)
 from .project import load_source_files
 from .sqlite_storage import (
     append_jsonl,
@@ -22,6 +27,7 @@ from .sqlite_storage import (
     new_record_id,
     query_segment_neighbors,
     query_segments,
+    read_adapter_state,
     read_json,
     read_jsonl,
     read_segment_sources,
@@ -74,6 +80,44 @@ def _stored_source_size(project: Path, stored_name: object) -> int:
         raise ProjectError(f"无法读取项目源文件大小：{stored_name}: {exc}") from exc
 
 
+def _read_adapter_context(
+    project: Path, file_record: dict[str, Any]
+) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
+    file_id = str(file_record["file_id"])
+    adapter_id = str(file_record["document_adapter_id"])
+    adapter = get_document_adapter(adapter_id)
+    state_path = file_record.get("document_adapter_state")
+    state_record = read_adapter_state(project, file_id)
+    if state_record is None:
+        if state_path is not None or adapter.run_options:
+            raise ProjectError(f"Document Adapter 状态缺失：{file_id}")
+        return adapter, None, {}
+    if state_path is None:
+        raise ProjectError(f"Document Adapter 状态路径缺失：{file_id}")
+    if (
+        state_record.get("adapter_id") != adapter_id
+        or str(state_record.get("adapter_version"))
+        != str(file_record.get("document_adapter_version"))
+        or str(state_record.get("file_id")) != file_id
+        or "state" not in state_record
+        or "run_options" not in state_record
+    ):
+        raise ProjectError(f"Document Adapter 状态归属或版本不匹配：{file_id}")
+    opaque_state = state_record["state"]
+    if opaque_state is not None and not isinstance(opaque_state, dict):
+        raise ProjectError(f"Document Adapter 状态无效：{file_id}")
+    raw_run_options = state_record["run_options"]
+    if not isinstance(raw_run_options, dict):
+        raise ProjectError(f"Document Adapter run_options 无效：{file_id}")
+    try:
+        run_options = validate_document_run_options(
+            adapter, raw_run_options, use_defaults=False
+        )
+    except UsageError as exc:
+        raise ProjectError(f"Document Adapter run_options 无效：{file_id}") from exc
+    return adapter, opaque_state, run_options
+
+
 class WebStore:
     """Web 工作台使用的项目读写与视图存储。"""
 
@@ -82,17 +126,6 @@ class WebStore:
         self.config = load_project_config(project)
         self.metadata = read_json(project, project / "project.json")
         self.files = load_source_files(project)
-        self._ruby_modes: dict[str, str] = {}
-        for file_record in self.files:
-            state_path = file_record.get("document_adapter_state")
-            if not isinstance(state_path, str):
-                continue
-            state_record = read_json(project, project / state_path)
-            state = state_record.get("state")
-            if isinstance(state, dict) and isinstance(state.get("ruby_mode"), str):
-                self._ruby_modes[str(file_record["file_id"])] = str(
-                    state["ruby_mode"]
-                )
 
     @property
     def project_id(self) -> str:
@@ -108,15 +141,6 @@ class WebStore:
             if record.get("status") == "reset":
                 continue
             item = dict(record)
-            file_id = str(segment_id).split("-S", 1)[0]
-            if self._ruby_modes.get(file_id) in {
-                "aozora",
-                "short_xml",
-                "compact",
-            }:
-                for key in ("text", "suggested_text"):
-                    if isinstance(item.get(key), str):
-                        item[key] = compact_emphasis_aozora(str(item[key]))
             result[segment_id] = item
         return result
 
@@ -158,20 +182,59 @@ class WebStore:
             terms_revision=self._terms_revision(),
         )
 
-    def _require_segment(self, segment_id: object) -> dict[str, Any]:
+    def _require_segment(
+        self,
+        segment_id: object,
+        *,
+        files: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(segment_id, str):
             raise UsageError(f"未知或空 Segment：{segment_id}")
         segment = get_segment(self.project, segment_id)
         if segment is None or segment.get("is_empty"):
             raise UsageError(f"未知或空 Segment：{segment_id}")
-        mode = self._ruby_modes.get(str(segment["file_id"]))
-        if mode is not None:
-            segment["_ruby_mode"] = mode
-            if mode in {"aozora", "short_xml", "compact"}:
-                segment["source"] = compact_emphasis_aozora(
-                    str(segment["source"])
-                )
+        current_files = files if files is not None else load_source_files(self.project)
+        file_record = next(
+            (
+                item
+                for item in current_files
+                if str(item["file_id"]) == str(segment["file_id"])
+            ),
+            None,
+        )
+        if file_record is None:
+            raise ProjectError(f"Segment 引用了未知 File：{segment['file_id']}")
+        _, opaque_state, run_options = _read_adapter_context(
+            self.project, file_record
+        )
+        segment["_adapter_state"] = opaque_state
+        segment["_adapter_run_options"] = dict(run_options)
         return segment
+
+    def _format_counts(self, segments: list[dict[str, Any]]) -> dict[str, int]:
+        current_files = load_source_files(self.project)
+        files_by_id = {str(item["file_id"]): item for item in current_files}
+        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None]] = {}
+        counts: dict[str, int] = {}
+        for segment in segments:
+            file_id = str(segment["file_id"])
+            file_record = files_by_id.get(file_id)
+            if file_record is None:
+                raise ProjectError(f"Segment 引用了未知 File：{file_id}")
+            if file_id not in contexts:
+                adapter, opaque_state, _ = _read_adapter_context(
+                    self.project, file_record
+                )
+                contexts[file_id] = (adapter, opaque_state)
+            adapter, opaque_state = contexts[file_id]
+            counts[str(segment["segment_id"])] = (
+                document_adapter_segment_format_count(
+                    adapter,
+                    segment=segment,
+                    opaque_state=opaque_state,
+                )
+            )
+        return counts
 
     def _base_results(
         self, stage: str, segment_ids_filter: list[str] | None = None
@@ -340,6 +403,7 @@ class WebStore:
             search=search,
             stage=stage,
         )
+        format_counts = self._format_counts(window)
         window_ids = [str(item["segment_id"]) for item in window]
         histories = {
             target: self._history(target, window_ids)
@@ -368,14 +432,9 @@ class WebStore:
                     "file_id": item["file_id"],
                     "part_id": item["part_id"],
                     "line_index": item["line_index"],
-                    "source": (
-                        compact_emphasis_aozora(str(item["source"]))
-                        if self._ruby_modes.get(str(item["file_id"]))
-                        in {"aozora", "short_xml", "compact"}
-                        else item["source"]
-                    ),
+                    "source": item["source"],
                     "model_source": item.get("model_source"),
-                    "format_count": len(item.get("_format_markers", [])),
+                    "format_count": format_counts[segment_id],
                     "completed": {
                         stage: segment_id in history
                         for stage, history in histories.items()
@@ -454,6 +513,9 @@ class WebStore:
                 "file_order": item["file_order"],
                 "name": item["original_name"],
                 "document_adapter_id": item["document_adapter_id"],
+                "has_run_options": bool(
+                    get_document_adapter(str(item["document_adapter_id"])).run_options
+                ),
                 "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
                 "size_bytes": _stored_source_size(
                     self.project, item.get("stored_name")
@@ -502,6 +564,7 @@ class WebStore:
             line_index=int(segment["line_index"]),
         )
         context_segments = [*before_segments, *after_segments]
+        format_counts = self._format_counts([segment, *context_segments])
         segment_filter = [
             segment_id,
             *(str(item["segment_id"]) for item in context_segments),
@@ -516,14 +579,24 @@ class WebStore:
                 "polishing_applied",
             )
         }
-        detail = self._segment_detail_view(segment, histories)
+        detail = self._segment_detail_view(
+            segment, histories, format_count=format_counts[str(segment["segment_id"])]
+        )
         detail["context"] = {
             "before": [
-                self._segment_detail_view(item, histories)
+                self._segment_detail_view(
+                    item,
+                    histories,
+                    format_count=format_counts[str(item["segment_id"])],
+                )
                 for item in before_segments
             ],
             "after": [
-                self._segment_detail_view(item, histories)
+                self._segment_detail_view(
+                    item,
+                    histories,
+                    format_count=format_counts[str(item["segment_id"])],
+                )
                 for item in after_segments
             ],
         }
@@ -533,6 +606,8 @@ class WebStore:
         self,
         segment: dict[str, Any],
         histories: dict[str, dict[str, dict[str, Any]]],
+        *,
+        format_count: int,
     ) -> dict[str, Any]:
         segment_id = str(segment["segment_id"])
         return {
@@ -540,14 +615,9 @@ class WebStore:
             "file_id": segment["file_id"],
             "part_id": segment["part_id"],
             "line_index": segment["line_index"],
-            "source": (
-                compact_emphasis_aozora(str(segment["source"]))
-                if self._ruby_modes.get(str(segment["file_id"]))
-                in {"aozora", "short_xml", "compact"}
-                else segment["source"]
-            ),
+            "source": segment["source"],
             "model_source": segment.get("model_source"),
-            "format_count": len(segment.get("_format_markers", [])),
+            "format_count": format_count,
             "translation": self._result_view(
                 histories["translation"].get(segment_id)
             ),
@@ -582,12 +652,12 @@ class WebStore:
 
     def _save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
         segment_id = payload.get("segment_id")
-        self._require_segment(segment_id)
+        files = load_source_files(self.project)
+        segment = self._require_segment(segment_id, files=files)
         text = payload.get("text")
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
-        segment = self._require_segment(segment_id)
-        text = normalize_model_text(self.files, segment, text, "translation")
+        text = normalize_model_text(files, segment, text, "translation")
         findings = validate_translation_text(
             self._translation_validation_context(segment, text),
             self.config["_translation_validator_instances"],
@@ -619,7 +689,8 @@ class WebStore:
         if stage not in REVIEW_STAGES:
             raise UsageError(f"不支持的建议阶段：{stage}")
         segment_id = payload.get("segment_id")
-        self._require_segment(segment_id)
+        files = load_source_files(self.project)
+        segment = self._require_segment(segment_id, files=files)
         base = self._base_results(stage, [str(segment_id)]).get(str(segment_id))
         if base is None:
             raise UsageError("当前 Segment 缺少可用基准结果")
@@ -631,8 +702,8 @@ class WebStore:
             if not isinstance(suggested_text, str) or not suggested_text:
                 raise UsageError("suggested 状态需要非空建议文本")
             suggested_text = normalize_model_text(
-                self.files,
-                self._require_segment(segment_id),
+                files,
+                segment,
                 suggested_text,
                 str(stage),
             )

@@ -36,8 +36,6 @@ from .config import load_project_config, load_run_config
 
 
 
-from .documents import aozora_to_model_ruby
-
 from .errors import (
     ConfigError,
     RequestSizeError,
@@ -767,9 +765,7 @@ def segment_model_source(segment: dict[str, Any]) -> str:
     return str(value) if isinstance(value, str) else str(segment["source"])
 
 def segment_model_text(segment: dict[str, Any], value: str) -> str:
-    mode = segment.get("_ruby_mode")
-    if mode in {"short_xml", "compact"}:
-        return aozora_to_model_ruby(value, str(mode))
+    del segment
     return value
 
 class PreviousContextIndex:

@@ -41,7 +41,7 @@ from .sqlite_storage import (
     record_header,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _base_results, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _base_results, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
 
 def _parse_review_items(
     content: str, expected_ids: list[str]
@@ -126,9 +126,11 @@ async def run_review(
     logger = get_logger(stage)
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
-    config, metadata, files, segments = _project_context(
-        project, stage=stage
-    )
+    context_kwargs: dict[str, object] = {"stage": stage}
+    frozen_run_options = _frozen_run_options(project, resume_run_id)
+    if frozen_run_options is not None:
+        context_kwargs["frozen_run_options"] = frozen_run_options
+    config, metadata, files, segments = _project_context(project, **context_kwargs)
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
