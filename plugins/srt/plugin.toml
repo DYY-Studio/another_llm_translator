@@ -1,0 +1,7 @@
+schema = 1
+
+[plugin]
+id = "srt-documents"
+version = "0.1.0"
+protocol = 12
+entrypoint = "plugin:descriptor"

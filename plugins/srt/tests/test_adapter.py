@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from another_llm_translator_srt.adapter import SRTDocumentAdapter
 
-from app.errors import IncompleteError, ProjectError, UsageError
+from app.plugin_api import IncompleteError, ProjectError, UsageError
+from plugins.srt.adapter import SRTDocumentAdapter
 
 
 def _config(*, fallback_encoding: str = "utf-8") -> dict[str, object]:

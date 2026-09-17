@@ -11,13 +11,17 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope, create_run, stage_fingerprint, stage_result_path
-from app.main import run
-from app.plugins import (
+from app.plugin_api import (
+    DocumentChoiceOption,
+    DocumentImport,
+    ImportedFile,
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+)
+from app.main import run
+from app.plugins import (
     document_adapter_replacement_options,
 )
 from app.project import (
@@ -35,7 +39,6 @@ from app.stage_translation import run_translation
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
-from tests.test_documents import FakeEntryPoint
 from tests.test_foundation import make_app_root
 
 _RECORD_MARKER_RE = re.compile(r"</?k\d+>")
@@ -667,9 +670,10 @@ def register_plugin(
         document_adapters=tuple(adapters),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     return descriptor
 
 
@@ -684,8 +688,10 @@ def test_contract_requires_runtime_model_renderer(
 
     from app.plugins import load_plugins
 
-    with pytest.raises(ConfigError, match="render_model_source"):
+    with pytest.raises(ConfigError, match="render_model_source") as raised:
         load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
 
 
 def test_contract_requires_segment_format_counter(
@@ -700,6 +706,76 @@ def test_contract_requires_segment_format_counter(
 
     with pytest.raises(ConfigError, match="segment_format_count"):
         load_plugins()
+
+
+@pytest.mark.parametrize(
+    ("missing_attribute", "message"),
+    (("import_sources", "import_sources"), ("export_sources", "export_sources")),
+)
+def test_contract_requires_declared_boundary_methods(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_attribute: str,
+    message: str,
+) -> None:
+    adapter = RecordDocumentAdapter()
+    adapter.adapter_id = f"missing-{missing_attribute}"
+    setattr(adapter, missing_attribute, None)
+    register_plugin(monkeypatch, adapter)
+
+    from app.plugins import load_plugins
+
+    with pytest.raises(ConfigError, match=message) as raised:
+        load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("option_attribute", "choices", "message"),
+    (
+        ("import_options", (("plain", "纯文本"), ("broken",)), "导入选项声明无效"),
+        ("run_options", (("plain", "纯文本"), ("marked", 1)), "运行选项声明无效"),
+    ),
+)
+def test_contract_rejects_malformed_choice_declarations(
+    monkeypatch: pytest.MonkeyPatch,
+    option_attribute: str,
+    choices: object,
+    message: str,
+) -> None:
+    adapter = RecordDocumentAdapter()
+    adapter.adapter_id = f"malformed-{option_attribute}"
+    malformed = DocumentChoiceOption(
+        option_id="style",
+        label="样式",
+        default="plain",
+        choices=choices,  # type: ignore[arg-type]
+    )
+    setattr(adapter, option_attribute, (malformed,))
+    register_plugin(monkeypatch, adapter)
+
+    from app.plugins import load_plugins
+
+    with pytest.raises(ConfigError, match=message) as raised:
+        load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
+
+
+def test_contract_rejects_unknown_document_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = RecordDocumentAdapter()
+    adapter.adapter_id = "unknown-capability"
+    adapter.capabilities = frozenset({"import", "unknown"})
+    register_plugin(monkeypatch, adapter)
+
+    from app.plugins import load_plugins
+
+    with pytest.raises(ConfigError, match="能力声明无效") as raised:
+        load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
 
 
 def test_contract_web_store_does_not_interpret_adapter_locator_state(

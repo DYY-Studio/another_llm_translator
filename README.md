@@ -12,7 +12,7 @@ Another LLM Translator 是一个在本机运行、支持中断恢复的 LLM 文�
 
 ## 可以做什么
 
-- 导入 TXT、EPUB，以及安装 SRT 插件后可用的 SRT 文档，并按原文件分别管理和导出。
+- 导入 TXT、EPUB 和随应用提供的 SRT 插件支持的 SRT 文档，并按原文件分别管理和导出。
 - 扫描、编辑、交换和发布术语；自动术语决策只生成待人工审批的草案。
 - 分阶段执行翻译、校对和润色，明确选择是否应用建议。
 - 以 Segment 为单位保存进度；取消、失败或重启后可继续未完成内容。
@@ -81,7 +81,7 @@ python -m app.main export novel --stage translated --bilingual
 - API Key 只从环境变量或系统钥匙串读取。普通日志不保存完整 Prompt、源文或鉴权 Header；
   Debug 模式可能保存敏感请求内容。
 - Web 默认只允许本机访问。局域网共享必须显式开启，当前使用 HTTP，不适合公网暴露。
-- 基础安装支持 TXT 和 EPUB；SRT 由可信 Python 插件提供。未安装 Adapter 的格式不会自动转换。
+- 基础安装支持 TXT、EPUB 和随应用资源提供的 SRT 插件。未安装 Adapter 的格式不会自动转换。
 - 应用不提供自动翻译质量评分或质量保证，关键内容必须人工检查。
 - 不支持的配置、协议或格式会明确失败，不会静默切换 Provider、格式或执行路径。
 

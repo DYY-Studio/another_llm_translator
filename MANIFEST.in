@@ -1,1 +1,8 @@
 recursive-include app/web_dist *
+include plugins/srt/__init__.py
+include plugins/srt/adapter.py
+include plugins/srt/plugin.py
+include plugins/srt/plugin.toml
+include plugins/term_validation/__init__.py
+include plugins/term_validation/plugin.py
+include plugins/term_validation/plugin.toml
