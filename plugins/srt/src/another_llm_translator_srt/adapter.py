@@ -6,13 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from app.documents import (
+from app.plugin_api import (
     DocumentChoiceOption,
     DocumentImport,
     ImportedFile,
     decode_plaintext,
+    IncompleteError,
+    ProjectError,
+    UsageError,
 )
-from app.errors import IncompleteError, ProjectError, UsageError
 
 _SRT_EXTENSIONS = frozenset({".srt"})
 _SEQUENCE_RE = re.compile(r"^[0-9]+$")

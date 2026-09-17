@@ -13,21 +13,23 @@ import pytest
 
 from app.config import dump_config, load_config
 from app.documents import (
-    DecodedPlaintext,
-    DocumentChoiceOption,
     DocumentExportJob,
-    ImportedFile,
     aozora_to_model_ruby,
     compact_emphasis_aozora,
-    decode_plaintext,
     escape_model_ruby_literal,
     publish_document_exports,
 )
 from app.errors import ConfigError, ExportError, IncompleteError, ProjectError, UsageError
 from app.execution import stage_result_path
-from app.plugins import (
+from app.plugin_api import (
+    DecodedPlaintext,
+    DocumentChoiceOption,
+    ImportedFile,
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+    decode_plaintext,
+)
+from app.plugins import (
     document_adapter_replacement_options,
     get_document_adapter,
     get_document_adapter_for_extension,

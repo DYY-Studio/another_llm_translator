@@ -314,7 +314,7 @@ def normalize_model_output(
 所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
 
 ```python
-from app.documents import DecodedPlaintext, decode_plaintext
+from app.plugin_api import DecodedPlaintext, decode_plaintext
 
 decoded: DecodedPlaintext = decode_plaintext(
     data,
@@ -490,6 +490,9 @@ EPUB Adapter 仅在 `markers` 模式向对应请求的 Prompt 注入上述保留
 
 ## 3. 可信 Python 插件宿主（Beta）
 
+插件使用的宿主契约统一从 `app.plugin_api` 导入；该模块只公开稳定的协议类型、严格解码
+API 和插件所需错误类型，不提供插件发现或业务执行入口。
+
 插件包在 entry-point 组 `another_llm_translator.plugins` 注册一个
 `PluginDescriptor` 实例或返回该实例的无参函数：
 
@@ -499,7 +502,7 @@ my_plugin = "my_package.plugin:descriptor"
 ```
 
 ```python
-from app.plugins import PluginDescriptor
+from app.plugin_api import PluginDescriptor
 
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
@@ -525,7 +528,7 @@ def descriptor() -> PluginDescriptor:
 首个真实外部示例是可选的 `another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
-from app.translation_validation import (
+from app.plugin_api import (
     TranslationValidationContext,
     TranslationValidationMatch,
 )

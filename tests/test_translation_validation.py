@@ -6,17 +6,19 @@ import pytest
 
 from app.config import load_project_config
 from app.errors import ConfigError, ProjectError
-from app.plugins import (
+from app.plugin_api import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+    TranslationValidationContext,
+    TranslationValidationMatch,
+)
+from app.plugins import (
     load_plugins,
     resolve_translation_validators,
 )
 from app.project import init_project
 from app.translation_validation import (
     SourceTextResidualValidator,
-    TranslationValidationContext,
-    TranslationValidationMatch,
     validate_translation_text,
 )
 from app.web_store import WebStore

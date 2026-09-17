@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.plugins import PluginDescriptor
+from app.plugin_api import PluginDescriptor
 
 from .adapter import SRTDocumentAdapter
 

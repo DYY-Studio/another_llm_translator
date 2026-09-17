@@ -5,7 +5,7 @@ from another_llm_translator_term_validation.plugin import (
     descriptor,
 )
 
-from app.translation_validation import (
+from app.plugin_api import (
     TranslationTermMatch,
     TranslationValidationContext,
 )

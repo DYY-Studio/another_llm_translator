@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from app.plugins import PluginDescriptor
-from app.translation_validation import (
+from app.plugin_api import (
+    PluginDescriptor,
     TranslationValidationContext,
     TranslationValidationMatch,
 )

@@ -11,13 +11,17 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.documents import DocumentChoiceOption, DocumentImport, ImportedFile
 from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope, create_run, stage_fingerprint, stage_result_path
-from app.main import run
-from app.plugins import (
+from app.plugin_api import (
+    DocumentChoiceOption,
+    DocumentImport,
+    ImportedFile,
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+)
+from app.main import run
+from app.plugins import (
     document_adapter_replacement_options,
 )
 from app.project import (

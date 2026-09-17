@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any
 
+from . import plugin_api
 from .documents import (
-    DocumentAdapter,
-    DocumentChoiceOption,
     normalize_document_output,
 )
 from .errors import ConfigError, ProjectError, UsageError
@@ -14,37 +12,26 @@ from .translation_validation import (
     JapaneseKanaValidator,
     KoreanHangulValidator,
     SourceTextResidualValidator,
-    TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 12
 PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
 
 
-@dataclass(frozen=True)
-class PluginDescriptor:
-    plugin_id: str
-    version: str
-    protocol_version: int
-    document_adapters: tuple[DocumentAdapter, ...] = ()
-    translation_validators: tuple[TranslationValidator, ...] = ()
-
-
-def _builtin_plugins() -> tuple[PluginDescriptor, ...]:
+def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
     from .epub_adapter import EPUBDocumentAdapter
     from .project import TXTDocumentAdapter
 
     return (
-        PluginDescriptor(
+        plugin_api.PluginDescriptor(
             plugin_id="builtin-documents",
             version="1",
-            protocol_version=PLUGIN_PROTOCOL_VERSION,
+            protocol_version=plugin_api.PLUGIN_PROTOCOL_VERSION,
             document_adapters=(TXTDocumentAdapter(), EPUBDocumentAdapter()),
         ),
-        PluginDescriptor(
+        plugin_api.PluginDescriptor(
             plugin_id="builtin-translation-validation",
             version="1",
-            protocol_version=PLUGIN_PROTOCOL_VERSION,
+            protocol_version=plugin_api.PLUGIN_PROTOCOL_VERSION,
             translation_validators=(
                 JapaneseKanaValidator(),
                 KoreanHangulValidator(),
@@ -54,12 +41,12 @@ def _builtin_plugins() -> tuple[PluginDescriptor, ...]:
     )
 
 
-def load_plugins() -> tuple[PluginDescriptor, ...]:
+def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
     plugins = list(_builtin_plugins())
     for entry_point in entry_points(group=PLUGIN_ENTRY_POINT):
         loaded = entry_point.load()
         descriptor = loaded() if callable(loaded) else loaded
-        if not isinstance(descriptor, PluginDescriptor):
+        if not isinstance(descriptor, plugin_api.PluginDescriptor):
             raise ConfigError(
                 f"插件入口未返回 PluginDescriptor：{entry_point.name}"
             )
@@ -69,7 +56,7 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
     seen_extensions: dict[str, str] = {}
     seen_validators: set[str] = set()
     for plugin in plugins:
-        if plugin.protocol_version != PLUGIN_PROTOCOL_VERSION:
+        if plugin.protocol_version != plugin_api.PLUGIN_PROTOCOL_VERSION:
             raise ConfigError(
                 f"插件协议版本不兼容：{plugin.plugin_id} "
                 f"{plugin.protocol_version}"
@@ -125,7 +112,8 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                 seen_extensions[extension] = adapter.adapter_id
             options = getattr(adapter, "import_options", None)
             if not isinstance(options, tuple) or not all(
-                isinstance(option, DocumentChoiceOption) for option in options
+                isinstance(option, plugin_api.DocumentChoiceOption)
+                for option in options
             ):
                 raise ConfigError(
                     f"Document Adapter 导入选项声明无效：{adapter.adapter_id}"
@@ -167,7 +155,8 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
                 seen_options.add(option.option_id)
             run_options = getattr(adapter, "run_options", ())
             if not isinstance(run_options, tuple) or not all(
-                isinstance(option, DocumentChoiceOption) for option in run_options
+                isinstance(option, plugin_api.DocumentChoiceOption)
+                for option in run_options
             ):
                 raise ConfigError(
                     f"Document Adapter 运行选项声明无效：{adapter.adapter_id}"
@@ -245,7 +234,7 @@ def load_plugins() -> tuple[PluginDescriptor, ...]:
     return tuple(plugins)
 
 
-def get_document_adapter(adapter_id: str) -> DocumentAdapter:
+def get_document_adapter(adapter_id: str) -> plugin_api.DocumentAdapter:
     for plugin in load_plugins():
         for adapter in plugin.document_adapters:
             if adapter.adapter_id == adapter_id:
@@ -255,9 +244,9 @@ def get_document_adapter(adapter_id: str) -> DocumentAdapter:
 
 def resolve_translation_validators(
     validator_ids: list[str] | tuple[str, ...] | None = None,
-) -> tuple[tuple[TranslationValidator, dict[str, str]], ...]:
+) -> tuple[tuple[plugin_api.TranslationValidator, dict[str, str]], ...]:
     requested = set(validator_ids) if validator_ids is not None else None
-    values: list[tuple[TranslationValidator, dict[str, str]]] = []
+    values: list[tuple[plugin_api.TranslationValidator, dict[str, str]]] = []
     for plugin in load_plugins():
         for validator in plugin.translation_validators:
             if requested is not None and validator.validator_id not in requested:
@@ -308,7 +297,7 @@ def normalize_model_text(
 
 
 def document_adapter_segment_format_count(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     *,
     segment: dict[str, Any],
     opaque_state: dict[str, Any] | None,
@@ -325,7 +314,9 @@ def document_adapter_segment_format_count(
     return value
 
 
-def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
+def get_document_adapter_for_extension(
+    extension: str,
+) -> plugin_api.DocumentAdapter:
     normalized = extension.casefold()
     for plugin in load_plugins():
         for adapter in plugin.document_adapters:
@@ -335,7 +326,7 @@ def get_document_adapter_for_extension(extension: str) -> DocumentAdapter:
 
 
 def validate_document_import_options(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     values: dict[str, str] | None,
     *,
     allow_replacement_choices: bool = False,
@@ -366,7 +357,7 @@ def validate_document_import_options(
 
 
 def validate_document_run_options(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     values: dict[str, str] | None,
     *,
     use_defaults: bool = True,
@@ -399,7 +390,7 @@ def validate_document_run_options(
 
 
 def split_document_adapter_options(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     values: dict[str, str] | None,
     *,
     allow_replacement_choices: bool = False,
@@ -423,7 +414,7 @@ def split_document_adapter_options(
 
 
 def document_adapter_replacement_options(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     *,
     opaque_state: dict[str, Any] | None,
     overrides: dict[str, str] | None = None,
@@ -465,7 +456,7 @@ def document_adapter_replacement_options(
 
 
 def _validate_replacement_overrides(
-    adapter: DocumentAdapter,
+    adapter: plugin_api.DocumentAdapter,
     overrides: dict[str, str],
     *,
     current: dict[str, str],
@@ -501,7 +492,9 @@ def document_adapter_summaries(
     values = []
     for plugin in load_plugins():
         for adapter in plugin.document_adapters:
-            def summarize_option(option: DocumentChoiceOption) -> dict[str, object]:
+            def summarize_option(
+                option: plugin_api.DocumentChoiceOption,
+            ) -> dict[str, object]:
                 choices = list(option.choices)
                 if (
                     replacement_values is not None
