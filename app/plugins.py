@@ -63,7 +63,7 @@ def _manifest_text(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as stream:
             value = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise _plugin_failure(path, "manifest", str(exc)) from exc
     if not isinstance(value, dict):
         raise _plugin_failure(path, "manifest", "根值必须是表")
@@ -240,7 +240,6 @@ def _validate_plugins(
     seen_validators: dict[str, tuple[str, str]] = {}
     for plugin in plugins:
         source = source_paths.get(id(plugin), f"插件：{plugin.plugin_id}")
-
         if plugin.protocol_version != plugin_api.PLUGIN_PROTOCOL_VERSION:
             raise _descriptor_failure(
                 f"插件协议版本不兼容：{plugin.plugin_id} {plugin.protocol_version}",
@@ -259,9 +258,33 @@ def _validate_plugins(
                 context=context,
             )
         seen_plugins[plugin.plugin_id] = source
-        for adapter in plugin.document_adapters:
-            previous_adapter = seen_adapters.get(adapter.adapter_id)
-            if not adapter.adapter_id or previous_adapter is not None:
+        adapters = plugin.document_adapters
+        if not isinstance(adapters, tuple):
+            raise _descriptor_failure(
+                f"Document Adapter 声明无效：{plugin.plugin_id}",
+                source,
+            )
+        for adapter in adapters:
+            try:
+                adapter_id = adapter.adapter_id
+                version = adapter.version
+                capabilities = adapter.capabilities
+            except (AttributeError, TypeError) as exc:
+                raise _descriptor_failure(
+                    f"Document Adapter 描述无效：{exc}",
+                    source,
+                ) from exc
+            if (
+                not isinstance(adapter_id, str)
+                or not isinstance(version, str)
+                or not isinstance(capabilities, frozenset)
+            ):
+                raise _descriptor_failure(
+                    f"Document Adapter 描述字段类型无效：{adapter_id!r}",
+                    source,
+                )
+            previous_adapter = seen_adapters.get(adapter_id)
+            if not adapter_id or previous_adapter is not None:
                 context = (
                     f"{previous_adapter[0]} 来源：{previous_adapter[1]}；"
                     f"{plugin.plugin_id} 来源：{source}"
@@ -269,26 +292,26 @@ def _validate_plugins(
                     else f"来源：{source}"
                 )
                 raise _descriptor_failure(
-                    f"Document Adapter ID 重复或为空：{adapter.adapter_id}",
+                    f"Document Adapter ID 重复或为空：{adapter_id}",
                     source,
                     context=context,
                 )
-            if not adapter.version or not adapter.capabilities:
+            if not version or not capabilities:
                 raise _descriptor_failure(
-                    f"Document Adapter 描述不完整：{adapter.adapter_id}",
+                    f"Document Adapter 描述不完整：{adapter_id}",
                     source,
                 )
             readable_versions = getattr(adapter, "readable_versions", None)
             if readable_versions is not None and (
                 not isinstance(readable_versions, frozenset)
-                or adapter.version not in readable_versions
+                or version not in readable_versions
                 or not all(
                     isinstance(value, str) and value
                     for value in readable_versions
                 )
             ):
                 raise _descriptor_failure(
-                    f"Document Adapter 可读版本声明无效：{adapter.adapter_id}",
+                    f"Document Adapter 可读版本声明无效：{adapter_id}",
                     source,
                 )
             extensions = getattr(adapter, "extensions", None)
@@ -300,13 +323,13 @@ def _validate_plugins(
                 for value in extensions
             ):
                 raise _descriptor_failure(
-                    f"Document Adapter 扩展名声明无效：{adapter.adapter_id}",
+                    f"Document Adapter 扩展名声明无效：{adapter_id}",
                     source,
                 )
-            if "import" in adapter.capabilities and not extensions:
+            if "import" in capabilities and not extensions:
                 raise _descriptor_failure(
                     "可导入的 Document Adapter 必须声明扩展名："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
             for extension in extensions:
@@ -314,7 +337,7 @@ def _validate_plugins(
                 if owner is not None:
                     context = (
                         f"{owner[2]}.{owner[0]} 来源：{owner[1]}，"
-                        f"{plugin.plugin_id}.{adapter.adapter_id} 来源：{source}"
+                        f"{plugin.plugin_id}.{adapter_id} 来源：{source}"
                     )
                     raise _descriptor_failure(
                         f"Document Adapter 扩展名重复：{extension}",
@@ -322,7 +345,7 @@ def _validate_plugins(
                         context=context,
                     )
                 seen_extensions[extension] = (
-                    adapter.adapter_id,
+                    adapter_id,
                     source,
                     plugin.plugin_id,
                 )
@@ -332,13 +355,13 @@ def _validate_plugins(
                 for option in options
             ):
                 raise _descriptor_failure(
-                    f"Document Adapter 导入选项声明无效：{adapter.adapter_id}",
+                    f"Document Adapter 导入选项声明无效：{adapter_id}",
                     source,
                 )
-            if options and "import" not in adapter.capabilities:
+            if options and "import" not in capabilities:
                 raise _descriptor_failure(
                     "不可导入的 Document Adapter 不能声明导入选项："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
             seen_options: set[str] = set()
@@ -368,7 +391,7 @@ def _validate_plugins(
                 ):
                     raise _descriptor_failure(
                         "Document Adapter 导入选项声明无效："
-                        f"{adapter.adapter_id}.{option.option_id}",
+                        f"{adapter_id}.{option.option_id}",
                         source,
                     )
                 seen_options.add(option.option_id)
@@ -378,7 +401,7 @@ def _validate_plugins(
                 for option in run_options
             ):
                 raise _descriptor_failure(
-                    f"Document Adapter 运行选项声明无效：{adapter.adapter_id}",
+                    f"Document Adapter 运行选项声明无效：{adapter_id}",
                     source,
                 )
             for option in run_options:
@@ -403,35 +426,35 @@ def _validate_plugins(
                 ):
                     raise _descriptor_failure(
                         "Document Adapter 运行选项声明无效："
-                        f"{adapter.adapter_id}.{option.option_id}",
+                        f"{adapter_id}.{option.option_id}",
                         source,
                     )
                 seen_options.add(option.option_id)
             if not callable(getattr(adapter, "model_prompt_requirements", None)):
                 raise _descriptor_failure(
                     "Document Adapter 缺少 model_prompt_requirements："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
             if not callable(getattr(adapter, "render_model_source", None)):
                 raise _descriptor_failure(
                     "Document Adapter 缺少 render_model_source："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
             if not callable(getattr(adapter, "segment_format_count", None)):
                 raise _descriptor_failure(
                     "Document Adapter 缺少 segment_format_count："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
             if not callable(getattr(adapter, "replacement_options", None)):
                 raise _descriptor_failure(
                     "Document Adapter 缺少 replacement_options："
-                    f"{adapter.adapter_id}",
+                    f"{adapter_id}",
                     source,
                 )
-            seen_adapters[adapter.adapter_id] = (plugin.plugin_id, source)
+            seen_adapters[adapter_id] = (plugin.plugin_id, source)
         validators = getattr(plugin, "translation_validators", None)
         if not isinstance(validators, tuple):
             raise _descriptor_failure(

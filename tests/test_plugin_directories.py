@@ -151,6 +151,48 @@ def test_manifest_errors_are_checked_before_any_plugin_import(
     assert not marker.exists()
 
 
+def test_invalid_utf8_manifest_is_a_manifest_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = tmp_path / "official"
+    broken = official / "broken"
+    broken.mkdir(parents=True)
+    (broken / "plugin.toml").write_bytes(b"schema = 1\n\xff")
+    monkeypatch.setattr("app.plugins._official_plugin_root", lambda: official)
+    monkeypatch.setattr("app.plugins.user_root", lambda: tmp_path / "missing-user")
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+
+    with pytest.raises(ConfigError, match="manifest") as raised:
+        load_plugins()
+
+    assert str(broken / "plugin.toml") in str(raised.value)
+
+
+def test_malformed_adapter_descriptor_reports_source_and_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.plugin_api import PluginDescriptor
+
+    descriptor = PluginDescriptor(
+        plugin_id="malformed-adapter-plugin",
+        version="1",
+        protocol_version=PLUGIN_PROTOCOL_VERSION,
+        document_adapters=(object(),),  # type: ignore[arg-type]
+    )
+    source = tmp_path / "malformed-adapter"
+    monkeypatch.setattr(
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, source)],
+    )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+
+    with pytest.raises(ConfigError, match="Document Adapter 描述无效") as raised:
+        load_plugins()
+
+    assert str(source) in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
+
+
 def test_user_plugin_id_collision_with_builtin_fails_before_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

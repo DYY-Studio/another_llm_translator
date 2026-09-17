@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -43,14 +43,25 @@ fn start_sidecar() -> Result<Sidecar, String> {
         command.args(["--port", &port]);
         return spawn_sidecar(command, source);
     }
-    let python = std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
-    let source = format!("{python} -m app.web");
-    let mut command = Command::new(&python);
-    command.args(["-m", "app.web", "--port", &port]);
-    if let Ok(root) = std::env::var("ANOTHER_LLM_REPO_ROOT") {
-        command.current_dir(root);
+
+    #[cfg(debug_assertions)]
+    {
+        let python =
+            std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
+        let source = format!("开发模式：{python} -m app.web");
+        eprintln!("使用开发模式 Python sidecar：{source}");
+        let mut command = Command::new(&python);
+        command.args(["-m", "app.web", "--port", &port]);
+        if let Ok(root) = std::env::var("ANOTHER_LLM_REPO_ROOT") {
+            command.current_dir(root);
+        }
+        return spawn_sidecar(command, source);
     }
-    spawn_sidecar(command, source)
+
+    #[cfg(not(debug_assertions))]
+    {
+        Err("找不到内置 sidecar（请先完成生产 sidecar 构建）".to_string())
+    }
 }
 
 fn spawn_sidecar(mut command: Command, source: String) -> Result<Sidecar, String> {
@@ -159,6 +170,15 @@ fn exit_status_description(status: ExitStatus) -> String {
 
 fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<(), String> {
     let address = format!("127.0.0.1:{port}");
+    let socket_address: SocketAddr = match address.parse() {
+        Ok(address) => address,
+        Err(error) => {
+            return Err(sidecar.failure(
+                "等待服务就绪",
+                format!("服务地址无效：{error}"),
+            ));
+        }
+    };
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match sidecar.child.try_wait() {
@@ -174,18 +194,38 @@ fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<
                 return Err(sidecar.failure("等待服务就绪", format!("检查进程状态失败：{error}")));
             }
         }
-        if let Ok(mut stream) = TcpStream::connect(&address) {
-            let _ =
-                stream.write_all(b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n");
-            let mut buffer = [0u8; 256];
-            if stream.read(&mut buffer).is_ok() {
-                let text = String::from_utf8_lossy(&buffer);
-                if text.contains(" 200 ") {
-                    return Ok(());
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, remaining) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero()
+                && stream.set_write_timeout(Some(remaining)).is_ok()
+                && stream
+                    .write_all(
+                        b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n",
+                    )
+                    .is_ok()
+            {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() && stream.set_read_timeout(Some(remaining)).is_ok() {
+                    let mut buffer = [0u8; 256];
+                    if stream.read(&mut buffer).is_ok() {
+                        let text = String::from_utf8_lossy(&buffer);
+                        if text.contains(" 200 ") {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(300));
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            std::thread::sleep(remaining.min(Duration::from_millis(300)));
+        }
     }
     Err(sidecar.failure(
         "等待服务就绪",
@@ -267,8 +307,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::Command;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn http_request_preserves_error_response_body() {
@@ -334,6 +374,34 @@ mod tests {
         sidecar.stop();
 
         assert!(sidecar.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn server_ready_times_out_when_http_listener_does_not_respond() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let listener_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            accepted_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(stream);
+        });
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut sidecar = spawn_sidecar(command, "/bin/sh -c exec sleep".to_string()).unwrap();
+        let started = Instant::now();
+        let error = server_ready(&mut sidecar, &port, Duration::from_millis(100)).unwrap_err();
+
+        assert!(error.contains("超时"));
+        assert!(accepted_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        release_tx.send(()).unwrap();
+        listener_thread.join().unwrap();
+        sidecar.stop();
     }
 }
 
