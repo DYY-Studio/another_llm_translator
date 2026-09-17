@@ -1,13 +1,23 @@
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::WebviewUrl;
 
-static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
+const STDERR_TAIL_LIMIT: usize = 16 * 1024;
+
+struct Sidecar {
+    child: Child,
+    source: String,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
+}
+
+static SIDECAR: Mutex<Option<Sidecar>> = Mutex::new(None);
 
 fn web_port() -> String {
     std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
@@ -25,43 +35,183 @@ fn bundled_sidecar() -> Option<PathBuf> {
     resources.is_file().then_some(resources)
 }
 
-fn start_sidecar() -> Option<Child> {
+fn start_sidecar() -> Result<Sidecar, String> {
     let port = web_port();
     if let Some(executable) = bundled_sidecar() {
-        return Command::new(executable)
-            .args(["--port", &port])
-            .spawn()
-            .ok();
+        let source = executable.display().to_string();
+        let mut command = Command::new(&executable);
+        command.args(["--port", &port]);
+        return spawn_sidecar(command, source);
     }
-    let python =
-        std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
-    let mut command = Command::new(python);
+    let python = std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
+    let source = format!("{python} -m app.web");
+    let mut command = Command::new(&python);
     command.args(["-m", "app.web", "--port", &port]);
     if let Ok(root) = std::env::var("ANOTHER_LLM_REPO_ROOT") {
         command.current_dir(root);
     }
-    command.spawn().ok()
+    spawn_sidecar(command, source)
 }
 
-fn server_ready(port: &str, timeout: Duration) -> bool {
+fn spawn_sidecar(mut command: Command, source: String) -> Result<Sidecar, String> {
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动进程 {source}：{error}"))?;
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_child(&mut child);
+            return Err(format!("无法捕获 sidecar 标准错误输出：{source}"));
+        }
+    };
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LIMIT)));
+    let reader_tail = Arc::clone(&stderr_tail);
+    let stderr_reader = std::thread::Builder::new()
+        .name("sidecar-stderr".to_string())
+        .spawn(move || drain_stderr(stderr, reader_tail))
+        .map_err(|error| {
+            terminate_child(&mut child);
+            format!("无法读取 sidecar 标准错误输出 {source}：{error}")
+        })?;
+    Ok(Sidecar {
+        child,
+        source,
+        stderr_tail,
+        stderr_reader: Some(stderr_reader),
+    })
+}
+
+fn terminate_child(child: &mut Child) {
+    let needs_kill = match child.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) | Err(_) => true,
+    };
+    if needs_kill {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn drain_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<VecDeque<u8>>>) {
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stderr.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(size) => append_stderr_tail(&tail, &buffer[..size]),
+        }
+    }
+}
+
+fn append_stderr_tail(tail: &Arc<Mutex<VecDeque<u8>>>, bytes: &[u8]) {
+    let Ok(mut tail) = tail.lock() else {
+        return;
+    };
+    for byte in bytes {
+        if tail.len() == STDERR_TAIL_LIMIT {
+            tail.pop_front();
+        }
+        tail.push_back(*byte);
+    }
+}
+
+fn stderr_snapshot(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
+    let Ok(tail) = tail.lock() else {
+        return "无法读取 sidecar 标准错误输出".to_string();
+    };
+    String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>())
+        .trim()
+        .to_string()
+}
+
+impl Sidecar {
+    fn stop(&mut self) {
+        terminate_child(&mut self.child);
+        self.finish_stderr();
+    }
+
+    fn finish_stderr(&mut self) {
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+    }
+
+    fn failure(&self, stage: &str, reason: String) -> String {
+        let stderr = stderr_snapshot(&self.stderr_tail);
+        let reason = if stderr.is_empty() {
+            reason
+        } else {
+            format!("{reason}\n标准错误：{stderr}")
+        };
+        format!(
+            "sidecar 启动失败\n阶段：{stage}\n命令：{}\n原因：{reason}",
+            self.source
+        )
+    }
+}
+
+fn exit_status_description(status: ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| format!("退出码：{code}"))
+        .unwrap_or_else(|| "进程被信号终止".to_string())
+}
+
+fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<(), String> {
     let address = format!("127.0.0.1:{port}");
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        match sidecar.child.try_wait() {
+            Ok(Some(status)) => {
+                sidecar.finish_stderr();
+                return Err(sidecar.failure(
+                    "等待服务就绪",
+                    format!("进程提前退出（{}）", exit_status_description(status)),
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(sidecar.failure("等待服务就绪", format!("检查进程状态失败：{error}")));
+            }
+        }
         if let Ok(mut stream) = TcpStream::connect(&address) {
-            let _ = stream.write_all(
-                b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n",
-            );
+            let _ =
+                stream.write_all(b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n");
             let mut buffer = [0u8; 256];
             if stream.read(&mut buffer).is_ok() {
                 let text = String::from_utf8_lossy(&buffer);
                 if text.contains(" 200 ") {
-                    return true;
+                    return Ok(());
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    false
+    Err(sidecar.failure(
+        "等待服务就绪",
+        format!("超时：无法连接 http://127.0.0.1:{port}"),
+    ))
+}
+
+fn percent_encode_query(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte & 0x0F) as usize]));
+        }
+    }
+    encoded
+}
+
+fn startup_error_url(error: &str) -> WebviewUrl {
+    WebviewUrl::App(PathBuf::from(format!(
+        "startup-error.html?error={}",
+        percent_encode_query(error)
+    )))
 }
 
 fn http_request(
@@ -109,9 +259,16 @@ fn http_request(
 
 #[cfg(test)]
 mod tests {
-    use super::http_request;
+    use super::{
+        append_stderr_tail, http_request, server_ready, spawn_sidecar, stderr_snapshot,
+        STDERR_TAIL_LIMIT,
+    };
+    use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn http_request_preserves_error_response_body() {
@@ -134,6 +291,49 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(error, payload);
+    }
+
+    #[test]
+    fn stderr_tail_keeps_only_the_bounded_suffix() {
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let input = vec![b'x'; STDERR_TAIL_LIMIT + 3];
+
+        append_stderr_tail(&tail, &input);
+
+        assert_eq!(stderr_snapshot(&tail).len(), STDERR_TAIL_LIMIT);
+        assert_eq!(stderr_snapshot(&tail), "x".repeat(STDERR_TAIL_LIMIT));
+    }
+
+    #[test]
+    fn server_ready_reports_early_exit_and_captured_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'plugin=/tmp/plugins/demo/plugin.toml: invalid protocol\\n' >&2; exit 7",
+        ]);
+        let mut sidecar = spawn_sidecar(command, "/bin/sh -c <sidecar>".to_string()).unwrap();
+
+        let error = server_ready(&mut sidecar, "1", Duration::from_secs(2)).unwrap_err();
+
+        assert!(error.contains("sidecar 启动失败"));
+        assert!(error.contains("等待服务就绪"));
+        assert!(error.contains("提前退出"));
+        assert!(error.contains("plugin=/tmp/plugins/demo/plugin.toml"));
+        assert!(error.contains("退出码：7"));
+    }
+
+    #[test]
+    fn stopping_after_timeout_reaps_the_sidecar_process() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut sidecar = spawn_sidecar(command, "/bin/sh -c exec sleep".to_string()).unwrap();
+
+        let error = server_ready(&mut sidecar, "1", Duration::from_millis(1)).unwrap_err();
+        assert!(error.contains("超时"));
+
+        sidecar.stop();
+
+        assert!(sidecar.child.try_wait().unwrap().is_some());
     }
 }
 
@@ -174,26 +374,41 @@ fn select_folder() -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default();
+    let builder = tauri::Builder::default();
     #[cfg(debug_assertions)]
-    {
-        builder = builder.plugin(
-            tauri_plugin_mcp_bridge::Builder::new()
-                .bind_address("127.0.0.1")
-                .build(),
-        );
-    }
+    let builder = builder.plugin(
+        tauri_plugin_mcp_bridge::Builder::new()
+            .bind_address("127.0.0.1")
+            .build(),
+    );
     builder
         .setup(|app| {
             let port = web_port();
-            *SIDECAR.lock().unwrap() = start_sidecar();
-            if !server_ready(&port, Duration::from_secs(30)) {
-                eprintln!("sidecar 启动超时：无法连接 http://127.0.0.1:{port}");
-            }
-            let url = format!("http://127.0.0.1:{port}")
-                .parse()
-                .expect("invalid sidecar URL");
-            let _ = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let url = match start_sidecar() {
+                Ok(mut sidecar) => {
+                    match server_ready(&mut sidecar, &port, Duration::from_secs(30)) {
+                        Ok(()) => {
+                            *SIDECAR.lock().unwrap() = Some(sidecar);
+                            WebviewUrl::External(
+                                format!("http://127.0.0.1:{port}")
+                                    .parse()
+                                    .expect("invalid sidecar URL"),
+                            )
+                        }
+                        Err(error) => {
+                            sidecar.stop();
+                            eprintln!("{error}");
+                            startup_error_url(&error)
+                        }
+                    }
+                }
+                Err(reason) => {
+                    let error = format!("sidecar 启动失败\n阶段：启动 sidecar\n原因：{reason}");
+                    eprintln!("{error}");
+                    startup_error_url(&error)
+                }
+            };
+            let _ = tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("译工坊")
                 .inner_size(1280.0, 860.0)
                 .build();
@@ -208,8 +423,8 @@ pub fn run() {
         .expect("failed to build tauri app")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                if let Some(mut child) = SIDECAR.lock().unwrap().take() {
-                    let _ = child.kill();
+                if let Some(mut sidecar) = SIDECAR.lock().unwrap().take() {
+                    sidecar.stop();
                 }
             }
         });

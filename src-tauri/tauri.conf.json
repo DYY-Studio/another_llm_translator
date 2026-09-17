@@ -4,7 +4,7 @@
   "version": "0.3.0",
   "identifier": "com.anotherllm.translator",
   "build": {
-    "frontendDist": null,
+    "frontendDist": "../app/web_dist",
     "devUrl": null,
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
