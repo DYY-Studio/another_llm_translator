@@ -688,8 +688,10 @@ def test_contract_requires_runtime_model_renderer(
 
     from app.plugins import load_plugins
 
-    with pytest.raises(ConfigError, match="render_model_source"):
+    with pytest.raises(ConfigError, match="render_model_source") as raised:
         load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
+    assert "阶段：descriptor" in str(raised.value)
 
 
 def test_contract_requires_segment_format_counter(

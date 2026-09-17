@@ -8,7 +8,11 @@ import pytest
 
 from app.errors import ConfigError
 from app.plugin_api import PLUGIN_PROTOCOL_VERSION
-from app.plugins import _PLUGIN_NAMESPACE_PREFIX, load_plugins
+from app.plugins import (
+    _PLUGIN_NAMESPACE_PREFIX,
+    _official_plugin_root,
+    load_plugins,
+)
 
 
 def _write_plugin(
@@ -93,6 +97,38 @@ def test_directory_plugins_are_sorted_and_loaded_from_user_root(
         "z-official",
         "user-plugin",
     ]
+
+
+def test_official_plugin_root_uses_builtin_prefix_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builtin_root = tmp_path / "prefix"
+    monkeypatch.setattr("app.plugins.BUILTIN_ROOT", builtin_root)
+
+    assert _official_plugin_root() == builtin_root / "plugins"
+
+
+def test_user_plugin_root_file_is_a_discovery_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = tmp_path / "official"
+    _write_plugin(
+        official,
+        "official",
+        plugin_id="official",
+        body=_validator_body("official"),
+    )
+    user = tmp_path / "user"
+    user.mkdir()
+    (user / "plugins").write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr("app.plugins._official_plugin_root", lambda: official)
+    monkeypatch.setattr("app.plugins.user_root", lambda: user)
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+
+    with pytest.raises(ConfigError, match="discover") as raised:
+        load_plugins()
+
+    assert str(user / "plugins") in str(raised.value)
 
 
 def test_manifest_errors_are_checked_before_any_plugin_import(
