@@ -38,6 +38,9 @@ _PLUGIN_LOAD_LOCK = threading.Lock()
 _PLUGIN_MANIFEST_SCHEMA = 1
 _PLUGIN_NAMESPACE_PREFIX = "_another_llm_plugin_"
 _ENTRYPOINT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$")
+_DOCUMENT_ADAPTER_CAPABILITIES = frozenset(
+    {"import", "translated_export", "bilingual_export"}
+)
 
 
 def _official_plugin_root() -> Path:
@@ -56,6 +59,47 @@ def _descriptor_failure(
 ) -> ConfigError:
     return ConfigError(
         f"{message}（{context or f'来源：{source}'}；阶段：descriptor）"
+    )
+
+
+def _choice_ids(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, tuple):
+        return None
+    choice_ids: list[str] = []
+    for choice in value:
+        if (
+            not isinstance(choice, tuple)
+            or len(choice) != 2
+            or not isinstance(choice[0], str)
+            or not choice[0]
+            or not isinstance(choice[1], str)
+            or not choice[1]
+        ):
+            return None
+        choice_ids.append(choice[0])
+    return tuple(choice_ids)
+
+
+def _valid_document_choice_option(
+    option: plugin_api.DocumentChoiceOption,
+    seen_options: set[str],
+) -> bool:
+    choice_ids = _choice_ids(option.choices)
+    replacement_choice_ids = _choice_ids(option.replacement_choices)
+    if choice_ids is None or replacement_choice_ids is None:
+        return False
+    return (
+        isinstance(option.option_id, str)
+        and bool(option.option_id)
+        and option.option_id not in seen_options
+        and isinstance(option.label, str)
+        and bool(option.label)
+        and len(choice_ids) >= 2
+        and len(set(choice_ids)) == len(choice_ids)
+        and isinstance(option.default, str)
+        and option.default in choice_ids
+        and len(set(replacement_choice_ids)) == len(replacement_choice_ids)
+        and not set(choice_ids) & set(replacement_choice_ids)
     )
 
 
@@ -283,6 +327,11 @@ def _validate_plugins(
                     f"Document Adapter 描述字段类型无效：{adapter_id!r}",
                     source,
                 )
+            if not capabilities <= _DOCUMENT_ADAPTER_CAPABILITIES:
+                raise _descriptor_failure(
+                    f"Document Adapter 能力声明无效：{adapter_id}",
+                    source,
+                )
             previous_adapter = seen_adapters.get(adapter_id)
             if not adapter_id or previous_adapter is not None:
                 context = (
@@ -366,29 +415,7 @@ def _validate_plugins(
                 )
             seen_options: set[str] = set()
             for option in options:
-                choice_ids = [choice_id for choice_id, _ in option.choices]
-                replacement_choice_ids = [
-                    choice_id for choice_id, _ in option.replacement_choices
-                ]
-                choices_valid = all(
-                    choice_id and label
-                    for choice_id, label in option.choices
-                )
-                if (
-                    not option.option_id
-                    or option.option_id in seen_options
-                    or not option.label
-                    or len(choice_ids) < 2
-                    or len(set(choice_ids)) != len(choice_ids)
-                    or not choices_valid
-                    or option.default not in choice_ids
-                    or len(set(replacement_choice_ids)) != len(replacement_choice_ids)
-                    or set(choice_ids) & set(replacement_choice_ids)
-                    or not all(
-                        choice_id and label
-                        for choice_id, label in option.replacement_choices
-                    )
-                ):
+                if not _valid_document_choice_option(option, seen_options):
                     raise _descriptor_failure(
                         "Document Adapter 导入选项声明无效："
                         f"{adapter_id}.{option.option_id}",
@@ -405,25 +432,7 @@ def _validate_plugins(
                     source,
                 )
             for option in run_options:
-                choice_ids = [choice_id for choice_id, _ in option.choices]
-                replacement_choice_ids = [
-                    choice_id for choice_id, _ in option.replacement_choices
-                ]
-                if (
-                    not option.option_id
-                    or option.option_id in seen_options
-                    or not option.label
-                    or len(choice_ids) < 2
-                    or len(set(choice_ids)) != len(choice_ids)
-                    or not all(choice_id and label for choice_id, label in option.choices)
-                    or option.default not in choice_ids
-                    or len(set(replacement_choice_ids)) != len(replacement_choice_ids)
-                    or set(choice_ids) & set(replacement_choice_ids)
-                    or not all(
-                        choice_id and label
-                        for choice_id, label in option.replacement_choices
-                    )
-                ):
+                if not _valid_document_choice_option(option, seen_options):
                     raise _descriptor_failure(
                         "Document Adapter 运行选项声明无效："
                         f"{adapter_id}.{option.option_id}",
@@ -451,6 +460,18 @@ def _validate_plugins(
             if not callable(getattr(adapter, "replacement_options", None)):
                 raise _descriptor_failure(
                     "Document Adapter 缺少 replacement_options："
+                    f"{adapter_id}",
+                    source,
+                )
+            if not callable(getattr(adapter, "import_sources", None)):
+                raise _descriptor_failure(
+                    "Document Adapter 缺少 import_sources："
+                    f"{adapter_id}",
+                    source,
+                )
+            if not callable(getattr(adapter, "export_sources", None)):
+                raise _descriptor_failure(
+                    "Document Adapter 缺少 export_sources："
                     f"{adapter_id}",
                     source,
                 )
