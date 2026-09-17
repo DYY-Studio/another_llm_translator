@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from importlib.metadata import entry_points
+import importlib
+import importlib.util
+import re
+import sys
+import threading
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import plugin_api
@@ -13,8 +20,176 @@ from .translation_validation import (
     KoreanHangulValidator,
     SourceTextResidualValidator,
 )
+from .user_config import user_root
 
-PLUGIN_ENTRY_POINT = "another_llm_translator.plugins"
+
+@dataclass(frozen=True)
+class _PluginManifest:
+    path: Path
+    plugin_id: str
+    version: str
+    protocol: int
+    entrypoint: str
+
+
+_PLUGIN_CACHE: tuple[plugin_api.PluginDescriptor, ...] | None = None
+_PLUGIN_LOAD_LOCK = threading.Lock()
+_PLUGIN_MANIFEST_SCHEMA = 1
+_PLUGIN_NAMESPACE_PREFIX = "_another_llm_plugin_"
+_ENTRYPOINT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _source_plugin_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "plugins"
+
+
+def _official_plugin_root() -> Path:
+    packaged = Path(__file__).resolve().parent / "plugins"
+    return packaged if packaged.is_dir() else _source_plugin_root()
+
+
+def _plugin_failure(path: Path, stage: str, reason: str) -> ConfigError:
+    return ConfigError(f"插件加载失败 [{path}] 阶段 {stage}：{reason}")
+
+
+def _manifest_text(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as stream:
+            value = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise _plugin_failure(path, "manifest", str(exc)) from exc
+    if not isinstance(value, dict):
+        raise _plugin_failure(path, "manifest", "根值必须是表")
+    return value
+
+
+def _read_manifest(plugin_dir: Path) -> _PluginManifest:
+    manifest_path = plugin_dir / "plugin.toml"
+    if not manifest_path.is_file():
+        raise _plugin_failure(plugin_dir, "manifest", "缺少 plugin.toml")
+    value = _manifest_text(manifest_path)
+    if set(value) != {"schema", "plugin"} or value.get("schema") != _PLUGIN_MANIFEST_SCHEMA:
+        raise _plugin_failure(plugin_dir, "manifest", "schema 必须为 1 且只允许 plugin 表")
+    plugin = value.get("plugin")
+    if not isinstance(plugin, dict) or set(plugin) != {"id", "version", "protocol", "entrypoint"}:
+        raise _plugin_failure(
+            manifest_path,
+            "manifest",
+            "plugin 必须包含 id、version、protocol、entrypoint 且不含未知字段",
+        )
+    plugin_id = plugin.get("id")
+    version = plugin.get("version")
+    protocol = plugin.get("protocol")
+    entrypoint = plugin.get("entrypoint")
+    if (
+        not isinstance(plugin_id, str)
+        or not plugin_id.strip()
+        or not isinstance(version, str)
+        or not version.strip()
+        or not isinstance(protocol, int)
+        or isinstance(protocol, bool)
+        or not isinstance(entrypoint, str)
+        or not _ENTRYPOINT_RE.fullmatch(entrypoint)
+    ):
+        raise _plugin_failure(manifest_path, "manifest", "字段类型或值无效")
+    if protocol != plugin_api.PLUGIN_PROTOCOL_VERSION:
+        raise _plugin_failure(
+            manifest_path,
+            "manifest",
+            f"协议版本不兼容：{protocol}，宿主需要 {plugin_api.PLUGIN_PROTOCOL_VERSION}",
+        )
+    return _PluginManifest(
+        path=plugin_dir,
+        plugin_id=plugin_id,
+        version=version,
+        protocol=protocol,
+        entrypoint=entrypoint,
+    )
+
+
+def _discover_manifests(root: Path, *, required: bool) -> tuple[_PluginManifest, ...]:
+    if not root.is_dir():
+        if required:
+            raise _plugin_failure(root, "discover", "官方插件目录不存在")
+        return ()
+    try:
+        children = sorted(root.iterdir(), key=lambda value: value.name)
+    except OSError as exc:
+        raise _plugin_failure(root, "discover", str(exc)) from exc
+    return tuple(
+        _read_manifest(child)
+        for child in children
+        if child.is_dir()
+    )
+
+
+def _discard_plugin_namespace(package_name: str) -> None:
+    for name in tuple(sys.modules):
+        if name == package_name or name.startswith(package_name + "."):
+            sys.modules.pop(name, None)
+
+
+def _load_manifest_descriptor(manifest: _PluginManifest, index: int) -> plugin_api.PluginDescriptor:
+    plugin_dir = manifest.path
+    init_path = plugin_dir / "__init__.py"
+    if not init_path.is_file():
+        raise _plugin_failure(plugin_dir, "import", "缺少 __init__.py")
+    module_text, separator, attribute = manifest.entrypoint.partition(":")
+    if not separator or not module_text or not attribute:
+        raise _plugin_failure(plugin_dir, "entrypoint", "格式必须为 module:attribute")
+    module_parts = module_text.split(".")
+    module_path = plugin_dir.joinpath(*module_parts).with_suffix(".py")
+    try:
+        module_path.relative_to(plugin_dir)
+    except ValueError as exc:
+        raise _plugin_failure(plugin_dir, "entrypoint", "入口必须位于插件目录内") from exc
+    if not module_path.is_file():
+        raise _plugin_failure(plugin_dir, "entrypoint", f"入口模块不存在：{module_text}")
+    package_name = (
+        f"{_PLUGIN_NAMESPACE_PREFIX}{index}_{manifest.plugin_id.replace('-', '_')}"
+    )
+    try:
+        package_spec = importlib.util.spec_from_file_location(
+            package_name,
+            init_path,
+            submodule_search_locations=[str(plugin_dir)],
+        )
+        if package_spec is None or package_spec.loader is None:
+            raise ImportError("无法创建插件包加载器")
+        package = importlib.util.module_from_spec(package_spec)
+        sys.modules[package_name] = package
+        package_spec.loader.exec_module(package)
+        module = importlib.import_module(f"{package_name}.{module_text}")
+        factory = getattr(module, attribute)
+    except Exception as exc:
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(plugin_dir, "import", str(exc)) from exc
+    if not callable(factory):
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(plugin_dir, "entrypoint", "入口必须是可调用的无参工厂")
+    try:
+        descriptor = factory()
+    except TypeError as exc:
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(plugin_dir, "factory", f"入口必须是无参工厂：{exc}") from exc
+    except Exception as exc:
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(plugin_dir, "factory", str(exc)) from exc
+    if not isinstance(descriptor, plugin_api.PluginDescriptor):
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(plugin_dir, "factory", "入口未返回 PluginDescriptor")
+    if (
+        descriptor.plugin_id != manifest.plugin_id
+        or descriptor.version != manifest.version
+        or descriptor.protocol_version != manifest.protocol
+    ):
+        _discard_plugin_namespace(package_name)
+        raise _plugin_failure(
+            plugin_dir,
+            "descriptor",
+            "manifest 与 PluginDescriptor 的 id、version 或 protocol 不一致",
+        )
+    return descriptor
 
 
 def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
@@ -41,33 +216,42 @@ def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
     )
 
 
-def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
-    plugins = list(_builtin_plugins())
-    for entry_point in entry_points(group=PLUGIN_ENTRY_POINT):
-        loaded = entry_point.load()
-        descriptor = loaded() if callable(loaded) else loaded
-        if not isinstance(descriptor, plugin_api.PluginDescriptor):
-            raise ConfigError(
-                f"插件入口未返回 PluginDescriptor：{entry_point.name}"
-            )
-        plugins.append(descriptor)
-    seen_plugins: set[str] = set()
-    seen_adapters: set[str] = set()
-    seen_extensions: dict[str, str] = {}
-    seen_validators: set[str] = set()
+def _validate_plugins(
+    plugins: list[plugin_api.PluginDescriptor],
+    source_paths: dict[int, str] | None = None,
+) -> tuple[plugin_api.PluginDescriptor, ...]:
+    source_paths = source_paths or {}
+    seen_plugins: dict[str, str] = {}
+    seen_adapters: dict[str, tuple[str, str]] = {}
+    seen_extensions: dict[str, tuple[str, str, str]] = {}
+    seen_validators: dict[str, tuple[str, str]] = {}
     for plugin in plugins:
+        source = source_paths.get(id(plugin), f"插件：{plugin.plugin_id}")
         if plugin.protocol_version != plugin_api.PLUGIN_PROTOCOL_VERSION:
             raise ConfigError(
                 f"插件协议版本不兼容：{plugin.plugin_id} "
-                f"{plugin.protocol_version}"
+                f"{plugin.protocol_version}（来源：{source}）"
             )
-        if not plugin.plugin_id or plugin.plugin_id in seen_plugins:
-            raise ConfigError(f"插件 ID 重复或为空：{plugin.plugin_id}")
-        seen_plugins.add(plugin.plugin_id)
+        previous_source = seen_plugins.get(plugin.plugin_id)
+        if not plugin.plugin_id or previous_source is not None:
+            detail = (
+                f"（来源：{previous_source}、{source}）"
+                if previous_source is not None
+                else f"（来源：{source}）"
+            )
+            raise ConfigError(f"插件 ID 重复或为空：{plugin.plugin_id}{detail}")
+        seen_plugins[plugin.plugin_id] = source
         for adapter in plugin.document_adapters:
-            if not adapter.adapter_id or adapter.adapter_id in seen_adapters:
+            previous_adapter = seen_adapters.get(adapter.adapter_id)
+            if not adapter.adapter_id or previous_adapter is not None:
+                detail = (
+                    f"（{previous_adapter[0]} 来源：{previous_adapter[1]}；"
+                    f"{plugin.plugin_id} 来源：{source}）"
+                    if previous_adapter is not None
+                    else f"（来源：{source}）"
+                )
                 raise ConfigError(
-                    f"Document Adapter ID 重复或为空：{adapter.adapter_id}"
+                    f"Document Adapter ID 重复或为空：{adapter.adapter_id}{detail}"
                 )
             if not adapter.version or not adapter.capabilities:
                 raise ConfigError(
@@ -107,9 +291,14 @@ def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
                 if owner is not None:
                     raise ConfigError(
                         f"Document Adapter 扩展名重复：{extension} "
-                        f"({owner}, {adapter.adapter_id})"
+                        f"({owner[2]}.{owner[0]} 来源：{owner[1]}，"
+                        f"{plugin.plugin_id}.{adapter.adapter_id} 来源：{source})"
                     )
-                seen_extensions[extension] = adapter.adapter_id
+                seen_extensions[extension] = (
+                    adapter.adapter_id,
+                    source,
+                    plugin.plugin_id,
+                )
             options = getattr(adapter, "import_options", None)
             if not isinstance(options, tuple) or not all(
                 isinstance(option, plugin_api.DocumentChoiceOption)
@@ -206,7 +395,7 @@ def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
                     f"Document Adapter 缺少 replacement_options："
                     f"{adapter.adapter_id}"
                 )
-            seen_adapters.add(adapter.adapter_id)
+            seen_adapters[adapter.adapter_id] = (plugin.plugin_id, source)
         validators = getattr(plugin, "translation_validators", None)
         if not isinstance(validators, tuple):
             raise ConfigError(
@@ -220,7 +409,6 @@ def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
             if (
                 not isinstance(validator_id, str)
                 or not validator_id.strip()
-                or validator_id in seen_validators
                 or not isinstance(version, str)
                 or not version.strip()
                 or not isinstance(label, str)
@@ -229,9 +417,77 @@ def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
             ):
                 raise ConfigError(
                     f"翻译校验器描述不完整：{plugin.plugin_id}.{validator_id}"
+                    f"（来源：{source}）"
                 )
-            seen_validators.add(validator_id)
+            previous_validator = seen_validators.get(validator_id)
+            if previous_validator is not None:
+                raise ConfigError(
+                    f"翻译校验器 ID 重复：{validator_id} "
+                    f"（{previous_validator[0]} 来源：{previous_validator[1]}；"
+                    f"{plugin.plugin_id} 来源：{source}）"
+                )
+            seen_validators[validator_id] = (plugin.plugin_id, source)
     return tuple(plugins)
+
+
+def _load_external_descriptors() -> list[
+    tuple[plugin_api.PluginDescriptor, Path]
+]:
+    manifests = (
+        *_discover_manifests(_official_plugin_root(), required=True),
+        *_discover_manifests(user_root() / "plugins", required=False),
+    )
+    seen_manifest_sources = {
+        plugin.plugin_id: f"内置插件：{plugin.plugin_id}"
+        for plugin in _builtin_plugins()
+    }
+    for manifest in manifests:
+        previous_source = seen_manifest_sources.get(manifest.plugin_id)
+        if previous_source is not None:
+            raise _plugin_failure(
+                manifest.path,
+                "manifest",
+                f"插件 ID 重复或占用内置 ID：{manifest.plugin_id} "
+                f"（已有来源：{previous_source}；当前来源：{manifest.path}）",
+            )
+        seen_manifest_sources[manifest.plugin_id] = str(manifest.path)
+    return [
+        (_load_manifest_descriptor(manifest, index), manifest.path)
+        for index, manifest in enumerate(manifests)
+    ]
+
+
+def _load_plugins_uncached() -> tuple[plugin_api.PluginDescriptor, ...]:
+    module_names_before = set(sys.modules)
+    try:
+        builtins = list(_builtin_plugins())
+        loaded_external = _load_external_descriptors()
+        descriptors = [descriptor for descriptor, _ in loaded_external]
+        sources = {
+            id(plugin): f"内置插件：{plugin.plugin_id}" for plugin in builtins
+        }
+        sources.update(
+            {id(descriptor): str(path) for descriptor, path in loaded_external}
+        )
+        return _validate_plugins([*builtins, *descriptors], sources)
+    except Exception:
+        for name in tuple(sys.modules):
+            if (
+                name.startswith(_PLUGIN_NAMESPACE_PREFIX)
+                and name not in module_names_before
+            ):
+                sys.modules.pop(name, None)
+        raise
+
+
+def load_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
+    global _PLUGIN_CACHE
+    if _PLUGIN_CACHE is not None:
+        return _PLUGIN_CACHE
+    with _PLUGIN_LOAD_LOCK:
+        if _PLUGIN_CACHE is None:
+            _PLUGIN_CACHE = _load_plugins_uncached()
+        return _PLUGIN_CACHE
 
 
 def get_document_adapter(adapter_id: str) -> plugin_api.DocumentAdapter:

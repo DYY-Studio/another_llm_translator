@@ -28,8 +28,8 @@ python -m pip install -r requirements-dev.txt
 python -m pip check
 ```
 
-`requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 增加测试、构建依赖，并以
-editable 方式安装宿主和仓库内的示例插件。插件也可以在各自目录单独构建和安装。
+`requirements.txt` 只包含运行时依赖；`requirements-dev.txt` 增加测试和构建依赖。仓库内的
+示例插件通过 `plugins/` 目录直接参与源码运行，不单独安装。
 
 开发用 API Key 只能通过 Preset 引用的环境变量或系统钥匙串提供，不得写入仓库文件。
 
@@ -99,8 +99,7 @@ bash scripts/build-app.sh
 ```
 
 脚本依次执行前端类型检查与构建、PyInstaller sidecar 冻结和 Tauri 打包。sidecar 构建会收集
-构建环境中已安装的 `another_llm_translator.plugins` entry point；官方构建会检查仓库内要求
-装配的示例插件是否存在。
+构建环境中的官方 `plugins/` 目录资源；用户插件在运行时从用户数据目录读取。
 
 当前输出是面向 macOS arm64 的未签名 ad hoc `.app` 和 zip：
 

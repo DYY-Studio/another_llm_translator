@@ -1,12 +1,7 @@
 # Another LLM Translator SRT 插件
 
-这是一个独立发行的 SRT `Document Adapter`，通过
-`another_llm_translator.plugins` entry point 注册到宿主。安装宿主后可显式
-安装插件：
-
-```bash
-python -m pip install another-llm-translator another-llm-translator-srt
-```
+这是一个 SRT `Document Adapter` 目录插件。宿主从 `plugin.toml` 读取描述，并在启动时
+加载同目录的 `plugin.py`；插件代码使用 `app.plugin_api` 的公开契约。
 
 插件把每个字幕 cue 映射为一个 Segment，保留序号和时间行，并支持纯译文与
 双语 SRT 导出。双语 cue 按“原文、换行、译文”排列。
@@ -18,8 +13,5 @@ python -m pip install another-llm-translator another-llm-translator-srt
 cue 正文（包括 HTML/ASS 样式标记）原样提供给模型；插件不解析或保证模型
 保留这些标记。输出中的空白分隔行会被拒绝，因为它会改变 SRT cue 边界。
 
-官方桌面构建会在构建时装配此独立包。已发布桌面应用暂不提供运行时安装任意
-第三方插件的机制。
-
-翻译校验示例插件 `another-llm-translator-term-validation` 也是独立包，使用同一
-entry point 组。两者均由官方桌面在构建时装配。
+官方桌面构建会在构建时装配此目录。用户可以将满足同一目录契约的插件解压到用户数据
+目录的 `plugins/` 下；应用重启后发现。

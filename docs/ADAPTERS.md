@@ -252,8 +252,8 @@ Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。�
 
 ## 2. Document Adapter（Beta）
 
-Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；独立发行的
-`another-llm-translator-srt` 插件提供 `srt` Adapter：
+Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；官方目录插件
+`plugins/srt/` 提供 `srt` Adapter：
 
 ```python
 class DocumentAdapter(Protocol):
@@ -402,8 +402,7 @@ Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都
 
 ### SRT 0.1（外部插件示例）
 
-SRT 插件位于 `plugins/srt/`，发行包名为 `another-llm-translator-srt`，通过
-`another_llm_translator.plugins` entry point 注册。
+SRT 插件位于 `plugins/srt/`，作为官方目录插件随宿主资源分发。
 
 每个 cue 是一个 Segment，所有 cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
 
@@ -491,15 +490,28 @@ EPUB Adapter 仅在 `markers` 模式向对应请求的 Prompt 注入上述保留
 ## 3. 可信 Python 插件宿主（Beta）
 
 插件使用的宿主契约统一从 `app.plugin_api` 导入；该模块只公开稳定的协议类型、严格解码
-API 和插件所需错误类型，不提供插件发现或业务执行入口。
-
-插件包在 entry-point 组 `another_llm_translator.plugins` 注册一个
-`PluginDescriptor` 实例或返回该实例的无参函数：
+API 和插件所需错误类型，不提供插件发现或业务执行入口。官方插件和用户插件均是一个
+直接位于插件根目录下的可信 Python 包：
 
 ```toml
-[project.entry-points."another_llm_translator.plugins"]
-my_plugin = "my_package.plugin:descriptor"
+schema = 1
+
+[plugin]
+id = "my-documents"
+version = "1.0.0"
+protocol = 12
+entrypoint = "plugin:descriptor"
 ```
+
+目录同时包含 `__init__.py`、入口模块和入口模块需要的相对导入文件。宿主只扫描官方
+资源 `plugins/` 和用户数据目录 `<用户数据目录>/plugins/` 的直接子目录；子目录按名称
+稳定排序，用户目录不存在表示没有用户插件。源码运行和冻结运行使用各自随应用分发的
+官方 `plugins/` 资源。用户插件修改后重启应用生效。
+
+宿主先读取并校验全部 `plugin.toml`，再执行任何插件代码。未知字段、缺失文件、协议不符、
+重复插件 ID、入口不在插件目录内、描述符元数据不一致或入口失败都会带路径、阶段和原因
+直接阻止启动；不跳过插件，也不回落到另一种发现机制。插件代码与宿主同进程运行，拥有
+当前进程权限；目录命名空间只隔离模块名，不构成安全沙箱。
 
 ```python
 from app.plugin_api import PluginDescriptor
@@ -525,7 +537,8 @@ def descriptor() -> PluginDescriptor:
 
 `error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。
 
-首个真实外部示例是可选的 `another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
+首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
+`preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
 from app.plugin_api import (

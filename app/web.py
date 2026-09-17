@@ -17,16 +17,24 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .diagnostics import DiagnosticsHub
-from .errors import AppError, ProjectError, UsageError, app_error_payload, internal_error_payload
+from .errors import (
+    AppError,
+    ProjectError,
+    UsageError,
+    app_error_payload,
+    internal_error_payload,
+)
 from .llm_migration import migrate_llm_resources
 from .logging_utils import get_logger
-from .project import APP_ROOT as DEFAULT_APP_ROOT, PROJECTS_ROOT, resolve_project
-from .sqlite_storage import database_path, read_json
+from .plugins import load_plugins
+from .project import APP_ROOT as DEFAULT_APP_ROOT
+from .project import PROJECTS_ROOT, resolve_project
 from .server_config import load_server_config
+from .sqlite_storage import database_path, read_json
 from .storage_management import StorageManager
 from .user_config import user_root
-from .web_tasks import WebTaskManager
 from .web_project_routes import ReplacementPreviewSession
+from .web_tasks import WebTaskManager
 
 WEB_DIST = (
     Path(__file__).with_name("web_dist")
@@ -92,6 +100,7 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    load_plugins()
     migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)

@@ -14,32 +14,30 @@ from .i18n import cli_language
 from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
-from .plugins import document_adapter_summaries
+from .plugins import document_adapter_summaries, load_plugins
 from .project import (
     add_project_files,
     apply_file_replacement,
+    file_run_options,
     init_project,
+    load_source_files,
     prepare_file_replacement,
     remove_project_files,
-    file_run_options,
-    update_file_run_options,
-    update_adapter_run_options,
-    load_source_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
+    update_adapter_run_options,
+    update_file_run_options,
 )
+from .project_export import export_project
 from .sqlite_storage import compact_project_database
+from .stage_review import run_apply, run_review
+from .stage_terminology import run_terminology
+from .stage_translation import run_translation
 from .stages import (
     inspect_full,
     run_all,
 )
-from .project_export import export_project
-from .stage_review import run_apply, run_review
-from .stage_terminology import run_terminology
-from .stage_translation import run_translation
-from .term_exchange import export_terms, import_terms
-from .term_library import publish_partial_terms
 from .term_decision import run_terminology_decision
 from .term_decision_drafts import (
     apply_decision_draft,
@@ -47,6 +45,8 @@ from .term_decision_drafts import (
     manual_review_state,
     rollback_decision,
 )
+from .term_exchange import export_terms, import_terms
+from .term_library import publish_partial_terms
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -295,6 +295,7 @@ def run(argv: list[str] | None = None) -> int:
     logger = get_logger()
     parser = build_parser()
     args = parser.parse_args(argv)
+    load_plugins()
     cli_language(None if args.language == "system" else args.language)
     logger.info("command start command=%s", args.command)
     if args.command == "init":

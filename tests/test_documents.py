@@ -2173,16 +2173,6 @@ def test_document_export_validates_all_files_before_publish(
     assert not directory.exists()
 
 
-class FakeEntryPoint:
-    name = "fixture"
-
-    def __init__(self, descriptor: PluginDescriptor) -> None:
-        self.descriptor = descriptor
-
-    def load(self) -> object:
-        return self.descriptor
-
-
 @pytest.mark.parametrize(
     "incompatible_version", [5, 6, 7, 9, 10, PLUGIN_PROTOCOL_VERSION + 1]
 )
@@ -2196,9 +2186,10 @@ def test_plugin_host_rejects_protocol_and_duplicate_adapter(
         protocol_version=incompatible_version,
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(incompatible)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(incompatible, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     with pytest.raises(ConfigError, match="协议版本不兼容"):
         load_plugins()
 
@@ -2209,9 +2200,10 @@ def test_plugin_host_rejects_protocol_and_duplicate_adapter(
         document_adapters=(txt_adapter,),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(duplicate)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(duplicate, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     with pytest.raises(ConfigError, match="Adapter ID 重复"):
         load_plugins()
 
@@ -2239,11 +2231,13 @@ def test_document_adapter_extensions_are_unique_and_resolve_case_insensitively(
         document_adapters=(DuplicateExtensionAdapter(),),  # type: ignore[arg-type]
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(duplicate)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(duplicate, Path("<fixture-plugin>"))],
     )
-    with pytest.raises(ConfigError, match="扩展名重复"):
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+    with pytest.raises(ConfigError, match="扩展名重复") as raised:
         load_plugins()
+    assert "<fixture-plugin>" in str(raised.value)
 
 
 def test_document_adapter_choice_options_apply_defaults_and_validate_values() -> None:
@@ -2290,9 +2284,10 @@ def test_plugin_host_rejects_invalid_choice_option(
         document_adapters=(InvalidOptionAdapter(),),  # type: ignore[arg-type]
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     with pytest.raises(ConfigError, match="导入选项声明无效"):
         load_plugins()
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from another_llm_translator_term_validation.plugin import (
-    PreferredTermUsageValidator,
-    descriptor,
-)
-
 from app.plugin_api import (
     TranslationTermMatch,
     TranslationValidationContext,
+)
+from plugins.term_validation.plugin import (
+    PreferredTermUsageValidator,
+    descriptor,
 )
 
 

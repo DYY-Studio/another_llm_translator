@@ -23,20 +23,13 @@ npm run build --prefix web
 python -m app.web
 ```
 
-需要处理 SRT 时，另行安装示例插件：
+官方 SRT Adapter 和建议级术语校验插件随应用的 `plugins/` 资源提供。用户插件可以手动
+解压到 `<用户数据目录>/plugins/<插件目录>/`，重启应用后生效；插件目录必须包含契约中
+规定的 `plugin.toml`、`__init__.py` 和入口模块。插件加载失败会在启动时显示具体路径、
+阶段和原因，不会自动改用其他格式或发现方式。
 
-```bash
-python -m pip install another-llm-translator-srt
-```
-
-需要使用建议级术语校验时，另行安装示例插件：
-
-```bash
-python -m pip install another-llm-translator-term-validation
-```
-
-从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`。官方桌面构建会在
-构建时装配这两个示例插件；已发布桌面应用暂不提供运行时插件安装。
+从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`，示例插件不
+单独安装。
 
 Another LLM Translator 只识别当前包名、命令、环境变量、插件入口和默认数据目录。旧版本位置中的
 数据不会自动发现、迁移或删除；如需保留，请用户自行处理。

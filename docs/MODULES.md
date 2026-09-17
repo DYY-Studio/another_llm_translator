@@ -165,8 +165,9 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/plugins.py`
 
-可信 Python 插件发现、描述符和协议版本校验。插件在同一进程运行，但只能通过公开协议注册
-Document Adapter 与 Translation Validator。
+可信 Python 目录插件的 manifest 发现、独立模块加载、描述符和协议版本校验。它先检查官方
+资源与用户数据目录的全部 manifest，再在同一进程中加载插件；成功的注册结果按进程缓存。插件
+只能通过公开协议注册 Document Adapter 与 Translation Validator。
 
 ### `app/plugin_api.py`
 

@@ -39,7 +39,6 @@ from app.stage_translation import run_translation
 from app.web import create_app
 from app.web_store import WebStore
 from tests.helpers import llm_jsonl
-from tests.test_documents import FakeEntryPoint
 from tests.test_foundation import make_app_root
 
 _RECORD_MARKER_RE = re.compile(r"</?k\d+>")
@@ -671,9 +670,10 @@ def register_plugin(
         document_adapters=tuple(adapters),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     return descriptor
 
 

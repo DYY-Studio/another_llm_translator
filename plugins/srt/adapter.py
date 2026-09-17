@@ -10,10 +10,10 @@ from app.plugin_api import (
     DocumentChoiceOption,
     DocumentImport,
     ImportedFile,
-    decode_plaintext,
     IncompleteError,
     ProjectError,
     UsageError,
+    decode_plaintext,
 )
 
 _SRT_EXTENSIONS = frozenset({".srt"})
