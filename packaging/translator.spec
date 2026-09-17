@@ -11,13 +11,42 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_entry_point, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH) if "SPECPATH" in globals() else Path.cwd()
-plugin_datas, plugin_hiddenimports = collect_entry_point(
-    "another_llm_translator.plugins"
-)
-hiddenimports = collect_submodules("uvicorn") + plugin_hiddenimports
+
+
+def collect_plugin_datas(plugin_root: Path) -> list[tuple[str, str]]:
+    """Bundle only runtime plugin files and their manifests."""
+    datas: list[tuple[str, str]] = []
+    for path in sorted(plugin_root.rglob("*")):
+        relative = path.relative_to(plugin_root)
+        if (
+            not path.is_file()
+            or "tests" in relative.parts
+            or "__pycache__" in relative.parts
+            or (path.suffix != ".py" and path.name != "plugin.toml")
+        ):
+            continue
+        destination = Path("plugins") / relative.parent
+        datas.append((str(path), str(destination)))
+    return datas
+
+
+plugin_root = ROOT.parent / "plugins"
+plugin_datas = collect_plugin_datas(plugin_root)
+hiddenimports = collect_submodules("uvicorn") + [
+    # These modules are reached through directory-loaded plugin code or
+    # imports inside the builtin plugin factory, so static analysis cannot
+    # discover all of them from sidecar_entry.py.
+    "app.documents",
+    "app.epub_adapter",
+    "app.errors",
+    "app.plugin_api",
+    "app.plugins",
+    "app.project",
+    "app.translation_validation",
+]
 
 a = Analysis(
     [str(ROOT / "sidecar_entry.py")],

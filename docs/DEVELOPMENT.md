@@ -119,6 +119,11 @@ src-tauri/target/
 dist/
 ```
 
+标准 Python wheel 也会把官方目录插件的运行时代码和 manifest 安装到内置资源目录；构建
+wheel 时使用主虚拟环境执行 `python -m pip wheel --no-deps . --wheel-dir <输出目录>`。
+sidecar 与 wheel 都不依赖插件 entry point 安装，用户插件仍从用户数据根的 `plugins/` 目录
+读取。
+
 ## 6. 调试与诊断
 
 普通日志用于查看启动、请求摘要、重试和失败原因。Debug 模式会额外保存完整请求、响应和

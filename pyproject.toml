@@ -61,3 +61,14 @@ llm_presets = [
   "llm_presets/google-gemini.json",
   "llm_presets/openai-responses.json",
 ]
+"plugins/srt" = [
+  "plugins/srt/__init__.py",
+  "plugins/srt/adapter.py",
+  "plugins/srt/plugin.py",
+  "plugins/srt/plugin.toml",
+]
+"plugins/term_validation" = [
+  "plugins/term_validation/__init__.py",
+  "plugins/term_validation/plugin.py",
+  "plugins/term_validation/plugin.toml",
+]

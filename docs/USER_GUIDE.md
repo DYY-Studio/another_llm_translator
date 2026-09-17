@@ -28,6 +28,9 @@ python -m app.web
 规定的 `plugin.toml`、`__init__.py` 和入口模块。插件加载失败会在启动时显示具体路径、
 阶段和原因，不会自动改用其他格式或发现方式。
 
+从 Python wheel 安装时，官方插件会随应用的内置资源一起安装；用户插件仍放在用户数据根
+目录，不要修改安装目录中的文件。
+
 从本仓库源码开发时可使用 `python -m pip install -r requirements-dev.txt`，示例插件不
 单独安装。
 
