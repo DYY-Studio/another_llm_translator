@@ -749,6 +749,7 @@ def register_task_routes(
             replace_draft=payload.replace_draft,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
+            final_review=payload.final_review,
             summary_selection=summary_selection,
         )
 
@@ -758,12 +759,14 @@ def register_task_routes(
         stage: str,
         include_summaries: bool = False,
         language: str | None = None,
+        final_review: bool = False,
     ) -> dict[str, Any]:
         return task_options(
             project(name),
             stage,
             include_summaries=include_summaries,
             prompt_language=(validate_language(language) if language is not None else None),
+            final_review=final_review,
         )
 
     @app.get("/api/v1/tasks/active")

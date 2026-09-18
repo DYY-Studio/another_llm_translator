@@ -36,6 +36,9 @@ export function RunDialog({
       : options.mismatched_fingerprint_completed ? null : "pending",
   );
   const decisionMode = options.stage === "terminology_decision";
+  const [finalReview, setFinalReview] = useState(
+    options.running_run?.final_review ?? options.final_review ?? false,
+  );
   const hybridSummary = options.stage === "terminology" && options.summary_selected_boundaries !== undefined;
   const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
   const summaryConfigurationBlocked = hybridSummary && (
@@ -44,13 +47,19 @@ export function RunDialog({
     || Boolean(options.summary_only_work)
   );
   const resuming = runAction === "resume";
+  const finalReviewLocked = decisionMode && Boolean(options.running_run && resuming);
   const ready = summaryConfigurationBlocked ? false : decisionMode
     ? !options.running_run || resuming || resultPolicy === "force"
     : resuming || resultPolicy !== null;
 
   function chooseRunAction(action: "resume" | "decline") {
     setRunAction(action);
-    if (decisionMode && action === "decline") setResultPolicy("force");
+    if (decisionMode && action === "decline") {
+      setResultPolicy("force");
+      setFinalReview(options.final_review ?? false);
+    } else if (decisionMode && action === "resume" && options.running_run) {
+      setFinalReview(options.running_run.final_review ?? false);
+    }
   }
 
   function submit() {
@@ -59,6 +68,7 @@ export function RunDialog({
       force: !resuming && resultPolicy === "force",
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
+      final_review: decisionMode && finalReview,
     });
   }
 
@@ -103,6 +113,25 @@ export function RunDialog({
             soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
             mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
           })}</span>}
+          <label className="config-toggle">
+            <span>
+              <input
+                type="checkbox"
+                checked={finalReview}
+                disabled={finalReviewLocked}
+                onChange={(event) => setFinalReview(event.target.checked)}
+              />
+              {translate("terms.decisionFinalReview", language)}
+            </span>
+            <small>
+              {finalReviewLocked
+                ? translate("terms.decisionFinalReviewLocked", language)
+                : translate("terms.decisionFinalReviewHint", language)}
+            </small>
+            {finalReview && (
+              <small>{translate("terms.decisionFinalReviewEstimateHint", language)}</small>
+            )}
+          </label>
         </div>}
 
         {hybridSummary && <div className="run-decision-info">

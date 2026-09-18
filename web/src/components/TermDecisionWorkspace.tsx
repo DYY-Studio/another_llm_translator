@@ -324,7 +324,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     setBusy(true);
     setMessage("");
     try {
-      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, { method: "POST", body: JSON.stringify({ stage: "terminology_decision", language, replace_draft: replaceDraft, force, reuse_mixed_fingerprints: false, acknowledge_manual_review: !resuming, run_action: decision.run_action }) });
+      const next = await api<TaskState>(`/api/v1/projects/${project}/tasks`, { method: "POST", body: JSON.stringify({ stage: "terminology_decision", language, replace_draft: replaceDraft, force, reuse_mixed_fingerprints: false, acknowledge_manual_review: !resuming, run_action: decision.run_action, final_review: decision.final_review }) });
       onTask(next);
     } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }

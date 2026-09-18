@@ -134,6 +134,11 @@ def _running_run(
         "previous": _endpoint_summary(old_config),
         "current": _endpoint_summary(current_config),
     }
+    if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
+        result["final_review"] = manifest["final_review"]
+        target_count = manifest.get("final_review_target_count")
+        if type(target_count) is int and target_count >= 0:
+            result["final_review_target_count"] = target_count
     if isinstance(manifest.get("last_interruption"), dict):
         result["last_interruption"] = manifest["last_interruption"]
     return result
@@ -231,7 +236,10 @@ def task_options(
     *,
     include_summaries: bool = False,
     prompt_language: str | None = None,
+    final_review: bool = False,
 ) -> dict[str, Any]:
+    if final_review and stage != TERMINOLOGY_DECISION_STAGE:
+        raise UsageError("final_review 只允许自动术语决策")
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
         overrides = read_json(
@@ -247,23 +255,36 @@ def task_options(
             for item in library.get("terms", [])
         )
         config = load_project_config(project, stage=stage)
-        plan = decision_plan(project) if has_eligible else None
+        plan = (
+            decision_plan(project, prompt_language, final_review=final_review)
+            if has_eligible
+            else None
+        )
         selected = len(plan["eligible"]) if plan else 0
         running_run = _running_run(project, stage, config)
         if running_run is not None:
+            running_final_review = running_run.get("final_review")
             compatible, reason = decision_resume_compatibility(
                 project,
                 str(running_run["run_id"]),
                 source_terms_revision=int(library["terms_revision"]),
+                final_review=(
+                    bool(running_final_review)
+                    if isinstance(running_final_review, bool)
+                    else final_review
+                ),
             )
             running_run["completed_steps"] = decision_checkpoint_progress(
                 project, str(running_run["run_id"])
             )
-            running_run["total_steps"] = selected * 2
+            running_run["total_steps"] = selected * 2 + int(
+                running_run.get("final_review_target_count", 0)
+            )
             running_run["resume_compatible"] = compatible
             running_run["resume_incompatibility_reason"] = reason
         return {
             "stage": stage,
+            "final_review": final_review,
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
@@ -511,6 +532,8 @@ def _running_runs_snapshot(
                 "requested_segment_count": manifest.get("requested_segment_count"),
                 "reused_segment_count": manifest.get("reused_segment_count"),
             }
+            if stage == TERMINOLOGY_DECISION_STAGE:
+                stable["final_review"] = manifest.get("final_review")
             snapshots.append(
                 (
                     stage,
@@ -533,6 +556,7 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
             "source_conflicts": plan["source_conflicts"],
             "evidence": plan["evidence"],
             "language": plan["language"],
+            "final_review": bool(plan.get("final_review", False)),
         }
     )
 
@@ -585,6 +609,7 @@ class _StartDecision:
     decision_inputs: str | None = None
     options_selected_count: int | None = None
     summary_selection: tuple[tuple[str, str], ...] = ()
+    final_review: bool = False
     plan: dict[str, Any] | None = field(default=None, compare=False)
 
 
@@ -618,6 +643,7 @@ class WebTask:
     _scope: Scope = field(default_factory=Scope, repr=False)
     _reuse_mixed_fingerprints: bool = field(default=False, repr=False)
     _run_action: str | None = field(default=None, repr=False)
+    _final_review: bool = field(default=False, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
@@ -631,6 +657,7 @@ class WebTask:
             "project": self.project.name,
             "project_id": self.project_id,
             "stage": self.stage,
+            "final_review": self._final_review,
             "include_summaries": self._include_summaries,
             "summary_selection": [
                 {"file_id": file_id, "part_id": part_id}
@@ -886,6 +913,7 @@ class WebTaskManager:
         prompt_language: str | None,
         include_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
+        final_review: bool = False,
     ) -> _StartDecision:
         if stage not in {
             "terminology",
@@ -921,6 +949,8 @@ class WebTaskManager:
             raise UsageError("run_action 必须是 resume、decline 或 null")
         if stage == "run-all" and run_action is not None:
             raise UsageError("run-all 不支持 run_action")
+        if final_review and stage != TERMINOLOGY_DECISION_STAGE:
+            raise UsageError("final_review 只允许自动术语决策")
         if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
             raise UsageError("自动术语决策不支持复用已发布结果")
         if ensure_unique:
@@ -974,9 +1004,15 @@ class WebTaskManager:
                     reason="unfinished_run",
                 )
         elif stage == TERMINOLOGY_DECISION_STAGE:
-            decision_plan_snapshot = decision_plan(project, prompt_language)
+            decision_plan_snapshot = decision_plan(
+                project, prompt_language, final_review=final_review
+            )
             library = decision_plan_snapshot["library"]
-            selected_count = len(decision_plan_snapshot["eligible"]) * 2
+            selected_count = int(
+                decision_plan_snapshot.get(
+                    "total_steps", len(decision_plan_snapshot["eligible"]) * 2
+                )
+            )
             current_terms_revision = int(library["terms_revision"])
             if (
                 run_action != "resume"
@@ -998,6 +1034,7 @@ class WebTaskManager:
                     project,
                     str(running[0]["run_id"]),
                     source_terms_revision=current_terms_revision,
+                    final_review=final_review,
                 )
                 if not compatible:
                     raise UsageError(f"{reason}；请结束旧 Run 并强制新建")
@@ -1067,6 +1104,7 @@ class WebTaskManager:
                         decision_plan_snapshot["config"],
                         decision_plan_snapshot["prompts"],
                         decision_plan_snapshot["library"],
+                        final_review=final_review,
                     )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
@@ -1122,6 +1160,7 @@ class WebTaskManager:
             decision_inputs=decision_inputs,
             options_selected_count=options_selected_count,
             summary_selection=summary_selection,
+            final_review=final_review,
             plan=decision_plan_snapshot,
         )
 
@@ -1144,6 +1183,7 @@ class WebTaskManager:
                     scope=state._scope,
                     reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
                     run_action=state._run_action,
+                    final_review=state._final_review,
                     prompt_language=state._prompt_language,
                     replace_draft=state._replace_draft,
                     acknowledge_manual_review=state._acknowledge_manual_review,
@@ -1184,6 +1224,7 @@ class WebTaskManager:
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
         summary_selection: Iterable[dict[str, str]] = (),
+        final_review: bool = False,
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -1202,6 +1243,7 @@ class WebTaskManager:
                     (str(item["file_id"]), str(item["part_id"]))
                     for item in summary_selection
                 ),
+                final_review=final_review,
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -1216,6 +1258,7 @@ class WebTaskManager:
             state._scope = scope
             state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
             state._run_action = run_action
+            state._final_review = final_review
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
@@ -1240,6 +1283,7 @@ class WebTaskManager:
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
+        final_review: bool = False,
     ) -> None:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
@@ -1279,6 +1323,7 @@ class WebTaskManager:
                     prompt_language=prompt_language,
                     include_summaries=include_summaries,
                     summary_selection=summary_selection,
+                    final_review=final_review,
                 )
                 if (
                     state._start_decision is not None
@@ -1353,6 +1398,7 @@ class WebTaskManager:
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
                         plan=decision.plan,
+                        final_review=final_review,
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(

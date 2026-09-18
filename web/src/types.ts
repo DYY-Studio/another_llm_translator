@@ -284,6 +284,7 @@ export interface TaskState {
   project: string;
   project_id: string;
   stage: string;
+  final_review?: boolean;
   status: string;
   include_summaries?: boolean;
   summary_selection?: Array<{ file_id: string; part_id: string }>;
@@ -562,6 +563,7 @@ export interface ModelRow {
 
 export interface TaskOptions {
   stage: RunStage;
+  final_review?: boolean;
   preset: {
     id: string;
     model: string;
@@ -599,6 +601,8 @@ export interface TaskOptions {
     scope: Record<string, unknown> | null;
     previous: { model: string; endpoint: string };
     current: { model: string; endpoint: string };
+    final_review?: boolean | null;
+    final_review_target_count?: number;
     completed_steps?: number;
     total_steps?: number;
     resume_compatible?: boolean;
@@ -618,6 +622,7 @@ export interface RunDecision {
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
+  final_review: boolean;
 }
 
 export interface TermDecisionConflicts {

@@ -538,6 +538,7 @@ def test_web_payload_models_keep_stable_defaults_and_types() -> None:
     task = TaskStartPayload(stage="translation")
     assert task.force is False
     assert task.replace_draft is False
+    assert task.final_review is False
     assert task.summary_selection == []
 
 
@@ -545,6 +546,8 @@ def test_web_payload_models_keep_stable_defaults_and_types() -> None:
 def test_web_payload_models_reject_boolean_option_coercion(value: object) -> None:
     with pytest.raises(ValidationError):
         TaskStartPayload(stage="translation", force=value)
+    with pytest.raises(ValidationError):
+        TaskStartPayload(stage="terminology_decision", final_review=value)
 
 
 def test_web_payload_models_reject_invalid_structured_values() -> None:
@@ -3449,6 +3452,74 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert conflicting.status_code == 400
     assert "不能同时使用" in conflicting.json()["error"]
     assert app.state.tasks.tasks == {}
+
+    invalid_final_review = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "final_review": True},
+    )
+    assert invalid_final_review.status_code == 400
+    assert "只允许自动术语决策" in invalid_final_review.json()["error"]
+    assert app.state.tasks.tasks == {}
+
+
+def test_web_decision_options_keep_running_final_review_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 3,
+        "terms": [
+            {"normalized": "alpha", "disabled": False},
+            {"normalized": "beta", "disabled": False},
+        ],
+    }
+    monkeypatch.setattr(
+        web_tasks_module, "_require_decision_library", lambda _project: library
+    )
+    monkeypatch.setattr(
+        web_tasks_module,
+        "decision_plan",
+        lambda *_args, **_kwargs: {
+            "eligible": [{"normalized": "alpha"}, {"normalized": "beta"}],
+            "protected": [],
+            "estimated_requests": 2,
+            "estimated_input_tokens": 10,
+        },
+    )
+    monkeypatch.setattr(
+        web_tasks_module,
+        "_running_run",
+        lambda *_args: {
+            "run_id": "RUN-DECISION",
+            "started_at": None,
+            "scope": None,
+            "previous": {"model": "old", "endpoint": "old"},
+            "current": {"model": "new", "endpoint": "new"},
+            "final_review": True,
+            "final_review_target_count": 1,
+        },
+    )
+    compatibility: dict[str, object] = {}
+
+    def resume_compatibility(*_args: object, **kwargs: object) -> tuple[bool, None]:
+        compatibility.update(kwargs)
+        return True, None
+
+    monkeypatch.setattr(
+        web_tasks_module,
+        "decision_resume_compatibility",
+        resume_compatibility,
+    )
+    monkeypatch.setattr(
+        web_tasks_module, "decision_checkpoint_progress", lambda *_args: 2
+    )
+
+    options = web_tasks_module.task_options(project, "terminology_decision")
+
+    assert options["final_review"] is False
+    assert options["running_run"]["final_review"] is True
+    assert options["running_run"]["total_steps"] == 5
+    assert compatibility["final_review"] is True
 
 
 def test_web_task_start_payload_schema_and_explicit_null_language(

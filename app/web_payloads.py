@@ -74,6 +74,7 @@ class TaskStartPayload(_WebPayload):
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
     reuse_mixed_fingerprints: StrictBool = False
+    final_review: StrictBool = False
     run_action: str | None = None
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
 
