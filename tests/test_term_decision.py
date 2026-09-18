@@ -32,6 +32,7 @@ from app.term_decision import (
     _apply_tentative,
     _automatic_phase_two_anchors,
     _consistency_states,
+    _final_review_targets,
     _merge_phase_decisions,
     decision_plan,
     run_terminology_decision,
@@ -808,6 +809,69 @@ def test_final_review_rejects_empty_update_for_active_term() -> None:
     assert [error["code"] for error in errors] == ["empty_patch"]
 
 
+def test_final_review_requires_scalar_conflicts_to_be_resolved() -> None:
+    active = _batch_state("active", "Active")
+    conflicts = {
+        "active": {
+            "categories": ["人物", "地点"],
+            "preferred_translations": ["主动", "活跃"],
+        }
+    }
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "keep",
+                    "reason": "保持当前状态",
+                }
+            ]
+        ),
+        [active],
+        visible_states=[active],
+        known_states={"active": active},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+        conflicts=conflicts,
+    )
+
+    assert decisions == {}
+    assert [error["code"] for error in errors] == ["unresolved_conflict"]
+
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "update",
+                    "reason": "明确两个冲突字段",
+                    "changes": {
+                        "category": "人物",
+                        "preferred_translation": "主动",
+                    },
+                }
+            ]
+        ),
+        [active],
+        visible_states=[active],
+        known_states={"active": active},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+        conflicts=conflicts,
+    )
+
+    assert errors == []
+    assert decisions["active"]["action"] == "update"
+
+
 def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
     focus = _batch_state("focus", "Focus")
     anchor = _batch_state("anchor", "Anchor")
@@ -1242,6 +1306,14 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
     assert observed == [("adjudication", 0), ("consistency", 2)]
     assert plan["estimated_requests"] == 2
     assert plan["estimated_input_tokens"] == 35
+
+    final_plan = decision_plan(project, final_review=True)
+    assert final_plan["total_steps"] == 4
+    assert set(final_plan["prompts"]) == {
+        "adjudication",
+        "consistency",
+        "final_review",
+    }
 
 
 def test_decision_batch_overflow_policy_controls_local_planning(
@@ -2428,6 +2500,8 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert summary["proposals"] == 1
     run_dir = project / "runs" / summary["run_id"]
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    assert checkpoint["final_review"] is False
+    assert "final_review" not in checkpoint["phases"]
     assert (
         checkpoint["phases"]["adjudication"]["alice"]["prompt_fingerprint"]
         != checkpoint["phases"]["consistency"]["alice"]["prompt_fingerprint"]
@@ -2476,6 +2550,265 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     alice = next(item for item in restored["terms"] if item["normalized"] == "alice")
     assert alice["preferred_translation"] is None
     assert alice["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_final_review_resolves_pending_without_losing_phase_one_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        focus = kwargs["focus"]
+        phases.append(phase)
+        result: dict[str, dict] = {}
+        for item in focus:
+            normalized = str(item["normalized"])
+            if phase == "adjudication" and normalized == "alice":
+                result[normalized] = {
+                    "action": "update",
+                    "reason": "第一阶段补全译名",
+                    "after": {
+                        **item,
+                        "preferred_translation": "爱丽丝",
+                        "disabled": False,
+                    },
+                }
+            elif phase == "consistency" and normalized == "alice":
+                result[normalized] = {
+                    "action": "needs_review",
+                    "reason": "第二阶段仍需证据",
+                }
+            else:
+                result[normalized] = {"action": "keep", "reason": "保持"}
+        return result
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases[:2] == ["adjudication", "adjudication"]
+    assert phases[2:4] == ["consistency", "consistency"]
+    assert phases[4:] == ["final_review"]
+    assert summary["needs_review"] == 0
+    assert summary["completed"] == 5
+    run_dir = project / "runs" / summary["run_id"]
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["final_review"] is True
+    assert manifest["final_review_target_count"] == 1
+    assert manifest["total_steps"] == 5
+    checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    assert set(checkpoint["phases"]["final_review"]) == {"alice"}
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["needs_review"] == []
+    assert draft["proposals"][0]["evidence"]["alice"]["windows"]
+    alice = next(
+        proposal["after"][0]
+        for proposal in draft["proposals"]
+        if proposal["normalized"] == ["alice"]
+    )
+    assert alice["preferred_translation"] == "爱丽丝"
+
+
+def test_final_review_targets_keep_protected_terms_as_anchors(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    protected = _batch_state("protected", "Protected")
+    pending = {**_batch_state("pending", "Pending"), "group_primary": "protected"}
+    decisions = {
+        "pending": {"action": "needs_review", "reason": "待终审"},
+    }
+
+    targets = _final_review_targets(
+        eligible=[pending],
+        protected={"protected"},
+        original={"pending": pending, "protected": protected},
+        final={"pending": pending, "protected": protected},
+        decisions=decisions,
+        spec=term_normalization(load_project_config(project)),
+    )
+
+    assert [item["normalized"] for item in targets] == ["pending"]
+    assert targets[0]["_prior_decision"]["action"] == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_final_review_rechecks_local_relationships_before_targeting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        focus = kwargs["focus"]
+        phases.append(phase)
+        result: dict[str, dict] = {}
+        for item in focus:
+            normalized = str(item["normalized"])
+            if phase == "adjudication" and normalized == "alice":
+                result[normalized] = {
+                    "action": "update",
+                    "reason": "错误组关系待终审",
+                    "after": {**item, "group_primary": "alice", "disabled": False},
+                }
+            else:
+                result[normalized] = {"action": "keep", "reason": "保持"}
+        return result
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases[4:] == ["final_review"]
+    assert summary["needs_review"] == 0
+
+
+@pytest.mark.asyncio
+async def test_final_review_skips_model_when_no_term_needs_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def keep_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phases.append(str(kwargs["phase"]))
+        return {
+            str(item["normalized"]): {"action": "keep", "reason": "保持"}
+            for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases == ["adjudication", "adjudication", "consistency", "consistency"]
+    assert summary["completed"] == 4
+    manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
+    assert manifest["final_review_target_count"] == 0
+    assert manifest["total_steps"] == 4
+
+
+@pytest.mark.asyncio
+async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+    final_started = asyncio.Event()
+    release_final = asyncio.Event()
+    calls: list[tuple[str, str]] = []
+
+    async def interrupted(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        calls.append((phase, normalized))
+        if phase == "consistency" and normalized == "alice":
+            return {normalized: {"action": "needs_review", "reason": "待终审"}}
+        if phase == "final_review":
+            final_started.set()
+            await release_final.wait()
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted)
+    async with httpx.AsyncClient() as client:
+        task = asyncio.create_task(
+            run_terminology_decision(project, final_review=True, http_client=client)
+        )
+        await asyncio.wait_for(final_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        run_dir = next(
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        )
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["final_review_target_count"] == 1
+        assert manifest["last_interruption"]["total_steps"] == 5
+        checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+        assert checkpoint["phases"]["final_review"] == {}
+
+        with pytest.raises(UsageError, match="终审选项"):
+            await run_terminology_decision(
+                project, resume_run_id=run_dir.name, http_client=client
+            )
+
+        resumed: list[tuple[str, str]] = []
+
+        async def resume_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            resumed.append((phase, normalized))
+            return {normalized: {"action": "keep", "reason": "终审确认"}}
+
+        monkeypatch.setattr("app.term_decision_batches._request_batch", resume_batch)
+        summary = await run_terminology_decision(
+            project,
+            final_review=True,
+            resume_run_id=run_dir.name,
+            http_client=client,
+        )
+
+    assert resumed == [("final_review", "alice")]
+    assert summary["completed"] == 5
+    assert current_decision_draft(project)["needs_review"] == []
+
+
+@pytest.mark.asyncio
+async def test_final_review_failure_keeps_previous_pending_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def initial_keep(*_: object, **kwargs: object) -> dict[str, dict]:
+        return {
+            str(item["normalized"]): {"action": "keep", "reason": "保持"}
+            for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", initial_keep)
+    async with httpx.AsyncClient() as client:
+        await run_terminology_decision(project, http_client=client)
+        old_draft = current_decision_draft(project)
+        assert old_draft is not None
+        old_run_id = old_draft["run_id"]
+
+        async def failing_final(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            if phase == "consistency" and normalized == "alice":
+                return {normalized: {"action": "needs_review", "reason": "待终审"}}
+            if phase == "final_review":
+                raise UsageError("终审模型失败")
+            return {normalized: {"action": "keep", "reason": "保持"}}
+
+        monkeypatch.setattr("app.term_decision_batches._request_batch", failing_final)
+        with pytest.raises(UsageError, match="终审模型失败"):
+            await run_terminology_decision(
+                project,
+                final_review=True,
+                replace_draft=True,
+                http_client=client,
+            )
+
+    current = current_decision_draft(project)
+    assert current is not None
+    assert current["run_id"] == old_run_id
 
 
 @pytest.mark.asyncio

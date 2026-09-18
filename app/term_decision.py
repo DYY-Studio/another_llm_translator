@@ -101,6 +101,11 @@ _CONFLICT_FIELDS = (
 )
 
 _PHASES = ("adjudication", "consistency")
+_FINAL_REVIEW_PHASE = "final_review"
+
+
+def _phase_names(final_review: bool = False) -> tuple[str, ...]:
+    return (*_PHASES, _FINAL_REVIEW_PHASE) if final_review else _PHASES
 
 _GroupViolation = tuple[str, tuple[str, ...]]
 
@@ -112,20 +117,25 @@ def _prompt_language(project: Path, requested: str | None) -> str:
         language = "zh-CN"
     return language
 
-def _prompt(project: Path, language: str) -> dict[str, str]:
+def _prompt(
+    project: Path, language: str, *, final_review: bool = False
+) -> dict[str, str]:
     path = project / "prompts" / prompt_file(STAGE, language)
     try:
         middle = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise StorageError(f"无法读取 Prompt：{path.name}: {exc}") from exc
     return {
-        phase: full_prompt(STAGE, middle, language, phase=phase) for phase in _PHASES
+        phase: full_prompt(STAGE, middle, language, phase=phase)
+        for phase in _phase_names(final_review)
     }
 
-def _prompt_snapshot(prompts: dict[str, str]) -> str:
+def _prompt_snapshot(
+    prompts: dict[str, str], *, final_review: bool = False
+) -> str:
     return "\n\n".join(
         f"===== terminology_decision/{phase} =====\n{prompts[phase]}"
-        for phase in _PHASES
+        for phase in _phase_names(final_review)
     )
 
 def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
@@ -171,8 +181,7 @@ def decision_checkpoint_progress(project: Path, run_id: str) -> int:
     if not isinstance(phases, dict):
         raise StorageError("术语决策检查点 phases 无效")
     completed = 0
-    for phase in _PHASES:
-        records = phases.get(phase)
+    for phase, records in phases.items():
         if not isinstance(records, dict):
             raise StorageError(f"术语决策检查点 {phase} 无效")
         completed += len(records)
@@ -183,6 +192,7 @@ def decision_resume_compatibility(
     run_id: str,
     *,
     source_terms_revision: int,
+    final_review: bool = False,
 ) -> tuple[bool, str | None]:
     try:
         manifest = read_json(
@@ -207,6 +217,8 @@ def decision_resume_compatibility(
         return False, "术语库 revision 已变化，不能续用自动决策 Run"
     if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
         return False, "旧 Run 使用不兼容的术语决策输出协议"
+    if bool(checkpoint.get("final_review", False)) != final_review:
+        return False, "旧 Run 的终审选项与当前运行不一致"
     return True, None
 
 def _read_checkpoint_file(path: Path) -> dict[str, Any]:
@@ -218,7 +230,13 @@ def _read_checkpoint_file(path: Path) -> dict[str, Any]:
         raise StorageError("术语决策检查点必须是 JSON 对象")
     return value
 
-def _new_checkpoint(project_id: str, run_id: str, revision: int) -> dict[str, Any]:
+def _new_checkpoint(
+    project_id: str,
+    run_id: str,
+    revision: int,
+    *,
+    final_review: bool = False,
+) -> dict[str, Any]:
     return record_header(
         "terminology_decision_checkpoint",
         project_id,
@@ -226,7 +244,8 @@ def _new_checkpoint(project_id: str, run_id: str, revision: int) -> dict[str, An
         run_id=run_id,
         source_terms_revision=revision,
         decision_rules_version=DECISION_RULES_VERSION,
-        phases={phase: {} for phase in _PHASES},
+        final_review=final_review,
+        phases={phase: {} for phase in _phase_names(final_review)},
     )
 
 def _load_checkpoint(
@@ -236,10 +255,13 @@ def _load_checkpoint(
     project_id: str,
     revision: int,
     known_terms: set[str],
+    final_review: bool = False,
 ) -> dict[str, Any]:
     path = _checkpoint_path(project, run_id)
     if not path.is_file():
-        checkpoint = _new_checkpoint(project_id, run_id, revision)
+        checkpoint = _new_checkpoint(
+            project_id, run_id, revision, final_review=final_review
+        )
         atomic_write_json(path, checkpoint)
         return checkpoint
     checkpoint = _read_checkpoint_file(path)
@@ -250,12 +272,17 @@ def _load_checkpoint(
         or checkpoint.get("source_terms_revision") != revision
     ):
         raise UsageError("术语决策检查点与当前 Run 或术语 revision 不一致")
+    if bool(checkpoint.get("final_review", False)) != final_review:
+        raise UsageError("术语决策检查点终审选项与当前 Run 不一致")
     if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
         raise UsageError("术语决策检查点规则版本不兼容；请显式结束旧 Run 并强制新建")
     phases = checkpoint.get("phases")
     if not isinstance(phases, dict):
         raise StorageError("术语决策检查点 phases 无效")
-    for phase in _PHASES:
+    expected_phases = set(_phase_names(final_review))
+    if set(phases) != expected_phases:
+        raise UsageError("术语决策检查点 phase 选项与当前运行不一致")
+    for phase in _phase_names(final_review):
         records = phases.get(phase)
         if not isinstance(records, dict):
             raise StorageError(f"术语决策检查点 {phase} 无效")
@@ -286,8 +313,8 @@ def _checkpoint_decisions(
 def _composite_fingerprint(checkpoint: dict[str, Any], field: str) -> str:
     values = {
         str(record[field])
-        for phase in _PHASES
-        for record in checkpoint["phases"][phase].values()
+        for records in checkpoint["phases"].values()
+        for record in records.values()
     }
     if not values:
         raise StorageError("术语决策检查点缺少批次指纹")
@@ -390,6 +417,62 @@ def _merge_phase_decisions(
                 )
     return merged
 
+
+def _final_review_base_states(
+    tentative: dict[str, dict[str, Any]],
+    consistency: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Keep accepted phase-one state while leaving consistency reviews pending."""
+    result = deepcopy(tentative)
+    _apply_tentative(result, consistency)
+    return result
+
+
+def _final_review_targets(
+    *,
+    eligible: list[dict[str, Any]],
+    protected: set[str],
+    original: dict[str, dict[str, Any]],
+    final: dict[str, dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+    spec: Any,
+) -> list[dict[str, Any]]:
+    pending = {
+        normalized
+        for normalized, decision in decisions.items()
+        if decision.get("action") == "needs_review"
+    }
+    if not pending:
+        return []
+    graph = _decision_dependency_graph(original, final, spec)
+    eligible_ids = {
+        str(item["normalized"]) for item in eligible
+    } - protected
+    target_ids = set().union(
+        *(
+            component & eligible_ids
+            for component in _dependency_components(graph, pending)
+        ),
+    )
+    return [
+        {
+            **deepcopy(final[str(item["normalized"])]),
+            "_prior_decision": deepcopy(decisions[str(item["normalized"])]),
+        }
+        for item in eligible
+        if str(item["normalized"]) in target_ids
+    ]
+
+
+def _merge_final_review_decisions(
+    decisions: dict[str, dict[str, Any]],
+    review_decisions: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = deepcopy(decisions)
+    for normalized, decision in review_decisions.items():
+        merged[normalized] = deepcopy(decision)
+    return merged
+
 def _proposal_id(values: list[dict[str, Any]]) -> str:
     encoded = json.dumps(
         values, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -410,11 +493,16 @@ def _merge_conflict_evidence(
     return merged
 
 def _decision_fingerprint(
-    config: dict[str, Any], prompts: dict[str, str], library: dict[str, Any]
+    config: dict[str, Any],
+    prompts: dict[str, str],
+    library: dict[str, Any],
+    *,
+    final_review: bool = False,
 ) -> str:
     data = {
         "stage": STAGE,
         "rules_version": DECISION_RULES_VERSION,
+        "final_review": final_review,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
@@ -422,7 +510,7 @@ def _decision_fingerprint(
         "temperature": config["llm"]["temperature_terminology_decision"],
         "prompts": {
             phase: hashlib.sha256(prompts[phase].encode()).hexdigest()
-            for phase in _PHASES
+            for phase in prompts
         },
         "terms_revision": library["terms_revision"],
         "terminology": config["terminology"],
@@ -433,7 +521,12 @@ def _decision_fingerprint(
     )
     return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
 
-def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str, Any]:
+def decision_plan(
+    project: Path,
+    prompt_language: str | None = None,
+    *,
+    final_review: bool = False,
+) -> dict[str, Any]:
     library = load_terms(project)
     if library is None or not library.get("terms"):
         raise UsageError("没有已发布术语库可供自动决策")
@@ -453,9 +546,11 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
     ]
     if not eligible:
         raise UsageError("已发布术语全部受到人工 override 保护")
-    evidence = _batches.collect_term_evidence(project, list(library.get("terms", [])), config)
+    evidence = _batches.collect_term_evidence(
+        project, list(library.get("terms", [])), config
+    )
     language = _prompt_language(project, prompt_language)
-    prompts = _prompt(project, language)
+    prompts = _prompt(project, language, final_review=final_review)
     spec = term_normalization(config)
     protected_states = [states[key] for key in sorted(protected & set(states))]
     phase_one, phase_one_tokens = _batches._pack_batches(
@@ -495,6 +590,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         "states": states,
         "source_conflicts": source_conflicts,
         "eligible": eligible,
+        "final_review": final_review,
         "evidence": evidence,
         "language": language,
         "prompts": prompts,
@@ -503,6 +599,7 @@ def decision_plan(project: Path, prompt_language: str | None = None) -> dict[str
         "phase_one": phase_one,
         "estimated_requests": len(phase_one) + len(phase_two),
         "estimated_input_tokens": phase_one_tokens + phase_two_tokens,
+        "total_steps": len(eligible) * 2,
     }
 
 async def run_terminology_decision(
@@ -517,12 +614,15 @@ async def run_terminology_decision(
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
     plan: dict[str, Any] | None = None,
+    final_review: bool = False,
 ) -> dict[str, Any]:
     existing = _drafts.current_decision_draft(project)
     if existing is not None and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None:
-        plan = decision_plan(project, prompt_language)
+        plan = decision_plan(project, prompt_language, final_review=final_review)
+    elif bool(plan.get("final_review", False)) != final_review:
+        raise UsageError("术语决策计划的终审选项与当前运行不一致")
     library = plan["library"]
     config = plan["config"]
     metadata = read_json(project, project / "project.json")
@@ -534,7 +634,9 @@ async def run_terminology_decision(
     evidence = plan["evidence"]
     language = plan["language"]
     prompts = plan["prompts"]
-    fingerprint = _decision_fingerprint(config, prompts, library)
+    fingerprint = _decision_fingerprint(
+        config, prompts, library, final_review=final_review
+    )
     model_fingerprint = (
         "sha256:"
         + hashlib.sha256(
@@ -550,9 +652,9 @@ async def run_terminology_decision(
     )
     prompt_fingerprints = {
         phase: "sha256:" + hashlib.sha256(prompts[phase].encode()).hexdigest()
-        for phase in _PHASES
+        for phase in _phase_names(final_review)
     }
-    prompt_snapshot = _prompt_snapshot(prompts)
+    prompt_snapshot = _prompt_snapshot(prompts, final_review=final_review)
     spec = plan["spec"]
     protected_states = plan["protected_states"]
     revision = int(library["terms_revision"])
@@ -562,6 +664,7 @@ async def run_terminology_decision(
             project,
             resume_run_id,
             source_terms_revision=revision,
+            final_review=final_review,
         )
         if not compatible:
             raise UsageError(f"{incompatibility_reason}；请显式结束旧 Run 并强制新建")
@@ -594,6 +697,7 @@ async def run_terminology_decision(
                 "decision_status": "generating",
                 "rejected_proposal_ids": [],
                 "prompt_language": language,
+                "final_review": final_review,
             },
         )
     else:
@@ -628,15 +732,22 @@ async def run_terminology_decision(
         project_id=str(metadata["project_id"]),
         revision=revision,
         known_terms=eligible_terms,
+        final_review=final_review,
     )
     tentative = deepcopy(states)
     decisions = _checkpoint_decisions(checkpoint, "adjudication")
     _apply_tentative(tentative, decisions)
-    final_decisions = _checkpoint_decisions(checkpoint, "consistency")
-    if final_decisions and len(decisions) != len(eligible):
+    consistency_decisions = _checkpoint_decisions(checkpoint, "consistency")
+    review_decisions = (
+        _checkpoint_decisions(checkpoint, _FINAL_REVIEW_PHASE)
+        if final_review
+        else {}
+    )
+    if consistency_decisions and len(decisions) != len(eligible):
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
-    completed = len(decisions) + len(final_decisions)
+    completed = len(decisions) + len(consistency_decisions) + len(review_decisions)
     total = len(eligible) * 2
+    final_review_target_count = 0
     usage_invoked = completed < total
     usage: dict[str, Any] | None = None
     active_llm: LLMClient | None = None
@@ -775,7 +886,9 @@ async def run_terminology_decision(
             )
             tentative = deepcopy(states)
             _apply_tentative(tentative, decisions)
-            phase_two_state = _consistency_states(states, tentative, final_decisions)
+            phase_two_state = _consistency_states(
+                states, tentative, consistency_decisions
+            )
             unresolved_phase_two_conflicts = _effective_conflicts(
                 project, phase_two_state, source_conflicts
             )
@@ -799,7 +912,7 @@ async def run_terminology_decision(
                     eligible,
                     phase_two_state,
                     decisions,
-                    final_decisions,
+                    consistency_decisions,
                     unresolved_phase_two_conflicts,
                     spec,
                 ),
@@ -807,7 +920,7 @@ async def run_terminology_decision(
             remaining_phase_two = [
                 item
                 for item in phase_two_focus
-                if str(item["normalized"]) not in final_decisions
+                if str(item["normalized"]) not in consistency_decisions
             ]
             phase_two, _ = _batches._pack_batches(
                 remaining_phase_two,
@@ -841,7 +954,7 @@ async def run_terminology_decision(
                     spec=spec,
                     conflicts=phase_two_conflicts,
                 )
-                final_decisions.update(result)
+                consistency_decisions.update(result)
                 records = checkpoint["phases"]["consistency"]
                 for normalized, decision in result.items():
                     records[normalized] = {
@@ -860,32 +973,179 @@ async def run_terminology_decision(
                 review_consistency,
                 max_parallel=int(config["execution"]["max_parallel"]),
             )
-            final = _consistency_states(states, tentative, final_decisions)
+            phase_two_final = _consistency_states(
+                states, tentative, consistency_decisions
+            )
+            final = (
+                _final_review_base_states(tentative, consistency_decisions)
+                if final_review
+                else phase_two_final
+            )
             decisions = _merge_phase_decisions(
                 original=states,
                 tentative=tentative,
                 final=final,
                 adjudication=decisions,
-                consistency=final_decisions,
+                consistency=consistency_decisions,
                 language=language,
             )
+            if final_review:
+                _recover_invalid_relationship_components(
+                    original=states,
+                    final=final,
+                    decisions=decisions,
+                    language=language,
+                    spec=spec,
+                )
+                review_conflicts = _effective_conflicts(
+                    project, final, source_conflicts
+                )
+                _recover_invalid_relationship_components(
+                    original=states,
+                    final=final,
+                    decisions=decisions,
+                    language=language,
+                    spec=spec,
+                    conflicts=review_conflicts,
+                )
+                review_conflicts = _effective_conflicts(
+                    project, final, source_conflicts
+                )
+                review_focus = _final_review_targets(
+                    eligible=eligible,
+                    protected=protected,
+                    original=states,
+                    final=final,
+                    decisions=decisions,
+                    spec=spec,
+                )
+                review_target_ids = {
+                    str(item["normalized"]) for item in review_focus
+                }
+                unexpected_review = set(review_decisions) - review_target_ids
+                if unexpected_review:
+                    raise StorageError(
+                        "术语终审检查点包含非当前待审术语："
+                        + ", ".join(sorted(unexpected_review)[:10])
+                    )
+                final_review_target_count = len(review_focus)
+                if review_focus:
+                    review_evidence = _batches.collect_term_review_evidence(
+                        project, review_focus, config
+                    )
+                    evidence.update(review_evidence)
+                total = len(eligible) * 2 + final_review_target_count
+                usage_invoked = completed < total
+                manifest = read_json(project, run_dir / "manifest.json")
+                manifest.update(
+                    final_review_target_count=final_review_target_count,
+                    total_steps=total,
+                )
+                write_json(project, run_dir / "manifest.json", manifest)
+                remaining_review = [
+                    item
+                    for item in review_focus
+                    if str(item["normalized"]) not in review_decisions
+                ]
+                phase_three = (
+                    _batches._pack_batches(
+                        remaining_review,
+                        phase=_FINAL_REVIEW_PHASE,
+                        target_language=str(config["project"]["target_language"]),
+                        anchors=protected_states,
+                        evidence=evidence,
+                        prompt=prompts[_FINAL_REVIEW_PHASE],
+                        config=config,
+                        spec=spec,
+                        conflicts=review_conflicts,
+                    )
+                    if remaining_review
+                    else ([], 0)
+                )[0]
+
+                async def review_final(
+                    batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
+                ) -> None:
+                    focus, anchors = batch
+                    nonlocal completed
+                    result = await _batches._request_batch(
+                        llm,
+                        focus=focus,
+                        anchors=anchors,
+                        phase=_FINAL_REVIEW_PHASE,
+                        prompt=prompts[_FINAL_REVIEW_PHASE],
+                        config=config,
+                        evidence=evidence,
+                        known_states=final,
+                        read_only_terms={
+                            str(item["normalized"]) for item in anchors
+                        },
+                        prompt_language=language,
+                        review_states=states,
+                        spec=spec,
+                        conflicts=review_conflicts,
+                    )
+                    review_decisions.update(result)
+                    records = checkpoint["phases"][_FINAL_REVIEW_PHASE]
+                    for normalized, decision in result.items():
+                        records[normalized] = {
+                            "decision": deepcopy(decision),
+                            "decision_fingerprint": fingerprint,
+                            "model_fingerprint": model_fingerprint,
+                            "prompt_fingerprint": prompt_fingerprints[
+                                _FINAL_REVIEW_PHASE
+                            ],
+                        }
+                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                    completed += len(focus)
+                    if on_progress:
+                        on_progress(completed, 0, total)
+
+                await run_bounded(
+                    phase_three,
+                    review_final,
+                    max_parallel=int(config["execution"]["max_parallel"]),
+                )
+                final = deepcopy(final)
+                _apply_tentative(final, review_decisions)
+                decisions = _merge_final_review_decisions(
+                    decisions, review_decisions
+                )
             usage = llm.usage_summary()
-        _recover_invalid_relationship_components(
-            original=states,
-            final=final,
-            decisions=decisions,
-            language=language,
-            spec=spec,
-        )
+        if not final_review:
+            _recover_invalid_relationship_components(
+                original=states,
+                final=final,
+                decisions=decisions,
+                language=language,
+                spec=spec,
+            )
         final_conflicts = _effective_conflicts(project, final, source_conflicts)
-        _recover_invalid_relationship_components(
-            original=states,
-            final=final,
-            decisions=decisions,
-            language=language,
-            spec=spec,
-            conflicts=final_conflicts,
-        )
+        if final_review:
+            unresolved = sorted(
+                normalized
+                for normalized, conflicts in final_conflicts.items()
+                if not final[normalized].get("disabled") and _has_conflicts(conflicts)
+            )
+            if unresolved:
+                raise UsageError(
+                    "术语自动终审后仍有未解决冲突："
+                    + ", ".join(unresolved[:10])
+                )
+            if any(
+                decision.get("action") == "needs_review"
+                for decision in decisions.values()
+            ):
+                raise UsageError("术语自动终审后仍存在 needs_review 决策")
+        else:
+            _recover_invalid_relationship_components(
+                original=states,
+                final=final,
+                decisions=decisions,
+                language=language,
+                spec=spec,
+                conflicts=final_conflicts,
+            )
         _validate_final_states(project, final, original=states, spec=spec)
         draft_conflicts = _merge_conflict_evidence(
             source_conflicts,
@@ -916,6 +1176,9 @@ async def run_terminology_decision(
             proposal_count=len(draft["proposals"]),
             needs_review_count=len(draft["needs_review"]),
             protected_term_count=len(protected_states),
+            final_review=final_review,
+            final_review_target_count=final_review_target_count,
+            total_steps=total,
         )
         manifest.pop("last_interruption", None)
         append_llm_warnings(manifest)
