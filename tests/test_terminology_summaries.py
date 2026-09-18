@@ -391,8 +391,9 @@ async def test_forced_full_cover_summary_replaces_auto_adopted_full(
                 "refs": [str(index) for index in range(1, len(source_segments) + 1)],
             }
         ]
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -465,7 +466,7 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
                     {"type": "summary", "text": "Alice 新概括。", "refs": ["1"]},
                     {"type": "summary", "text": "Bob 新概括。", "refs": ["2"]},
                 ]
-        )
+            )
         for source in ("Alice", "Bob"):
             if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
@@ -533,8 +534,9 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
                 "refs": [str(index) for index in range(1, len(source_segments) + 1)],
             }
         ]
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -571,8 +573,9 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
             ]
         else:
             records = []
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
