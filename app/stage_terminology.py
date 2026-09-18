@@ -825,13 +825,28 @@ async def run_terminology(
             if context_config["enabled"]
             else []
         )
+        response_mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.TERMS_ONLY
+        )
+        source_segments: list[object]
+        if response_mode in {
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+            TerminologyResponseMode.SUMMARY_ONLY,
+        }:
+            source_segments = [
+                {
+                    "id": str(index),
+                    "text": segment_model_source(item),
+                }
+                for index, item in enumerate(items, 1)
+            ]
+        else:
+            source_segments = [segment_model_source(item) for item in items]
         payload = {
             "target_language": config["project"]["target_language"],
             "reference_context": [item["source"] for item in raw_context],
-            "source_segments": [segment_model_source(item) for item in items],
+            "source_segments": source_segments,
         }
-        if include_summaries:
-            payload["source_refs"] = [str(index) for index, _ in enumerate(items, 1)]
         return payload
 
     run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(

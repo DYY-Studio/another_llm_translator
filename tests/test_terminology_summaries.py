@@ -56,13 +56,23 @@ def _project(tmp_path: Path, text: str = "Alice entered.\nBob waved.") -> Path:
     return project
 
 
+def _source_text(value: object) -> str:
+    return str(value["text"]) if isinstance(value, dict) else str(value)
+
+
 def _joint_handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content)
     payload = json.loads(body["messages"][1]["content"])
     source_segments = payload["source_segments"]
+    assert "source_refs" not in payload
+    assert all(
+        segment == {"id": str(index), "text": segment["text"]}
+        for index, segment in enumerate(source_segments, 1)
+    )
+    source_texts = [_source_text(segment) for segment in source_segments]
     summary_text = (
         "<em1>Alice</em1> 进入。"
-        if any("<em1>" in source for source in source_segments)
+        if any("<em1>" in source for source in source_texts)
         else "人物依次出现并行动。"
     )
     records = [
@@ -73,7 +83,7 @@ def _joint_handler(request: httpx.Request) -> httpx.Response:
         }
     ]
     for source in ("Alice", "Bob"):
-        if any(source in value for value in source_segments):
+        if any(source in value for value in source_texts):
             records.append({"type": "term", "source": source, "category": "人物"})
     return httpx.Response(
         200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
@@ -381,8 +391,9 @@ async def test_forced_full_cover_summary_replaces_auto_adopted_full(
                 "refs": [str(index) for index in range(1, len(source_segments) + 1)],
             }
         ]
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -442,6 +453,12 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
         source_segments = payload["source_segments"]
         joint = 'type="summary"' in prompt
         modes.append("joint" if joint else "terms-only")
+        assert "source_refs" not in payload
+        if joint:
+            assert all(isinstance(value, dict) for value in source_segments)
+        else:
+            assert all(isinstance(value, str) for value in source_segments)
+        source_texts = [_source_text(value) for value in source_segments]
         records: list[dict[str, object]] = []
         if joint:
             records.extend(
@@ -451,7 +468,7 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
                 ]
             )
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -517,8 +534,9 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
                 "refs": [str(index) for index in range(1, len(source_segments) + 1)],
             }
         ]
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -555,8 +573,9 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
             ]
         else:
             records = []
+        source_texts = [_source_text(value) for value in source_segments]
         for source in ("Alice", "Bob"):
-            if any(source in value for value in source_segments):
+            if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
         return httpx.Response(
             200,
@@ -1090,6 +1109,12 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
         is_joint = 'type="summary"' in system_prompt
         request_modes.append("joint" if is_joint else "terms-only")
         source_segments = payload["source_segments"]
+        assert "source_refs" not in payload
+        if is_joint:
+            assert all(isinstance(value, dict) for value in source_segments)
+        else:
+            assert all(isinstance(value, str) for value in source_segments)
+        source_texts = [_source_text(value) for value in source_segments]
         records: list[dict[str, object]] = []
         if is_joint:
             records.append(
@@ -1097,7 +1122,7 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
                     "type": "summary",
                     "text": (
                         "<em1>Bob</em1> 挥手。"
-                        if "<em1>" in source_segments[0]
+                        if "<em1>" in source_texts[0]
                         else "片段概括。"
                     ),
                     "refs": [str(i) for i in range(1, len(source_segments) + 1)],
@@ -1106,7 +1131,7 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
         records.append(
             {
                 "type": "term",
-                "source": "Alice" if "Alice" in source_segments[0] else "Bob",
+                "source": "Alice" if "Alice" in source_texts[0] else "Bob",
                 "category": "人物",
             }
         )
@@ -2161,7 +2186,7 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
 
     def split_handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        source = payload["source_segments"][0]
+        source = _source_text(payload["source_segments"][0])
         requested_sources.append(source)
         if len(source) > 3:
             return httpx.Response(
@@ -2262,7 +2287,7 @@ async def test_external_model_source_refuses_unsafe_oversized_split(
         [{"file_id": "F0001", "part_id": "a", "selected": True}],
     )
 
-    requests: list[list[str]] = []
+    requests: list[list[dict[str, str]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -2285,8 +2310,11 @@ async def test_external_model_source_refuses_unsafe_oversized_split(
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
-    assert requests[0] == ["<k1>ABCDEFGH</k1>", "<k2>IJKL</k2>"]
-    assert requests[1:] == [["<k1>ABCDEFGH</k1>"]]
+    assert requests[0] == [
+        {"id": "1", "text": "<k1>ABCDEFGH</k1>"},
+        {"id": "2", "text": "<k2>IJKL</k2>"},
+    ]
+    assert requests[1:] == [[{"id": "1", "text": "<k1>ABCDEFGH</k1>"}]]
     assert read_summary_runs(project)[0]["status"] == "failed"
     assert read_content_summaries(project, kind="fragment") == []
 
@@ -2634,15 +2662,16 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
         source_segments = payload["source_segments"]
+        source_texts = [_source_text(segment) for segment in source_segments]
         records = [
             {
                 "type": "summary",
-                "text": f"概括：{source_segments[0]}",
+                "text": f"概括：{source_texts[0]}",
                 "refs": ["1"],
             },
             {
                 "type": "term",
-                "source": "Alice" if "Alice" in source_segments[0] else "Bob",
+                "source": "Alice" if "Alice" in source_texts[0] else "Bob",
                 "category": "人物",
             },
         ]
@@ -2662,8 +2691,8 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
 
     assert result["failed"] == 0
     assert [payload["source_segments"] for payload in requests] == [
-        ["<k1>Alice entered.</k1>"],
-        ["<k2>Bob waved.</k2>"],
+        [{"id": "1", "text": "<k1>Alice entered.</k1>"}],
+        [{"id": "1", "text": "<k2>Bob waved.</k2>"}],
     ]
     summaries = read_content_summaries(project, kind="fragment", status="completed")
     assert {(item["file_id"], item["part_id"]) for item in summaries} == {
