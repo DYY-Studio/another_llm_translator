@@ -41,7 +41,7 @@ from app.term_decision_rules import (
 )
 from app.term_decision_batches import (
     _compact_anchor_evidence, _make_payload, _pack_batches, _related_anchors,
-    collect_term_evidence,
+    collect_term_evidence, collect_term_review_evidence,
 )
 from app.term_decision_drafts import (
     apply_decision_draft, current_decision_draft, discard_decision_draft,
@@ -3568,6 +3568,120 @@ def test_evidence_labels_aozora_base_and_reading_views(tmp_path: Path) -> None:
     assert evidence["かんじ"]["samples"][0]["matched_forms"] == [
         {"kind": "source", "value": "かんじ"}
     ]
+
+
+def test_review_evidence_keeps_full_hits_and_merges_context_windows(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(
+        tmp_path,
+        "before one\nbefore two\nAlice first\nAlice second\n"
+        "after one\nafter two\nafter three",
+    )
+    library = read_json(project, project / "terminology" / "terms.json")
+
+    evidence = collect_term_review_evidence(project, library["terms"])["alice"]
+
+    samples = evidence["samples"]
+    assert [sample["segment_id"] for sample in samples] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
+    assert samples[0]["source"] == "Alice first"
+    assert samples[0]["window_id"] == "W001"
+    assert evidence["windows"] == [
+        {
+            "window_id": "W001",
+            "hit_segment_ids": ["F0001-S000003", "F0001-S000004"],
+            "segments": [
+                {
+                    "segment_id": f"F0001-S{index:06d}",
+                    "file_id": "F0001",
+                    "part_id": "document",
+                    "line_index": index - 1,
+                    "source": source,
+                    "is_empty": False,
+                }
+                for index, source in enumerate(
+                    [
+                        "before one",
+                        "before two",
+                        "Alice first",
+                        "Alice second",
+                        "after one",
+                        "after two",
+                    ],
+                    start=1,
+                )
+            ],
+        }
+    ]
+
+
+def test_review_evidence_limits_samples_and_stops_at_file_part_boundaries(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"review-{index}.txt"
+        path.write_text(
+            "\n".join(f"Alice file {index} line {line}" for line in range(1, 6)),
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="review-evidence-boundaries",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            ("part-b", "F0001-S000003"),
+        )
+
+    evidence = collect_term_review_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert len(evidence["samples"]) == 10
+    assert [
+        (sample["file_id"], sample["part_id"])
+        for sample in evidence["samples"][:3]
+    ] == [("F0001", "document"), ("F0001", "part-b"), ("F0002", "document")]
+    for window in evidence["windows"]:
+        boundaries = {
+            (segment["file_id"], segment["part_id"])
+            for segment in window["segments"]
+        }
+        assert len(boundaries) == 1
+
+
+def test_review_evidence_counts_empty_segments_in_context_order(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(
+        tmp_path,
+        "Alice\n\nnear\nfar",
+    )
+
+    evidence = collect_term_review_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert [
+        segment["segment_id"] for segment in evidence["windows"][0]["segments"]
+    ] == [
+        "F0001-S000001",
+        "F0001-S000002",
+        "F0001-S000003",
+    ]
+    assert evidence["windows"][0]["segments"][1]["is_empty"] is True
 
 
 def test_alias_transfer_requires_a_complete_relationship() -> None:
