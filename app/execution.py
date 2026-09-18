@@ -61,7 +61,10 @@ from .sqlite_storage import (
     write_json,
 )
 
-from .term_decision_protocol import terminology_decision_protocol
+from .term_decision_protocol import (
+    terminology_decision_protocol,
+    terminology_final_review_protocol,
+)
 
 STAGE_FILES = {
     "translation": "translation.jsonl",
@@ -547,6 +550,19 @@ _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
             "output a decision for anchors."
         ),
     },
+    "final_review": {
+        "zh-CN": (
+            "当前是第三阶段“术语自动终审”。terms 是本批唯一决策目标；anchors 只读，"
+            "用于提供关联术语和关系参照。必须为 terms 中每个仍待审目标明确敲定最终决定，"
+            "只能输出 keep、update、disable，禁止使用 needs_review。"
+        ),
+        "en": (
+            "This is phase three, terminology final review. terms are the only decision targets in "
+            "this batch; anchors are read-only references for related terms and relationships. "
+            "Settle a final decision for every remaining target in terms using only keep, update, "
+            "or disable; never use needs_review."
+        ),
+    },
 }
 
 _COMMON_SUFFIX: dict[str, str] = {
@@ -629,11 +645,14 @@ def full_prompt(
         for requirement in document_requirements
         if isinstance(requirement, str) and requirement.strip()
     )
-    stage_suffix = (
-        terminology_decision_protocol(language)
-        if stage == "terminology_decision"
-        else _STAGE_SUFFIX[effective_stage][language]
-    )
+    if stage == "terminology_decision":
+        stage_suffix = (
+            terminology_final_review_protocol(language)
+            if phase == "final_review"
+            else terminology_decision_protocol(language)
+        )
+    else:
+        stage_suffix = _STAGE_SUFFIX[effective_stage][language]
     if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
         stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))

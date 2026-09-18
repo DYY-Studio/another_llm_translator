@@ -386,26 +386,81 @@ def _request_evidence(
     focus: list[dict[str, Any]],
     anchors: list[dict[str, Any]],
     evidence: dict[str, dict[str, Any]],
+    *,
+    include_windows: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Project durable locations to request-local content-boundary references."""
     boundary_refs: dict[tuple[str, str], int] = {}
+    segment_refs: dict[tuple[str, str, str], int] = {}
     projected: dict[str, dict[str, Any]] = {}
+
+    def project_segment(segment: dict[str, Any]) -> tuple[int, int]:
+        boundary = (str(segment["file_id"]), str(segment["part_id"]))
+        boundary_ref = boundary_refs.setdefault(boundary, len(boundary_refs) + 1)
+        segment_key = (*boundary, str(segment["segment_id"]))
+        segment_ref = segment_refs.setdefault(segment_key, len(segment_refs) + 1)
+        return boundary_ref, segment_ref
+
     for state in [*focus, *anchors]:
         normalized = str(state["normalized"])
         value = deepcopy(evidence[normalized])
-        samples = []
+        samples: list[dict[str, Any]] = []
+        window_refs: dict[str, int] = {}
+        windows = []
+        if include_windows:
+            for window in value.get("windows", []):
+                window_id = str(window["window_id"])
+                window_ref = window_refs.setdefault(window_id, len(window_refs) + 1)
+                segments = []
+                for segment in window["segments"]:
+                    boundary_ref, segment_ref = project_segment(segment)
+                    segments.append(
+                        {
+                            "segment_ref": segment_ref,
+                            "boundary_ref": boundary_ref,
+                            "source": segment["source"],
+                            "is_empty": bool(segment["is_empty"]),
+                        }
+                    )
+                hit_segment_refs = [
+                    segment_refs[
+                        (
+                            str(segment["file_id"]),
+                            str(segment["part_id"]),
+                            str(segment["segment_id"]),
+                        )
+                    ]
+                    for segment in window["segments"]
+                    if str(segment["segment_id"]) in window["hit_segment_ids"]
+                ]
+                windows.append(
+                    {
+                        "window_ref": window_ref,
+                        "hit_segment_refs": hit_segment_refs,
+                        "segments": segments,
+                    }
+                )
         for sample in value["samples"]:
-            boundary = (str(sample["file_id"]), str(sample["part_id"]))
-            boundary_ref = boundary_refs.setdefault(boundary, len(boundary_refs) + 1)
-            samples.append(
-                {
-                    "boundary_ref": boundary_ref,
-                    "source": sample["source"],
-                    "match_view": sample["match_view"],
-                    "matched_forms": deepcopy(sample["matched_forms"]),
-                }
-            )
+            boundary_ref, segment_ref = project_segment(sample)
+            sample_value = {
+                "boundary_ref": boundary_ref,
+                "source": sample["source"],
+                "match_view": sample["match_view"],
+                "matched_forms": deepcopy(sample["matched_forms"]),
+            }
+            if include_windows:
+                window_id = str(sample["window_id"])
+                window_ref = window_refs.setdefault(window_id, len(window_refs) + 1)
+                sample_value.update(
+                    segment_ref=segment_ref,
+                    window_ref=window_ref,
+                )
+            samples.append(sample_value)
         value["samples"] = samples
+        if include_windows:
+            value["windows"] = windows
+        else:
+            value.pop("windows", None)
         projected[normalized] = value
     return projected
 
@@ -422,6 +477,8 @@ def _compact_anchor_evidence(
         value = compacted.get(normalized)
         if isinstance(value, dict):
             value["samples"] = []
+            if "windows" in value:
+                value["windows"] = []
     return compacted
 
 def _compact_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -507,8 +564,13 @@ def _make_payload(
     evidence: dict[str, dict[str, Any]],
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
-    include_disabled = phase == "consistency"
-    request_evidence = _request_evidence(focus, anchors, evidence)
+    include_disabled = phase in {"consistency", "final_review"}
+    request_evidence = _request_evidence(
+        focus,
+        anchors,
+        evidence,
+        include_windows=phase == "final_review",
+    )
     return {
         "phase": phase,
         "target_language": target_language,

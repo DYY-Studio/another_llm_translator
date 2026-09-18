@@ -473,6 +473,13 @@ def _analyze_decisions(
         if action not in DECISION_ACTIONS:
             reject("invalid_action", f"术语决策 action 无效：{normalized}", value)
             continue
+        if action == "needs_review" and phase == "final_review":
+            reject(
+                "needs_review_forbidden",
+                f"术语自动终审不得保留 needs_review：{normalized}",
+                value,
+            )
+            continue
         reason = value.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             reject(
@@ -526,7 +533,10 @@ def _analyze_decisions(
                 term_conflicts.get("categories")
                 or term_conflicts.get("preferred_translations")
             )
-            if action == "keep" and scalar_conflicts and phase == "adjudication":
+            if action == "keep" and scalar_conflicts and phase in {
+                "adjudication",
+                "final_review",
+            }:
                 reject(
                     "unresolved_conflict",
                     f"术语决策 keep 不能保留未裁决类别或推荐译名冲突：{normalized}",
@@ -613,7 +623,7 @@ def _analyze_decisions(
                 for field, candidates in required_conflict_fields.items()
                 if candidates and (field not in changes or after.get(field) is None)
             ]
-            if phase == "adjudication"
+            if phase in {"adjudication", "final_review"}
             else []
         )
         if missing_conflict_fields:
