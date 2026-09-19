@@ -29,7 +29,7 @@ import { canAutoSelectProject } from "./requestState";
 import { reconcileRecentProjectPaths } from "./recentProjectState";
 import { STORAGE_KEYS } from "./storageKeys";
 import { termsSubpageForTask } from "./summaryWorkspaceState";
-import { isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
+import { displayableFailureStage, isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
 import { fetchOverview, fetchProjects, queryKeys } from "./queries";
 import "./styles.css";
 
@@ -573,9 +573,10 @@ export default function App() {
   }
 
   function showFailures() {
-    const target = runnable[stage] ?? (
-      task && runnable[task.stage as Stage] ? runnable[task.stage as Stage] : null
-    );
+    const taskTarget = task ? displayableFailureStage(task) : null;
+    const target = task?.stage === "continuous"
+      ? taskTarget
+      : runnable[stage] ?? taskTarget;
     if (!target) return;
     setFailureFocus(target);
     setStage(target as Stage);

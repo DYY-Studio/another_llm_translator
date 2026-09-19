@@ -3,7 +3,7 @@ import type { Stage, TaskState, TaskStep, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
-import { canCancelTaskStatus, isTerminalTaskStatus } from "../taskState";
+import { canCancelTaskStatus, displayableFailureStage, isTerminalTaskStatus } from "../taskState";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -95,6 +95,7 @@ export function AppShell({
   const terminal = Boolean(task && isTerminalTaskStatus(task.status));
   const completed = task?.completed_segments ?? 0;
   const failed = task?.failed_segments ?? 0;
+  const failureStage = task ? displayableFailureStage(task) : null;
   const pending = task?.pending_segments ?? 0;
   const total = task?.total_segments ?? 0;
   const processed = completed + failed;
@@ -246,7 +247,7 @@ export function AppShell({
           </div>
           {(failed > 0 || task.error) && (
             <div className="run-tokens run-task-details">
-              {failed > 0 && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
+              {failed > 0 && failureStage && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
               {task.error && (
                 <span
                   className="error-text run-error"

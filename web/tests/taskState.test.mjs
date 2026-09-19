@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   canCancelTaskStatus,
+  displayableFailureStage,
   isActiveTaskStatus,
   isTerminalTaskStatus,
   mergeTaskCollection,
@@ -67,6 +68,18 @@ test("only queued and running tasks expose a cancellation action", () => {
   assert.equal(canCancelTaskStatus("running"), true);
   assert.equal(canCancelTaskStatus("cancelling"), false);
   assert.equal(canCancelTaskStatus("completed"), false);
+});
+
+test("maps continuous failures to a displayable current stage only", () => {
+  assert.equal(
+    displayableFailureStage({ stage: "continuous", current_stage: "proofreading" }),
+    "proofreading",
+  );
+  assert.equal(
+    displayableFailureStage({ stage: "continuous", current_stage: "terminology_decision" }),
+    null,
+  );
+  assert.equal(displayableFailureStage({ stage: "content_summary" }), null);
 });
 
 test("keeps a fetched terminal state once an observed task leaves the active list", () => {
