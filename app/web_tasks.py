@@ -63,6 +63,7 @@ from .web_continuous import (
     CONTINUOUS_STAGE,
     inspect_continuous,
     require_continuous_ready,
+    run_continuous,
 )
 from .web_continuous import selection_snapshot as _selection_snapshot
 from .web_continuous import stage_fingerprint_snapshot as _stage_fingerprint_snapshot
@@ -480,6 +481,7 @@ class _StartDecision:
     summary_selection: tuple[tuple[str, str], ...] = ()
     final_review: bool = False
     continuous_snapshot: dict[str, Any] | None = None
+    continuous_steps: tuple[dict[str, Any], ...] = ()
     plan: dict[str, Any] | None = field(default=None, compare=False)
 
 
@@ -499,6 +501,8 @@ class WebTask:
     failed_segments: int = 0
     total_segments: int = 0
     summary_selection_counts: tuple[int, int, int] | None = None
+    current_stage: str | None = None
+    steps: list[dict[str, Any]] = field(default_factory=list)
     failure_counts: dict[str, int] = field(default_factory=dict)
     usage: dict[str, Any] = field(
         default_factory=lambda: {
@@ -530,6 +534,8 @@ class WebTask:
             "project": self.project.name,
             "project_id": self.project_id,
             "stage": self.stage,
+            "current_stage": self.current_stage,
+            "steps": [dict(step) for step in self.steps],
             "final_review": self._final_review,
             "include_summaries": self._include_summaries,
             "summary_selection": [
@@ -854,6 +860,7 @@ class WebTaskManager:
         summary_participation: tuple[tuple[str, str, bool], ...] = ()
         options_selected_count: int | None = None
         continuous_snapshot: dict[str, Any] | None = None
+        continuous_steps: tuple[dict[str, Any], ...] = ()
         inspection: dict[str, Any] | None = None
         if stage == CONTINUOUS_STAGE:
             if include_summaries or any(
@@ -880,6 +887,15 @@ class WebTaskManager:
             )
             require_continuous_ready(inspection)
             continuous_snapshot = inspection["snapshot"]
+            continuous_steps = tuple(
+                {
+                    **step,
+                    "completed": 0,
+                    "failed": 0,
+                    "pending": int(step.get("selected", 0)),
+                }
+                for step in inspection["steps"]
+            )
             selected_count = sum(
                 int(step.get("selected", 0))
                 for step in inspection["steps"]
@@ -1095,6 +1111,7 @@ class WebTaskManager:
             summary_selection=summary_selection,
             final_review=effective_final_review,
             continuous_snapshot=continuous_snapshot,
+            continuous_steps=continuous_steps,
             plan=decision_plan_snapshot,
         )
 
@@ -1196,8 +1213,8 @@ class WebTaskManager:
                 continuous_run_actions=continuous_run_actions,
                 apply_terminology_decision=apply_terminology_decision,
             )
-            if stage == CONTINUOUS_STAGE:
-                raise UsageError("连续运行执行尚未接入")
+            if stage == CONTINUOUS_STAGE and "polishing" in continuous_stages:
+                raise UsageError("校对自动应用将在下一节点接入")
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,
@@ -1212,6 +1229,7 @@ class WebTaskManager:
             state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
             state._run_action = run_action
             state._final_review = decision.final_review
+            state.steps = [dict(step) for step in decision.continuous_steps]
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
@@ -1259,6 +1277,52 @@ class WebTaskManager:
         def boundary_progress(completed: int, failed: int, total: int) -> None:
             state.summary_selection_counts = (completed, failed, total)
 
+        def continuous_stage(
+            stage: str, status: str, step: Mapping[str, Any]
+        ) -> None:
+            state.current_stage = stage
+            for index, current in enumerate(state.steps):
+                if current.get("stage") == stage:
+                    state.steps[index] = dict(step)
+                    break
+            else:
+                state.steps.append(dict(step))
+            state.completed_segments = sum(
+                int(item.get("completed", 0)) for item in state.steps
+            )
+            state.failed_segments = sum(
+                int(item.get("failed", 0)) for item in state.steps
+            )
+            state.total_segments = sum(
+                int(item.get("selected", 0)) for item in state.steps
+            )
+            failure_counts: dict[str, int] = {}
+            for current in state.steps:
+                summary = current.get("summary")
+                if not isinstance(summary, Mapping):
+                    continue
+                for key, value in (summary.get("failure_counts") or {}).items():
+                    failure_counts[str(key)] = failure_counts.get(str(key), 0) + int(
+                        value
+                    )
+            state.failure_counts = failure_counts
+
+        def continuous_progress(
+            stage: str, completed: int, failed: int, total: int
+        ) -> None:
+            continuous_stage(
+                stage,
+                "running",
+                {
+                    "stage": stage,
+                    "status": "running",
+                    "selected": total,
+                    "completed": completed,
+                    "failed": failed,
+                    "pending": max(0, total - completed - failed),
+                },
+            )
+
         def usage_changed(current: dict[str, Any] | None) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
             if self.diagnostics is not None:
@@ -1294,9 +1358,17 @@ class WebTaskManager:
                     and decision != state._start_decision
                 ):
                     raise UsageError("排队期间项目选择或设置已变化；请重新创建任务")
-                shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
-                if state.stage == "run-all":
-                    for stage in LLM_STAGES:
+                shared_limiters: dict[
+                    tuple[str, str], SlidingWindowLimiter | KeyPool
+                ] = {}
+                if state.stage == CONTINUOUS_STAGE:
+                    limiter_stages = state._continuous_stages
+                elif state.stage == "run-all":
+                    limiter_stages = LLM_STAGES
+                else:
+                    limiter_stages = (state.stage,)
+                if state.stage in {CONTINUOUS_STAGE, "run-all"}:
+                    for stage in limiter_stages:
                         config = load_project_config(state.project, stage=stage)
                         key = (
                             str(config["_llm_preset_id"]),
@@ -1319,7 +1391,7 @@ class WebTaskManager:
                     ] = limiter
                     limiter_releases.append(release)
                 resume_run_id = None
-                if state.stage != "run-all":
+                if state.stage not in {"run-all", CONTINUOUS_STAGE}:
                     resume_run_id, _ = choose_running_run(
                         state.project,
                         state.stage,
@@ -1340,7 +1412,23 @@ class WebTaskManager:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
                                 usage_base = raw_usage
-                if state.stage == "content_summary":
+                if state.stage == CONTINUOUS_STAGE:
+                    summary = await run_continuous(
+                        state.project,
+                        scope,
+                        continuous_stages,
+                        limiters=shared_limiters,
+                        reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        run_actions=continuous_run_actions,
+                        apply_terminology_decision=apply_terminology_decision,
+                        final_review=final_review,
+                        prompt_language=prompt_language,
+                        planned_steps=state.steps,
+                        on_stage=continuous_stage,
+                        on_progress=continuous_progress,
+                        on_usage=usage_changed,
+                    )
+                elif state.stage == "content_summary":
                     summary = await aggregate_summaries(
                         state.project,
                         [
@@ -1399,7 +1487,7 @@ class WebTaskManager:
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
                     )
-                else:
+                elif state.stage == "run-all":
                     summary = await run_all(
                         state.project,
                         scope,
@@ -1409,8 +1497,24 @@ class WebTaskManager:
                         on_progress=progress,
                         on_usage=usage_changed,
                     )
+                else:
+                    raise UsageError(f"未知后台阶段：{state.stage}")
             state.summary = summary
-            if state.stage == "content_summary":
+            if state.stage == CONTINUOUS_STAGE:
+                state.steps = [dict(step) for step in summary.get("steps", [])]
+                state.current_stage = (
+                    str(state.steps[-1]["stage"]) if state.steps else None
+                )
+                state.completed_segments = sum(
+                    int(step.get("completed", 0)) for step in state.steps
+                )
+                state.failed_segments = sum(
+                    int(step.get("failed", 0)) for step in state.steps
+                )
+                state.total_segments = sum(
+                    int(step.get("selected", 0)) for step in state.steps
+                )
+            elif state.stage == "content_summary":
                 if state.summary_selection_counts is not None:
                     completed, failed, total = state.summary_selection_counts
                     state.completed_segments = completed

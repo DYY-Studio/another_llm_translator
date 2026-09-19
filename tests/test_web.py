@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -23,7 +24,7 @@ import app.web_tasks as web_tasks_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
-from app.errors import ConfigError, UsageError
+from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope, continue_run, create_run, finalize_run
 from app.llm_keys import KeyPool
 from app.locking import project_write_lock
@@ -41,7 +42,11 @@ from app.sqlite_storage import (
     write_summary_participation,
 )
 from app.web import create_app
-from app.web_continuous import inspect_continuous, normalize_stages
+from app.web_continuous import (
+    inspect_continuous,
+    normalize_stages,
+    run_continuous,
+)
 from app.web_payloads import (
     BoundaryPayload,
     SegmentFilterPayload,
@@ -5255,6 +5260,20 @@ def test_web_directory_browse_skips_unreadable_children(tmp_path: Path) -> None:
         blocked.chmod(stat_module.S_IRWXU)
 
 
+def _continuous_limiter_map(
+    project: Path, stages: Iterable[str]
+) -> dict[tuple[str, str], object]:
+    return {
+        (
+            str(config["_llm_preset_id"]),
+            str(config["_llm_preset_hash"]),
+        ): object()
+        for config in (
+            load_project_config(project, stage=stage) for stage in stages
+        )
+    }
+
+
 def test_continuous_normalization_requires_a_canonical_interval() -> None:
     assert normalize_stages(
         ["terminology", "terminology_decision", "translation"]
@@ -5566,6 +5585,54 @@ def test_continuous_marks_protected_decision_plan_as_no_work(
     assert result["steps"][1]["status"] == "skipped"
 
 
+def test_continuous_skipped_decision_resume_requires_decline_and_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr(
+        "app.web_continuous.find_running_runs",
+        lambda _project, stage: (
+            [
+                {
+                    "run_id": "RUN-DECISION",
+                    "status": "running",
+                    "source_terms_revision": 7,
+                }
+            ]
+            if stage == "terminology_decision"
+            else []
+        ),
+    )
+    revisions: list[int] = []
+
+    def compatible(
+        *_args: object, source_terms_revision: int, **_kwargs: object
+    ) -> tuple[bool, None]:
+        revisions.append(source_terms_revision)
+        return True, None
+
+    monkeypatch.setattr(
+        "app.web_continuous.decision_resume_compatibility", compatible
+    )
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision"],
+        run_actions={"terminology_decision": "resume"},
+        apply_terminology_decision=True,
+    )
+
+    assert revisions == [-1]
+    blocking = next(
+        item
+        for item in result["blocking"]
+        if item["code"] == "decision_resume_skipped_requires_decline"
+    )
+    assert "decline" in blocking["message"]
+    assert "force" in blocking["message"]
+
+
 def test_continuous_fingerprints_downstream_stages_with_terms_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5585,21 +5652,419 @@ def test_continuous_fingerprints_downstream_stages_with_terms_revision(
 
 
 @pytest.mark.asyncio
-async def test_continuous_start_rejects_before_creating_a_task(tmp_path: Path) -> None:
+async def test_continuous_start_runs_queued_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _projects_root, project = make_project(tmp_path)
     manager = WebTaskManager()
 
-    with pytest.raises(UsageError, match="尚未接入"):
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        kwargs["on_progress"](2, 0, 2)
+        return {
+            "stage": "translation",
+            "run_id": "RUN-TRANSLATION",
+            "selected": 2,
+            "completed": 2,
+            "failed": 0,
+            "pending": 0,
+            "failure_counts": {"external_error": 2},
+        }
+
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    started = await manager.start(
+        project,
+        "continuous",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        continuous_stages=("translation",),
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    view = manager.get(started["task_id"])
+    assert view["status"] == "completed"
+    assert view["current_stage"] == "translation"
+    assert view["steps"][0]["run_id"] == "RUN-TRANSLATION"
+    assert view["failure_counts"] == {"external_error": 2}
+
+
+@pytest.mark.asyncio
+async def test_continuous_polishing_is_rejected_before_task_creation(
+    tmp_path: Path,
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    manager = WebTaskManager()
+
+    with pytest.raises(UsageError, match="校对自动应用将在下一节点接入"):
         await manager.start(
             project,
             "continuous",
             scope=Scope(),
             reuse_mixed_fingerprints=False,
             run_action=None,
-            continuous_stages=("translation",),
+            continuous_stages=("translation", "proofreading", "polishing"),
         )
 
     assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_continuous_decision_no_work_continues_to_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    called: list[str] = []
+
+    async def fake_terminology(*_: object, **__: object) -> dict[str, object]:
+        called.append("terminology")
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        called.append("translation")
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_continuous.run_terminology", fake_terminology)
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    stages = ("terminology", "terminology_decision", "translation")
+    preflight = inspect_continuous(
+        project,
+        stages,
+        apply_terminology_decision=True,
+    )
+
+    result = await run_continuous(
+        project,
+        Scope(),
+        stages,
+        limiters=_continuous_limiter_map(project, stages),
+        apply_terminology_decision=True,
+        planned_steps=preflight["steps"],
+    )
+
+    assert called == ["terminology", "translation"]
+    assert result["steps"][1]["status"] == "skipped"
+    assert result["steps"][1]["summary"]["reason"] == "no_published_terms"
+    assert result["steps"][2]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_continuous_resume_usage_includes_stage_manifest_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    base = {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "available": True,
+        "partial": False,
+    }
+    current = {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "available": True,
+        "partial": False,
+    }
+
+    monkeypatch.setattr(
+        "app.web_continuous.choose_running_run",
+        lambda *_args, **_kwargs: ("RUN-TRANSLATION", []),
+    )
+    monkeypatch.setattr("app.web_continuous.record_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        "app.web_continuous.read_json",
+        lambda *_args, **_kwargs: {"usage": base},
+    )
+
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        kwargs["on_usage"](current)
+        return {
+            "selected": 2,
+            "completed": 2,
+            "failed": 0,
+            "pending": 0,
+            "usage": current,
+        }
+
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    result = await run_continuous(
+        project,
+        Scope(),
+        ("translation",),
+        limiters=_continuous_limiter_map(project, ("translation",)),
+        run_actions={"translation": "resume"},
+    )
+
+    assert result["usage"]["input_tokens"] == 13
+    assert result["usage"]["output_tokens"] == 6
+    assert result["usage"]["total_tokens"] == 19
+
+
+@pytest.mark.asyncio
+async def test_continuous_middle_decision_applies_before_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr(
+        "app.web_continuous.decision_plan",
+        lambda *_args, **_kwargs: {
+            "config": load_project_config(project, stage="terminology_decision"),
+            "prompts": {},
+            "library": library,
+            "overrides_document": {},
+            "protected": [],
+            "eligible": [{"normalized": "alpha"}],
+            "states": {},
+            "source_conflicts": {},
+            "evidence": {},
+            "language": "zh-CN",
+        },
+    )
+    calls: list[str] = []
+    application = object()
+    stages = ("terminology", "terminology_decision", "translation")
+
+    async def fake_terminology(*_: object, **__: object) -> dict[str, object]:
+        calls.append("terminology")
+        return {
+            "selected": 2,
+            "completed": 2,
+            "failed": 0,
+            "pending": 0,
+            "failure_counts": {"terminology_error": 1},
+        }
+
+    async def fake_decision(*_: object, **kwargs: object) -> dict[str, object]:
+        calls.append("decision")
+        assert kwargs["final_review"] is True
+        return {
+            "run_id": "RUN-DECISION",
+            "eligible": 1,
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "needs_review": 0,
+            "failure_counts": {"decision_error": 2},
+        }
+
+    async def fake_translation(*_: object, **kwargs: object) -> dict[str, object]:
+        calls.append("translation")
+        assert kwargs["resume_run_id"] == "RUN-TRANSLATION"
+        assert kwargs["limiter"] is application
+        return {
+            "selected": 2,
+            "completed": 2,
+            "failed": 0,
+            "pending": 0,
+            "failure_counts": {"translation_error": 3},
+        }
+
+    def choose(
+        _project: Path,
+        stage: str,
+        *,
+        action: str | None,
+        dry_run: bool,
+        interactive: bool,
+    ) -> tuple[str | None, list[str]]:
+        assert dry_run is False
+        assert interactive is False
+        return (
+            ("RUN-TRANSLATION" if stage == "translation" else None),
+            [action or "none"],
+        )
+
+    monkeypatch.setattr("app.web_continuous.run_terminology", fake_terminology)
+    monkeypatch.setattr(
+        "app.web_continuous.run_terminology_decision", fake_decision
+    )
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    monkeypatch.setattr(
+        "app.web_continuous.apply_decision_draft",
+        lambda *_args, **_: application,
+    )
+    monkeypatch.setattr("app.web_continuous.choose_running_run", choose)
+    limiter_map = _continuous_limiter_map(project, stages)
+    translation_key = (
+        str(load_project_config(project, stage="translation")["_llm_preset_id"]),
+        str(load_project_config(project, stage="translation")["_llm_preset_hash"]),
+    )
+    limiter_map[translation_key] = application
+    preflight = inspect_continuous(
+        project,
+        stages,
+        apply_terminology_decision=True,
+    )
+
+    result = await run_continuous(
+        project,
+        Scope(),
+        stages,
+        limiters=limiter_map,
+        run_actions={"translation": "resume"},
+        apply_terminology_decision=True,
+        planned_steps=preflight["steps"],
+    )
+
+    assert calls == ["terminology", "decision", "translation"]
+    assert result["steps"][1]["summary"]["applied"] is application
+    assert result["failure_counts"] == {
+        "terminology_error": 1,
+        "decision_error": 2,
+        "translation_error": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_continuous_terminal_decision_does_not_apply_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr(
+        "app.web_continuous.decision_plan",
+        lambda *_args, **_kwargs: {
+            "config": load_project_config(project, stage="terminology_decision"),
+            "prompts": {},
+            "library": library,
+            "overrides_document": {},
+            "protected": [],
+            "eligible": [{"normalized": "alpha"}],
+            "states": {},
+            "source_conflicts": {},
+            "evidence": {},
+            "language": "zh-CN",
+        },
+    )
+    applied = False
+
+    async def fake_decision(*_: object, **__: object) -> dict[str, object]:
+        return {
+            "run_id": "RUN-DECISION",
+            "eligible": 1,
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "needs_review": 1,
+        }
+
+    def fail_apply(**_: object) -> None:
+        nonlocal applied
+        applied = True
+
+    monkeypatch.setattr("app.web_continuous.run_terminology_decision", fake_decision)
+    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fail_apply)
+    stages = ("terminology", "terminology_decision")
+    preflight = inspect_continuous(project, stages)
+
+    async def fake_terminology(*_: object, **__: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_continuous.run_terminology", fake_terminology)
+    result = await run_continuous(
+        project,
+        Scope(),
+        stages,
+        limiters=_continuous_limiter_map(project, stages),
+        planned_steps=preflight["steps"],
+    )
+
+    assert result["steps"][-1]["status"] == "completed"
+    assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuous_failed_step_stops_following_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    called = False
+
+    async def failed_translation(*_: object, **__: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 0, "failed": 1, "pending": 1}
+
+    async def following_review(*_: object, **__: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_continuous.run_translation", failed_translation)
+    monkeypatch.setattr("app.web_continuous.run_review", following_review)
+    stages = ("translation", "proofreading")
+
+    with pytest.raises(IncompleteError):
+        await run_continuous(
+            project,
+            Scope(),
+            stages,
+            limiters=_continuous_limiter_map(project, stages),
+        )
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_continuous_cancellation_stops_following_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    called = False
+
+    async def cancelled_translation(*_: object, **__: object) -> dict[str, object]:
+        raise asyncio.CancelledError
+
+    async def following_review(*_: object, **__: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("app.web_continuous.run_translation", cancelled_translation)
+    monkeypatch.setattr("app.web_continuous.run_review", following_review)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_continuous(
+            project,
+            Scope(),
+            ("translation", "proofreading"),
+            limiters=_continuous_limiter_map(project, ("translation", "proofreading")),
+        )
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_continuous_choose_cancellation_updates_step_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    def cancelled_choose(*_: object, **__: object) -> tuple[str | None, list[str]]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.web_continuous.choose_running_run", cancelled_choose)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_continuous(
+            project,
+            Scope(),
+            ("translation",),
+            limiters=_continuous_limiter_map(project, ("translation",)),
+            on_stage=lambda stage, status, _step: events.append((stage, status)),
+        )
+
+    assert events == [("translation", "running"), ("translation", "cancelled")]
 
 
 @pytest.mark.asyncio
