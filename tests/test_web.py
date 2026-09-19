@@ -16,9 +16,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 import app.web as web_module
+import app.web_continuous as web_continuous_module
+import app.web_resource_routes as web_resource_module
 import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
-import app.web_resource_routes as web_resource_module
 from app import sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
@@ -36,12 +37,11 @@ from app.sqlite_storage import (
     record_exists,
     record_header,
     replace_source,
-    write_summary_participation,
     write_json,
+    write_summary_participation,
 )
 from app.web import create_app
-from app.web_store import WebStore
-from app.web_tasks import SharedLimiterPool, WebTaskManager
+from app.web_continuous import inspect_continuous, normalize_stages
 from app.web_payloads import (
     BoundaryPayload,
     SegmentFilterPayload,
@@ -51,6 +51,8 @@ from app.web_payloads import (
     SummarySelectionPayload,
     TaskStartPayload,
 )
+from app.web_store import WebStore
+from app.web_tasks import SharedLimiterPool, WebTask, WebTaskManager
 from tests.test_documents import RUBY_XHTML, add_translations, init_epub, make_epub
 from tests.test_foundation import make_app_root
 from tests.test_web_store import seed_conflicted_terms
@@ -5251,3 +5253,451 @@ def test_web_directory_browse_skips_unreadable_children(tmp_path: Path) -> None:
         assert by_name["blocked"]["is_project"] is False
     finally:
         blocked.chmod(stat_module.S_IRWXU)
+
+
+def test_continuous_normalization_requires_a_canonical_interval() -> None:
+    assert normalize_stages(
+        ["terminology", "terminology_decision", "translation"]
+    ) == (
+        "terminology",
+        "terminology_decision",
+        "translation",
+    )
+    assert normalize_stages(["translation", "proofreading"]) == (
+        "translation",
+        "proofreading",
+    )
+    with pytest.raises(UsageError, match="连续阶段"):
+        normalize_stages(["terminology", "translation"])
+    with pytest.raises(UsageError, match="起点"):
+        normalize_stages(["polishing"])
+    with pytest.raises(UsageError, match="起点"):
+        normalize_stages(["terminology_decision", "translation"])
+
+
+def test_continuous_inspection_keeps_decision_preset_when_terms_are_missing(
+    tmp_path: Path,
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision", "translation"],
+        apply_terminology_decision=True,
+    )
+
+    assert result["stages"] == [
+        "terminology",
+        "terminology_decision",
+        "translation",
+    ]
+    assert result["steps"][1]["status"] == "skipped"
+    assert result["steps"][1]["reason"] == "no_published_terms"
+    assert result["presets"]["terminology_decision"]["id"] == "default"
+    assert result["snapshot"]["stages"] == result["stages"]
+    assert set(result["snapshot"]) == {
+        "stages",
+        "selections",
+        "fingerprints",
+        "running_runs",
+        "decision_inputs",
+        "options",
+    }
+    assert result["blocking"] == []
+
+
+def test_continuous_inspection_requires_full_translation_before_proofreading(
+    tmp_path: Path,
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+
+    result = inspect_continuous(project, ["proofreading"])
+
+    assert any(item["code"] == "translation_incomplete" for item in result["blocking"])
+
+
+def test_continuous_inspection_requires_per_stage_run_actions_and_apply_permission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+
+    monkeypatch.setattr(
+        "app.web_continuous.find_running_runs",
+        lambda _project, stage: (
+            [{"run_id": "RUN-TRANSLATION", "status": "running"}]
+            if stage == "translation"
+            else []
+        ),
+    )
+    without_actions = inspect_continuous(
+        project,
+        ["translation", "proofreading"],
+    )
+    assert any(
+        item["code"] == "run_action_required"
+        and item["stage"] == "translation"
+        for item in without_actions["blocking"]
+    )
+
+    with_decision = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision", "translation"],
+    )
+    assert any(item["code"] == "apply_terminology_decision_required" for item in with_decision["blocking"])
+
+
+def test_continuous_task_options_exposes_preflight_and_rejects_unknown_start_fields(
+    tmp_path: Path,
+) -> None:
+    projects_root, _project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    options = client.get(
+        "/api/v1/projects/sample/task-options/continuous",
+        params=[("stages", "translation"), ("stages", "proofreading")],
+    )
+
+    assert options.status_code == 200
+    assert options.json()["stages"] == ["translation", "proofreading"]
+    assert options.json()["rules"]["whole_project"] is True
+    assert len(options.json()["steps"]) == 2
+
+    invalid_interval = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={
+            "stage": "continuous",
+            "stages": ["terminology", "translation"],
+            "apply_terminology_decision": True,
+        },
+    )
+    assert invalid_interval.status_code == 400
+    assert "连续阶段" in invalid_interval.json()["error"]
+
+    unknown = client.post(
+        "/api/v1/projects/sample/tasks",
+        json={"stage": "translation", "unexpected": True},
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["code"] == "request_validation_error"
+
+
+def test_continuous_decision_policy_is_explicit_and_middle_decision_is_final_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    plans: list[bool] = []
+
+    def fake_plan(*_args: object, **kwargs: object) -> dict[str, object]:
+        plans.append(bool(kwargs["final_review"]))
+        return {
+            "config": load_project_config(project, stage="terminology_decision"),
+            "prompts": {},
+            "library": library,
+            "overrides_document": {},
+            "protected": [],
+            "eligible": [{"normalized": "alpha"}],
+            "states": {},
+            "source_conflicts": {},
+            "evidence": {},
+            "language": "zh-CN",
+            "final_review": bool(kwargs["final_review"]),
+        }
+
+    monkeypatch.setattr("app.web_continuous.decision_plan", fake_plan)
+    middle = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision", "translation"],
+        apply_terminology_decision=True,
+    )
+    assert middle["rules"]["decision_final_review"] is True
+    assert plans == [True]
+
+    reused = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision"],
+        reuse_mixed_fingerprints=True,
+        apply_terminology_decision=True,
+    )
+    assert reused["options"]["reuse_mixed_fingerprints"] is True
+
+
+def test_continuous_decision_does_not_acknowledge_existing_review_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
+        "config": load_project_config(project, stage="terminology_decision"),
+        "prompts": {},
+        "library": library,
+        "overrides_document": {},
+        "protected": [],
+        "eligible": [],
+        "states": {},
+        "source_conflicts": {},
+        "evidence": {},
+        "language": "zh-CN",
+    })
+    monkeypatch.setattr(
+        "app.web_continuous.current_decision_draft",
+        lambda _project: {"status": "pending"},
+    )
+    monkeypatch.setattr(
+        "app.web_continuous.manual_review_state",
+        lambda _project: {"remaining": 1},
+    )
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision"],
+        apply_terminology_decision=True,
+    )
+
+    assert {item["code"] for item in result["blocking"]} >= {
+        "pending_decision_draft",
+        "pending_manual_review",
+    }
+
+
+def test_continuous_terminal_decision_is_manual_apply_and_allows_no_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
+        "config": load_project_config(project, stage="terminology_decision"),
+        "prompts": {},
+        "library": library,
+        "overrides_document": {},
+        "protected": [],
+        "eligible": [{"normalized": "alpha"}],
+        "states": {},
+        "source_conflicts": {},
+        "evidence": {},
+        "language": "zh-CN",
+    })
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision"],
+    )
+
+    assert result["rules"]["decision_requires_apply"] is False
+    assert result["rules"]["decision_final_review"] is False
+    assert not any(
+        item["code"] == "apply_terminology_decision_required"
+        for item in result["blocking"]
+    )
+
+
+def test_continuous_checks_review_state_even_without_published_terms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr(
+        "app.web_continuous.current_decision_draft",
+        lambda _project: {"status": "pending"},
+    )
+    monkeypatch.setattr(
+        "app.web_continuous.manual_review_state",
+        lambda _project: {"remaining": 1},
+    )
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision"],
+        apply_terminology_decision=True,
+    )
+
+    assert {item["code"] for item in result["blocking"]} >= {
+        "pending_decision_draft",
+        "pending_manual_review",
+    }
+
+
+def test_continuous_marks_protected_decision_plan_as_no_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
+        "config": load_project_config(project, stage="terminology_decision"),
+        "prompts": {},
+        "library": library,
+        "overrides_document": {},
+        "protected": ["alpha"],
+        "eligible": [],
+        "states": {},
+        "source_conflicts": {},
+        "evidence": {},
+        "language": "zh-CN",
+    })
+    monkeypatch.setattr(
+        "app.web_continuous.read_json",
+        lambda *_args, **_kwargs: {"overrides": [{"normalized": "alpha"}]},
+    )
+
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision", "translation"],
+        apply_terminology_decision=True,
+    )
+
+    assert result["decision_inputs"]["status"] == "skipped"
+    assert result["decision_inputs"]["reason"] == "no_work"
+    assert result["steps"][1]["status"] == "skipped"
+
+
+def test_continuous_fingerprints_downstream_stages_with_terms_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    libraries = iter(
+        [
+            {"terms_revision": 1, "terms": [{"normalized": "alpha"}]},
+            {"terms_revision": 2, "terms": [{"normalized": "alpha"}]},
+        ]
+    )
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: next(libraries))
+
+    first = inspect_continuous(project, ["translation"])
+    second = inspect_continuous(project, ["translation"])
+
+    assert first["fingerprints"]["translation"] != second["fingerprints"]["translation"]
+
+
+@pytest.mark.asyncio
+async def test_continuous_start_rejects_before_creating_a_task(tmp_path: Path) -> None:
+    _projects_root, project = make_project(tmp_path)
+    manager = WebTaskManager()
+
+    with pytest.raises(UsageError, match="尚未接入"):
+        await manager.start(
+            project,
+            "continuous",
+            scope=Scope(),
+            reuse_mixed_fingerprints=False,
+            run_action=None,
+            continuous_stages=("translation",),
+        )
+
+    assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_continuous_dispatch_preserves_run_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    manager = WebTaskManager()
+    state = WebTask(
+        task_id="TASK-CONTINUOUS-DISPATCH",
+        project=project,
+        project_id="sample",
+        stage="continuous",
+    )
+    state._continuous_stages = ("translation", "proofreading")
+    state._continuous_run_actions = {"translation": "resume"}
+    state._apply_terminology_decision = True
+    manager.tasks[state.task_id] = state
+    manager.queued_task_ids.append(state.task_id)
+    received: dict[str, object] = {}
+
+    async def fake_run(_state: WebTask, **kwargs: object) -> None:
+        received.update(kwargs)
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+    manager._dispatch_locked()
+    await state.asyncio_task
+
+    assert received["continuous_stages"] == ("translation", "proofreading")
+    assert received["continuous_run_actions"] == {"translation": "resume"}
+    assert received["apply_terminology_decision"] is True
+
+
+def test_continuous_selection_snapshot_contains_source_and_adapter_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    captured: list[object] = []
+    original_digest = web_continuous_module._stable_digest
+
+    def capture(value: object) -> str:
+        captured.append(value)
+        return original_digest(value)
+
+    monkeypatch.setattr(web_continuous_module, "_stable_digest", capture)
+    inspect_continuous(project, ["translation"])
+
+    selection_values = [
+        value["translation"]
+        for value in captured
+        if isinstance(value, dict) and "translation" in value
+    ]
+    assert selection_values
+    assert len(selection_values[0][0]) == 8
+
+
+def test_continuous_decision_resume_preflight_rejects_incompatible_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
+        "config": load_project_config(project, stage="terminology_decision"),
+        "prompts": {},
+        "library": library,
+        "overrides_document": {},
+        "protected": [],
+        "eligible": [{"normalized": "alpha"}],
+        "states": {},
+        "source_conflicts": {},
+        "evidence": {},
+        "language": "zh-CN",
+    })
+    monkeypatch.setattr(
+        "app.web_continuous.find_running_runs",
+        lambda _project, stage: (
+            [{"run_id": "RUN-DECISION", "status": "running"}]
+            if stage == "terminology_decision"
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        "app.web_continuous.decision_resume_compatibility",
+        lambda *_args, **_kwargs: (False, "旧 Run 的终审选项不一致"),
+        raising=False,
+    )
+    result = inspect_continuous(
+        project,
+        ["terminology", "terminology_decision", "translation"],
+        apply_terminology_decision=True,
+        run_actions={"terminology_decision": "resume"},
+    )
+
+    assert any(
+        item["code"] == "decision_resume_incompatible"
+        for item in result["blocking"]
+    )
