@@ -1213,8 +1213,6 @@ class WebTaskManager:
                 continuous_run_actions=continuous_run_actions,
                 apply_terminology_decision=apply_terminology_decision,
             )
-            if stage == CONTINUOUS_STAGE and "polishing" in continuous_stages:
-                raise UsageError("校对自动应用将在下一节点接入")
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,

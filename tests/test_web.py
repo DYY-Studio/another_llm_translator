@@ -5689,23 +5689,125 @@ async def test_continuous_start_runs_queued_chain(
 
 
 @pytest.mark.asyncio
-async def test_continuous_polishing_is_rejected_before_task_creation(
-    tmp_path: Path,
+async def test_continuous_polishing_runs_after_proofreading_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
     manager = WebTaskManager()
+    calls: list[tuple[str, str]] = []
 
-    with pytest.raises(UsageError, match="校对自动应用将在下一节点接入"):
-        await manager.start(
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        calls.append(("run", "translation"))
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    async def fake_review(
+        _project: Path, stage: str, *_: object, **__: object
+    ) -> dict[str, object]:
+        calls.append(("run", stage))
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    def fake_apply(
+        _project: Path,
+        stage: str,
+        _scope: Scope,
+        *,
+        allow_outdated_base: bool,
+        confirmed_all: bool,
+    ) -> dict[str, object]:
+        calls.append(("apply", stage))
+        assert allow_outdated_base is False
+        assert confirmed_all is True
+        return {"stage": "proofreading_applied", "completed": 2}
+
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    monkeypatch.setattr("app.web_continuous.run_review", fake_review)
+    monkeypatch.setattr("app.web_continuous.run_apply", fake_apply)
+
+    started = await manager.start(
+        project,
+        "continuous",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        continuous_stages=("translation", "proofreading", "polishing"),
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+
+    assert calls == [
+        ("run", "translation"),
+        ("run", "proofreading"),
+        ("apply", "proofreading"),
+        ("run", "polishing"),
+    ]
+    view = manager.get(started["task_id"])
+    assert view["status"] == "completed"
+    assert view["steps"][1]["applied"]["stage"] == "proofreading_applied"
+
+
+@pytest.mark.asyncio
+async def test_continuous_proofreading_endpoint_does_not_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    applied = False
+
+    async def fake_review(*_: object, **__: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    def fake_apply(*_: object, **__: object) -> dict[str, object]:
+        nonlocal applied
+        applied = True
+        return {}
+
+    monkeypatch.setattr("app.web_continuous.run_review", fake_review)
+    monkeypatch.setattr("app.web_continuous.run_apply", fake_apply)
+
+    result = await run_continuous(
+        project,
+        Scope(),
+        ("proofreading",),
+        limiters=_continuous_limiter_map(project, ("proofreading",)),
+    )
+
+    assert result["steps"][0]["status"] == "completed"
+    assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuous_apply_failure_stops_polishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    calls: list[str] = []
+
+    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
+        calls.append("translation")
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    async def fake_review(
+        _project: Path, stage: str, *_: object, **__: object
+    ) -> dict[str, object]:
+        calls.append(stage)
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    def failed_apply(*_: object, **__: object) -> dict[str, object]:
+        raise IncompleteError("校对应用失败")
+
+    monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    monkeypatch.setattr("app.web_continuous.run_review", fake_review)
+    monkeypatch.setattr("app.web_continuous.run_apply", failed_apply)
+
+    with pytest.raises(IncompleteError, match="校对应用失败"):
+        await run_continuous(
             project,
-            "continuous",
-            scope=Scope(),
-            reuse_mixed_fingerprints=False,
-            run_action=None,
-            continuous_stages=("translation", "proofreading", "polishing"),
+            Scope(),
+            ("translation", "proofreading", "polishing"),
+            limiters=_continuous_limiter_map(
+                project, ("translation", "proofreading", "polishing")
+            ),
         )
 
-    assert manager.tasks == {}
+    assert calls == ["translation", "proofreading"]
 
 
 @pytest.mark.asyncio

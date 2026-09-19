@@ -27,7 +27,7 @@ from .sqlite_storage import (
     read_jsonl,
     record_exists,
 )
-from .stage_review import run_review
+from .stage_review import run_apply, run_review
 from .stage_runtime import prompt_middle_digests
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
@@ -779,8 +779,6 @@ async def run_continuous(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_stages(stages)
-    if "polishing" in normalized:
-        raise UsageError("校对自动应用将在下一节点接入")
     actions = dict(run_actions or {})
     has_decision = "terminology_decision" in normalized
     decision_final_review = (
@@ -1034,6 +1032,18 @@ async def run_continuous(
                 step["failed"] or step["pending"]
             ):
                 raise IncompleteError("连续运行阶段仍有 pending 或 failed")
+            if stage == "proofreading" and "polishing" in normalized:
+                applied = run_apply(
+                    project,
+                    "proofreading",
+                    Scope(),
+                    allow_outdated_base=False,
+                    confirmed_all=True,
+                )
+                summary = {**summary, "applied": applied}
+                summaries[stage] = dict(summary)
+                step["summary"] = dict(summary)
+                step["applied"] = applied
             if step["status"] != "skipped":
                 step["status"] = "completed"
             emit(stage, str(step["status"]), step)
