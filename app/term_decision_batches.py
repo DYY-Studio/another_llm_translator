@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import re
 import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
 from .config import load_project_config
 from .documents import aozora_match_views
 from .errors import RequestSizeError, StorageError, UsageError
@@ -13,20 +15,19 @@ from .execution import (
 )
 from .llm_client import LLMClient
 from .sqlite_storage import (
-    read_segments,
     read_segment_sources,
-)
-from .term_library import (
-    normalize_term,
-    term_normalization,
+    read_segments,
 )
 from .term_decision_protocol import (
     format_correction,
 )
-
 from .term_decision_rules import *
 from .term_decision_rules import _relation_keys
-import re
+from .term_library import (
+    normalize_term,
+    term_normalization,
+)
+
 _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 STAGE = "terminology_decision"
 EVIDENCE_SAMPLE_LIMIT = 5

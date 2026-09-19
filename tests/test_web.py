@@ -5949,6 +5949,7 @@ async def test_continuous_middle_decision_applies_before_translation(
         return {
             "run_id": "RUN-DECISION",
             "eligible": 1,
+            "total_steps": 2,
             "completed": 1,
             "failed": 0,
             "pending": 0,
@@ -6017,11 +6018,115 @@ async def test_continuous_middle_decision_applies_before_translation(
 
     assert calls == ["terminology", "decision", "translation"]
     assert result["steps"][1]["summary"]["applied"] is application
+    assert result["steps"][1]["selected"] == 2
     assert result["failure_counts"] == {
         "terminology_error": 1,
         "decision_error": 2,
         "translation_error": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_continuous_decision_checks_next_terms_revision_before_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    library = {
+        "terms_revision": 2,
+        "terms": [{"normalized": "alpha", "disabled": False}],
+    }
+    stages = ("terminology", "terminology_decision", "translation")
+    apply_called = False
+    translation_called = False
+    draft: dict[str, object] | None = None
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr(
+        "app.web_continuous.decision_plan",
+        lambda *_args, **_kwargs: {
+            "config": load_project_config(project, stage="terminology_decision"),
+            "prompts": {},
+            "library": library,
+            "overrides_document": {},
+            "protected": [],
+            "eligible": [{"normalized": "alpha"}],
+            "states": {},
+            "source_conflicts": {},
+            "evidence": {},
+            "language": "zh-CN",
+        },
+    )
+    monkeypatch.setattr(
+        "app.web_continuous.current_decision_draft",
+        lambda _project: draft,
+    )
+    old_fingerprint = web_continuous_module.stage_fingerprint_snapshot(
+        project, "translation"
+    )
+    segment_id = str(read_segments(project)[0]["segment_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    append_jsonl(
+        project,
+        project / "stages" / "translation.jsonl",
+        record_header(
+            "stage_result",
+            project_id,
+            stage="translation",
+            segment_id=segment_id,
+            status="completed",
+            stage_fingerprint=old_fingerprint,
+            text="old translation",
+        ),
+    )
+
+    def fail_apply(*_args: object, **_kwargs: object) -> None:
+        nonlocal apply_called
+        apply_called = True
+
+    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fail_apply)
+
+    async def fake_terminology(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_continuous.run_terminology", fake_terminology)
+
+    async def fake_decision(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "run_id": "RUN-DECISION",
+            "eligible": 1,
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "needs_review": 0,
+        }
+
+    monkeypatch.setattr("app.web_continuous.run_terminology_decision", fake_decision)
+
+    async def fail_translation(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal translation_called
+        translation_called = True
+        return {"selected": 0, "completed": 0, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr("app.web_continuous.run_translation", fail_translation)
+    preflight = inspect_continuous(
+        project,
+        stages,
+        apply_terminology_decision=True,
+    )
+    assert preflight["blocking"] == []
+    draft = {
+        "proposals": [{"proposal_id": "PROPOSAL-1"}],
+        "rejected_proposal_ids": [],
+    }
+    with pytest.raises(UsageError, match="应用术语决策后"):
+        await run_continuous(
+            project,
+            Scope(),
+            stages,
+            limiters=_continuous_limiter_map(project, stages),
+            apply_terminology_decision=True,
+        )
+    assert apply_called is False
+    assert translation_called is False
 
 
 @pytest.mark.asyncio

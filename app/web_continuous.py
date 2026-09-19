@@ -730,7 +730,10 @@ def _continuous_step_summary(
     run_id: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
-    selected_value = summary.get("selected", summary.get("eligible", selected_hint))
+    selected_value = summary.get(
+        "total_steps",
+        summary.get("selected", summary.get("eligible", selected_hint)),
+    )
     selected = int(selected_value) if isinstance(selected_value, int) else selected_hint
     reused = int(summary.get("reused", 0))
     completed = int(summary.get("completed", 0)) + reused
@@ -758,6 +761,59 @@ def _continuous_step_summary(
         step["run_id"] = run_id
     step["summary"] = dict(summary)
     return step
+
+
+def _ensure_downstream_fingerprints_after_decision(
+    project: Path,
+    stages: tuple[str, ...],
+    scope: Scope,
+    *,
+    reuse_mixed_fingerprints: bool,
+) -> None:
+    """Check downstream results against the revision that applying the draft will create."""
+    library = load_terms(project)
+    draft = current_decision_draft(project)
+    if library is None or draft is None:
+        return
+    rejected = {
+        str(value) for value in draft.get("rejected_proposal_ids", [])
+    }
+    proposals = draft.get("proposals", [])
+    accepted = any(
+        isinstance(proposal, Mapping)
+        and str(proposal.get("proposal_id")) not in rejected
+        for proposal in proposals
+    )
+    if not accepted:
+        return
+    next_terms_revision = int(library["terms_revision"]) + 1
+    segments = tuple(
+        str(segment["segment_id"])
+        for segment in load_segments(project)
+        if not segment["is_empty"]
+    )
+    for stage in stages:
+        if stage in {"terminology", "terminology_decision"}:
+            continue
+        config = load_project_config(project, stage=stage)
+        summary = stage_summary(
+            project,
+            stage,
+            config,
+            active_segment_ids=set(segments),
+            nonempty_count=len(segments),
+            terms_revision=next_terms_revision,
+        )
+        if (
+            summary["mismatched_fingerprint_completed"]
+            and not scope.force
+            and not reuse_mixed_fingerprints
+        ):
+            raise UsageError(
+                f"{stage} 在应用术语决策后将出现不同设置指纹的已完成结果；"
+                "请明确选择复用或 force",
+                reason="mismatched_fingerprint",
+            )
 
 
 async def run_continuous(
@@ -917,6 +973,12 @@ async def run_continuous(
                             "自动术语决策仍有人工待办，无法自动应用"
                         )
                     if normalized[-1] != "terminology_decision":
+                        _ensure_downstream_fingerprints_after_decision(
+                            project,
+                            normalized,
+                            scope,
+                            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        )
                         applied = apply_decision_draft(
                             project,
                             confirm_all=True,
