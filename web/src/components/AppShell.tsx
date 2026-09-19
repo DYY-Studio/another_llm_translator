@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { Stage, TaskState, ThemeMode } from "../types";
+import type { Stage, TaskState, TaskStep, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
@@ -19,6 +19,30 @@ function taskStageLabelKey(stage: string): string {
   if (stage === "terminology_decision") return "stage.terminologyDecision";
   if (stage === "content_summary") return "stage.contentSummary";
   return `stage.${stage}`;
+}
+
+function TaskSteps({
+  steps,
+  currentStage,
+  language,
+  compact = false,
+}: {
+  steps: TaskStep[];
+  currentStage?: string | null;
+  language: Language;
+  compact?: boolean;
+}) {
+  return (
+    <div className={`task-steps${compact ? " compact" : ""}`} aria-label={translate("run.steps", language)}>
+      {steps.map((step) => (
+        <div className={`task-step${step.stage === currentStage ? " current" : ""}`} key={step.stage}>
+          <span>{translate(taskStageLabelKey(step.stage), language)}</span>
+          <strong>{translate(`run.${step.status}`, language)}</strong>
+          <small>{translate("run.stepProgress", language, { completed: step.completed, failed: step.failed, pending: step.pending, total: step.selected })}</small>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function AppShell({
@@ -150,18 +174,20 @@ export function AppShell({
                           <strong>{next.project}</strong>
                           <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
                         </div>
-                        <div className="task-panel-progress">
-                          <span>{translate("run.completedCount", language, {
-                            completed: nextCompleted,
-                            failed: nextFailed,
-                            pending: nextPending,
-                            total: nextTotal,
-                          })}</span>
-                          <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={nextTotal} aria-valuenow={nextProcessed}>
-                            <span className="progress-completed" style={{ width: `${nextTotal ? nextCompleted / nextTotal * 100 : 0}%` }} />
-                            <span className="progress-failed" style={{ width: `${nextTotal ? nextFailed / nextTotal * 100 : 0}%` }} />
+                        {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} language={language} compact /> : (
+                          <div className="task-panel-progress">
+                            <span>{translate("run.completedCount", language, {
+                              completed: nextCompleted,
+                              failed: nextFailed,
+                              pending: nextPending,
+                              total: nextTotal,
+                            })}</span>
+                            <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={nextTotal} aria-valuenow={nextProcessed}>
+                              <span className="progress-completed" style={{ width: `${nextTotal ? nextCompleted / nextTotal * 100 : 0}%` }} />
+                              <span className="progress-failed" style={{ width: `${nextTotal ? nextFailed / nextTotal * 100 : 0}%` }} />
+                            </div>
                           </div>
-                        </div>
+                        )}
                         <div className="task-panel-tokens">
                           {next.usage.available ? (
                             <><span>{translate("run.tokensInput", language)} {next.usage.input_tokens}</span><span>{translate("run.tokensOutput", language)} {next.usage.output_tokens}</span></>
@@ -201,15 +227,17 @@ export function AppShell({
         <section className={`global-run-status${terminal ? " terminal" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
-            <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}</span>
+            <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}{task.stage === "continuous" && task.current_stage ? ` · ${translate(taskStageLabelKey(task.current_stage), language)}` : ""}</span>
           </div>
-          <div className="run-progress">
-            <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
-            <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
-              <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
-              <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
+          {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} language={language} /> : (
+            <div className="run-progress">
+              <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
+              <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
+                <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
+                <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />
+              </div>
             </div>
-          </div>
+          )}
           <div className="run-tokens">
             {task.usage.available ? (
               <><span>{translate("run.tokensInput", language)} {task.usage.input_tokens} Tokens</span><span>{translate("run.tokensOutput", language)} {task.usage.output_tokens} Tokens</span></>

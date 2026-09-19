@@ -10,6 +10,7 @@ import { Overview } from "./components/Overview";
 import { SettingsView } from "./components/SettingsView";
 import { LoginView } from "./components/ServerSettings";
 import { RunDialog } from "./components/RunDialog";
+import { ContinuousRunDialog } from "./components/ContinuousRunDialog";
 import { DiagnosticsView } from "./components/DiagnosticsView";
 import type {
   LLMStage,
@@ -21,6 +22,7 @@ import type {
   TaskOptions,
   TaskState,
   ThemeMode,
+  ContinuousRunDecision,
 } from "./types";
 import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { canAutoSelectProject } from "./requestState";
@@ -100,6 +102,7 @@ export default function App() {
   const [runOptions, setRunOptions] = useState<TaskOptions | null>(null);
   const [runOptionsLoading, setRunOptionsLoading] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [continuousOpen, setContinuousOpen] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
@@ -471,6 +474,24 @@ export default function App() {
     }
   }
 
+  async function startContinuous(decision: ContinuousRunDecision) {
+    if (!project) return;
+    setStarting(true);
+    setError(null);
+    try {
+      updateTask(await api<TaskState>(`/api/v1/projects/${project}/tasks`, {
+        method: "POST",
+        body: JSON.stringify({ language, ...decision }),
+      }));
+      setContinuousOpen(false);
+    } catch (value) {
+      setError(value);
+      throw value;
+    } finally {
+      setStarting(false);
+    }
+  }
+
   async function cancelRun() {
     if (!task) return;
     updateTask(await api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }));
@@ -580,6 +601,7 @@ export default function App() {
       onFilesChanged={refreshProject}
       onDeleted={handleProjectDeleted}
       onRepair={repairProject}
+      onContinuousRun={() => setContinuousOpen(true)}
       repairing={repairing}
       language={language}
     />
@@ -695,6 +717,14 @@ export default function App() {
           onClose={() => setRunOptions(null)}
           onStart={startRun}
           onOpenOverview={() => { setRunOptions(null); navigateStage("overview"); }}
+        />
+      )}
+      {continuousOpen && project && (
+        <ContinuousRunDialog
+          project={project}
+          language={language}
+          onClose={() => setContinuousOpen(false)}
+          onStart={startContinuous}
         />
       )}
     </>

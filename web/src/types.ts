@@ -81,6 +81,7 @@ export type LLMStage =
   | "polishing";
 
 export type RunStage = LLMStage | "content_summary";
+export type TaskStage = RunStage | "continuous";
 
 export interface ResultView {
   record_id: string;
@@ -284,6 +285,8 @@ export interface TaskState {
   project: string;
   project_id: string;
   stage: string;
+  current_stage?: string | null;
+  steps?: TaskStep[];
   final_review?: boolean;
   status: string;
   include_summaries?: boolean;
@@ -297,6 +300,18 @@ export interface TaskState {
   summary_selection_progress?: { completed: number; failed: number; total: number } | null;
   failure_counts: Record<string, number>;
   usage: TaskUsage;
+}
+
+export interface TaskStep {
+  stage: string;
+  status: string;
+  selected: number;
+  completed: number;
+  failed: number;
+  pending: number;
+  run_id?: string | null;
+  summary?: Record<string, unknown>;
+  applied?: Record<string, unknown>;
 }
 
 export interface TaskUsage {
@@ -595,27 +610,67 @@ export interface TaskOptions {
     file_count: number;
     options: Array<{ option_id: string; label: string; value: string | null }>;
   }>;
-  running_run: {
-    run_id: string;
-    started_at: string | null;
-    scope: Record<string, unknown> | null;
-    previous: { model: string; endpoint: string };
-    current: { model: string; endpoint: string };
-    final_review?: boolean | null;
-    final_review_target_count?: number;
-    completed_steps?: number;
-    total_steps?: number;
-    resume_compatible?: boolean;
-    resume_incompatibility_reason?: string | null;
-    last_interruption?: {
-      at: string;
-      error_code: string;
-      reason: string;
-      request_id?: string;
-      completed_steps: number;
-      total_steps: number;
-    };
-  } | null;
+  running_run: RunningRun | null;
+}
+
+export interface ContinuousTaskOptions {
+  stage: "continuous";
+  stages: LLMStage[];
+  steps: ContinuousOptionStep[];
+  blocking: Array<{ code: string; message: string; stage?: string }>;
+  rules: {
+    canonical_order?: string[];
+    start_stages?: string[];
+    whole_project?: boolean;
+    decision_requires_apply?: boolean;
+    decision_final_review?: boolean;
+  };
+}
+
+export interface RunningRun {
+  run_id: string;
+  started_at: string | null;
+  scope: Record<string, unknown> | null;
+  previous: { model: string; endpoint: string };
+  current: { model: string; endpoint: string };
+  final_review?: boolean | null;
+  final_review_target_count?: number;
+  completed_steps?: number;
+  total_steps?: number;
+  resume_compatible?: boolean;
+  resume_incompatibility_reason?: string | null;
+  last_interruption?: {
+    at: string;
+    error_code: string;
+    reason: string;
+    request_id?: string;
+    completed_steps: number;
+    total_steps: number;
+  };
+}
+
+export interface ContinuousOptionStep {
+  stage: string;
+  status: string;
+  selected: number;
+  completed?: number;
+  failed?: number;
+  pending?: number;
+  reason?: string;
+  preset?: { id: string; model: string };
+  running_run?: RunningRun | null;
+  current_fingerprint_completed?: number;
+  mismatched_fingerprint_completed?: number;
+}
+
+export interface ContinuousRunDecision {
+  stage: "continuous";
+  stages: LLMStage[];
+  run_actions: Record<string, "resume" | "decline">;
+  force: boolean;
+  reuse_mixed_fingerprints: boolean;
+  final_review: boolean;
+  apply_terminology_decision: boolean;
 }
 
 export interface RunDecision {
