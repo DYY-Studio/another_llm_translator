@@ -310,3 +310,11 @@
   .overview-file-list .file-row-select.reorder-select > strong { grid-column: 3; grid-row: 1; }
   .overview-file-list .file-row-select.reorder-select .file-row-meta { grid-column: 3; grid-row: 2; }
 }
+
+@media (max-width: 600px) {
+  .continuous-run-dialog { width: calc(100vw - 20px); height: auto; max-height: calc(100dvh - 20px); }
+  .continuous-run-dialog-heading { padding: 18px 16px 12px; }
+  .continuous-run-dialog-content { max-height: calc(100dvh - 155px); padding: 14px 16px 18px; }
+  .continuous-run-dialog > .modal-actions { padding: 12px 16px 14px; }
+  .continuous-run-dialog > .modal-actions button { flex: 1 1 0; min-width: 0; }
+}

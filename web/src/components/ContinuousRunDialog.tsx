@@ -155,6 +155,7 @@ export function ContinuousRunDialog({
     }] : []),
   ];
   const allBlocking = [...blocking, ...localBlocking];
+  const globalBlocking = allBlocking.filter((item) => !item.stage);
   const canStart = Boolean(
     options
       && !loading
@@ -193,138 +194,148 @@ export function ContinuousRunDialog({
         aria-labelledby="continuous-run-dialog-title"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="page-heading">
+        <div className="continuous-run-dialog-heading page-heading">
           <div>
             <h2 id="continuous-run-dialog-title">{translate("continuousRun.title", language)}</h2>
             <p>{translate("continuousRun.subtitle", language)}</p>
           </div>
         </div>
 
-        <label>
-          {translate("continuousRun.startStage", language)}
-          <select
-            value={startStage}
-            disabled={submitting}
-            onChange={(event) => changeStartStage(event.target.value as ContinuousStartStage)}
-          >
-            {CONTINUOUS_START_STAGES.map((stage) => (
-              <option key={stage} value={stage}>{stageLabel(stage, language)}</option>
-            ))}
-          </select>
-        </label>
+        <div className="continuous-run-dialog-content">
+          <label className="continuous-run-start">
+            {translate("continuousRun.startStage", language)}
+            <select
+              value={startStage}
+              disabled={submitting}
+              onChange={(event) => changeStartStage(event.target.value as ContinuousStartStage)}
+            >
+              {CONTINUOUS_START_STAGES.map((stage) => (
+                <option key={stage} value={stage}>{stageLabel(stage, language)}</option>
+              ))}
+            </select>
+          </label>
 
-        <fieldset className="continuous-run-stages">
-          <legend>{translate("continuousRun.stages", language)}</legend>
-          <p className="muted">{translate("continuousRun.stagesHint", language)}</p>
-          {CONTINUOUS_ORDER.slice(CONTINUOUS_ORDER.indexOf(startStage)).map((stage) => {
-            const stageIndex = CONTINUOUS_ORDER.indexOf(stage);
-            const selected = stageIndex <= endIndex;
-            const canToggle = stageIndex === CONTINUOUS_ORDER.indexOf(startStage)
-              ? false
-              : stageIndex <= endIndex + 1;
-            const step = stepFor(options, stage);
-            const stageBlocking = blocking.filter((item) => item.stage === stage);
-            return (
-              <label className={`continuous-run-stage${selected ? " selected" : ""}`} key={stage}>
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={!canToggle || submitting}
-                  onChange={(event) => changeEnd(stageIndex, event.target.checked)}
-                />
-                <span className="continuous-run-stage-main">
-                  <strong>{stageLabel(stage, language)}</strong>
-                  {stage === "terminology_decision" && startStage === "terminology" && (
-                    <small>{translate("continuousRun.decisionInserted", language)}</small>
-                  )}
-                  {step?.preset && <small>{step.preset.id} · {step.preset.model} · {step.selected}</small>}
-                  {step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
-                  {stageBlocking.map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
-                </span>
-              </label>
-            );
-          })}
-        </fieldset>
-
-        {hasDecision && (
-          <section className="continuous-run-section">
-            <h3>{translate("continuousRun.decisionSettings", language)}</h3>
-            {decisionInMiddle ? (
-              <label className="check-row">
-                <input type="checkbox" checked disabled />
-                <span>{translate("continuousRun.middleFinalReview", language)}</span>
-              </label>
-            ) : (
-              <label className="check-row">
-                <input type="checkbox" checked={finalReview} onChange={(event) => setFinalReview(event.target.checked)} disabled={submitting} />
-                <span>{translate("continuousRun.terminalFinalReview", language)}</span>
-              </label>
-            )}
-            {decisionInMiddle && (
-              <label className="check-row">
-                <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
-                <span>{translate("continuousRun.applyDecision", language)}</span>
-              </label>
-            )}
-          </section>
-        )}
-
-        {stages.includes("proofreading") && stages.at(-1) === "polishing" && (
-          <p className="muted continuous-run-auto-apply">
-            {translate("continuousRun.proofreadingAutoApply", language)}
-          </p>
-        )}
-
-        <section className="continuous-run-section">
-          <h3>{translate("continuousRun.resultPolicy", language)}</h3>
-          <div className="continuous-run-policy">
-            {(["pending", "reuse", "force"] as const).map((policy) => (
-              <label className="radio-option decision-option" key={policy}>
-                <input
-                  type="radio"
-                  checked={resultPolicy === policy}
-                  disabled={submitting || (hasResume && policy !== "pending")}
-                  onChange={() => setResultPolicy(policy)}
-                />
-                <span><strong>{translate(`continuousRun.policy.${policy}`, language)}</strong><small>{translate(`continuousRun.policy.${policy}Hint`, language)}</small></span>
-              </label>
-            ))}
-          </div>
-        </section>
-
-        {runningSteps.length > 0 && (
-          <section className="continuous-run-section">
-            <h3>{translate("continuousRun.unfinishedRuns", language)}</h3>
-            {runningSteps.map((step) => {
-              const run = step.running_run!;
+          <fieldset className="continuous-run-stages">
+            <legend>{translate("continuousRun.stages", language)}</legend>
+            <p className="muted">{translate("continuousRun.stagesHint", language)}</p>
+            {CONTINUOUS_ORDER.slice(CONTINUOUS_ORDER.indexOf(startStage)).map((stage) => {
+              const stageIndex = CONTINUOUS_ORDER.indexOf(stage);
+              const selected = stageIndex <= endIndex;
+              const canToggle = stageIndex === CONTINUOUS_ORDER.indexOf(startStage)
+                ? false
+                : stageIndex <= endIndex + 1;
+              const stageState = selected ? "selected" : canToggle ? "next" : "disabled";
+              const step = stepFor(options, stage);
+              const stageBlocking = blocking.filter((item) => item.stage === stage);
               return (
-                <fieldset className="continuous-run-running" key={step.stage}>
-                  <legend>{stageLabel(step.stage, language)} · {run.run_id}</legend>
-                  <label className="radio-option decision-option">
-                    <input type="radio" checked={runActions[step.stage]?.action === "resume"} disabled={run.resume_compatible === false || submitting} onChange={() => chooseRunAction(step.stage, "resume")} />
-                    <span><strong>{translate("continuousRun.resume", language)}</strong><small>{run.resume_compatible === false ? run.resume_incompatibility_reason : translate("continuousRun.resumeHint", language)}</small></span>
-                  </label>
-                  <label className="radio-option decision-option">
-                    <input type="radio" checked={runActions[step.stage]?.action === "decline"} disabled={submitting} onChange={() => chooseRunAction(step.stage, "decline")} />
-                    <span><strong>{translate("continuousRun.decline", language)}</strong><small>{translate("continuousRun.declineHint", language)}</small></span>
-                  </label>
-                </fieldset>
+                <label className={`continuous-run-stage ${stageState}`} key={stage}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={!canToggle || submitting}
+                    onChange={(event) => changeEnd(stageIndex, event.target.checked)}
+                  />
+                  <span className="continuous-run-stage-main">
+                    <strong>{stageLabel(stage, language)}</strong>
+                    {stage === "terminology_decision" && startStage === "terminology" && (
+                      <small>{translate("continuousRun.decisionInserted", language)}</small>
+                    )}
+                    {step?.preset && <small>{step.preset.id} · {step.preset.model} · {step.selected}</small>}
+                    {step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
+                    {stageBlocking.map((item) => (
+                      <small className="error-text" key={item.code}>
+                        {item.code === "mismatched_fingerprint"
+                          ? translate("continuousRun.stageFingerprintWarning", language)
+                          : item.message}
+                      </small>
+                    ))}
+                  </span>
+                </label>
               );
             })}
-          </section>
-        )}
+          </fieldset>
 
-        {options?.steps?.some((step) => step.mismatched_fingerprint_completed) && (
-          <p className="warning-banner run-warning">{translate("continuousRun.fingerprintWarning", language)}</p>
-        )}
-        {allBlocking.length > 0 && (
-          <div className="error-text continuous-run-blocking" role="alert">
-            {allBlocking.map((item) => <p key={`${item.code}-${item.stage ?? ""}`}>{item.message}</p>)}
+          {hasDecision && (
+            <section className="continuous-run-section">
+              <h3>{translate("continuousRun.decisionSettings", language)}</h3>
+              {decisionInMiddle ? (
+                <label className="check-row">
+                  <input type="checkbox" checked disabled />
+                  <span>{translate("continuousRun.middleFinalReview", language)}</span>
+                </label>
+              ) : (
+                <label className="check-row">
+                  <input type="checkbox" checked={finalReview} onChange={(event) => setFinalReview(event.target.checked)} disabled={submitting} />
+                  <span>{translate("continuousRun.terminalFinalReview", language)}</span>
+                </label>
+              )}
+              {decisionInMiddle && (
+                <label className="check-row">
+                  <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
+                  <span>{translate("continuousRun.applyDecision", language)}</span>
+                </label>
+              )}
+            </section>
+          )}
+
+          {stages.includes("proofreading") && stages.at(-1) === "polishing" && (
+            <p className="muted continuous-run-auto-apply">
+              {translate("continuousRun.proofreadingAutoApply", language)}
+            </p>
+          )}
+
+          <section className="continuous-run-section">
+            <h3>{translate("continuousRun.resultPolicy", language)}</h3>
+            <div className="continuous-run-policy">
+              {(["pending", "reuse", "force"] as const).map((policy) => (
+                <label className="radio-option decision-option" key={policy}>
+                  <input
+                    type="radio"
+                    checked={resultPolicy === policy}
+                    disabled={submitting || (hasResume && policy !== "pending")}
+                    onChange={() => setResultPolicy(policy)}
+                  />
+                  <span><strong>{translate(`continuousRun.policy.${policy}`, language)}</strong><small>{translate(`continuousRun.policy.${policy}Hint`, language)}</small></span>
+                </label>
+              ))}
+            </div>
+          </section>
+
+          {runningSteps.length > 0 && (
+            <section className="continuous-run-section">
+              <h3>{translate("continuousRun.unfinishedRuns", language)}</h3>
+              {runningSteps.map((step) => {
+                const run = step.running_run!;
+                return (
+                  <fieldset className="continuous-run-running" key={step.stage}>
+                    <legend>{stageLabel(step.stage, language)} · {run.run_id}</legend>
+                    <label className="radio-option decision-option">
+                      <input type="radio" checked={runActions[step.stage]?.action === "resume"} disabled={run.resume_compatible === false || submitting} onChange={() => chooseRunAction(step.stage, "resume")} />
+                      <span><strong>{translate("continuousRun.resume", language)}</strong><small>{run.resume_compatible === false ? run.resume_incompatibility_reason : translate("continuousRun.resumeHint", language)}</small></span>
+                    </label>
+                    <label className="radio-option decision-option">
+                      <input type="radio" checked={runActions[step.stage]?.action === "decline"} disabled={submitting} onChange={() => chooseRunAction(step.stage, "decline")} />
+                      <span><strong>{translate("continuousRun.decline", language)}</strong><small>{translate("continuousRun.declineHint", language)}</small></span>
+                    </label>
+                  </fieldset>
+                );
+              })}
+            </section>
+          )}
+
+          <div className="continuous-run-feedback">
+            {globalBlocking.length > 0 && (
+              <div className="error-text continuous-run-blocking" role="alert">
+                {globalBlocking.map((item) => (
+                  <p key={`${item.code}-${item.stage ?? ""}`}>{item.message}</p>
+                ))}
+              </div>
+            )}
+            {loading && <p className="muted">{translate("common.loading", language)}</p>}
+            {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
+            {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
           </div>
-        )}
-        {loading && <p className="muted">{translate("common.loading", language)}</p>}
-        {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
-        {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
+        </div>
 
         <div className="modal-actions">
           <button className="quiet-button" onClick={onClose} disabled={submitting}>{translate("common.cancel", language)}</button>

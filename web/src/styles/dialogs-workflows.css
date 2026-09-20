@@ -138,22 +138,38 @@
 .replacement-impact > div:not(.replacement-counts) strong { flex-basis: 100%; color: var(--text); }
 .replacement-impact .warning-text { color: var(--warning-text); }
 .run-dialog { width: min(660px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
-.continuous-run-dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
-.continuous-run-dialog h3 { margin: 0 0 10px; font-size: 14px; }
-.continuous-run-stages { display: grid; gap: 7px; margin: 18px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.continuous-run-dialog { width: min(760px, calc(100vw - 32px)); height: auto; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.continuous-run-dialog-heading { flex: none; margin: 0; padding: 22px 24px 14px; border-bottom: 1px solid var(--border); }
+.continuous-run-dialog-heading h2 { margin-bottom: 6px; }
+.continuous-run-dialog-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.continuous-run-dialog-content { min-height: 0; max-height: calc(100dvh - 190px); flex: 0 1 auto; overflow: auto; padding: 16px 24px 20px; overscroll-behavior: contain; }
+.continuous-run-dialog > .modal-actions { flex: none; margin: 0; padding: 14px 24px 16px; border-top: 1px solid var(--border); background: var(--surface); }
+.continuous-run-dialog h3 { margin: 0 0 8px; font-size: 13px; }
+.continuous-run-start { margin: 0 0 14px !important; }
+.continuous-run-start select { width: 100%; }
+.continuous-run-stages { display: grid; gap: 5px; margin: 0 0 16px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
 .continuous-run-stages > legend { padding: 0 5px; font-weight: 700; }
-.continuous-run-stages > p { margin: 0 0 3px; }
-.continuous-run-stage { display: flex; align-items: flex-start; gap: 9px; margin: 0; padding: 9px; border-radius: 6px; cursor: pointer; }
-.continuous-run-stage.selected { background: var(--accent-soft); }
+.continuous-run-stages > p { margin: 0 0 2px; font-size: 12px; line-height: 1.45; }
+.continuous-run-dialog label.continuous-run-stage { display: flex; align-items: flex-start; gap: 9px; margin: 0; padding: 8px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.continuous-run-stage.selected { border-color: var(--accent); background: var(--accent-soft); }
+.continuous-run-stage.next { border-color: var(--row-border); }
+.continuous-run-stage.next:hover { background: var(--hover); }
+.continuous-run-stage.disabled { cursor: not-allowed; opacity: .55; background: var(--disabled-bg); }
 .continuous-run-stage input { flex: 0 0 16px; margin-top: 2px; }
 .continuous-run-stage-main { display: grid; gap: 2px; min-width: 0; }
 .continuous-run-stage-main small { color: var(--muted); font-size: 11px; font-weight: 400; }
-.continuous-run-section { display: grid; gap: 8px; margin: 18px 0; }
-.continuous-run-section > .check-row { margin: 0; }
-.continuous-run-policy { display: grid; gap: 7px; }
+.continuous-run-section { display: grid; gap: 7px; margin: 16px 0; }
+.continuous-run-dialog label.check-row,
+.continuous-run-dialog label.radio-option { margin: 0; }
+.continuous-run-dialog label.radio-option { display: flex; align-items: flex-start; }
+.continuous-run-section > .check-row { gap: 8px; }
+.continuous-run-policy { display: grid; gap: 5px; }
 .continuous-run-running { display: grid; gap: 7px; margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: 7px; }
 .continuous-run-running > legend { padding: 0 4px; font-size: 12px; font-weight: 700; }
-.continuous-run-blocking { display: grid; gap: 4px; margin: 12px 0; }
+.continuous-run-auto-apply { margin: 0 0 16px; line-height: 1.45; }
+.continuous-run-feedback { display: grid; gap: 8px; margin-top: 16px; }
+.continuous-run-feedback > p { margin: 0; }
+.continuous-run-blocking { display: grid; gap: 4px; margin: 0; }
 .continuous-run-blocking p { margin: 0; }
 .exchange-dialog { width: min(920px, calc(100vw - 32px)); overflow: hidden; }
 .exchange-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
