@@ -186,7 +186,7 @@
 .error-text, .error-banner { color: var(--danger); }
 .error-banner { width: 100%; padding: 10px; border: 0; background: var(--danger-bg); }
 .error-banner-global { display: flex; align-items: center; gap: 12px; padding-inline: 20px; text-align: left; }
-.error-banner-global > span { min-width: 0; flex: 1; }
+.error-banner-global > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .error-banner-global .quiet-button { flex: none; min-height: 32px; padding-inline: 12px; }
 .success-banner { width: 100%; padding: 10px; border: 0; background: var(--surface-soft); color: var(--accent-text); text-align: left; }
 .warning-banner-sticky { position: sticky; top: 0; z-index: 5; width: 100%; margin: 0; border-radius: 0; border-width: 0 0 1px; text-align: center; }
