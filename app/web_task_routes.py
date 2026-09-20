@@ -6,6 +6,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
 from fastapi import FastAPI, Query
 
 from .errors import UsageError
@@ -749,7 +750,11 @@ def register_task_routes(
             replace_draft=payload.replace_draft,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
+            final_review=payload.final_review,
             summary_selection=summary_selection,
+            continuous_stages=payload.stages,
+            continuous_run_actions=payload.run_actions,
+            apply_terminology_decision=payload.apply_terminology_decision,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
@@ -758,12 +763,18 @@ def register_task_routes(
         stage: str,
         include_summaries: bool = False,
         language: str | None = None,
+        final_review: bool = False,
+        stages: list[str] = Query(default=[]),  # noqa: B008
+        apply_terminology_decision: bool = False,
     ) -> dict[str, Any]:
         return task_options(
             project(name),
             stage,
             include_summaries=include_summaries,
             prompt_language=(validate_language(language) if language is not None else None),
+            final_review=final_review,
+            continuous_stages=stages,
+            apply_terminology_decision=apply_terminology_decision,
         )
 
     @app.get("/api/v1/tasks/active")

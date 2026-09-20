@@ -80,6 +80,7 @@
   .global-run-status.terminal .run-progress { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
   .global-run-status.terminal > .run-tokens { grid-column: 1 / -1; grid-row: 3; min-width: 0; }
   .global-run-status .run-task-details { grid-column: 1 / -1; min-width: 0; }
+  .global-run-status > .task-steps { grid-column: 1 / -1; }
   .global-run-status.terminal .run-task-details { grid-row: 4; }
   .run-task-details .run-failure-link { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .run-task-details .run-error { min-width: 0; max-width: none; }

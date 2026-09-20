@@ -39,6 +39,7 @@ export function Overview({
   onFilesChanged,
   onDeleted,
   onRepair,
+  onContinuousRun,
   repairing,
   language,
 }: {
@@ -51,6 +52,7 @@ export function Overview({
   onFilesChanged: () => Promise<void>;
   onDeleted: (path: string) => Promise<void>;
   onRepair: () => Promise<void>;
+  onContinuousRun: () => void;
   repairing: boolean;
   language: Language;
 }) {
@@ -394,6 +396,13 @@ export function Overview({
         </div>
         <div className="overview-heading-controls">
           <div className="overview-project-actions">
+            <button
+              className="primary-button"
+              disabled={busy || compacting || buttonReorderMode || !value.nonempty_segment_count || runningProjectIds.has(selectedProject?.project_id ?? "")}
+              onClick={onContinuousRun}
+            >
+              {translate("overview.continuousRun", language)}
+            </button>
             <button className="quiet-button" disabled={busy || compacting || buttonReorderMode} onClick={() => void compactStorage()}>
               {compacting ? translate("overview.compacting", language) : translate("overview.compact", language)}
             </button>

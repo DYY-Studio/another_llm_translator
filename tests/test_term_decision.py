@@ -7,6 +7,7 @@ import os
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.config import load_config, load_project_config, validate_config
 from app.errors import ConfigError, RequestSizeError, StorageError, UsageError
-from app.execution import create_run, estimate_messages, render_messages
+from app.execution import create_run, estimate_messages, full_prompt, render_messages
 from app.main import build_parser
 from app.project import init_project
 from app.sqlite_storage import (
@@ -31,6 +32,7 @@ from app.term_decision import (
     _apply_tentative,
     _automatic_phase_two_anchors,
     _consistency_states,
+    _final_review_targets,
     _merge_phase_decisions,
     decision_plan,
     run_terminology_decision,
@@ -41,7 +43,7 @@ from app.term_decision_rules import (
 )
 from app.term_decision_batches import (
     _compact_anchor_evidence, _make_payload, _pack_batches, _related_anchors,
-    collect_term_evidence,
+    _request_batch, collect_term_evidence, collect_term_review_evidence,
 )
 from app.term_decision_drafts import (
     apply_decision_draft, current_decision_draft, discard_decision_draft,
@@ -704,6 +706,451 @@ def test_compact_anchor_payload_removes_samples_before_location_projection() -> 
     assert payload["terms"][0]["evidence"]["samples"][0]["boundary_ref"] == 1
 
 
+def test_final_review_prompt_forbids_unresolved_decisions() -> None:
+    prompt = full_prompt(
+        "terminology_decision",
+        "middle prompt",
+        "zh-CN",
+        phase="final_review",
+    )
+
+    assert "终审" in prompt
+    assert "禁止输出 needs_review" in prompt
+    assert "keep、update、disable" in prompt
+    assert "第一阶段存在" not in prompt
+    assert "第二阶段只有" not in prompt
+    assert "无法可靠决定时使用 needs_review" not in prompt
+
+    ordinary_prompt = full_prompt(
+        "terminology_decision",
+        "middle prompt",
+        "zh-CN",
+        phase="consistency",
+    )
+    assert "第二阶段只有显式 update、disable、needs_review 才覆盖第一阶段" in ordinary_prompt
+
+
+def test_final_review_actions_settle_prior_review_and_disabled_terms() -> None:
+    reviewed = {
+        **_batch_state("reviewed", "Reviewed"),
+        "_prior_decision": {"action": "needs_review", "reason": "证据不足"},
+    }
+    disabled = {**_batch_state("disabled", "Disabled"), "disabled": True}
+    active = _batch_state("active", "Active")
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "reviewed",
+                    "action": "keep",
+                    "reason": "确认当前状态",
+                },
+                {
+                    "type": "decision",
+                    "normalized": "disabled",
+                    "action": "update",
+                    "reason": "重新启用",
+                    "changes": {},
+                },
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "disable",
+                    "reason": "确认禁用",
+                },
+            ]
+        ),
+        [reviewed, disabled, active],
+        visible_states=[reviewed, disabled, active],
+        known_states={
+            "reviewed": reviewed,
+            "disabled": disabled,
+            "active": active,
+        },
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+    )
+
+    assert errors == []
+    assert decisions["reviewed"]["action"] == "keep"
+    assert decisions["disabled"]["after"]["disabled"] is False
+    assert decisions["active"]["action"] == "disable"
+
+
+def test_final_review_rejects_empty_update_for_active_term() -> None:
+    active = _batch_state("active", "Active")
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "update",
+                    "reason": "无实际改动",
+                    "changes": {},
+                }
+            ]
+        ),
+        [active],
+        visible_states=[active],
+        known_states={"active": active},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+    )
+
+    assert decisions == {}
+    assert [error["code"] for error in errors] == ["empty_patch"]
+
+
+def test_final_review_requires_scalar_conflicts_to_be_resolved() -> None:
+    active = _batch_state("active", "Active")
+    conflicts = {
+        "active": {
+            "categories": ["人物", "地点"],
+            "preferred_translations": ["主动", "活跃"],
+        }
+    }
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "keep",
+                    "reason": "保持当前状态",
+                }
+            ]
+        ),
+        [active],
+        visible_states=[active],
+        known_states={"active": active},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+        conflicts=conflicts,
+    )
+
+    assert decisions == {}
+    assert [error["code"] for error in errors] == ["unresolved_conflict"]
+
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "active",
+                    "action": "update",
+                    "reason": "明确两个冲突字段",
+                    "changes": {
+                        "category": "人物",
+                        "preferred_translation": "主动",
+                    },
+                }
+            ]
+        ),
+        [active],
+        visible_states=[active],
+        known_states={"active": active},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states=None,
+        spec=None,
+        phase="final_review",
+        conflicts=conflicts,
+    )
+
+    assert errors == []
+    assert decisions["active"]["action"] == "update"
+
+
+def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = _batch_state("anchor", "Anchor")
+    evidence = _batch_evidence(focus, anchor)
+    evidence["focus"]["samples"] = [
+        {
+            "file_id": "F1",
+            "part_id": "chapter-1",
+            "segment_id": "S1",
+            "source": "focus hit",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+            "window_id": "W001",
+        }
+    ]
+    evidence["focus"]["windows"] = [
+        {
+            "window_id": "W001",
+            "hit_segment_ids": ["S1"],
+            "segments": [
+                {
+                    "segment_id": "S0",
+                    "file_id": "F1",
+                    "part_id": "chapter-1",
+                    "line_index": 0,
+                    "source": "before",
+                    "is_empty": False,
+                },
+                {
+                    "segment_id": "S1",
+                    "file_id": "F1",
+                    "part_id": "chapter-1",
+                    "line_index": 1,
+                    "source": "focus hit",
+                    "is_empty": False,
+                },
+            ],
+        }
+    ]
+    evidence["anchor"]["samples"] = [
+        {
+            **sample,
+            "window_id": "W001",
+        }
+        for sample in evidence["anchor"]["samples"]
+    ]
+    evidence["anchor"]["windows"] = deepcopy(evidence["focus"]["windows"])
+
+    payload = _make_payload(
+        phase="final_review",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=evidence,
+    )
+
+    focus_evidence = payload["terms"][0]["evidence"]
+    assert focus_evidence["samples"] == [
+        {
+            "boundary_ref": 1,
+            "segment_ref": 2,
+            "window_ref": 1,
+            "source": "focus hit",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        }
+    ]
+    assert focus_evidence["windows"] == [
+        {
+            "window_ref": 1,
+            "hit_segment_refs": [2],
+            "segments": [
+                {
+                    "segment_ref": 1,
+                    "boundary_ref": 1,
+                    "source": "before",
+                    "is_empty": False,
+                },
+                {
+                    "segment_ref": 2,
+                    "boundary_ref": 1,
+                    "source": "focus hit",
+                    "is_empty": False,
+                },
+            ],
+        }
+    ]
+    serialized = json.dumps(focus_evidence, ensure_ascii=False)
+    assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
+
+    compacted = _compact_anchor_evidence(evidence, [{**anchor, "_compact_evidence": True}])
+    assert compacted["anchor"]["samples"] == []
+    assert compacted["anchor"]["windows"] == []
+    assert compacted["focus"]["windows"]
+
+
+def test_final_review_request_estimation_includes_windows_and_rejects_hard_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["execution"]["target_chunk_input_tokens"] = 1000
+    config["llm"]["context_window_tokens"] = 50
+    config["llm"]["context_safety_margin_tokens"] = 0
+    config["execution"]["input_tokens_per_minute"] = 0
+    focus = _batch_state("focus", "Focus")
+    evidence = _batch_evidence(focus)
+    evidence["focus"]["samples"] = [
+        {
+            **evidence["focus"]["samples"][0],
+            "segment_id": "S1",
+            "window_id": "W001",
+        }
+    ]
+    evidence["focus"]["windows"] = [
+        {
+            "window_id": "W001",
+            "hit_segment_ids": ["S1"],
+            "segments": [
+                {
+                    "segment_id": "S1",
+                    "file_id": "F1",
+                    "part_id": "document",
+                    "line_index": 0,
+                    "source": "x" * 500,
+                    "is_empty": False,
+                }
+            ],
+        }
+    ]
+    observed: list[dict] = []
+
+    def estimate(messages: list[dict[str, str]], _: float) -> int:
+        observed.append(json.loads(messages[1]["content"]))
+        return 100
+
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
+
+    with pytest.raises(RequestSizeError, match="完整术语及证据仍超过硬限制"):
+        _pack_batches(
+            [focus],
+            phase="final_review",
+            target_language="简体中文",
+            anchors=[],
+            evidence=evidence,
+            prompt="final review prompt",
+            config=config,
+            spec=term_normalization(config),
+        )
+
+    assert observed[0]["phase"] == "final_review"
+    assert observed[0]["terms"][0]["evidence"]["windows"][0]["segments"]
+
+
+def test_final_review_rejects_needs_review_as_a_retry_error() -> None:
+    focus = [_batch_state("target", "Target")]
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "needs_review",
+                    "reason": "证据不足",
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states= None,
+        spec=None,
+        phase="final_review",
+    )
+
+    assert decisions == {}
+    assert [error["code"] for error in errors] == ["needs_review_forbidden"]
+
+
+def test_final_review_keeps_relationship_validation() -> None:
+    focus = [_batch_state("target", "Target")]
+    decisions, _, _, errors, _, _ = _analyze_decisions(
+        llm_jsonl(
+            [
+                {
+                    "type": "decision",
+                    "normalized": "target",
+                    "action": "update",
+                    "reason": "建立关系",
+                    "changes": {"group_primary": "target"},
+                }
+            ]
+        ),
+        focus,
+        visible_states=focus,
+        known_states={"target": focus[0]},
+        read_only_terms=set(),
+        prompt_language="zh-CN",
+        review_states={"target": focus[0]},
+        spec=term_normalization(
+            {
+                "terminology": {
+                    "unicode_normalization": "NFKC",
+                    "case_insensitive": False,
+                }
+            }
+        ),
+        phase="final_review",
+    )
+
+    assert decisions == {}
+    assert [error["code"] for error in errors] == ["invalid_relationship"]
+
+
+@pytest.mark.asyncio
+async def test_final_review_needs_review_exhausts_existing_format_retries(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 1
+    focus_state = _batch_state("target", "Target")
+    focus = [focus_state]
+    evidence = _batch_evidence(focus_state)
+    evidence["target"]["samples"] = [
+        {
+            **sample,
+            "window_id": "W001",
+        }
+        for sample in evidence["target"]["samples"]
+    ]
+    evidence["target"]["windows"] = []
+
+    class StubLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.logger = logging.getLogger("test-final-review")
+
+        async def chat(self, **_: object) -> tuple[SimpleNamespace, None]:
+            self.calls += 1
+            return (
+                SimpleNamespace(
+                    content=llm_jsonl(
+                        [
+                            {
+                                "type": "decision",
+                                "normalized": "target",
+                                "action": "needs_review",
+                                "reason": "证据不足",
+                            }
+                        ]
+                    )
+                ),
+                None,
+            )
+
+    llm = StubLLM()
+    with pytest.raises(UsageError, match="格式修正重试耗尽") as error:
+        await _request_batch(
+            llm,
+            focus=focus,
+            anchors=[],
+            phase="final_review",
+            prompt="final review prompt",
+            config=config,
+            evidence=evidence,
+            known_states={"target": focus_state},
+            read_only_terms=set(),
+            prompt_language="zh-CN",
+            review_states={"target": focus_state},
+            spec=term_normalization(config),
+        )
+
+    assert llm.calls == 2
+    assert error.value.params["reason"] == "format_retries_exhausted"
+
+
 def test_compact_sample_locations_reduce_estimated_request_tokens() -> None:
     focus = _batch_state("alice", "Alice")
     durable_evidence = _batch_evidence(focus)
@@ -859,6 +1306,14 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
     assert observed == [("adjudication", 0), ("consistency", 2)]
     assert plan["estimated_requests"] == 2
     assert plan["estimated_input_tokens"] == 35
+
+    final_plan = decision_plan(project, final_review=True)
+    assert final_plan["total_steps"] == 4
+    assert set(final_plan["prompts"]) == {
+        "adjudication",
+        "consistency",
+        "final_review",
+    }
 
 
 def test_decision_batch_overflow_policy_controls_local_planning(
@@ -2045,6 +2500,8 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert summary["proposals"] == 1
     run_dir = project / "runs" / summary["run_id"]
     checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    assert checkpoint["final_review"] is False
+    assert "final_review" not in checkpoint["phases"]
     assert (
         checkpoint["phases"]["adjudication"]["alice"]["prompt_fingerprint"]
         != checkpoint["phases"]["consistency"]["alice"]["prompt_fingerprint"]
@@ -2093,6 +2550,265 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     alice = next(item for item in restored["terms"] if item["normalized"] == "alice")
     assert alice["preferred_translation"] is None
     assert alice["description"] == "unhelpful"
+
+
+@pytest.mark.asyncio
+async def test_final_review_resolves_pending_without_losing_phase_one_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        focus = kwargs["focus"]
+        phases.append(phase)
+        result: dict[str, dict] = {}
+        for item in focus:
+            normalized = str(item["normalized"])
+            if phase == "adjudication" and normalized == "alice":
+                result[normalized] = {
+                    "action": "update",
+                    "reason": "第一阶段补全译名",
+                    "after": {
+                        **item,
+                        "preferred_translation": "爱丽丝",
+                        "disabled": False,
+                    },
+                }
+            elif phase == "consistency" and normalized == "alice":
+                result[normalized] = {
+                    "action": "needs_review",
+                    "reason": "第二阶段仍需证据",
+                }
+            else:
+                result[normalized] = {"action": "keep", "reason": "保持"}
+        return result
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases[:2] == ["adjudication", "adjudication"]
+    assert phases[2:4] == ["consistency", "consistency"]
+    assert phases[4:] == ["final_review"]
+    assert summary["needs_review"] == 0
+    assert summary["completed"] == 5
+    run_dir = project / "runs" / summary["run_id"]
+    manifest = read_json(project, run_dir / "manifest.json")
+    assert manifest["final_review"] is True
+    assert manifest["final_review_target_count"] == 1
+    assert manifest["total_steps"] == 5
+    checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+    assert set(checkpoint["phases"]["final_review"]) == {"alice"}
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["needs_review"] == []
+    assert draft["proposals"][0]["evidence"]["alice"]["windows"]
+    alice = next(
+        proposal["after"][0]
+        for proposal in draft["proposals"]
+        if proposal["normalized"] == ["alice"]
+    )
+    assert alice["preferred_translation"] == "爱丽丝"
+
+
+def test_final_review_targets_keep_protected_terms_as_anchors(tmp_path: Path) -> None:
+    project = create_decision_project(tmp_path)
+    protected = _batch_state("protected", "Protected")
+    pending = {**_batch_state("pending", "Pending"), "group_primary": "protected"}
+    decisions = {
+        "pending": {"action": "needs_review", "reason": "待终审"},
+    }
+
+    targets = _final_review_targets(
+        eligible=[pending],
+        protected={"protected"},
+        original={"pending": pending, "protected": protected},
+        final={"pending": pending, "protected": protected},
+        decisions=decisions,
+        spec=term_normalization(load_project_config(project)),
+    )
+
+    assert [item["normalized"] for item in targets] == ["pending"]
+    assert targets[0]["_prior_decision"]["action"] == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_final_review_rechecks_local_relationships_before_targeting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        focus = kwargs["focus"]
+        phases.append(phase)
+        result: dict[str, dict] = {}
+        for item in focus:
+            normalized = str(item["normalized"])
+            if phase == "adjudication" and normalized == "alice":
+                result[normalized] = {
+                    "action": "update",
+                    "reason": "错误组关系待终审",
+                    "after": {**item, "group_primary": "alice", "disabled": False},
+                }
+            else:
+                result[normalized] = {"action": "keep", "reason": "保持"}
+        return result
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases[4:] == ["final_review"]
+    assert summary["needs_review"] == 0
+
+
+@pytest.mark.asyncio
+async def test_final_review_skips_model_when_no_term_needs_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases: list[str] = []
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def keep_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+        phases.append(str(kwargs["phase"]))
+        return {
+            str(item["normalized"]): {"action": "keep", "reason": "保持"}
+            for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
+    async with httpx.AsyncClient() as client:
+        summary = await run_terminology_decision(
+            project, final_review=True, http_client=client
+        )
+
+    assert phases == ["adjudication", "adjudication", "consistency", "consistency"]
+    assert summary["completed"] == 4
+    manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
+    assert manifest["final_review_target_count"] == 0
+    assert manifest["total_steps"] == 4
+
+
+@pytest.mark.asyncio
+async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+    final_started = asyncio.Event()
+    release_final = asyncio.Event()
+    calls: list[tuple[str, str]] = []
+
+    async def interrupted(*_: object, **kwargs: object) -> dict[str, dict]:
+        phase = str(kwargs["phase"])
+        normalized = str(kwargs["focus"][0]["normalized"])
+        calls.append((phase, normalized))
+        if phase == "consistency" and normalized == "alice":
+            return {normalized: {"action": "needs_review", "reason": "待终审"}}
+        if phase == "final_review":
+            final_started.set()
+            await release_final.wait()
+        return {normalized: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted)
+    async with httpx.AsyncClient() as client:
+        task = asyncio.create_task(
+            run_terminology_decision(project, final_review=True, http_client=client)
+        )
+        await asyncio.wait_for(final_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        run_dir = next(
+            item
+            for item in (project / "runs").iterdir()
+            if (item / CHECKPOINT_FILE).is_file()
+        )
+        manifest = read_json(project, run_dir / "manifest.json")
+        assert manifest["final_review_target_count"] == 1
+        assert manifest["last_interruption"]["total_steps"] == 5
+        checkpoint = json.loads((run_dir / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+        assert checkpoint["phases"]["final_review"] == {}
+
+        with pytest.raises(UsageError, match="终审选项"):
+            await run_terminology_decision(
+                project, resume_run_id=run_dir.name, http_client=client
+            )
+
+        resumed: list[tuple[str, str]] = []
+
+        async def resume_batch(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            resumed.append((phase, normalized))
+            return {normalized: {"action": "keep", "reason": "终审确认"}}
+
+        monkeypatch.setattr("app.term_decision_batches._request_batch", resume_batch)
+        summary = await run_terminology_decision(
+            project,
+            final_review=True,
+            resume_run_id=run_dir.name,
+            http_client=client,
+        )
+
+    assert resumed == [("final_review", "alice")]
+    assert summary["completed"] == 5
+    assert current_decision_draft(project)["needs_review"] == []
+
+
+@pytest.mark.asyncio
+async def test_final_review_failure_keeps_previous_pending_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+
+    async def initial_keep(*_: object, **kwargs: object) -> dict[str, dict]:
+        return {
+            str(item["normalized"]): {"action": "keep", "reason": "保持"}
+            for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", initial_keep)
+    async with httpx.AsyncClient() as client:
+        await run_terminology_decision(project, http_client=client)
+        old_draft = current_decision_draft(project)
+        assert old_draft is not None
+        old_run_id = old_draft["run_id"]
+
+        async def failing_final(*_: object, **kwargs: object) -> dict[str, dict]:
+            phase = str(kwargs["phase"])
+            normalized = str(kwargs["focus"][0]["normalized"])
+            if phase == "consistency" and normalized == "alice":
+                return {normalized: {"action": "needs_review", "reason": "待终审"}}
+            if phase == "final_review":
+                raise UsageError("终审模型失败")
+            return {normalized: {"action": "keep", "reason": "保持"}}
+
+        monkeypatch.setattr("app.term_decision_batches._request_batch", failing_final)
+        with pytest.raises(UsageError, match="终审模型失败"):
+            await run_terminology_decision(
+                project,
+                final_review=True,
+                replace_draft=True,
+                http_client=client,
+            )
+
+    current = current_decision_draft(project)
+    assert current is not None
+    assert current["run_id"] == old_run_id
 
 
 @pytest.mark.asyncio
@@ -3568,6 +4284,120 @@ def test_evidence_labels_aozora_base_and_reading_views(tmp_path: Path) -> None:
     assert evidence["かんじ"]["samples"][0]["matched_forms"] == [
         {"kind": "source", "value": "かんじ"}
     ]
+
+
+def test_review_evidence_keeps_full_hits_and_merges_context_windows(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(
+        tmp_path,
+        "before one\nbefore two\nAlice first\nAlice second\n"
+        "after one\nafter two\nafter three",
+    )
+    library = read_json(project, project / "terminology" / "terms.json")
+
+    evidence = collect_term_review_evidence(project, library["terms"])["alice"]
+
+    samples = evidence["samples"]
+    assert [sample["segment_id"] for sample in samples] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
+    assert samples[0]["source"] == "Alice first"
+    assert samples[0]["window_id"] == "W001"
+    assert evidence["windows"] == [
+        {
+            "window_id": "W001",
+            "hit_segment_ids": ["F0001-S000003", "F0001-S000004"],
+            "segments": [
+                {
+                    "segment_id": f"F0001-S{index:06d}",
+                    "file_id": "F0001",
+                    "part_id": "document",
+                    "line_index": index - 1,
+                    "source": source,
+                    "is_empty": False,
+                }
+                for index, source in enumerate(
+                    [
+                        "before one",
+                        "before two",
+                        "Alice first",
+                        "Alice second",
+                        "after one",
+                        "after two",
+                    ],
+                    start=1,
+                )
+            ],
+        }
+    ]
+
+
+def test_review_evidence_limits_samples_and_stops_at_file_part_boundaries(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    inputs = []
+    for index in range(1, 4):
+        path = tmp_path / f"review-{index}.txt"
+        path.write_text(
+            "\n".join(f"Alice file {index} line {line}" for line in range(1, 6)),
+            encoding="utf-8-sig",
+        )
+        inputs.append(str(path))
+    project, _ = init_project(
+        inputs,
+        name="review-evidence-boundaries",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute(
+            "UPDATE segments SET part_id = ? WHERE segment_id = ?",
+            ("part-b", "F0001-S000003"),
+        )
+
+    evidence = collect_term_review_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert len(evidence["samples"]) == 10
+    assert [
+        (sample["file_id"], sample["part_id"])
+        for sample in evidence["samples"][:3]
+    ] == [("F0001", "document"), ("F0001", "part-b"), ("F0002", "document")]
+    for window in evidence["windows"]:
+        boundaries = {
+            (segment["file_id"], segment["part_id"])
+            for segment in window["segments"]
+        }
+        assert len(boundaries) == 1
+
+
+def test_review_evidence_counts_empty_segments_in_context_order(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(
+        tmp_path,
+        "Alice\n\nnear\nfar",
+    )
+
+    evidence = collect_term_review_evidence(
+        project,
+        [{"source": "Alice", "normalized": "alice", "aliases": []}],
+    )["alice"]
+
+    assert [
+        segment["segment_id"] for segment in evidence["windows"][0]["segments"]
+    ] == [
+        "F0001-S000001",
+        "F0001-S000002",
+        "F0001-S000003",
+    ]
+    assert evidence["windows"][0]["segments"][1]["is_empty"] is True
 
 
 def test_alias_transfer_requires_a_complete_relationship() -> None:

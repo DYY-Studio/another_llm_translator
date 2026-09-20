@@ -64,6 +64,8 @@ class SummaryExportPayload(_SummaryBoundariesPayload):
 
 
 class TaskStartPayload(_WebPayload):
+    model_config = ConfigDict(extra="forbid")
+
     stage: str
     language: str | None = None
     from_file: str | None = None
@@ -74,7 +76,11 @@ class TaskStartPayload(_WebPayload):
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
     reuse_mixed_fingerprints: StrictBool = False
+    final_review: StrictBool = False
     run_action: str | None = None
+    stages: list[StrictStr] = Field(default_factory=list)
+    run_actions: dict[StrictStr, StrictStr] = Field(default_factory=dict)
+    apply_terminology_decision: StrictBool = False
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
 
 

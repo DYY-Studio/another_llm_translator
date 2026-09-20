@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,8 +26,6 @@ from .execution import (
     choose_running_run,
     combine_usage,
     find_running_runs,
-    select_scope,
-    stage_fingerprint,
     unavailable_usage,
 )
 from .llm_client import SlidingWindowLimiter
@@ -35,10 +33,9 @@ from .llm_keys import KeyPool
 from .llm_preset import endpoint_url
 from .locking import project_write_lock
 from .logging_utils import get_logger
-from .project import file_run_options, load_segments, load_source_files
 from .plugins import get_document_adapter
+from .project import file_run_options, load_segments, load_source_files
 from .sqlite_storage import (
-    latest_stage_summary,
     read_content_summaries,
     read_json,
     read_jsonl,
@@ -47,7 +44,7 @@ from .sqlite_storage import (
     utc_now,
 )
 from .stage_review import run_review
-from .stage_runtime import prompt_middle_digests, prompt_preflight
+from .stage_runtime import prompt_preflight
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
 from .stages import run_all
@@ -62,6 +59,16 @@ from .term_decision import (
 )
 from .term_decision_drafts import current_decision_draft, manual_review_state
 from .term_library import load_terms
+from .web_continuous import (
+    CONTINUOUS_STAGE,
+    inspect_continuous,
+    require_continuous_ready,
+    run_continuous,
+)
+from .web_continuous import selection_snapshot as _selection_snapshot
+from .web_continuous import stage_fingerprint_snapshot as _stage_fingerprint_snapshot
+from .web_continuous import stage_summary as _stage_summary
+from .web_continuous import terminology_summary as _terminology_summary
 
 
 def _endpoint_summary(config: dict[str, Any]) -> dict[str, str]:
@@ -134,95 +141,14 @@ def _running_run(
         "previous": _endpoint_summary(old_config),
         "current": _endpoint_summary(current_config),
     }
+    if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
+        result["final_review"] = manifest["final_review"]
+        target_count = manifest.get("final_review_target_count")
+        if type(target_count) is int and target_count >= 0:
+            result["final_review_target_count"] = target_count
     if isinstance(manifest.get("last_interruption"), dict):
         result["last_interruption"] = manifest["last_interruption"]
     return result
-
-
-def _stage_summary(
-    project: Path,
-    stage: str,
-    config: dict[str, Any],
-    *,
-    active_segment_ids: set[str],
-    nonempty_count: int,
-    terms_revision: int | None,
-) -> dict[str, Any]:
-    summary = latest_stage_summary(project, stage, active_segment_ids)
-    completed = {
-        segment_id: item for segment_id, item in summary.items() if item["completed"]
-    }
-    failed = {
-        segment_id for segment_id, item in summary.items() if item["failed"]
-    }
-    current_fingerprint = stage_fingerprint(
-        config,
-        stage,
-        prompt_middle_digests(project, stage),
-        terms_revision=terms_revision,
-    )
-    return {
-        "completed": len(completed),
-        "failed": len(failed),
-        "pending": nonempty_count - len(completed) - len(failed),
-        "current_fingerprint_completed": sum(
-            item["stage_fingerprint"] == current_fingerprint
-            for item in completed.values()
-        ),
-    }
-
-
-def _terminology_summary(
-    project: Path,
-    config: dict[str, Any],
-    *,
-    active_segment_ids: set[str],
-    nonempty_count: int,
-) -> dict[str, Any]:
-    base = {
-        "completed": 0,
-        "failed": 0,
-        "pending": nonempty_count,
-        "current_fingerprint_completed": 0,
-    }
-    active_path = project / "terminology" / "active_task.json"
-    if not record_exists(project, active_path):
-        return base
-    active = read_json(project, active_path)
-    if active.get("status") not in {"active", "completed"}:
-        return base
-    scans = [
-        item
-        for item in read_jsonl(
-            project,
-            project / "terminology" / "scans.jsonl",
-            task_id=active.get("active_task_id"),
-        )
-        if str(item.get("segment_id")) in active_segment_ids
-    ]
-    completed = {
-        item["segment_id"] for item in scans if item["status"] == "completed"
-    }
-    failed = {
-        item["segment_id"]
-        for item in scans
-        if item["status"] == "failed" and item["segment_id"] not in completed
-    }
-    current_fingerprint = stage_fingerprint(
-        config,
-        "terminology",
-        prompt_middle_digests(project, "terminology"),
-    )
-    return {
-        "completed": len(completed),
-        "failed": len(failed),
-        "pending": nonempty_count - len(completed) - len(failed),
-        "current_fingerprint_completed": sum(
-            item.get("status") == "completed"
-            and item.get("stage_fingerprint") == current_fingerprint
-            for item in scans
-        ),
-    }
 
 
 def task_options(
@@ -231,7 +157,23 @@ def task_options(
     *,
     include_summaries: bool = False,
     prompt_language: str | None = None,
+    final_review: bool = False,
+    continuous_stages: Iterable[object] = (),
+    apply_terminology_decision: bool = False,
 ) -> dict[str, Any]:
+    if final_review and stage not in {
+        TERMINOLOGY_DECISION_STAGE,
+        CONTINUOUS_STAGE,
+    }:
+        raise UsageError("final_review 只允许自动术语决策")
+    if stage == "continuous":
+        return inspect_continuous(
+            project,
+            continuous_stages,
+            prompt_language=prompt_language,
+            apply_terminology_decision=apply_terminology_decision,
+            final_review=final_review,
+        )
     if stage == TERMINOLOGY_DECISION_STAGE:
         library = _require_decision_library(project)
         overrides = read_json(
@@ -247,23 +189,36 @@ def task_options(
             for item in library.get("terms", [])
         )
         config = load_project_config(project, stage=stage)
-        plan = decision_plan(project) if has_eligible else None
+        plan = (
+            decision_plan(project, prompt_language, final_review=final_review)
+            if has_eligible
+            else None
+        )
         selected = len(plan["eligible"]) if plan else 0
         running_run = _running_run(project, stage, config)
         if running_run is not None:
+            running_final_review = running_run.get("final_review")
             compatible, reason = decision_resume_compatibility(
                 project,
                 str(running_run["run_id"]),
                 source_terms_revision=int(library["terms_revision"]),
+                final_review=(
+                    bool(running_final_review)
+                    if isinstance(running_final_review, bool)
+                    else final_review
+                ),
             )
             running_run["completed_steps"] = decision_checkpoint_progress(
                 project, str(running_run["run_id"])
             )
-            running_run["total_steps"] = selected * 2
+            running_run["total_steps"] = selected * 2 + int(
+                running_run.get("final_review_target_count", 0)
+            )
             running_run["resume_compatible"] = compatible
             running_run["resume_incompatibility_reason"] = reason
         return {
             "stage": stage,
+            "final_review": final_review,
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
@@ -403,22 +358,6 @@ def task_options(
     return result
 
 
-def _stage_fingerprint_snapshot(project: Path, stage: str) -> str:
-    config = load_project_config(project, stage=stage)
-    library = load_terms(project)
-    terms_revision = (
-        int(library["terms_revision"])
-        if stage != "terminology" and library is not None
-        else None
-    )
-    return stage_fingerprint(
-        config,
-        stage,
-        prompt_middle_digests(project, stage),
-        terms_revision=terms_revision,
-    )
-
-
 def _stable_digest(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -427,54 +366,6 @@ def _stable_digest(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def _selection_snapshot(
-    project: Path,
-    scope: Scope,
-    *,
-    force_all: bool = False,
-) -> tuple[tuple[str, str, int, int, str, str, str, str], ...]:
-    files = load_source_files(project)
-    segments = load_segments(project)
-    selected = (
-        [segment for segment in segments if not segment["is_empty"]]
-        if force_all
-        else select_scope(segments, files, scope)
-    )
-    file_order = {
-        str(item["file_id"]): int(item["file_order"]) for item in files
-    }
-    adapter_snapshots: dict[str, str] = {}
-    for file_record in files:
-        state_path = file_record.get("document_adapter_state")
-        state_record = (
-            read_json(project, project / state_path)
-            if isinstance(state_path, str)
-            and record_exists(project, project / state_path)
-            else None
-        )
-        adapter_snapshots[str(file_record["file_id"])] = _stable_digest(
-            {
-                "adapter_id": file_record.get("document_adapter_id"),
-                "adapter_version": file_record.get("document_adapter_version"),
-                "state_path": state_path,
-                "state": state_record,
-            }
-        )
-    return tuple(
-        (
-            str(segment["segment_id"]),
-            str(segment["file_id"]),
-            file_order[str(segment["file_id"])],
-            int(segment["line_index"]),
-            str(segment["part_id"]),
-            str(segment["source"]),
-            str(segment.get("model_source") or ""),
-            adapter_snapshots[str(segment["file_id"])],
-        )
-        for segment in selected
-    )
 
 
 def _summary_participation_snapshot(
@@ -511,6 +402,8 @@ def _running_runs_snapshot(
                 "requested_segment_count": manifest.get("requested_segment_count"),
                 "reused_segment_count": manifest.get("reused_segment_count"),
             }
+            if stage == TERMINOLOGY_DECISION_STAGE:
+                stable["final_review"] = manifest.get("final_review")
             snapshots.append(
                 (
                     stage,
@@ -533,6 +426,7 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
             "source_conflicts": plan["source_conflicts"],
             "evidence": plan["evidence"],
             "language": plan["language"],
+            "final_review": bool(plan.get("final_review", False)),
         }
     )
 
@@ -585,6 +479,9 @@ class _StartDecision:
     decision_inputs: str | None = None
     options_selected_count: int | None = None
     summary_selection: tuple[tuple[str, str], ...] = ()
+    final_review: bool = False
+    continuous_snapshot: dict[str, Any] | None = None
+    continuous_steps: tuple[dict[str, Any], ...] = ()
     plan: dict[str, Any] | None = field(default=None, compare=False)
 
 
@@ -604,6 +501,8 @@ class WebTask:
     failed_segments: int = 0
     total_segments: int = 0
     summary_selection_counts: tuple[int, int, int] | None = None
+    current_stage: str | None = None
+    steps: list[dict[str, Any]] = field(default_factory=list)
     failure_counts: dict[str, int] = field(default_factory=dict)
     usage: dict[str, Any] = field(
         default_factory=lambda: {
@@ -618,11 +517,15 @@ class WebTask:
     _scope: Scope = field(default_factory=Scope, repr=False)
     _reuse_mixed_fingerprints: bool = field(default=False, repr=False)
     _run_action: str | None = field(default=None, repr=False)
+    _final_review: bool = field(default=False, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
     _summary_selection: tuple[tuple[str, str], ...] = field(default_factory=tuple, repr=False)
+    _continuous_stages: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    _continuous_run_actions: dict[str, str] = field(default_factory=dict, repr=False)
+    _apply_terminology_decision: bool = field(default=False, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
 
     def view(self) -> dict[str, Any]:
@@ -631,6 +534,9 @@ class WebTask:
             "project": self.project.name,
             "project_id": self.project_id,
             "stage": self.stage,
+            "current_stage": self.current_stage,
+            "steps": [dict(step) for step in self.steps],
+            "final_review": self._final_review,
             "include_summaries": self._include_summaries,
             "summary_selection": [
                 {"file_id": file_id, "part_id": part_id}
@@ -886,6 +792,10 @@ class WebTaskManager:
         prompt_language: str | None,
         include_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
+        final_review: bool = False,
+        continuous_stages: Iterable[object] = (),
+        continuous_run_actions: Mapping[str, str] | None = None,
+        apply_terminology_decision: bool = False,
     ) -> _StartDecision:
         if stage not in {
             "terminology",
@@ -895,6 +805,7 @@ class WebTaskManager:
             TERMINOLOGY_DECISION_STAGE,
             "content_summary",
             "run-all",
+            CONTINUOUS_STAGE,
         }:
             raise UsageError(f"未知后台阶段：{stage}")
         if include_summaries and stage != "terminology":
@@ -921,6 +832,17 @@ class WebTaskManager:
             raise UsageError("run_action 必须是 resume、decline 或 null")
         if stage == "run-all" and run_action is not None:
             raise UsageError("run-all 不支持 run_action")
+        if final_review and stage not in {
+            TERMINOLOGY_DECISION_STAGE,
+            CONTINUOUS_STAGE,
+        }:
+            raise UsageError("final_review 只允许自动术语决策")
+        if stage != CONTINUOUS_STAGE and (
+            tuple(continuous_stages)
+            or continuous_run_actions
+            or apply_terminology_decision
+        ):
+            raise UsageError("连续运行选项只允许 stage=continuous")
         if stage == TERMINOLOGY_DECISION_STAGE and reuse_mixed_fingerprints:
             raise UsageError("自动术语决策不支持复用已发布结果")
         if ensure_unique:
@@ -937,7 +859,49 @@ class WebTaskManager:
         ] = ()
         summary_participation: tuple[tuple[str, str, bool], ...] = ()
         options_selected_count: int | None = None
-        if stage == "content_summary":
+        continuous_snapshot: dict[str, Any] | None = None
+        continuous_steps: tuple[dict[str, Any], ...] = ()
+        inspection: dict[str, Any] | None = None
+        if stage == CONTINUOUS_STAGE:
+            if include_summaries or any(
+                value is not None
+                for value in (
+                    scope.from_file,
+                    scope.only_file,
+                    scope.only_segment,
+                    scope.segment_ids,
+                )
+            ):
+                raise UsageError("连续运行只支持整个项目范围")
+            if run_action is not None:
+                raise UsageError("连续运行必须通过 run_actions 指定各阶段动作")
+            inspection = inspect_continuous(
+                project,
+                continuous_stages,
+                prompt_language=prompt_language,
+                force=force,
+                reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                run_actions=continuous_run_actions,
+                apply_terminology_decision=apply_terminology_decision,
+                final_review=final_review,
+            )
+            require_continuous_ready(inspection)
+            continuous_snapshot = inspection["snapshot"]
+            continuous_steps = tuple(
+                {
+                    **step,
+                    "completed": 0,
+                    "failed": 0,
+                    "pending": int(step.get("selected", 0)),
+                }
+                for step in inspection["steps"]
+            )
+            selected_count = sum(
+                int(step.get("selected", 0))
+                for step in inspection["steps"]
+                if step.get("status") != "skipped"
+            )
+        elif stage == "content_summary":
             if not summary_selection:
                 raise UsageError("内容概括聚合选择不能为空")
             if len(summary_selection) != len(set(summary_selection)):
@@ -974,9 +938,15 @@ class WebTaskManager:
                     reason="unfinished_run",
                 )
         elif stage == TERMINOLOGY_DECISION_STAGE:
-            decision_plan_snapshot = decision_plan(project, prompt_language)
+            decision_plan_snapshot = decision_plan(
+                project, prompt_language, final_review=final_review
+            )
             library = decision_plan_snapshot["library"]
-            selected_count = len(decision_plan_snapshot["eligible"]) * 2
+            selected_count = int(
+                decision_plan_snapshot.get(
+                    "total_steps", len(decision_plan_snapshot["eligible"]) * 2
+                )
+            )
             current_terms_revision = int(library["terms_revision"])
             if (
                 run_action != "resume"
@@ -998,6 +968,7 @@ class WebTaskManager:
                     project,
                     str(running[0]["run_id"]),
                     source_terms_revision=current_terms_revision,
+                    final_review=final_review,
                 )
                 if not compatible:
                     raise UsageError(f"{reason}；请结束旧 Run 并强制新建")
@@ -1067,6 +1038,7 @@ class WebTaskManager:
                         decision_plan_snapshot["config"],
                         decision_plan_snapshot["prompts"],
                         decision_plan_snapshot["library"],
+                        final_review=final_review,
                     )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
@@ -1077,6 +1049,14 @@ class WebTaskManager:
                 if stage == TERMINOLOGY_DECISION_STAGE
                 else None
             )
+        elif stage == CONTINUOUS_STAGE:
+            assert continuous_snapshot is not None
+            assert inspection is not None
+            fingerprints = tuple(
+                (str(stage_name), str(fingerprint))
+                for stage_name, fingerprint in inspection["fingerprints"].items()
+            )
+            decision_inputs = continuous_snapshot["decision_inputs"]
         elif stage == "run-all":
             selection_snapshots = tuple(
                 (
@@ -1108,9 +1088,16 @@ class WebTaskManager:
             fingerprints = ((stage, _stage_fingerprint_snapshot(project, stage)),)
             decision_inputs = None
         relevant_stages = (
-            LLM_STAGES
+            tuple(inspection["stages"])
+            if stage == CONTINUOUS_STAGE
+            else LLM_STAGES
             if stage == "run-all"
             else (stage,)
+        )
+        effective_final_review = (
+            bool(inspection["rules"]["decision_final_review"])
+            if stage == CONTINUOUS_STAGE and inspection is not None
+            else final_review
         )
         return _StartDecision(
             selected_count=selected_count,
@@ -1122,6 +1109,9 @@ class WebTaskManager:
             decision_inputs=decision_inputs,
             options_selected_count=options_selected_count,
             summary_selection=summary_selection,
+            final_review=effective_final_review,
+            continuous_snapshot=continuous_snapshot,
+            continuous_steps=continuous_steps,
             plan=decision_plan_snapshot,
         )
 
@@ -1144,6 +1134,10 @@ class WebTaskManager:
                     scope=state._scope,
                     reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
                     run_action=state._run_action,
+                    final_review=state._final_review,
+                    continuous_stages=state._continuous_stages,
+                    continuous_run_actions=state._continuous_run_actions,
+                    apply_terminology_decision=state._apply_terminology_decision,
                     prompt_language=state._prompt_language,
                     replace_draft=state._replace_draft,
                     acknowledge_manual_review=state._acknowledge_manual_review,
@@ -1184,10 +1178,22 @@ class WebTaskManager:
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
         summary_selection: Iterable[dict[str, str]] = (),
+        final_review: bool = False,
+        continuous_stages: Iterable[object] = (),
+        continuous_run_actions: Mapping[str, str] | None = None,
+        apply_terminology_decision: bool = False,
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
                 raise UsageError("任务管理器正在关闭")
+            if stage == CONTINUOUS_STAGE and (
+                replace_draft or acknowledge_manual_review
+            ):
+                raise UsageError(
+                    "连续运行不能通过 replace_draft 或 acknowledge_manual_review 绕过术语待办"
+                )
+            continuous_stages = tuple(continuous_stages)
+            continuous_run_actions = dict(continuous_run_actions or {})
             decision = self._validate_start(
                 project,
                 stage,
@@ -1202,6 +1208,10 @@ class WebTaskManager:
                     (str(item["file_id"]), str(item["part_id"]))
                     for item in summary_selection
                 ),
+                final_review=final_review,
+                continuous_stages=continuous_stages,
+                continuous_run_actions=continuous_run_actions,
+                apply_terminology_decision=apply_terminology_decision,
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -1216,11 +1226,18 @@ class WebTaskManager:
             state._scope = scope
             state._reuse_mixed_fingerprints = reuse_mixed_fingerprints
             state._run_action = run_action
+            state._final_review = decision.final_review
+            state.steps = [dict(step) for step in decision.continuous_steps]
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
             state._summary_selection = decision.summary_selection
+            state._continuous_stages = tuple(
+                str(value) for value in continuous_stages
+            )
+            state._continuous_run_actions = dict(continuous_run_actions)
+            state._apply_terminology_decision = apply_terminology_decision
             state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
@@ -1240,6 +1257,10 @@ class WebTaskManager:
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
+        final_review: bool = False,
+        continuous_stages: tuple[str, ...] = (),
+        continuous_run_actions: Mapping[str, str] | None = None,
+        apply_terminology_decision: bool = False,
     ) -> None:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
@@ -1253,6 +1274,52 @@ class WebTaskManager:
 
         def boundary_progress(completed: int, failed: int, total: int) -> None:
             state.summary_selection_counts = (completed, failed, total)
+
+        def continuous_stage(
+            stage: str, status: str, step: Mapping[str, Any]
+        ) -> None:
+            state.current_stage = stage
+            for index, current in enumerate(state.steps):
+                if current.get("stage") == stage:
+                    state.steps[index] = dict(step)
+                    break
+            else:
+                state.steps.append(dict(step))
+            state.completed_segments = sum(
+                int(item.get("completed", 0)) for item in state.steps
+            )
+            state.failed_segments = sum(
+                int(item.get("failed", 0)) for item in state.steps
+            )
+            state.total_segments = sum(
+                int(item.get("selected", 0)) for item in state.steps
+            )
+            failure_counts: dict[str, int] = {}
+            for current in state.steps:
+                summary = current.get("summary")
+                if not isinstance(summary, Mapping):
+                    continue
+                for key, value in (summary.get("failure_counts") or {}).items():
+                    failure_counts[str(key)] = failure_counts.get(str(key), 0) + int(
+                        value
+                    )
+            state.failure_counts = failure_counts
+
+        def continuous_progress(
+            stage: str, completed: int, failed: int, total: int
+        ) -> None:
+            continuous_stage(
+                stage,
+                "running",
+                {
+                    "stage": stage,
+                    "status": "running",
+                    "selected": total,
+                    "completed": completed,
+                    "failed": failed,
+                    "pending": max(0, total - completed - failed),
+                },
+            )
 
         def usage_changed(current: dict[str, Any] | None) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
@@ -1279,15 +1346,27 @@ class WebTaskManager:
                     prompt_language=prompt_language,
                     include_summaries=include_summaries,
                     summary_selection=summary_selection,
+                    final_review=final_review,
+                    continuous_stages=continuous_stages,
+                    continuous_run_actions=continuous_run_actions,
+                    apply_terminology_decision=apply_terminology_decision,
                 )
                 if (
                     state._start_decision is not None
                     and decision != state._start_decision
                 ):
                     raise UsageError("排队期间项目选择或设置已变化；请重新创建任务")
-                shared_limiters: dict[tuple[str, str], SlidingWindowLimiter] = {}
-                if state.stage == "run-all":
-                    for stage in LLM_STAGES:
+                shared_limiters: dict[
+                    tuple[str, str], SlidingWindowLimiter | KeyPool
+                ] = {}
+                if state.stage == CONTINUOUS_STAGE:
+                    limiter_stages = state._continuous_stages
+                elif state.stage == "run-all":
+                    limiter_stages = LLM_STAGES
+                else:
+                    limiter_stages = (state.stage,)
+                if state.stage in {CONTINUOUS_STAGE, "run-all"}:
+                    for stage in limiter_stages:
                         config = load_project_config(state.project, stage=stage)
                         key = (
                             str(config["_llm_preset_id"]),
@@ -1310,7 +1389,7 @@ class WebTaskManager:
                     ] = limiter
                     limiter_releases.append(release)
                 resume_run_id = None
-                if state.stage != "run-all":
+                if state.stage not in {"run-all", CONTINUOUS_STAGE}:
                     resume_run_id, _ = choose_running_run(
                         state.project,
                         state.stage,
@@ -1331,7 +1410,23 @@ class WebTaskManager:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
                                 usage_base = raw_usage
-                if state.stage == "content_summary":
+                if state.stage == CONTINUOUS_STAGE:
+                    summary = await run_continuous(
+                        state.project,
+                        scope,
+                        continuous_stages,
+                        limiters=shared_limiters,
+                        reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+                        run_actions=continuous_run_actions,
+                        apply_terminology_decision=apply_terminology_decision,
+                        final_review=final_review,
+                        prompt_language=prompt_language,
+                        planned_steps=state.steps,
+                        on_stage=continuous_stage,
+                        on_progress=continuous_progress,
+                        on_usage=usage_changed,
+                    )
+                elif state.stage == "content_summary":
                     summary = await aggregate_summaries(
                         state.project,
                         [
@@ -1353,6 +1448,7 @@ class WebTaskManager:
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
                         plan=decision.plan,
+                        final_review=final_review,
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(
@@ -1389,7 +1485,7 @@ class WebTaskManager:
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
                     )
-                else:
+                elif state.stage == "run-all":
                     summary = await run_all(
                         state.project,
                         scope,
@@ -1399,8 +1495,24 @@ class WebTaskManager:
                         on_progress=progress,
                         on_usage=usage_changed,
                     )
+                else:
+                    raise UsageError(f"未知后台阶段：{state.stage}")
             state.summary = summary
-            if state.stage == "content_summary":
+            if state.stage == CONTINUOUS_STAGE:
+                state.steps = [dict(step) for step in summary.get("steps", [])]
+                state.current_stage = (
+                    str(state.steps[-1]["stage"]) if state.steps else None
+                )
+                state.completed_segments = sum(
+                    int(step.get("completed", 0)) for step in state.steps
+                )
+                state.failed_segments = sum(
+                    int(step.get("failed", 0)) for step in state.steps
+                )
+                state.total_segments = sum(
+                    int(step.get("selected", 0)) for step in state.steps
+                )
+            elif state.stage == "content_summary":
                 if state.summary_selection_counts is not None:
                     completed, failed, total = state.summary_selection_counts
                     state.completed_segments = completed

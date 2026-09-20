@@ -76,6 +76,7 @@ _SEMANTIC_RETRY_GUIDANCE = {
         "self_alias": "aliases 不得包含当前术语自身的 source 或 normalized。",
         "no_op_patch": "changes 必须实际修改术语状态。",
         "invalid_relationship": "请修正 alias 与 group_primary 关系，避免自指、成员指向、禁用目标、未知目标或循环。",
+        "needs_review_forbidden": "终审必须明确敲定，action 不得使用 needs_review；请在 keep、update 或 disable 中选择一个最终决定。",
     },
     "en": {
         "invalid_document": "Correct the decision JSONL records and follow the fixed field contract.",
@@ -95,6 +96,7 @@ _SEMANTIC_RETRY_GUIDANCE = {
         "self_alias": "aliases must not contain the current term's source or normalized value.",
         "no_op_patch": "changes must make an actual change to the term state.",
         "invalid_relationship": "Fix alias and group_primary relationships; avoid self-reference, member targets, disabled or unknown targets, and cycles.",
+        "needs_review_forbidden": "The final review must settle every target; action must not be needs_review. Choose a final keep, update, or disable decision.",
     },
 }
 
@@ -161,6 +163,46 @@ _PROTOCOL = {
 
 def terminology_decision_protocol(language: str) -> str:
     return _PROTOCOL[language]
+
+
+_FINAL_REVIEW_PROTOCOL = {
+    "zh-CN": (
+        "以下固定终审协议优先于可编辑中段。terms[] 是唯一决策目标；每项必须恰好输出一条 decision，"
+        "并逐字照录 normalized。anchors[]、evidence、windows、conflicts、source、disabled 和 prior action/reason "
+        "均为只读数据，不得输出 anchor 决策。每条记录必须有非空字符串 reason。终审 action 只能是 keep、update 或 disable；"
+        "keep、disable 必须且只能含 type、normalized、action、reason，update 必须且只能含 type、normalized、action、reason、changes。"
+        "changes 是 Patch，只能包含 category、description、preferred_translation、aliases、group_primary 中实际需要修改的键；"
+        "category、description、preferred_translation、group_primary 为字符串或 JSON null，aliases 为字符串数组。"
+        "description 的非空改写必须由当前说明、evidence 中的源文样本或可见 anchors 支持，不得增加无证据事实。"
+        "aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构或重复。"
+        "group_primary 只能为 null 或本次可见、启用且自身 group_primary=null 的根术语 normalized；禁止自指、指向 disabled 术语、"
+        "成员指向成员以及任何链或循环。keep 表示确认当前术语状态并清除此前 needs_review，不修改术语状态。"
+        "update 必须实际修改术语状态，并会重新启用术语；如果当前术语 disabled，空 changes 仅用于重新启用，其他 update 的 changes 不得为空且不得是 no-op。"
+        "仍存在 category 或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，disable 则通过禁用术语解决冲突。"
+        "disable 表示禁用术语。证据不足时也必须在 keep、update、disable 中选择最可靠的最终决定，禁止输出 needs_review。"
+    ),
+    "en": (
+        "The following fixed final-review contract takes precedence over the editable middle. terms[] are the only decision targets; "
+        "output exactly one decision per item and copy normalized verbatim. anchors[], evidence, windows, conflicts, source, disabled, "
+        "and prior action/reason are read-only; never output an anchor decision. Every record requires a non-empty string reason. "
+        "Final-review action may only be keep, update, or disable. keep and disable contain exactly type, normalized, action, reason; "
+        "update contains exactly type, normalized, action, reason, changes. changes is a Patch and may contain only fields actually changed "
+        "from category, description, preferred_translation, aliases, and group_primary. category, description, preferred_translation, and "
+        "group_primary use strings or JSON null; aliases is a string array. A non-empty description rewrite must be supported by the current "
+        "description, source samples in evidence, or visible anchors and must not add unsupported facts. aliases may use only source/alias "
+        "spellings visible in this request. group_primary is null or the normalized of a visible enabled root whose group_primary is null; "
+        "it must not self-reference, target a disabled term or another member, or form a chain or cycle. keep confirms the current term state "
+        "and clears the prior needs_review status without changing the term. update must make an actual state change and re-enables the term; "
+        "if the current term is disabled, empty changes are allowed only to re-enable it. Other update changes must be non-empty and not a no-op. "
+        "If category or preferred_translation conflicts remain, keep is invalid; update must provide a non-empty decision for every conflicted field, "
+        "and disable resolves the conflict by disabling the term. disable disables the term. Even with limited evidence, choose the most reliable "
+        "final decision among keep, update, and disable; never output needs_review."
+    ),
+}
+
+
+def terminology_final_review_protocol(language: str) -> str:
+    return _FINAL_REVIEW_PROTOCOL[language]
 
 
 def _retry_errors(errors: list[dict[str, Any]], language: str) -> list[dict[str, Any]]:

@@ -1,7 +1,13 @@
-import type { TaskState } from "./types";
+import type { LLMStage, TaskState } from "./types";
 
 const activeStatuses = new Set(["queued", "running", "cancelling"]);
 const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+const failureStages = new Set<LLMStage>([
+  "terminology",
+  "translation",
+  "proofreading",
+  "polishing",
+]);
 
 export function isActiveTaskStatus(status: string): boolean {
   return activeStatuses.has(status);
@@ -13,6 +19,17 @@ export function isTerminalTaskStatus(status: string): boolean {
 
 export function canCancelTaskStatus(status: string): boolean {
   return status === "queued" || status === "running";
+}
+
+export function displayableFailureStage(
+  task: Pick<TaskState, "stage" | "current_stage">,
+): LLMStage | null {
+  const candidate = task.stage === "continuous"
+    ? task.current_stage
+    : task.stage;
+  return candidate && failureStages.has(candidate as LLMStage)
+    ? candidate as LLMStage
+    : null;
 }
 
 export function mergeTaskCollection(
