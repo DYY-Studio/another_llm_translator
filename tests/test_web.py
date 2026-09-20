@@ -1701,6 +1701,61 @@ def test_web_persists_epub_file_run_options_without_project_level_settings(
     assert state["run_options"]["ruby_mode"] == "short_xml"
 
 
+def test_web_task_options_expose_readable_run_option_values_and_mixed_state(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    first = tmp_path / "first.epub"
+    second = tmp_path / "second.epub"
+    make_epub(first)
+    make_epub(second)
+    client = TestClient(create_app(projects_root=projects_root))
+
+    created = client.post(
+        "/api/v1/projects",
+        data={"name": "readable-run-options"},
+        files=[
+            ("files", ("first.epub", first.read_bytes(), "application/epub+zip")),
+            ("files", ("second.epub", second.read_bytes(), "application/epub+zip")),
+        ],
+    )
+    assert created.status_code == 200
+
+    uniform = client.get(
+        "/api/v1/projects/readable-run-options/task-options/translation"
+    )
+    assert uniform.status_code == 200
+    epub_summary = next(
+        item
+        for item in uniform.json()["document_adapter_run_options"]
+        if item["adapter_id"] == "epub"
+    )
+    ruby_option = next(
+        item for item in epub_summary["options"] if item["option_id"] == "ruby_mode"
+    )
+    assert ruby_option["value"] == "青空格式｜原文《Ruby》"
+
+    changed = client.put(
+        "/api/v1/projects/readable-run-options/files/F0002/run-options",
+        json={"options": {"ruby_mode": "short_xml"}},
+    )
+    assert changed.status_code == 200
+
+    mixed = client.get(
+        "/api/v1/projects/readable-run-options/task-options/translation"
+    )
+    assert mixed.status_code == 200
+    epub_summary = next(
+        item
+        for item in mixed.json()["document_adapter_run_options"]
+        if item["adapter_id"] == "epub"
+    )
+    ruby_option = next(
+        item for item in epub_summary["options"] if item["option_id"] == "ruby_mode"
+    )
+    assert ruby_option["value"] is None
+
+
 def test_web_replacement_options_use_file_values_and_preview_overrides(
     tmp_path: Path,
 ) -> None:

@@ -102,7 +102,7 @@ def _document_adapter_run_option_summary(project: Path) -> list[dict[str, Any]]:
                         "option_id": option.option_id,
                         "label": option.label,
                         "value": (
-                            values[0][option.option_id]
+                            dict(option.choices)[values[0][option.option_id]]
                             if all(
                                 item[option.option_id]
                                 == values[0][option.option_id]
