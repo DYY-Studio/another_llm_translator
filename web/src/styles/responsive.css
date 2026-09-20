@@ -176,8 +176,9 @@
   .comparison, .context-groups { grid-template-columns: 1fr; }
   .settings-layout { display: block; }
   .settings-page { height: auto; display: block; overflow: visible; }
-  .settings-navigation { position: sticky; top: calc(58px + var(--mobile-run-status-height)); grid-template-rows: 36px 42px; padding-inline: 14px; }
-  .settings-scope-tabs, .settings-section-tabs { overflow-x: auto; }
+  .settings-navigation { position: sticky; top: calc(58px + var(--mobile-run-status-height)); grid-template-rows: minmax(36px, auto) 42px; padding-inline: 14px; }
+  .settings-scope-row { overflow: visible; }
+  .settings-section-tabs { overflow-x: auto; }
   .settings-content { overflow: visible; }
   .settings-main { overflow: visible; padding: 0 14px 60px; border: 0; }
   .storage-page { height: auto; overflow: visible; padding: 0 14px 70px; }
