@@ -6112,7 +6112,11 @@ async def test_continuous_decision_checks_next_terms_revision_before_apply(
         stages,
         apply_terminology_decision=True,
     )
-    assert preflight["blocking"] == []
+    assert any(
+        item["code"] == "mismatched_fingerprint"
+        and item["stage"] == "translation"
+        for item in preflight["blocking"]
+    )
     draft = {
         "proposals": [{"proposal_id": "PROPOSAL-1"}],
         "rejected_proposal_ids": [],
@@ -6127,6 +6131,67 @@ async def test_continuous_decision_checks_next_terms_revision_before_apply(
         )
     assert apply_called is False
     assert translation_called is False
+
+
+def test_continuous_terminology_revision_policy_preflight_requires_explicit_strategy(
+    tmp_path: Path,
+) -> None:
+    _projects_root, project = make_project(tmp_path)
+    stages = ("terminology", "terminology_decision", "translation")
+
+    without_downstream = inspect_continuous(
+        project,
+        stages,
+        apply_terminology_decision=True,
+    )
+    assert not any(
+        item["code"] == "mismatched_fingerprint"
+        and item["stage"] == "translation"
+        for item in without_downstream["blocking"]
+    )
+
+    old_fingerprint = web_continuous_module.stage_fingerprint_snapshot(
+        project, "translation"
+    )
+    segment_id = str(read_segments(project)[0]["segment_id"])
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    append_jsonl(
+        project,
+        project / "stages" / "translation.jsonl",
+        record_header(
+            "stage_result",
+            project_id,
+            stage="translation",
+            segment_id=segment_id,
+            status="completed",
+            stage_fingerprint=old_fingerprint,
+            text="old translation",
+        ),
+    )
+
+    result = inspect_continuous(
+        project,
+        stages,
+        apply_terminology_decision=True,
+    )
+
+    assert any(
+        item["code"] == "mismatched_fingerprint"
+        and item["stage"] == "translation"
+        and "terminology" in item["message"]
+        for item in result["blocking"]
+    )
+    reused = inspect_continuous(
+        project,
+        stages,
+        reuse_mixed_fingerprints=True,
+        apply_terminology_decision=True,
+    )
+    assert not any(
+        item["code"] == "mismatched_fingerprint"
+        and item["stage"] == "translation"
+        for item in reused["blocking"]
+    )
 
 
 @pytest.mark.asyncio

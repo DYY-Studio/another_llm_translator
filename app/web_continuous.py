@@ -518,6 +518,40 @@ def inspect_continuous(
                 )
             )
 
+    revision_policy_blocked_stages = {
+        str(item["stage"])
+        for item in blocking
+        if item.get("code") == "mismatched_fingerprint"
+        and item.get("stage") is not None
+    }
+
+    def block_future_terms_revision(source_stage: str) -> None:
+        if force or reuse_mixed_fingerprints:
+            return
+        source_index = normalized.index(source_stage)
+        for downstream_stage in normalized[source_index + 1 :]:
+            if downstream_stage not in {"translation", "proofreading", "polishing"}:
+                continue
+            summary = stage_summaries.get(downstream_stage)
+            if (
+                summary is None
+                or int(summary.get("completed", 0)) <= 0
+                or downstream_stage in revision_policy_blocked_stages
+            ):
+                continue
+            revision_policy_blocked_stages.add(downstream_stage)
+            blocking.append(
+                _blocking(
+                    "mismatched_fingerprint",
+                    f"上游 {source_stage} 可能改变术语 revision；"
+                    f"{downstream_stage} 已有成功结果，必须明确选择复用或 force",
+                    stage=downstream_stage,
+                )
+            )
+
+    if "terminology" in normalized:
+        block_future_terms_revision("terminology")
+
     decision_inputs: dict[str, Any] | None = None
     decision_plan_for_fingerprint: Mapping[str, Any] | None = None
     if has_decision:
@@ -605,6 +639,13 @@ def inspect_continuous(
                 decision_plan_for_fingerprint["library"],
                 final_review=decision_final_review,
             )
+        if (
+            requires_decision_apply
+            and apply_terminology_decision
+            and decision_inputs is not None
+            and decision_inputs["status"] == "ready"
+        ):
+            block_future_terms_revision("terminology_decision")
     if normalized[0] == "proofreading" and not _translation_complete(project, segments):
         blocking.append(
             _blocking(
