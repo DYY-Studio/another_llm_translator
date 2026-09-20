@@ -79,20 +79,28 @@ export function RunOptionsDialog({ project, fileId, bulkAdapterIds, language, on
     <div className="modal run-options-modal" role="dialog" aria-modal="true" aria-label={translate("runOptions.title", language)} onMouseDown={(event) => event.stopPropagation()}>
       <div className="run-options-content">
         <h2>{bulk ? translate("runOptions.bulkTitle", language) : translate("runOptions.title", language)}</h2>
-        {bulk && <label>{translate("runOptions.adapter", language)}
-          <select value={selectedAdapterId} disabled={saving} onChange={(event) => setSelectedAdapterId(event.target.value)}>
-            {(bulkAdapterIds ?? []).map((id) => <option key={id} value={id}>{id.toUpperCase()}</option>)}
-          </select>
-        </label>}
         {loading ? <p>{translate("runOptions.loading", language)}</p> : <>
-          {bulk && <><p>{translate("runOptions.applyHint", language, { count: files.length })}</p><div className="run-options-files">{files.map((file) => <span key={file.file_id}>{file.file_id} · {file.name}</span>)}</div></>}
-          {(adapter?.run_options ?? []).map((option) => <label key={option.option_id}>{option.label}
-            <select value={draft[option.option_id] ?? ""} disabled={saving} onChange={(event) => setDraft({ ...draft, [option.option_id]: event.target.value })}>
-              {bulk && <option value="">{translate("runOptions.multipleValues", language)}</option>}
-              {option.choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-            </select>
-          </label>)}
-          {bulk && <button type="button" className="quiet-button" disabled={saving} onClick={defaults}>{translate("runOptions.restoreDefaults", language)}</button>}
+          <p className="run-options-description">{translate(bulk ? "runOptions.bulkHint" : "runOptions.singleHint", language, { count: files.length })}</p>
+          <div className="run-options-scope">
+            {bulk ? <label className="run-options-adapter-select">{translate("runOptions.adapter", language)}
+              <select value={selectedAdapterId} disabled={saving} onChange={(event) => setSelectedAdapterId(event.target.value)}>
+                {(bulkAdapterIds ?? []).map((id) => <option key={id} value={id}>{id.toUpperCase()}</option>)}
+              </select>
+            </label> : <div className="run-options-scope-row"><span>{translate("runOptions.adapter", language)}</span><code>{adapter?.adapter_id ?? "—"}</code></div>}
+            <div className="run-options-scope-row run-options-file-summary">
+              <span>{translate("runOptions.fileCount", language, { count: files.length })}</span>
+              <div className="run-options-files">{files.map((file) => <span key={file.file_id}>{file.file_id} · {file.name}</span>)}</div>
+            </div>
+          </div>
+          <div className="run-options-fields">
+            {(adapter?.run_options ?? []).map((option) => <label key={option.option_id}>{option.label}
+              <select value={draft[option.option_id] ?? ""} disabled={saving} onChange={(event) => setDraft({ ...draft, [option.option_id]: event.target.value })}>
+                {bulk && <option value="">{translate("runOptions.multipleValues", language)}</option>}
+                {option.choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+              </select>
+            </label>)}
+            {bulk && <button type="button" className="quiet-button run-options-defaults" disabled={saving} onClick={defaults}>{translate("runOptions.restoreDefaults", language)}</button>}
+          </div>
         </>}
         {error && <p className="error-banner">{error}</p>}
       </div>

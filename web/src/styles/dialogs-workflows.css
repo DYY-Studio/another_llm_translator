@@ -188,6 +188,20 @@
 .run-counts { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; border-block: 1px solid var(--border); }
 .run-counts span { display: grid; gap: 3px; padding: 12px 0; color: var(--muted); font-size: 12px; }
 .run-counts strong { color: var(--text); font-size: 19px; }
+.run-adapter-options { display: grid; gap: 10px; margin-bottom: 18px; padding: 10px 12px; border-block: 1px solid var(--border); background: var(--surface-soft); }
+.run-adapter-options-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.run-adapter-options-heading strong { font-size: 12px; }
+.run-adapter-options .link-button { flex: none; padding: 0; border: 0; background: transparent; color: var(--accent-text); font-size: 11px; font-weight: 650; }
+.run-adapter-options .link-button:hover { text-decoration: underline; }
+.run-adapter-summary-list { display: grid; }
+.run-adapter-summary { min-width: 0; padding: 9px 0; border-top: 1px solid var(--row-border); }
+.run-adapter-summary header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.run-adapter-summary header code { color: var(--text); font-size: 12px; font-weight: 700; }
+.run-adapter-summary header span { color: var(--muted); font-size: 11px; }
+.run-adapter-summary dl { display: grid; grid-template-columns: minmax(130px, auto) minmax(0, 1fr); gap: 5px 14px; margin: 8px 0 0; font-size: 12px; }
+.run-adapter-summary dl div { display: contents; }
+.run-adapter-summary dt { color: var(--muted); }
+.run-adapter-summary dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); font-weight: 650; }
 .run-decision-info { display: grid; gap: 5px; margin-bottom: 18px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-soft); color: var(--muted); font-size: 12px; line-height: 1.45; }
 .decision-group { display: grid; gap: 8px; margin: 16px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 7px; }
 .decision-group legend { min-width: max-content; padding: 0 6px; font-size: 13px; font-weight: 700; white-space: nowrap; }

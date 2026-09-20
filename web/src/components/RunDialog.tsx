@@ -100,10 +100,15 @@ export function RunDialog({
         </div>
         {(options.document_adapter_run_options?.length ?? 0) > 0 && (
           <section className="run-adapter-options" aria-label={translate("runOptions.summaryTitle", language)}>
-            <div><strong>{translate("runOptions.summaryTitle", language)}</strong>{onOpenOverview && <button className="link-button" onClick={onOpenOverview}>{translate("runOptions.openOverview", language)}</button>}</div>
-            {options.document_adapter_run_options?.map((adapter) => (
-              <p key={adapter.adapter_id}><code>{adapter.adapter_id}</code> · {translate("runOptions.fileCount", language, { count: adapter.file_count })}: {adapter.options.map((option) => `${option.label}: ${option.value ?? translate("runOptions.multiple", language)}`).join(" · ")}</p>
-            ))}
+            <div className="run-adapter-options-heading"><strong>{translate("runOptions.summaryTitle", language)}</strong>{onOpenOverview && <button className="link-button" onClick={onOpenOverview}>{translate("runOptions.openOverview", language)}</button>}</div>
+            <div className="run-adapter-summary-list">
+              {options.document_adapter_run_options?.map((adapter) => (
+                <article className="run-adapter-summary" key={adapter.adapter_id}>
+                  <header><code>{adapter.adapter_id}</code><span>{translate("runOptions.fileCount", language, { count: adapter.file_count })}</span></header>
+                  <dl>{adapter.options.map((option) => <div key={option.option_id}><dt>{option.label}</dt><dd>{option.value ?? translate("runOptions.multiple", language)}</dd></div>)}</dl>
+                </article>
+              ))}
+            </div>
           </section>
         )}
         {decisionMode && <div className="run-decision-info">
