@@ -40,10 +40,7 @@ export async function openExternalUrl(url: string): Promise<void> {
     return;
   }
 
-  const popup = window.open(url, "_blank", "noopener,noreferrer");
-  if (!popup) {
-    throw new Error("Could not open external URL");
-  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export async function saveExport(

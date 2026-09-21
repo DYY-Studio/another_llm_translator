@@ -13,12 +13,12 @@ function removeWindow() {
   delete globalThis.window;
 }
 
-test("openExternalUrl opens a web link in a new tab", async () => {
+test("openExternalUrl resolves when a web link opens with noopener", async () => {
   const calls = [];
   installWindow({
     open: (...args) => {
       calls.push(args);
-      return {};
+      return null;
     },
   });
 
@@ -64,16 +64,6 @@ test("openExternalUrl fails when the native opener is unavailable", async () => 
 
   try {
     await assert.rejects(openExternalUrl(guideUrl), /Tauri opener is unavailable/);
-  } finally {
-    removeWindow();
-  }
-});
-
-test("openExternalUrl reports a blocked web popup", async () => {
-  installWindow({ open: () => null });
-
-  try {
-    await assert.rejects(openExternalUrl(guideUrl), /Could not open external URL/);
   } finally {
     removeWindow();
   }
