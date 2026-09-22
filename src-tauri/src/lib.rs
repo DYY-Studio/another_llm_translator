@@ -64,6 +64,7 @@ fn managed_runtime_root(
 fn python_command(python: &std::path::Path, port: &str) -> Command {
     let mut command = Command::new(python);
     command.args(["-m", "app.web", "--port", port]);
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     command
 }
 
@@ -393,6 +394,13 @@ mod tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["-m", "app.web", "--port", "9123"]
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == std::ffi::OsStr::new("PYTHONDONTWRITEBYTECODE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("1")))
         );
     }
 
