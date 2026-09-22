@@ -41,8 +41,6 @@ app/web_dist/
 /src-tauri/gen
 /src-tauri/permissions/
 
-# PyInstaller sidecar
-sidecar-dist/
 build/
 /dist/
 
