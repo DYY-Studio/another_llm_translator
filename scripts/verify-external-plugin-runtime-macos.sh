@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
 if [[ $# -ne 1 || ${1:-} != *.app || ! -d ${1:-} ]]; then
   echo "用法：$0 /path/to/Another\ LLM\ Translator.app" >&2
   exit 2
@@ -30,6 +32,9 @@ if [[ ! -x $APP_EXECUTABLE ]]; then
   echo "缺少可执行文件：$APP_EXECUTABLE" >&2
   exit 1
 fi
+
+echo "验证 packaged Python、官方插件资源和外部插件私有依赖"
+python3 "$SCRIPT_DIR/probe_packaged_plugin_dependencies.py" "$APP"
 
 PORT="$(python3 - <<'PY'
 import socket
