@@ -3,7 +3,7 @@ import type { Stage, TaskState, TaskStep, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
-import { canCancelTaskStatus, displayableFailureStage, isTerminalTaskStatus } from "../taskState";
+import { canCancelTaskStatus, displayableFailureStage, displayableTaskStepStatus, isTerminalTaskStatus } from "../taskState";
 
 const items: Array<{ id: Stage; key: string }> = [
   { id: "overview", key: "nav.overview" },
@@ -24,11 +24,13 @@ function taskStageLabelKey(stage: string): string {
 function TaskSteps({
   steps,
   currentStage,
+  taskStatus,
   language,
   compact = false,
 }: {
   steps: TaskStep[];
   currentStage?: string | null;
+  taskStatus: string;
   language: Language;
   compact?: boolean;
 }) {
@@ -37,7 +39,7 @@ function TaskSteps({
       {steps.map((step) => (
         <div className={`task-step${step.stage === currentStage ? " current" : ""}`} key={step.stage}>
           <span>{translate(taskStageLabelKey(step.stage), language)}</span>
-          <strong>{translate(`run.${step.status}`, language)}</strong>
+          <strong>{translate(`run.${displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus })}`, language)}</strong>
           <small>{translate("run.stepProgress", language, { completed: step.completed, failed: step.failed, pending: step.pending, total: step.selected })}</small>
         </div>
       ))}
@@ -175,7 +177,7 @@ export function AppShell({
                           <strong>{next.project}</strong>
                           <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
                         </div>
-                        {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} language={language} compact /> : (
+                        {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} taskStatus={next.status} language={language} compact /> : (
                           <div className="task-panel-progress">
                             <span>{translate("run.completedCount", language, {
                               completed: nextCompleted,
@@ -230,7 +232,7 @@ export function AppShell({
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}{task.stage === "continuous" && task.current_stage ? ` · ${translate(taskStageLabelKey(task.current_stage), language)}` : ""}</span>
           </div>
-          {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} language={language} /> : (
+          {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} taskStatus={task.status} language={language} /> : (
             <div className="run-progress">
               <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
               <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>

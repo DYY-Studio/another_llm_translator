@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canCancelTaskStatus,
   displayableFailureStage,
+  displayableTaskStepStatus,
   isActiveTaskStatus,
   isTerminalTaskStatus,
   mergeTaskCollection,
@@ -80,6 +81,106 @@ test("maps continuous failures to a displayable current stage only", () => {
     null,
   );
   assert.equal(displayableFailureStage({ stage: "content_summary" }), null);
+});
+
+test("keeps preflight-skipped continuous steps queued while terminology is running", () => {
+  const steps = [
+    { stage: "terminology", status: "running" },
+    { stage: "terminology_decision", status: "skipped" },
+    { stage: "translation", status: "queued" },
+  ];
+
+  assert.deepEqual(
+    steps.map((step) => displayableTaskStepStatus(
+      step,
+      steps,
+      { current_stage: "terminology", status: "running" },
+    )),
+    ["running", "queued", "queued"],
+  );
+});
+
+test("keeps ready continuous steps queued after the current stage", () => {
+  const steps = [
+    { stage: "terminology", status: "running" },
+    { stage: "terminology_decision", status: "ready" },
+    { stage: "translation", status: "ready" },
+  ];
+
+  assert.equal(
+    displayableTaskStepStatus(
+      steps[2],
+      steps,
+      { current_stage: "terminology", status: "running" },
+    ),
+    "queued",
+  );
+});
+
+test("keeps preflight steps queued before a task has a current stage", () => {
+  const steps = [
+    { stage: "terminology", status: "ready" },
+    { stage: "terminology_decision", status: "skipped" },
+  ];
+
+  assert.deepEqual(
+    steps.map((step) => displayableTaskStepStatus(
+      step,
+      steps,
+      { current_stage: null, status: "queued" },
+    )),
+    ["queued", "queued"],
+  );
+});
+
+test("reveals a skipped continuous step after execution advances past it", () => {
+  const steps = [
+    { stage: "terminology", status: "completed" },
+    { stage: "terminology_decision", status: "skipped" },
+    { stage: "translation", status: "running" },
+  ];
+
+  assert.equal(
+    displayableTaskStepStatus(
+      steps[1],
+      steps,
+      { current_stage: "translation", status: "running" },
+    ),
+    "skipped",
+  );
+});
+
+test("keeps a currently executing step skipped when the service reports it", () => {
+  const steps = [
+    { stage: "terminology", status: "completed" },
+    { stage: "terminology_decision", status: "skipped" },
+    { stage: "translation", status: "queued" },
+  ];
+
+  assert.equal(
+    displayableTaskStepStatus(
+      steps[1],
+      steps,
+      { current_stage: "terminology_decision", status: "running" },
+    ),
+    "skipped",
+  );
+});
+
+test("preserves terminal continuous step statuses", () => {
+  const steps = [
+    { stage: "terminology", status: "completed" },
+    { stage: "terminology_decision", status: "skipped" },
+  ];
+
+  assert.equal(
+    displayableTaskStepStatus(
+      steps[1],
+      steps,
+      { current_stage: "terminology_decision", status: "completed" },
+    ),
+    "skipped",
+  );
 });
 
 test("keeps a fetched terminal state once an observed task leaves the active list", () => {
