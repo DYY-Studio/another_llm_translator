@@ -16,6 +16,9 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
     "resources": {
       "../build/managed-runtime-dist": "managed-runtime"
     },
