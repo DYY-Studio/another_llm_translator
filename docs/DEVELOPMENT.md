@@ -124,6 +124,22 @@ wheel 时使用主虚拟环境执行 `python -m pip wheel --no-deps . --wheel-di
 sidecar 与 wheel 都不依赖插件 entry point 安装，用户插件仍从用户数据根的 `plugins/` 目录
 读取。
 
+### packaged app 的外部插件 smoke
+
+先完成完整打包，再把生成的 `.app` 传给运行时 smoke 脚本：
+
+```bash
+bash scripts/build-app.sh
+bash scripts/verify-external-plugin-runtime-macos.sh \
+  dist/another-llm-translator-<版本>-macos-arm64/Another\ LLM\ Translator.app
+```
+
+脚本使用临时用户数据根启动同一个 packaged app，必须依次通过三项检查：首次启动未加载
+临时插件；重启后发现外部 Document Adapter；通过项目创建、概览和 Segment 查询确认该
+Adapter 导入两个源文 Segment。插件字段和运行时边界见 [Adapter 契约](ADAPTERS.md)。
+
+该 smoke 仅适用于 macOS arm64 打包产物；应用未签名，首次打开可能仍需在系统设置中放行。
+
 ## 6. 调试与诊断
 
 普通日志用于查看启动、请求摘要、重试和失败原因。Debug 模式会额外保存完整请求、响应和
