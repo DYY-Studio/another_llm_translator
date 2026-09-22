@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -74,13 +75,43 @@ def _validate_app(app: Path) -> dict[str, Any]:
     if not app_executable.is_file() or not os.access(app_executable, os.X_OK):
         _fail("app_executable", f"缺少可执行应用入口：{app_executable}")
 
-    sidecar_root = (
-        contents / "Resources" / "_up_" / "sidecar-dist" / "translator-sidecar"
-    )
-    sidecar_executable = sidecar_root / "translator-sidecar"
-    if not sidecar_executable.is_file() or not os.access(sidecar_executable, os.X_OK):
-        _fail("sidecar_missing", f"缺少 packaged sidecar 入口：{sidecar_executable}")
-    resource_root = sidecar_root / "_internal"
+    runtime_root = contents / "Resources" / "managed-runtime"
+    runtime_python = runtime_root / "bin" / "python3"
+    if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+        _fail("runtime_python_missing", f"缺少 bundled Python：{runtime_python}")
+    site_packages = runtime_root / "lib" / "python3.13" / "site-packages"
+    if not site_packages.is_dir():
+        _fail("site_packages_missing", f"缺少 bundled site-packages：{site_packages}")
+    wheel_files = sorted(site_packages.glob("regex-*.dist-info/WHEEL"))
+    if len(wheel_files) != 1:
+        _fail(
+            "binary_wheel_missing",
+            f"bundled site-packages 中需要且只能有一份 regex wheel metadata：{site_packages}",
+        )
+    try:
+        wheel_tags = [
+            line.removeprefix("Tag: ").strip()
+            for line in wheel_files[0].read_text(encoding="utf-8").splitlines()
+            if line.startswith("Tag: ")
+        ]
+    except OSError as exc:
+        _fail(
+            "binary_wheel_metadata",
+            f"无法读取 regex wheel 标签 {wheel_files[0]}：{exc}",
+        )
+    compatible_tags = [
+        tag
+        for tag in wheel_tags
+        if re.fullmatch(r"cp313-cp313-macosx_(\d+)_\d+_arm64", tag)
+        and int(tag.split("_")[1]) <= 13
+    ]
+    if not compatible_tags:
+        _fail(
+            "binary_wheel_incompatible",
+            "regex wheel 必须匹配 CPython 3.13/macOS 13 arm64；"
+            f"发现标签：{wheel_tags or 'none'}",
+        )
+    resource_root = runtime_root
     official_resources = [
         resource_root / relative for relative in _OFFICIAL_PLUGIN_FILES
     ]
@@ -88,21 +119,71 @@ def _validate_app(app: Path) -> dict[str, Any]:
         if not resource.is_file():
             _fail("official_resource_missing", f"缺少官方插件资源：{resource}")
     bundled_private = sorted(
-        path for path in app.rglob(_PRIVATE_DEPENDENCY_FILE) if path.is_file()
+        path for path in runtime_root.rglob(_PRIVATE_DEPENDENCY_FILE) if path.is_file()
     )
     if bundled_private:
         _fail(
             "private_dependency_bundled",
-            "私有依赖不得存在于 .app/PyInstaller bundle："
+            "外部插件私有依赖不得预先存在于 bundled runtime："
             + ", ".join(str(path) for path in bundled_private),
         )
     return {
         "app": app,
         "bundle_executable": app_executable,
-        "sidecar_root": sidecar_root,
-        "sidecar_executable": sidecar_executable,
+        "runtime_root": runtime_root,
+        "runtime_python": runtime_python,
+        "compatible_wheel_tags": compatible_tags,
         "official_resources": official_resources,
     }
+
+
+def _check_binary_import(layout: dict[str, Any]) -> dict[str, Any]:
+    runtime_root = Path(layout["runtime_root"])
+    runtime_python = Path(layout["runtime_python"])
+    code = (
+        "import json, pathlib, platform, sys, sysconfig\n"
+        "import regex\n"
+        "import regex._regex as binary\n"
+        "expected = pathlib.Path(sys.argv[1]).resolve()\n"
+        "executable = pathlib.Path(sys.executable).resolve()\n"
+        "origin = pathlib.Path(binary.__file__).resolve()\n"
+        "if executable != expected and expected not in executable.parents:\n"
+        "    raise RuntimeError(f'Python did not execute from bundled runtime: {executable}')\n"
+        "if sys.version_info[:2] != (3, 13) or platform.machine() != 'arm64':\n"
+        "    raise RuntimeError(f'unexpected runtime ABI: {sys.version} {platform.machine()}')\n"
+        "if expected not in origin.parents:\n"
+        "    raise RuntimeError(f'regex binary did not import from bundled runtime: {origin}')\n"
+        "if origin.suffix != '.so':\n"
+        "    raise RuntimeError(f'regex import is not a macOS binary extension: {origin}')\n"
+        "if regex.fullmatch(r'\\d+', '313') is None:\n"
+        "    raise RuntimeError('regex binary import did not execute')\n"
+        "print(json.dumps({'python_executable': str(executable), 'binary_import_path': str(origin), 'platform': sysconfig.get_platform()}))\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("VIRTUAL_ENV", None)
+    result = subprocess.run(
+        [str(runtime_python), "-c", code, str(runtime_root)],
+        cwd=runtime_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "无诊断输出"
+        _fail("binary_import_failed", f"bundled regex 导入/执行失败：{detail}")
+    try:
+        evidence = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        _fail(
+            "binary_import_failed",
+            f"bundled Python 输出无效：{exc}；{result.stdout}",
+        )
+    if not isinstance(evidence, dict):
+        _fail("binary_import_failed", f"bundled Python 输出不是对象：{result.stdout}")
+    return evidence
 
 
 def _free_port() -> int:
@@ -138,8 +219,8 @@ def _wait_for_status(process: subprocess.Popen[str], url: str, log_path: Path) -
         if process.poll() is not None:
             detail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
             _fail(
-                "sidecar_exit",
-                f"packaged sidecar 在 server status 可用前退出（code={process.returncode}）：{detail}",
+                "web_exit",
+                f"bundled Web 进程在 server status 可用前退出（code={process.returncode}）：{detail}",
             )
         try:
             _request_json(url)
@@ -149,9 +230,9 @@ def _wait_for_status(process: subprocess.Popen[str], url: str, log_path: Path) -
             time.sleep(0.2)
     if last_failure is not None:
         _fail(
-            "sidecar_startup_failed", f"packaged sidecar 启动诊断失败：{last_failure}"
+            "web_startup_failed", f"bundled Web 启动诊断失败：{last_failure}"
         )
-    _fail("sidecar_timeout", f"packaged sidecar 未在期限内提供响应：{url}")
+    _fail("web_timeout", f"bundled Web 未在期限内提供响应：{url}")
 
 
 def _port_open(port: int) -> bool:
@@ -186,6 +267,10 @@ def _run_packaged_smoke(
     layout: dict[str, Any], root: Path, evidence: dict[str, Any]
 ) -> dict[str, Any]:
     fixture = _fixture_module()
+    binary_evidence = _check_binary_import(layout)
+    evidence.update(binary_evidence)
+    evidence["binary_imported"] = True
+    evidence["wheel_tags"] = layout["compatible_wheel_tags"]
     user_root = root / "user-root"
     dependency_root = root / "private-dependency"
     fixture._write_external_plugin(user_root, dependency_root)
@@ -194,7 +279,7 @@ def _run_packaged_smoke(
         "private dependency\npackaged file import\n", encoding="utf-8"
     )
     port = _free_port()
-    log_path = root / "sidecar.log"
+    log_path = root / "web.log"
     env = os.environ.copy()
     env.update(
         {
@@ -209,8 +294,8 @@ def _run_packaged_smoke(
     log_stream = log_path.open("w", encoding="utf-8")
     try:
         process = subprocess.Popen(
-            [str(layout["sidecar_executable"]), "--port", str(port)],
-            cwd=layout["sidecar_root"],
+            [str(layout["runtime_python"]), "-m", "app.web", "--port", str(port)],
+            cwd=layout["runtime_root"],
             env=env,
             stdout=log_stream,
             stderr=subprocess.STDOUT,
@@ -240,7 +325,32 @@ def _run_packaged_smoke(
             or created.get("segment_count") != 2
         ):
             _fail("file_import_failed", f"文件导入结果不匹配：{created}")
-        return {"adapter_discovered": True, "file_imported": True}
+        project_name = created.get("project_name")
+        if not isinstance(project_name, str) or not project_name:
+            _fail("project_missing", f"创建响应缺少项目名称：{created}")
+        overview = _request_json(
+            f"http://127.0.0.1:{port}/api/v1/projects/{project_name}?offset=0&limit=100"
+        )
+        if not isinstance(overview.get("files"), list) or len(overview["files"]) != 1:
+            _fail("project_missing", f"项目概览未包含导入文件：{overview}")
+        if overview["files"][0].get("document_adapter_id") != adapter_id:
+            _fail("project_adapter_mismatch", f"项目文件 Adapter 不匹配：{overview}")
+        segments = _request_json(
+            f"http://127.0.0.1:{port}/api/v1/projects/{project_name}/segments/query",
+            method="POST",
+            data=json.dumps({"offset": 0, "limit": 100}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        ).get("segments")
+        if not isinstance(segments, list) or [
+            item.get("source") for item in segments
+        ] != ["private dependency", "packaged file import"]:
+            _fail("segment_query_failed", f"Segment 查询结果不匹配：{segments}")
+        return {
+            "adapter_discovered": True,
+            "file_imported": True,
+            "project_created": True,
+            "segments_queried": True,
+        }
     finally:
         stopped, forced_kill = _stop_process(process)
         log_stream.close()
@@ -248,11 +358,11 @@ def _run_packaged_smoke(
         evidence["forced_kill"] = forced_kill
         evidence["port_released"] = _wait_for_port_release(port)
         if not stopped:
-            _fail("process_exit", "packaged sidecar 未能退出")
+            _fail("process_exit", "bundled Web 进程未能退出")
         if not evidence["port_released"]:
-            _fail("port_release", f"packaged sidecar 退出后端口仍被占用：{port}")
+            _fail("port_release", f"bundled Web 退出后端口仍被占用：{port}")
         if forced_kill:
-            _fail("forced_kill", "packaged sidecar 需要强制 KILL 才退出")
+            _fail("forced_kill", "bundled Web 进程需要强制 KILL 才退出")
 
 
 def probe(app: Path) -> dict[str, Any]:
@@ -264,6 +374,7 @@ def probe(app: Path) -> dict[str, Any]:
         "temporary_root": str(temporary_root),
         "temporary_root_removed": False,
         "forced_kill": False,
+        "process_exited": False,
         "port_released": False,
     }
     try:
@@ -271,7 +382,7 @@ def probe(app: Path) -> dict[str, Any]:
         result.update(
             {
                 "bundle_executable": str(layout["bundle_executable"]),
-                "sidecar_executable": str(layout["sidecar_executable"]),
+                "python_executable": str(layout["runtime_python"]),
                 "official_plugin_resources": [
                     str(path) for path in layout["official_resources"]
                 ],
@@ -281,7 +392,14 @@ def probe(app: Path) -> dict[str, Any]:
         result.update({"status": "ok", "port_released": True})
     except ProbeFailure as exc:
         result.update({"code": exc.code, "message": str(exc)})
-    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (
+        KeyError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        TypeError,
+        ValueError,
+    ) as exc:
         result.update({"code": "unexpected", "message": f"探针异常：{exc}"})
     finally:
         try:
