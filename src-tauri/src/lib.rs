@@ -192,6 +192,7 @@ fn exit_status_description(status: ExitStatus) -> String {
 }
 
 fn server_ready(process: &mut WebProcess, port: &str, timeout: Duration) -> Result<(), String> {
+    let poll_interval = Duration::from_millis(100);
     let address = format!("127.0.0.1:{port}");
     let socket_address: SocketAddr = match address.parse() {
         Ok(address) => address,
@@ -222,13 +223,19 @@ fn server_ready(process: &mut WebProcess, port: &str, timeout: Duration) -> Resu
         if let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, remaining) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if !remaining.is_zero()
-                && stream.set_write_timeout(Some(remaining)).is_ok()
+                && stream
+                    .set_write_timeout(Some(remaining.min(poll_interval)))
+                    .is_ok()
                 && stream
                     .write_all(b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n")
                     .is_ok()
             {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if !remaining.is_zero() && stream.set_read_timeout(Some(remaining)).is_ok() {
+                if !remaining.is_zero()
+                    && stream
+                        .set_read_timeout(Some(remaining.min(poll_interval)))
+                        .is_ok()
+                {
                     let mut buffer = [0u8; 256];
                     if stream.read(&mut buffer).is_ok() {
                         let text = String::from_utf8_lossy(&buffer);
@@ -242,7 +249,7 @@ fn server_ready(process: &mut WebProcess, port: &str, timeout: Duration) -> Resu
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if !remaining.is_zero() {
-            std::thread::sleep(remaining.min(Duration::from_millis(300)));
+            std::thread::sleep(remaining.min(poll_interval));
         }
     }
     Err(process.failure(
@@ -482,6 +489,41 @@ mod tests {
         release_tx.send(()).unwrap();
         listener_thread.join().unwrap();
         process.stop();
+    }
+
+    #[test]
+    fn server_ready_reports_child_exit_while_http_listener_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let listener_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            accepted_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 0.1; printf 'PermissionError: app.log\\n' >&2; exit 9",
+        ]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh -c <web-service>".to_string()).unwrap();
+        let started = Instant::now();
+        let error = server_ready(&mut process, &port, Duration::from_secs(2)).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(accepted_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        release_tx.send(()).unwrap();
+        listener_thread.join().unwrap();
+
+        assert!(elapsed < Duration::from_secs(1));
+        assert!(error.contains("提前退出"), "{error}");
+        assert!(error.contains("PermissionError: app.log"), "{error}");
+        assert!(error.contains("退出码：9"), "{error}");
     }
 }
 

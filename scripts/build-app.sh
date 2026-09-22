@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the macOS Tauri app bundle (ad-hoc, unsigned) with bundled managed Python.
+# Build the macOS Tauri app bundle with bundled managed Python and a local ad-hoc signature.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -50,10 +50,14 @@ if [ -z "$APP" ]; then
   echo "未找到 bundle 产物" >&2
   exit 1
 fi
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo unknown)"
 DIST="dist/another-llm-translator-${VERSION}-macos-arm64"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 cp -R "$APP" "$DIST/"
-ditto -c -k --keepParent "$APP" "$DIST/another-llm-translator-${VERSION}-macos-arm64.zip"
+DIST_APP="$DIST/$(basename "$APP")"
+codesign --verify --deep --strict --verbose=2 "$DIST_APP"
+ditto -c -k --keepParent "$DIST_APP" "$DIST/another-llm-translator-${VERSION}-macos-arm64.zip"
 echo "产物：$PWD/$DIST"
