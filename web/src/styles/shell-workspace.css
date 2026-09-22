@@ -29,9 +29,10 @@
 .task-step strong { color: var(--muted); font-size: 11px; font-weight: 650; }
 .task-step small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
 .task-steps.compact .task-step { padding: 5px 7px; }
-.task-steps.task-step-track { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: max-content; align-items: start; gap: 0; min-width: 0; height: 39px; }
-.task-steps.task-step-track::before { position: absolute; z-index: 0; top: 7px; inset-inline: 8px; height: 2px; background: var(--border); content: ""; }
-.task-step-track-item { position: relative; z-index: 1; display: grid; grid-template-columns: 16px max-content; grid-template-rows: 16px 15px; column-gap: 6px; padding: 0 4px; }
+.task-steps.task-step-track { display: grid; grid-template-rows: auto auto; gap: 5px; min-width: 0; }
+.task-step-track-stages { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); align-items: start; gap: 0; min-width: 0; }
+.task-step-track-stages::before { position: absolute; z-index: 0; top: 7px; inset-inline: 8px; height: 2px; background: var(--border); content: ""; }
+.task-step-track-item { position: relative; z-index: 1; display: grid; grid-template-columns: 16px max-content; grid-template-rows: 16px; column-gap: 6px; min-width: 0; padding: 0 4px; }
 .task-step-track-node { position: relative; z-index: 1; grid-column: 1; grid-row: 1; width: 14px; height: 14px; border: 2px solid var(--status-idle); border-radius: 50%; background: var(--surface-raised); }
 .task-step-track-item.status-running .task-step-track-node, .task-step-track-item.status-cancelling .task-step-track-node { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .task-step-track-item.status-completed .task-step-track-node { border-color: var(--status-success); background: var(--status-success); }
@@ -39,16 +40,24 @@
 .task-step-track-item.status-failed .task-step-track-node { border-color: var(--danger); background: var(--danger); }
 .task-step-track-label { position: relative; z-index: 1; grid-column: 2; grid-row: 1; padding-inline: 2px; color: var(--muted); background: var(--surface-raised); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .task-step-track-item.current .task-step-track-label { color: var(--accent-text); font-weight: 650; }
-.task-step-track-progress { position: relative; z-index: 1; grid-column: 2; grid-row: 2; padding-inline: 2px; color: var(--muted); background: var(--surface-raised); font-size: 10px; line-height: 15px; white-space: nowrap; }
+.task-step-track-current-progress { display: none; position: relative; z-index: 1; grid-column: 2; grid-row: 2; padding-inline: 2px; color: var(--muted); background: var(--surface-raised); font-size: 10px; line-height: 15px; white-space: nowrap; }
+.task-step-track-item-connector { display: none; }
+.task-step-track-progress { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.task-step-track-progress-bar { display: flex; min-width: 0; height: 5px; overflow: hidden; border-radius: 999px; background: var(--border); }
+.task-step-track-progress-bar > span { display: block; height: 100%; transition: width .2s ease; }
+.task-step-track-progress strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }
 .global-run-status > .task-step-track { min-width: 0; }
 .global-run-status.continuous { grid-template-columns: max-content minmax(0, 1fr) max-content max-content max-content; }
-.global-run-status.continuous > .task-step-track { min-width: max-content; }
+.global-run-status.continuous > .task-step-track { min-width: 0; }
 .global-run-status.terminal > .task-step-track { flex: 1 1 420px; }
 .global-run-status { grid-row: 2; grid-column: 1 / -1; min-width: 0; min-height: 54px; display: grid; grid-template-columns: minmax(150px, auto) minmax(190px, 1fr) auto minmax(0, auto) minmax(0, auto) auto; align-items: center; gap: 12px 20px; padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--surface-raised); font-size: 12px; }
 .run-identity { min-width: 0; max-width: 260px; display: grid; gap: 2px; }
 .run-identity strong { color: var(--accent-text); font-size: 13px; }
 .run-identity span, .run-progress > span, .run-tokens { color: var(--muted); }
 .run-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-identity-context { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.run-identity-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-identity-separator, .run-identity-stage { flex: 0 0 auto; white-space: nowrap; }
 .run-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(80px, 1fr); align-items: center; gap: 10px; }
 .progress-track { display: flex; height: 7px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .progress-track > span { display: block; height: 100%; transition: width .2s ease; }

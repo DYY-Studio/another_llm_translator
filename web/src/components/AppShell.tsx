@@ -35,32 +35,66 @@ function TaskSteps({
   compact?: boolean;
 }) {
   if (!compact) {
+    const currentStep = currentStage ? steps.find((step) => step.stage === currentStage) : undefined;
+    const currentTotal = currentStep?.selected ?? 0;
+    const currentCompleted = currentStep?.completed ?? 0;
+    const currentFailed = currentStep?.failed ?? 0;
+    const currentProgress = currentStep
+      ? translate("run.stepProgressCompact", language, {
+          completed: currentCompleted,
+          total: currentTotal,
+        })
+      : null;
     return (
       <div className="task-steps task-step-track" role="list" aria-label={translate("run.steps", language)}>
-        {steps.map((step) => {
-          const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
-          const current = step.stage === currentStage;
-          const label = translate(taskStageLabelKey(step.stage), language);
-          const statusLabel = translate(`run.${status}`, language);
-          const progress = translate("run.stepProgressCompact", language, {
-            completed: step.completed,
-            total: step.selected,
-          });
-          return (
-            <div
-              className={`task-step-track-item status-${status}${current ? " current" : ""}`}
-              key={step.stage}
-              role="listitem"
-              aria-current={current ? "step" : undefined}
-              aria-label={`${label}: ${statusLabel}${current ? `, ${progress}` : ""}`}
-              title={label}
-            >
-              <span className="task-step-track-node" aria-hidden="true" />
-              <span className="task-step-track-label">{label}</span>
-              {current && <small className="task-step-track-progress">{progress}</small>}
+        <div className="task-step-track-stages">
+          {steps.map((step) => {
+            const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
+            const current = step.stage === currentStage;
+            const label = translate(taskStageLabelKey(step.stage), language);
+            const statusLabel = translate(`run.${status}`, language);
+            const progress = translate("run.stepProgressCompact", language, {
+              completed: step.completed,
+              total: step.selected,
+            });
+            return (
+              <div
+                className={`task-step-track-item status-${status}${current ? " current" : ""}`}
+                key={step.stage}
+                role="listitem"
+                aria-current={current ? "step" : undefined}
+                aria-label={`${label}: ${statusLabel}${current ? `, ${progress}` : ""}`}
+                title={label}
+              >
+                <span className="task-step-track-node" aria-hidden="true" />
+                <span className="task-step-track-label">{label}</span>
+                {current && <small className="task-step-track-current-progress">{progress}</small>}
+                {current && (
+                  <span className="task-step-track-item-connector" aria-hidden="true">
+                    <span className="task-step-track-connector-completed" style={{ width: `${currentTotal ? currentCompleted / currentTotal * 100 : 0}%` }} />
+                    <span className="task-step-track-connector-failed" style={{ width: `${currentTotal ? currentFailed / currentTotal * 100 : 0}%` }} />
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {currentStep && currentProgress && (
+          <div
+            className="task-step-track-progress"
+            role="progressbar"
+            aria-label={translate("shell.taskProgress", language)}
+            aria-valuemin={0}
+            aria-valuemax={currentTotal}
+            aria-valuenow={currentCompleted + currentFailed}
+          >
+            <div className="task-step-track-progress-bar">
+              <span className="progress-completed" style={{ width: `${currentTotal ? currentCompleted / currentTotal * 100 : 0}%` }} />
+              <span className="progress-failed" style={{ width: `${currentTotal ? currentFailed / currentTotal * 100 : 0}%` }} />
             </div>
-          );
-        })}
+            <strong>{currentProgress}</strong>
+          </div>
+        )}
       </div>
     );
   }
@@ -260,7 +294,15 @@ export function AppShell({
         <section className={`global-run-status${terminal ? " terminal" : ""}${task.stage === "continuous" ? " continuous" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
-            <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}{task.stage === "continuous" && task.current_stage ? ` · ${translate(taskStageLabelKey(task.current_stage), language)}` : ""}</span>
+            {task.stage === "continuous" ? (
+              <span className="run-identity-context">
+                <span className="run-identity-project" title={task.project}>{task.project}</span>
+                <span className="run-identity-separator" aria-hidden="true">·</span>
+                <span className="run-identity-stage">{translate(taskStageLabelKey(task.current_stage ?? task.stage), language)}</span>
+              </span>
+            ) : (
+              <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}</span>
+            )}
           </div>
           {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} taskStatus={task.status} language={language} /> : (
             <div className="run-progress">
