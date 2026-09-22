@@ -137,33 +137,26 @@ def _validate_app(app: Path) -> dict[str, Any]:
     }
 
 
-def _check_binary_import(layout: dict[str, Any]) -> dict[str, Any]:
+def _check_binary_import(
+    layout: dict[str, Any],
+    plugin_root: Path,
+    dependency_root: Path,
+    dependency_env: str,
+) -> dict[str, Any]:
     runtime_root = Path(layout["runtime_root"])
     runtime_python = Path(layout["runtime_python"])
     code = (
-        "import json, pathlib, platform, sys, sysconfig\n"
-        "import regex\n"
-        "import regex._regex as binary\n"
-        "expected = pathlib.Path(sys.argv[1]).resolve()\n"
-        "executable = pathlib.Path(sys.executable).resolve()\n"
-        "origin = pathlib.Path(binary.__file__).resolve()\n"
-        "if executable != expected and expected not in executable.parents:\n"
-        "    raise RuntimeError(f'Python did not execute from bundled runtime: {executable}')\n"
-        "if sys.version_info[:2] != (3, 13) or platform.machine() != 'arm64':\n"
-        "    raise RuntimeError(f'unexpected runtime ABI: {sys.version} {platform.machine()}')\n"
-        "if expected not in origin.parents:\n"
-        "    raise RuntimeError(f'regex binary did not import from bundled runtime: {origin}')\n"
-        "if origin.suffix != '.so':\n"
-        "    raise RuntimeError(f'regex import is not a macOS binary extension: {origin}')\n"
-        "if regex.fullmatch(r'\\d+', '313') is None:\n"
-        "    raise RuntimeError('regex binary import did not execute')\n"
-        "print(json.dumps({'python_executable': str(executable), 'binary_import_path': str(origin), 'platform': sysconfig.get_platform()}))\n"
+        "import importlib, json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "plugin = importlib.import_module('plugin')\n"
+        "print(json.dumps(plugin.binary_smoke(sys.argv[2])))\n"
     )
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
+    env[dependency_env] = str(dependency_root)
     result = subprocess.run(
-        [str(runtime_python), "-c", code, str(runtime_root)],
+        [str(runtime_python), "-c", code, str(plugin_root), str(runtime_root)],
         cwd=runtime_root,
         env=env,
         capture_output=True,
@@ -173,16 +166,19 @@ def _check_binary_import(layout: dict[str, Any]) -> dict[str, Any]:
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "无诊断输出"
-        _fail("binary_import_failed", f"bundled regex 导入/执行失败：{detail}")
+        _fail("binary_import_failed", f"外部插件 binary_smoke 执行失败：{detail}")
     try:
         evidence = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         _fail(
             "binary_import_failed",
-            f"bundled Python 输出无效：{exc}；{result.stdout}",
+            f"外部插件 binary_smoke 输出无效：{exc}；{result.stdout}",
         )
     if not isinstance(evidence, dict):
-        _fail("binary_import_failed", f"bundled Python 输出不是对象：{result.stdout}")
+        _fail(
+            "binary_import_failed",
+            f"外部插件 binary_smoke 输出不是对象：{result.stdout}",
+        )
     return evidence
 
 
@@ -267,13 +263,10 @@ def _run_packaged_smoke(
     layout: dict[str, Any], root: Path, evidence: dict[str, Any]
 ) -> dict[str, Any]:
     fixture = _fixture_module()
-    binary_evidence = _check_binary_import(layout)
-    evidence.update(binary_evidence)
-    evidence["binary_imported"] = True
-    evidence["wheel_tags"] = layout["compatible_wheel_tags"]
     user_root = root / "user-root"
     dependency_root = root / "private-dependency"
-    fixture._write_external_plugin(user_root, dependency_root)
+    plugin_root = fixture._write_external_plugin(user_root, dependency_root)
+    evidence["wheel_tags"] = layout["compatible_wheel_tags"]
     input_path = root / "input.probe"
     input_path.write_text(
         "private dependency\npackaged file import\n", encoding="utf-8"
@@ -313,6 +306,12 @@ def _run_packaged_smoke(
             for item in adapters
         ):
             _fail("adapter_missing", f"未发现外部 Adapter：{adapter_id}")
+        evidence.update(
+            _check_binary_import(
+                layout, plugin_root, dependency_root, fixture._DEPENDENCY_ENV
+            )
+        )
+        evidence["binary_imported"] = True
         body, content_type = fixture._multipart_file(input_path)
         created = _request_json(
             f"http://127.0.0.1:{port}/api/v1/projects",

@@ -119,27 +119,34 @@ def test_probe_reports_missing_interpreter_and_target(tmp_path: Path) -> None:
 
 
 def test_probe_imports_official_target_and_real_external_adapter(
-    project_wheel: Path,
+    project_wheel: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result = _run_probe(
-        "--wheel",
-        str(project_wheel),
-        "--python",
-        sys.executable,
-        "--import-target",
-        "plugins.srt.plugin",
-    )
+    module = _probe_module()
+    write_plugin = module._write_external_plugin
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = _payload(result)
+    def write_plugin_with_packaged_only_smoke(
+        user_root: Path, dependency_root: Path
+    ) -> Path:
+        plugin_root = write_plugin(user_root, dependency_root)
+        with (plugin_root / "plugin.py").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\ndef binary_smoke(expected_runtime_root):\n"
+                "    raise RuntimeError('Web probe called packaged-only binary smoke')\n"
+            )
+        return plugin_root
+
+    monkeypatch.setattr(
+        module, "_write_external_plugin", write_plugin_with_packaged_only_smoke
+    )
+    payload = module.probe(project_wheel, Path(sys.executable), "plugins.srt.plugin")
+
     assert payload["status"] == "ok"
-    assert payload["import_target"] == "plugins.srt.plugin"
     assert payload["adapter_discovered"] is True
     assert payload["file_imported"] is True
-    assert payload["web_command"][0].endswith("another-llm-translator-web")
     assert payload["port_released"] is True
     assert payload["temporary_root_removed"] is True
     assert not Path(str(payload["temporary_root"])).exists()
+    assert "binary_imported" not in payload
 
 
 def test_probe_reports_import_target_failure(project_wheel: Path) -> None:

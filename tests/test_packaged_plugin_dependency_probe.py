@@ -66,8 +66,9 @@ def _make_app(
         encoding="utf-8",
     )
     (site_packages / "regex" / "_regex.py").write_text(
+        "import re\n"
         "def fullmatch(pattern, value):\n"
-        "    return value if pattern == r'\\d+' and value.isdigit() else None\n",
+        "    return re.fullmatch(pattern, value)\n",
         encoding="utf-8",
     )
     if private_dependency_bundled:
@@ -101,7 +102,8 @@ def _make_app(
         "    import types\n"
         "    binary = types.ModuleType('regex._regex')\n"
         f"    binary.__file__ = {str(site_packages / 'regex' / '_regex.cpython-313-darwin.so')!r}\n"
-        "    binary.fullmatch = lambda pattern, value: value if pattern == r'\\d+' and value.isdigit() else None\n"
+        "    import re\n"
+        "    binary.fullmatch = re.fullmatch\n"
         "    sys.modules['regex._regex'] = binary\n"
         "    exec(code, {'__name__': '__main__'})\n"
         "elif sys.argv[1:3] == ['-m', 'app.web']:\n"
@@ -285,6 +287,7 @@ def test_probe_clears_host_paths_before_bundled_runtime(tmp_path: Path) -> None:
     assert payload["adapter_discovered"] is True
     assert payload["file_imported"] is True
     assert payload["binary_imported"] is True
+    assert payload["binary_match"] == "313"
     assert payload["wheel_tags"] == ["cp313-cp313-macosx_11_0_arm64"]
     assert str(app / "Contents/Resources/managed-runtime") in str(
         payload["binary_import_path"]

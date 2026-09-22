@@ -97,10 +97,12 @@ stop_app() {
   local stop_status=0
   local child_status=0
   if [[ -n $APP_PID ]]; then
-    APP_CHILD_PIDS="$(pgrep -P "$APP_PID")" || child_status=$?
-    if ((child_status > 1)); then
-      echo "无法确认 packaged app 的 Web 子进程（pgrep exit=$child_status，parent=$APP_PID）" >&2
-      stop_status=1
+    if kill -0 "$APP_PID" 2>/dev/null; then
+      APP_CHILD_PIDS="$(pgrep -P "$APP_PID")" || child_status=$?
+      if ((child_status > 1)); then
+        echo "无法确认 packaged app 的 Web 子进程（pgrep 失败）" >&2
+        stop_status=1
+      fi
     fi
     stop_pid "$APP_PID" || stop_status=1
     APP_PID=""
