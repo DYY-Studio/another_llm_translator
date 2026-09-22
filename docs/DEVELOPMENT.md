@@ -124,6 +124,57 @@ wheel 时使用主虚拟环境执行 `python -m pip wheel --no-deps . --wheel-di
 sidecar 与 wheel 都不依赖插件 entry point 安装，用户插件仍从用户数据根的 `plugins/` 目录
 读取。
 
+### 插件依赖运行时探针（受控实验）
+
+以下两个脚本只针对明确的 wheel、解释器或 `.app` 做可复现的分发形态验证，不是公共插件依赖
+协议，也不等于运行时迁移。它们不承诺 pip 自动安装、依赖 resolver、插件市场或隔离 Host；探针
+结果不能作为这些能力已存在的依据。
+
+#### Web wheel/clean venv
+
+前置条件是已按上面的流程准备 Python 3.11+ 开发环境，并能构建 wheel。命令会创建临时 venv，
+安装给定 wheel，清除 `PYTHONPATH` 与 `VIRTUAL_ENV` 后验证官方插件导入，再启动 wheel 的 Web
+entrypoint，发现受控外部 Adapter 并导入两个 Segment：
+
+```bash
+WHEEL_DIR="$(mktemp -d)"
+python -m pip wheel --no-deps . --wheel-dir "$WHEEL_DIR"
+python scripts/probe_plugin_dependencies.py \
+  --wheel "$WHEEL_DIR"/*.whl \
+  --python "$(command -v python)" \
+  --import-target plugins.srt.plugin
+```
+
+脚本在标准输出打印一个 JSON 对象；成功时退出码为 `0` 且 `status` 为 `"ok"`，并应看到
+`dependency_imported`、`adapter_discovered`、`file_imported`、`port_released` 和
+`temporary_root_removed` 均为 `true`。临时 venv 和 fixture 会由脚本清理。此处的 pip 安装只
+是探针实现的一部分，不是应用的自动安装或 resolver 契约。
+
+失败时退出码非零，JSON 中的 `status` 为 `"error"`，`code` 和 `message` 给出定位信息；修正
+wheel、解释器或构建环境后重跑，不应把失败当作静默回落。常见输入/导入失败包括
+`wheel_missing`、`interpreter_missing`、`wheel_install` 和 `import_failed`。
+
+#### Packaged macOS
+
+前置条件是已完成 macOS arm64 的完整打包，并得到未签名 `.app`；直接探针还需要可执行的
+packaged sidecar 和官方插件资源：
+
+```bash
+bash scripts/build-app.sh
+APP="dist/another-llm-translator-<版本>-macos-arm64/Another LLM Translator.app"
+python3 scripts/probe_packaged_plugin_dependencies.py "$APP"
+```
+
+直接探针会检查 `.app` 的 bundle/sidecar 入口和官方插件资源，清除宿主 Python 路径后启动
+packaged sidecar，验证外部 Adapter、两个 Segment 的导入以及端口和进程清理。成功时退出码为
+`0`、`status` 为 `"ok"`，并应看到 `adapter_discovered`、`file_imported`、`process_exited`、
+`port_released` 和 `temporary_root_removed` 为 `true`，`forced_kill` 为 `false`。
+
+失败时退出码非零，JSON 的 `code` 和 `message` 指向 bundle、资源、sidecar 启动、导入或清理
+问题；修正 `.app` 或打包环境后重跑。`private_dependency_bundled`、`sidecar_exit`、
+`adapter_missing`、`file_import_failed`、`port_release` 和 `cleanup_failed` 等结果都必须直接
+处理，不能静默回落到其他解释器或运行时。
+
 ### packaged app 的外部插件 smoke
 
 先完成完整打包，再把生成的 `.app` 传给运行时 smoke 脚本：
