@@ -1042,6 +1042,8 @@ async def run_terminology_decision(
                     total_steps=total,
                 )
                 write_json(project, run_dir / "manifest.json", manifest)
+                if final_review_target_count and on_progress:
+                    on_progress(completed, 0, total)
                 remaining_review = [
                     item
                     for item in review_focus

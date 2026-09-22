@@ -2785,6 +2785,7 @@ async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
     final_started = asyncio.Event()
     release_final = asyncio.Event()
     calls: list[tuple[str, str]] = []
+    progress: list[tuple[int, int, int]] = []
 
     async def interrupted(*_: object, **kwargs: object) -> dict[str, dict]:
         phase = str(kwargs["phase"])
@@ -2800,9 +2801,17 @@ async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
     monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted)
     async with httpx.AsyncClient() as client:
         task = asyncio.create_task(
-            run_terminology_decision(project, final_review=True, http_client=client)
+            run_terminology_decision(
+                project,
+                final_review=True,
+                http_client=client,
+                on_progress=lambda completed, failed, total: progress.append(
+                    (completed, failed, total)
+                ),
+            )
         )
         await asyncio.wait_for(final_started.wait(), timeout=1)
+        assert progress[-1] == (4, 0, 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
