@@ -2260,7 +2260,11 @@ async def test_decision_format_repair_abstracts_and_deduplicates_document_errors
             assert all("unknown" not in message for message in messages)
             assert all("invalid_document" not in item for item in errors)
             assert any("每个非空物理行" in message for message in messages)
-            assert any("只输出协议允许" in message for message in messages)
+            assert any(
+                '术语记录的 type 必须精确为 "decision"；禁止使用 "term"'
+                in message
+                for message in messages
+            )
             assert any("最终记录必须且只能是精确" in message for message in messages)
             content = llm_jsonl(decision_response(payload))
         else:
@@ -2614,6 +2618,78 @@ async def test_final_review_resolves_pending_without_losing_phase_one_change(
         if proposal["normalized"] == ["alice"]
     )
     assert alice["preferred_translation"] == "爱丽丝"
+
+
+@pytest.mark.asyncio
+async def test_final_review_retries_term_type_as_exact_decision_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+    correction_messages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        phase = payload["phase"]
+        if phase == "adjudication":
+            content = llm_jsonl(decision_response(payload))
+        elif phase == "consistency":
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": term["normalized"],
+                        "action": (
+                            "needs_review"
+                            if term["normalized"] == "alice"
+                            else "keep"
+                        ),
+                        "reason": "待终审" if term["normalized"] == "alice" else "保持",
+                    }
+                    for term in payload["terms"]
+                ]
+            )
+        elif phase == "final_review" and "format_correction" not in payload:
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "term",
+                        "normalized": "alice",
+                        "action": "keep",
+                        "reason": "确认当前状态",
+                    }
+                ]
+            )
+        else:
+            correction = payload["format_correction"]
+            correction_messages.append(correction["errors"][0]["message"])
+            content = llm_jsonl(
+                [
+                    {
+                        "type": "decision",
+                        "normalized": "alice",
+                        "action": "keep",
+                        "reason": "确认当前状态",
+                    }
+                ]
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        summary = await run_terminology_decision(
+            project,
+            final_review=True,
+            prompt_language="zh-CN",
+            http_client=client,
+        )
+
+    assert len(correction_messages) == 1
+    assert '"decision"' in correction_messages[0]
+    assert '"term"' in correction_messages[0]
+    assert summary["needs_review"] == 0
 
 
 def test_final_review_targets_keep_protected_terms_as_anchors(tmp_path: Path) -> None:

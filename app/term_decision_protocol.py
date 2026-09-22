@@ -36,7 +36,10 @@ _JSONL_RETRY_GUIDANCE = {
         "end_record": (
             '最终记录必须且只能是精确的 {"type":"end"}，end 之后不得再有任何记录。'
         ),
-        "record_type": "只输出协议允许的 decision 记录和最终 end 记录。",
+        "record_type": (
+            '术语记录的 type 必须精确为 "decision"；禁止使用 "term"；'
+            '最终记录只能是 "end"。'
+        ),
     },
     "en": {
         "record_json": (
@@ -52,7 +55,8 @@ _JSONL_RETRY_GUIDANCE = {
             "follow it."
         ),
         "record_type": (
-            "Only output protocol-allowed decision records and the final end record."
+            'A term record must use the exact type "decision"; never use "term"; '
+            'the final record must be "end".'
         ),
     },
 }
@@ -180,6 +184,9 @@ _FINAL_REVIEW_PROTOCOL = {
         "update 必须实际修改术语状态，并会重新启用术语；如果当前术语 disabled，空 changes 仅用于重新启用，其他 update 的 changes 不得为空且不得是 no-op。"
         "仍存在 category 或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，disable 则通过禁用术语解决冲突。"
         "disable 表示禁用术语。证据不足时也必须在 keep、update、disable 中选择最可靠的最终决定，禁止输出 needs_review。"
+        "完整 JSONL 示例："
+        '{"type":"decision","normalized":"alice","action":"keep","reason":"确认当前状态"}\n'
+        '{"type":"end"}'
     ),
     "en": (
         "The following fixed final-review contract takes precedence over the editable middle. terms[] are the only decision targets; "
@@ -196,7 +203,9 @@ _FINAL_REVIEW_PROTOCOL = {
         "if the current term is disabled, empty changes are allowed only to re-enable it. Other update changes must be non-empty and not a no-op. "
         "If category or preferred_translation conflicts remain, keep is invalid; update must provide a non-empty decision for every conflicted field, "
         "and disable resolves the conflict by disabling the term. disable disables the term. Even with limited evidence, choose the most reliable "
-        "final decision among keep, update, and disable; never output needs_review."
+        "final decision among keep, update, and disable; never output needs_review. Complete JSONL example: "
+        '{"type":"decision","normalized":"alice","action":"keep","reason":"confirm current state"}\n'
+        '{"type":"end"}'
     ),
 }
 
