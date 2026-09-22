@@ -65,6 +65,8 @@ fn python_command(python: &std::path::Path, port: &str) -> Command {
     let mut command = Command::new(python);
     command.args(["-m", "app.web", "--port", port]);
     command.env("PYTHONDONTWRITEBYTECODE", "1");
+    command.env_remove("PYTHONPATH");
+    command.env_remove("PYTHONHOME");
     command
 }
 
@@ -402,6 +404,16 @@ mod tests {
                 .map(|(_, value)| value),
             Some(Some(std::ffi::OsStr::new("1")))
         );
+        for name in ["PYTHONPATH", "PYTHONHOME"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(env_name, _)| *env_name == std::ffi::OsStr::new(name))
+                    .map(|(_, value)| value),
+                Some(None),
+                "{name} must not leak into the bundled runtime"
+            );
+        }
     }
 
     #[test]
