@@ -31,9 +31,6 @@ if [[ ! -x $APP_EXECUTABLE ]]; then
   exit 1
 fi
 
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/another-llm-plugin-smoke.XXXXXX")"
-APP_PID=""
-APP_CHILD_PIDS=""
 PORT="$(python3 - <<'PY'
 import socket
 
@@ -43,25 +40,67 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 )"
 BASE_URL="http://127.0.0.1:$PORT"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/another-llm-plugin-smoke.XXXXXX")"
+APP_PID=""
+APP_CHILD_PIDS=""
+
+stop_pid() {
+  local pid=$1
+  local attempt
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for attempt in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "进程未在短时间内响应 TERM，发送 KILL：$pid" >&2
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "无法终止进程：$pid" >&2
+    return 1
+  fi
+}
 
 stop_app() {
+  local stop_status=0
   if [[ -n $APP_PID ]]; then
     APP_CHILD_PIDS="$(pgrep -P "$APP_PID" || true)"
-    kill "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
+    stop_pid "$APP_PID" || stop_status=1
     APP_PID=""
   fi
   for child_pid in $APP_CHILD_PIDS; do
-    kill "$child_pid" 2>/dev/null || true
-    wait "$child_pid" 2>/dev/null || true
+    stop_pid "$child_pid" || stop_status=1
   done
   APP_CHILD_PIDS=""
+  return "$stop_status"
 }
 
 cleanup() {
+  local exit_code=$?
+  local cleanup_status=0
   set +e
-  stop_app
-  rm -rf -- "$TEMP_ROOT"
+  stop_app || cleanup_status=1
+  wait_for_port_release || cleanup_status=1
+  if ! rm -rf -- "$TEMP_ROOT"; then
+    echo "无法删除临时目录：$TEMP_ROOT" >&2
+    cleanup_status=1
+  fi
+  if ((cleanup_status != 0)); then
+    echo "smoke 清理失败" >&2
+    if ((exit_code == 0)); then
+      exit_code=1
+    fi
+  fi
+  trap - EXIT
+  exit "$exit_code"
 }
 trap cleanup EXIT
 
@@ -78,6 +117,11 @@ PY
 wait_for_status() {
   local attempt
   for attempt in $(seq 1 120); do
+    if [[ -n $APP_PID ]] && ! kill -0 "$APP_PID" 2>/dev/null; then
+      echo "应用在 server status 可用前退出" >&2
+      tail -n 80 "$TEMP_ROOT/app.log" >&2 || true
+      return 1
+    fi
     if curl --fail --silent --show-error --connect-timeout 1 --max-time 3 \
       "$BASE_URL/api/v1/server/status" >/dev/null 2>&1; then
       return 0
