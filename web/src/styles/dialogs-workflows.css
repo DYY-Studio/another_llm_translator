@@ -93,7 +93,7 @@
 .welcome-card { width: min(460px, calc(100vw - 32px)); display: grid; gap: 14px; padding: 26px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
 .welcome-card h1 { margin: 0; }
 .welcome-card p { margin: 0; }
-.welcome-list { margin: 0; padding-left: 18px; display: grid; gap: 8px; color: var(--text); font-size: 13px; line-height: 1.6; }
+.welcome-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--text); font-size: 13px; line-height: 1.5; }
 .welcome-card .button-group { justify-content: flex-end; }
 .directory-picker-backdrop { z-index: 11; }
 .directory-picker-modal { width: min(640px, calc(100vw - 32px)); }

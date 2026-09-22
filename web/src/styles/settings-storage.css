@@ -1,10 +1,15 @@
 .settings-page { height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--surface-soft); }
-.settings-navigation { z-index: 3; display: grid; grid-template-rows: 36px 42px; padding: 7px 30px 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+.settings-navigation { z-index: 3; display: grid; grid-template-rows: minmax(36px, auto) 42px; padding: 7px 30px 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+.settings-scope-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-width: 0; }
 .settings-scope-tabs { display: flex; align-items: center; gap: 5px; }
 .settings-scope-tabs button { min-height: 28px; padding: 0 12px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; }
 .settings-scope-tabs button:hover { background: var(--hover); }
 .settings-scope-tabs button.active { border-color: var(--input-border); background: var(--surface-raised); color: var(--text); }
 .settings-scope-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.settings-guide-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin-left: auto; }
+.settings-guide-link { min-height: 28px; padding: 0 12px; border: 0; background: transparent; color: var(--accent-text); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.settings-guide-link:hover { text-decoration: underline; }
+.settings-guide-error { color: var(--danger); font-size: 11px; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
 .settings-section-tabs { display: flex; align-items: end; gap: 22px; overflow-x: auto; }
 .settings-section-tabs button { height: 42px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); white-space: nowrap; font-size: 13px; font-weight: 650; }
 .settings-section-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); }
@@ -181,7 +186,7 @@
 .error-text, .error-banner { color: var(--danger); }
 .error-banner { width: 100%; padding: 10px; border: 0; background: var(--danger-bg); }
 .error-banner-global { display: flex; align-items: center; gap: 12px; padding-inline: 20px; text-align: left; }
-.error-banner-global > span { min-width: 0; flex: 1; }
+.error-banner-global > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .error-banner-global .quiet-button { flex: none; min-height: 32px; padding-inline: 12px; }
 .success-banner { width: 100%; padding: 10px; border: 0; background: var(--surface-soft); color: var(--accent-text); text-align: left; }
 .warning-banner-sticky { position: sticky; top: 0; z-index: 5; width: 100%; margin: 0; border-radius: 0; border-width: 0 0 1px; text-align: center; }

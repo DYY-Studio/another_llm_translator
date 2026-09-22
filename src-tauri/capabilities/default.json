@@ -8,6 +8,14 @@
   "permissions": [
     "core:default",
     "mcp-bridge:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://github.com/DYY-Studio/another_llm_translator/blob/main/docs/USER_GUIDE.md#2-%E9%85%8D%E7%BD%AE%E6%A8%A1%E5%9E%8B%E8%BF%9E%E6%8E%A5%E4%B8%8E%E5%87%AD%E6%8D%AE"
+        }
+      ]
+    },
     "allow-select-file",
     "allow-select-folder",
     "allow-save-export"

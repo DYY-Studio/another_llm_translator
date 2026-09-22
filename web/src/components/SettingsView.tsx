@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
+import { openExternalUrl } from "../native";
 import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
@@ -17,9 +18,12 @@ interface AdapterRow {
   streaming_supported?: boolean;
 }
 
+const CONFIGURATION_GUIDE_URL = "https://github.com/DYY-Studio/another_llm_translator/blob/main/docs/USER_GUIDE.md#2-%E9%85%8D%E7%BD%AE%E6%A8%A1%E5%9E%8B%E8%BF%9E%E6%8E%A5%E4%B8%8E%E5%87%AD%E6%8D%AE";
+
 export function SettingsView({ project, language, focusField, onFocusConsumed }: { project: string; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
   const [scope, setScope] = useState<ConfigScope>(project ? "project" : "global");
   const [section, setSection] = useState<SettingsSection>("config");
+  const [guideError, setGuideError] = useState("");
   useEffect(() => {
     if (!project) {
       setScope("global");
@@ -39,12 +43,26 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
       setSection("config");
     }
   }, [activeScope, section]);
+  async function openConfigurationGuide() {
+    setGuideError("");
+    try {
+      await openExternalUrl(CONFIGURATION_GUIDE_URL);
+    } catch {
+      setGuideError(translate("settings.configurationGuideError", language));
+    }
+  }
   return (
     <div className="settings-page">
       <nav className="settings-navigation" aria-label={translate("settings.title", language)}>
-        <div className="settings-scope-tabs" aria-label={translate("settings.scope", language)}>
-          <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>{translate("settings.project", language)}</button>
-          <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>{translate("settings.global", language)}</button>
+        <div className="settings-scope-row">
+          <div className="settings-scope-tabs" aria-label={translate("settings.scope", language)}>
+            <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>{translate("settings.project", language)}</button>
+            <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>{translate("settings.global", language)}</button>
+          </div>
+          <div className="settings-guide-control">
+            <button type="button" className="settings-guide-link" onClick={() => void openConfigurationGuide()}>{translate("settings.configurationGuide", language)}</button>
+            {guideError && <small className="settings-guide-error" role="alert">{guideError}</small>}
+          </div>
         </div>
         <div className="settings-section-tabs" aria-label={translate("settings.sectionsAria", language, { scope: translate(activeScope === "project" ? "settings.projectShort" : "settings.globalShort", language) })}>
           <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>{translate("settings.config", language)}</button>
@@ -303,7 +321,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} help={translate("settings.jitterHint", language)} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.debug", language)} description={translate("settings.debugHint", language)} warning>
-          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} help={translate("settings.enableDebugHint", language)} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
+          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
           <NumberField label={translate("settings.inject429", language)} value={config.debug.inject_429_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_429_every = value; })} />
           <NumberField label={translate("settings.inject500", language)} value={config.debug.inject_500_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_500_every = value; })} />
           <NumberField label={translate("settings.injectTimeout", language)} value={config.debug.inject_timeout_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_timeout_every = value; })} />

@@ -705,7 +705,6 @@ export default function App() {
             </ul>
             <div className="button-group">
               <button className="primary-button" onClick={() => { void api("/api/v1/welcome/dismiss", { method: "POST" }).catch(() => {}); setWelcomeOpen(false); }}>{translate("welcome.getStarted", language)}</button>
-              <button className="quiet-button" onClick={() => { void api("/api/v1/welcome/dismiss", { method: "POST" }).catch(() => {}); setWelcomeOpen(false); }}>{translate("welcome.skip", language)}</button>
             </div>
           </div>
         </div>
