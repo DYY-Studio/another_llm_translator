@@ -34,6 +34,36 @@ function TaskSteps({
   language: Language;
   compact?: boolean;
 }) {
+  if (!compact) {
+    return (
+      <div className="task-steps task-step-track" role="list" aria-label={translate("run.steps", language)}>
+        {steps.map((step) => {
+          const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
+          const current = step.stage === currentStage;
+          const label = translate(taskStageLabelKey(step.stage), language);
+          const statusLabel = translate(`run.${status}`, language);
+          const progress = translate("run.stepProgressCompact", language, {
+            completed: step.completed,
+            total: step.selected,
+          });
+          return (
+            <div
+              className={`task-step-track-item status-${status}${current ? " current" : ""}`}
+              key={step.stage}
+              role="listitem"
+              aria-current={current ? "step" : undefined}
+              aria-label={`${label}: ${statusLabel}${current ? `, ${progress}` : ""}`}
+              title={label}
+            >
+              <span className="task-step-track-node" aria-hidden="true" />
+              <span className="task-step-track-label">{label}</span>
+              {current && <small className="task-step-track-progress">{progress}</small>}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   return (
     <div className={`task-steps${compact ? " compact" : ""}`} aria-label={translate("run.steps", language)}>
       {steps.map((step) => (
@@ -227,7 +257,7 @@ export function AppShell({
         <button className="language-button" onClick={onLanguage}>{translate("language.switch", language)}</button>
       </header>
       {task && (
-        <section className={`global-run-status${terminal ? " terminal" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
+        <section className={`global-run-status${terminal ? " terminal" : ""}${task.stage === "continuous" ? " continuous" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
             <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}{task.stage === "continuous" && task.current_stage ? ` · ${translate(taskStageLabelKey(task.current_stage), language)}` : ""}</span>
