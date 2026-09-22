@@ -28,13 +28,22 @@ def _probe_module():
 def project_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     output_dir = tmp_path_factory.mktemp("project-wheel")
     source_dir = output_dir.parent / "project-source"
-    shutil.copytree(
-        ROOT,
-        source_dir,
-        ignore=shutil.ignore_patterns(
-            ".git", ".pytest_cache", ".venv", "__pycache__", "*.egg-info"
-        ),
-    )
+    source_dir.mkdir()
+    for name in ("README.md", "MANIFEST.in", "pyproject.toml"):
+        shutil.copy2(ROOT / name, source_dir / name)
+    for name in (
+        "app",
+        "config",
+        "llm_adapters",
+        "llm_presets",
+        "plugins",
+        "prompts",
+    ):
+        shutil.copytree(
+            ROOT / name,
+            source_dir / name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"),
+        )
     result = subprocess.run(
         [
             sys.executable,
