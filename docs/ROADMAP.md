@@ -10,7 +10,7 @@
 
 ### Windows Tauri 公开 Beta
 
-**下一步**：验证 Windows bundled Python runtime、Credential Manager、Unicode/长路径、安装包签名和完整安装、
+**下一步**：验证 Windows 桌面运行时打包与启动、Credential Manager、Unicode/长路径、安装包签名和完整安装、
 升级、卸载流程。
 
 **进入条件**：有可持续验证的 Windows 构建环境和代表性安装测试机器；Web 与桌面共享的业务行为在
@@ -24,7 +24,7 @@ Windows 上无需复制业务分支。
 
 ### Linux Tauri Beta
 
-**下一步**：先确定目标发行版、包格式及 Wayland/X11 支持范围，再验证 bundled Python runtime、Secret Service、
+**下一步**：先确定目标发行版、包格式及 Wayland/X11 支持范围，再验证桌面运行时打包与启动、Secret Service、
 文件权限和局域网共享。
 
 **进入条件**：选定可维护的发行版矩阵，并具备对应 CI 或测试机器。缺少 Secret Service 时必须
