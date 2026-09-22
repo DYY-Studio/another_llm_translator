@@ -154,6 +154,7 @@ def _check_binary_import(
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env[dependency_env] = str(dependency_root)
     result = subprocess.run(
         [str(runtime_python), "-c", code, str(plugin_root), str(runtime_root)],
@@ -283,6 +284,7 @@ def _run_packaged_smoke(
     )
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     process: subprocess.Popen[str] | None = None
     log_stream = log_path.open("w", encoding="utf-8")
     try:

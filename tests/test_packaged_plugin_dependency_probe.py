@@ -26,6 +26,7 @@ def _make_app(
     *,
     dependency_failure: bool = False,
     require_clean_env: bool = False,
+    require_no_bytecode: bool = False,
     wheel_tag: str = "cp313-cp313-macosx_11_0_arm64",
     private_dependency_bundled: bool = False,
 ) -> Path:
@@ -88,6 +89,12 @@ def _make_app(
         if require_clean_env
         else ""
     )
+    no_bytecode_guard = (
+        "if os.environ.get('PYTHONDONTWRITEBYTECODE') != '1':\n"
+        "    raise SystemExit('bundled runtime may not write bytecode into the signed app')\n"
+        if require_no_bytecode
+        else ""
+    )
     runtime_python = (
         f"#!{sys.executable}\n"
         "import os, runpy, sys\n"
@@ -95,6 +102,7 @@ def _make_app(
         f"sys.path.insert(0, {str(site_packages)!r})\n"
         f"sys.path.insert(0, {root_literal})\n"
         f"{clean_env_guard}"
+        f"{no_bytecode_guard}"
         f"{failure}\n"
         "if sys.argv[1:2] == ['-c']:\n"
         "    code = sys.argv[2]\n"
@@ -292,6 +300,18 @@ def test_probe_clears_host_paths_before_bundled_runtime(tmp_path: Path) -> None:
     assert str(app / "Contents/Resources/managed-runtime") in str(
         payload["binary_import_path"]
     )
+
+
+def test_probe_disables_bytecode_for_bundled_python_children(tmp_path: Path) -> None:
+    app = _make_app(tmp_path, require_no_bytecode=True)
+
+    result = _run_probe(app)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+    assert payload["binary_imported"] is True
+    assert payload["adapter_discovered"] is True
 
 
 def test_probe_reports_missing_external_adapter(
