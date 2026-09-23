@@ -89,6 +89,7 @@ git diff --check
 根据修改范围执行必要验证：
 
 * 后端行为变更：运行相关测试，合并前优先运行完整 Python 测试。
+* 日常 `python -m pytest -q` 默认排除 `packaging` 标记探针；显式运行方式与范围见[开发指南](docs/DEVELOPMENT.md)。
 * Web 变更：运行 TypeScript 检查和前端构建，并验证受影响交互。
 * Adapter、存储、恢复或协议变更：必须覆盖对应契约和回归测试。
 * 纯文档变更：检查链接、命令、标题层级和 `git diff --check`。

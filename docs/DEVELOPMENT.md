@@ -203,8 +203,9 @@ python scripts/probe_plugin_dependencies.py \
 
 脚本在标准输出打印一个 JSON 对象；成功时退出码为 `0` 且 `status` 为 `"ok"`，并应看到
 `dependency_imported`、`adapter_discovered`、`file_imported`、`port_released` 和
-`temporary_root_removed` 均为 `true`。临时 venv 和 fixture 会由脚本清理。此处的 pip 安装只
-是探针实现的一部分，不是应用的自动安装或 resolver 契约。
+`temporary_root_removed` 均为 `true`。临时 venv 和 fixture 会由脚本清理。探针在临时 venv 中用
+pip 安装项目 wheel，因此 pip 可能下载项目声明的运行时依赖；这是安装项目 wheel 的过程，不表示
+应用会自动安装插件依赖。
 
 失败时退出码非零，JSON 中的 `status` 为 `"error"`，`code` 和 `message` 给出定位信息；修正
 wheel、解释器或构建环境后重跑，不应把失败当作静默回落。常见输入/导入失败包括
@@ -270,6 +271,20 @@ npm run typecheck --prefix web
 npm run build --prefix web
 git diff --check
 ```
+
+日常 `python -m pytest -q` 会排除 `packaging` 标记的运行时与打包探针。涉及 runtime 或打包变更时，按需显式运行：
+
+```bash
+python -m pytest -q -o addopts= -m packaging
+```
+
+该命令运行四个探针测试模块，其中 managed-runtime 构建模块仅在 macOS arm64 执行。合并 runtime 或打包变更前，如需完整 Python 测试套件，可清除默认过滤后运行：
+
+```bash
+python -m pytest -q -o addopts=
+```
+
+pytest 探针不替代真实 PBS 源归档探针或 packaged `.app` 外部插件 smoke；这两项仍分别使用上文的 `probe_managed_runtime_macos.py` 和 `verify-external-plugin-runtime-macos.sh` 单独验证。
 
 - 后端行为变更：运行相关测试，合并前优先运行完整 Python 测试。
 - Web 变更：运行 TypeScript 检查和前端构建，并在浏览器中验证受影响交互。
