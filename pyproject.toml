@@ -24,6 +24,9 @@ dependencies = [
 another-llm-translator = "app.main:main"
 another-llm-translator-web = "app.web:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests", "plugins"]
+
 [tool.setuptools]
 packages = ["app"]
 include-package-data = true

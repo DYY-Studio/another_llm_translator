@@ -16,7 +16,12 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "resources": ["../sidecar-dist/translator-sidecar"],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
+    "resources": {
+      "../build/managed-runtime-dist": "managed-runtime"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

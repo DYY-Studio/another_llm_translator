@@ -10,10 +10,10 @@
 
 ### Windows Tauri 公开 Beta
 
-**下一步**：验证 Windows sidecar、Credential Manager、Unicode/长路径、安装包签名和完整安装、
+**下一步**：验证 Windows 桌面运行时打包与启动、Credential Manager、Unicode/长路径、安装包签名和完整安装、
 升级、卸载流程。
 
-**进入条件**：有可持续验证的 Windows 构建环境和代表性安装测试机器；现有 Web/sidecar 行为在
+**进入条件**：有可持续验证的 Windows 构建环境和代表性安装测试机器；Web 与桌面共享的业务行为在
 Windows 上无需复制业务分支。
 
 **公开 Beta 门槛**：签名安装包可重复构建，外部项目与用户数据保留行为经过验证；只有用户开启
@@ -24,7 +24,7 @@ Windows 上无需复制业务分支。
 
 ### Linux Tauri Beta
 
-**下一步**：先确定目标发行版、包格式及 Wayland/X11 支持范围，再验证 sidecar、Secret Service、
+**下一步**：先确定目标发行版、包格式及 Wayland/X11 支持范围，再验证桌面运行时打包与启动、Secret Service、
 文件权限和局域网共享。
 
 **进入条件**：选定可维护的发行版矩阵，并具备对应 CI 或测试机器。缺少 Secret Service 时必须
@@ -75,10 +75,20 @@ Windows 上无需复制业务分支。
 读取和插件缺失行为。
 
 **稳定条件**：TXT、EPUB 与至少一个真实外部 Document Adapter 持续通过统一契约；出现第二个
-外部维护者后，再决定长期兼容范围和运行时安装策略。
+外部维护者后，再决定长期兼容范围和插件分发策略。
 
 **暂缓项**：远程插件、自动安装、在线市场和沙箱。当前插件是可信同进程扩展，尚无足够需求
-承担分发、隔离和安全模型的复杂度。
+承担分发、隔离和安全模型的复杂度。插件依赖运行时状态及后续平台评估见
+[插件依赖运行时](#插件依赖运行时)。
+
+### 插件依赖运行时
+
+Web wheel/venv 与 macOS bundled Python runtime 的纯 Python/二进制依赖探针和统一运行时迁移已完成。
+当前构建、验证、用户可见行为、模块边界和插件契约分别见[开发指南](DEVELOPMENT.md)、
+[用户指南](USER_GUIDE.md)、[模块职责](MODULES.md)与[Adapter 契约](ADAPTERS.md)。
+
+**后续方向**：Windows 与 Linux 是否采用相同 managed runtime，随各自桌面平台路线进入实施评估；
+进入条件见[Windows Beta](#windows-tauri-公开-beta)和[Linux Beta](#linux-tauri-beta)。
 
 ### Python LLM Adapter
 

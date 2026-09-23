@@ -9,11 +9,11 @@
 
 - `app/`：Python CLI、Web API、领域执行、存储、Adapter 宿主与导出。
 - `web/`：React/Vite/TypeScript 前端，只通过 HTTP API 使用后端能力。
-- `src-tauri/`：Tauri 2 桌面壳、sidecar 生命周期和原生选择器。
+- `src-tauri/`：Tauri 2 桌面壳、managed Python Web 进程生命周期和原生选择器。
 - `config/`、`prompts/`、`llm_adapters/`、`llm_presets/`：随应用分发的内置资源。
 - `plugins/`：可独立构建的可信 Python 示例插件。
 - `tests/`：使用临时项目和模拟模型响应的契约与工作流测试。
-- `packaging/`、`scripts/`：sidecar、前端和桌面构建入口。
+- `packaging/`、`scripts/`：PBS 与依赖 lock、managed runtime、前端和桌面构建/探针入口。
 - `docs/`：产品、协议、模块、开发、使用和路线图文档；各自职责由根目录
   [`AGENTS.md`](../AGENTS.md) 定义。
 
@@ -220,8 +220,10 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 页面局部 UI 状态留在对应 workspace/component；服务端拥有的项目、运行和结果状态必须重新
 读取 API，不在前端建立权威副本。
 
-`src-tauri/src/` 只负责桌面窗口、sidecar 生命周期和原生选择器。`packaging/` 与 `scripts/`
-负责冻结和构建；桌面壳不实现独立业务后端。
+`src-tauri/src/` 负责桌面窗口、从应用资源目录定位 bundled managed Python 并以
+`-m app.web` 启动 Web 服务、管理该进程及原生选择器；开发构建从明确的 runtime 目录启动，
+正式构建使用 app 内的 runtime。`packaging/` 与 `scripts/` 负责 runtime 组装、检查和 Tauri
+打包；桌面壳不实现独立业务后端。
 
 ## 11. 变更规则
 

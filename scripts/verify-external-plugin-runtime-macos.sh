@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
 if [[ $# -ne 1 || ${1:-} != *.app || ! -d ${1:-} ]]; then
   echo "用法：$0 /path/to/Another\ LLM\ Translator.app" >&2
   exit 2
@@ -30,6 +32,28 @@ if [[ ! -x $APP_EXECUTABLE ]]; then
   echo "缺少可执行文件：$APP_EXECUTABLE" >&2
   exit 1
 fi
+
+echo "验证 packaged Python、官方插件资源和外部插件私有依赖"
+PROBE_JSON="$(python3 "$SCRIPT_DIR/probe_packaged_plugin_dependencies.py" "$APP")"
+printf '%s\n' "$PROBE_JSON"
+python3 - "$APP" "$PROBE_JSON" <<'PY'
+import json
+import sys
+
+app, raw = sys.argv[1:]
+payload = json.loads(raw)
+runtime = app + "/Contents/Resources/managed-runtime"
+if payload.get("status") != "ok":
+    raise SystemExit(f"packaged runtime probe 未通过：{payload}")
+if not str(payload.get("python_executable", "")).startswith(runtime + "/bin/"):
+    raise SystemExit(f"探针未使用 bundled Python：{payload}")
+if payload.get("binary_imported") is not True:
+    raise SystemExit(f"探针未执行 bundled binary wheel：{payload}")
+if payload.get("wheel_tags") != ["cp313-cp313-macosx_11_0_arm64"]:
+    raise SystemExit(f"regex wheel ABI 标签不匹配：{payload.get('wheel_tags')}")
+if payload.get("adapter_discovered") is not True or payload.get("file_imported") is not True:
+    raise SystemExit(f"外部 Adapter / 文件导入失败：{payload}")
+PY
 
 PORT="$(python3 - <<'PY'
 import socket
@@ -71,8 +95,15 @@ stop_pid() {
 
 stop_app() {
   local stop_status=0
+  local child_status=0
   if [[ -n $APP_PID ]]; then
-    APP_CHILD_PIDS="$(pgrep -P "$APP_PID" || true)"
+    if kill -0 "$APP_PID" 2>/dev/null; then
+      APP_CHILD_PIDS="$(pgrep -P "$APP_PID")" || child_status=$?
+      if ((child_status > 1)); then
+        echo "无法确认 packaged app 的 Web 子进程（pgrep 失败）" >&2
+        stop_status=1
+      fi
+    fi
     stop_pid "$APP_PID" || stop_status=1
     APP_PID=""
   fi
@@ -91,6 +122,10 @@ cleanup() {
   wait_for_port_release || cleanup_status=1
   if ! rm -rf -- "$TEMP_ROOT"; then
     echo "无法删除临时目录：$TEMP_ROOT" >&2
+    cleanup_status=1
+  fi
+  if [[ -e $TEMP_ROOT ]]; then
+    echo "临时目录仍存在：$TEMP_ROOT" >&2
     cleanup_status=1
   fi
   if ((cleanup_status != 0)); then
@@ -146,7 +181,8 @@ wait_for_port_release() {
 }
 
 start_app() {
-  ANOTHER_LLM_USER_ROOT="$TEMP_ROOT" \
+  env -u PYTHONPATH -u VIRTUAL_ENV \
+    ANOTHER_LLM_USER_ROOT="$TEMP_ROOT" \
     ANOTHER_LLM_WEB_PORT="$PORT" \
     "$APP_EXECUTABLE" >"$TEMP_ROOT/app.log" 2>&1 &
   APP_PID=$!
@@ -342,4 +378,5 @@ PY
 
 stop_app
 wait_for_port_release
+echo "主应用与 Web 子进程已退出，端口已释放，临时目录将在退出清理中删除"
 echo "外部插件 packaged macOS runtime smoke 通过"

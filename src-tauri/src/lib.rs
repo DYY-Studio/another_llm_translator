@@ -6,65 +6,91 @@ use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tauri::WebviewUrl;
+use tauri::{Manager, WebviewUrl};
 
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 
-struct Sidecar {
+struct WebProcess {
     child: Child,
     source: String,
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
-static SIDECAR: Mutex<Option<Sidecar>> = Mutex::new(None);
+static WEB_PROCESS: Mutex<Option<WebProcess>> = Mutex::new(None);
 
 fn web_port() -> String {
     std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
 }
 
-fn bundled_sidecar() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let resources = exe_dir
-        .parent()?
-        .join("Resources")
-        .join("_up_")
-        .join("sidecar-dist")
-        .join("translator-sidecar")
-        .join("translator-sidecar");
-    resources.is_file().then_some(resources)
-}
-
-fn start_sidecar() -> Result<Sidecar, String> {
-    let port = web_port();
-    if let Some(executable) = bundled_sidecar() {
-        let source = executable.display().to_string();
-        let mut command = Command::new(&executable);
-        command.args(["--port", &port]);
-        return spawn_sidecar(command, source);
+fn managed_python_path(runtime_root: &std::path::Path) -> Result<PathBuf, String> {
+    let python = runtime_root.join("bin").join("python3");
+    if !python.is_file() {
+        return Err(format!(
+            "缺少内置 managed Python runtime：{}",
+            python.display()
+        ));
     }
-
-    #[cfg(debug_assertions)]
+    #[cfg(unix)]
     {
-        let python =
-            std::env::var("ANOTHER_LLM_PYTHON").unwrap_or_else(|_| "python3".into());
-        let source = format!("开发模式：{python} -m app.web");
-        eprintln!("使用开发模式 Python sidecar：{source}");
-        let mut command = Command::new(&python);
-        command.args(["-m", "app.web", "--port", &port]);
-        if let Ok(root) = std::env::var("ANOTHER_LLM_REPO_ROOT") {
-            command.current_dir(root);
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&python)
+            .map(|metadata| metadata.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return Err(format!(
+                "内置 managed Python 不可执行：{}",
+                python.display()
+            ));
         }
-        return spawn_sidecar(command, source);
     }
-
-    #[cfg(not(debug_assertions))]
-    {
-        Err("找不到内置 sidecar（请先完成生产 sidecar 构建）".to_string())
-    }
+    Ok(python)
 }
 
-fn spawn_sidecar(mut command: Command, source: String) -> Result<Sidecar, String> {
+fn managed_runtime_root(
+    resource_dir: &std::path::Path,
+    debug_runtime_root: Option<&std::path::Path>,
+    debug_build: bool,
+) -> Result<PathBuf, String> {
+    if debug_build {
+        return debug_runtime_root
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| "开发模式缺少 ANOTHER_LLM_MANAGED_RUNTIME_DIR".to_string());
+    }
+    Ok(resource_dir.join("managed-runtime"))
+}
+
+fn python_command(python: &std::path::Path, port: &str) -> Command {
+    let mut command = Command::new(python);
+    command.args(["-m", "app.web", "--port", port]);
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
+    command.env_remove("PYTHONPATH");
+    command.env_remove("PYTHONHOME");
+    command
+}
+
+fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
+    let port = web_port();
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法定位应用资源目录：{error}"))?;
+    #[cfg(debug_assertions)]
+    let debug_runtime_root = std::env::var_os("ANOTHER_LLM_MANAGED_RUNTIME_DIR").map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let debug_runtime_root: Option<PathBuf> = None;
+    let runtime_root = managed_runtime_root(
+        &resource_dir,
+        debug_runtime_root.as_deref(),
+        cfg!(debug_assertions),
+    )?;
+    let python = managed_python_path(&runtime_root)?;
+    let source = format!("{} -m app.web --port {port}", python.display());
+    spawn_web_process(python_command(&python, &port), source)
+}
+
+fn spawn_web_process(mut command: Command, source: String) -> Result<WebProcess, String> {
     command.stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -73,19 +99,19 @@ fn spawn_sidecar(mut command: Command, source: String) -> Result<Sidecar, String
         Some(stderr) => stderr,
         None => {
             terminate_child(&mut child);
-            return Err(format!("无法捕获 sidecar 标准错误输出：{source}"));
+            return Err(format!("无法捕获 Web 服务标准错误输出：{source}"));
         }
     };
     let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LIMIT)));
     let reader_tail = Arc::clone(&stderr_tail);
     let stderr_reader = std::thread::Builder::new()
-        .name("sidecar-stderr".to_string())
+        .name("web-service-stderr".to_string())
         .spawn(move || drain_stderr(stderr, reader_tail))
         .map_err(|error| {
             terminate_child(&mut child);
-            format!("无法读取 sidecar 标准错误输出 {source}：{error}")
+            format!("无法读取 Web 服务标准错误输出 {source}：{error}")
         })?;
-    Ok(Sidecar {
+    Ok(WebProcess {
         child,
         source,
         stderr_tail,
@@ -128,14 +154,14 @@ fn append_stderr_tail(tail: &Arc<Mutex<VecDeque<u8>>>, bytes: &[u8]) {
 
 fn stderr_snapshot(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
     let Ok(tail) = tail.lock() else {
-        return "无法读取 sidecar 标准错误输出".to_string();
+        return "无法读取 Web 服务标准错误输出".to_string();
     };
     String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>())
         .trim()
         .to_string()
 }
 
-impl Sidecar {
+impl WebProcess {
     fn stop(&mut self) {
         terminate_child(&mut self.child);
         self.finish_stderr();
@@ -155,7 +181,7 @@ impl Sidecar {
             format!("{reason}\n标准错误：{stderr}")
         };
         format!(
-            "sidecar 启动失败\n阶段：{stage}\n命令：{}\n原因：{reason}",
+            "Web 服务启动失败\n阶段：{stage}\n命令：{}\n原因：{reason}",
             self.source
         )
     }
@@ -168,30 +194,28 @@ fn exit_status_description(status: ExitStatus) -> String {
         .unwrap_or_else(|| "进程被信号终止".to_string())
 }
 
-fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<(), String> {
+fn server_ready(process: &mut WebProcess, port: &str, timeout: Duration) -> Result<(), String> {
+    let poll_interval = Duration::from_millis(100);
     let address = format!("127.0.0.1:{port}");
     let socket_address: SocketAddr = match address.parse() {
         Ok(address) => address,
         Err(error) => {
-            return Err(sidecar.failure(
-                "等待服务就绪",
-                format!("服务地址无效：{error}"),
-            ));
+            return Err(process.failure("等待服务就绪", format!("服务地址无效：{error}")));
         }
     };
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        match sidecar.child.try_wait() {
+        match process.child.try_wait() {
             Ok(Some(status)) => {
-                sidecar.finish_stderr();
-                return Err(sidecar.failure(
+                process.finish_stderr();
+                return Err(process.failure(
                     "等待服务就绪",
                     format!("进程提前退出（{}）", exit_status_description(status)),
                 ));
             }
             Ok(None) => {}
             Err(error) => {
-                return Err(sidecar.failure("等待服务就绪", format!("检查进程状态失败：{error}")));
+                return Err(process.failure("等待服务就绪", format!("检查进程状态失败：{error}")));
             }
         }
 
@@ -202,15 +226,19 @@ fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<
         if let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, remaining) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if !remaining.is_zero()
-                && stream.set_write_timeout(Some(remaining)).is_ok()
                 && stream
-                    .write_all(
-                        b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n",
-                    )
+                    .set_write_timeout(Some(remaining.min(poll_interval)))
+                    .is_ok()
+                && stream
+                    .write_all(b"GET /api/v1/server/status HTTP/1.0\r\nHost: localhost\r\n\r\n")
                     .is_ok()
             {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if !remaining.is_zero() && stream.set_read_timeout(Some(remaining)).is_ok() {
+                if !remaining.is_zero()
+                    && stream
+                        .set_read_timeout(Some(remaining.min(poll_interval)))
+                        .is_ok()
+                {
                     let mut buffer = [0u8; 256];
                     if stream.read(&mut buffer).is_ok() {
                         let text = String::from_utf8_lossy(&buffer);
@@ -224,10 +252,10 @@ fn server_ready(sidecar: &mut Sidecar, port: &str, timeout: Duration) -> Result<
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if !remaining.is_zero() {
-            std::thread::sleep(remaining.min(Duration::from_millis(300)));
+            std::thread::sleep(remaining.min(poll_interval));
         }
     }
-    Err(sidecar.failure(
+    Err(process.failure(
         "等待服务就绪",
         format!("超时：无法连接 http://127.0.0.1:{port}"),
     ))
@@ -300,8 +328,8 @@ fn http_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_stderr_tail, http_request, server_ready, spawn_sidecar, stderr_snapshot,
-        STDERR_TAIL_LIMIT,
+        append_stderr_tail, http_request, managed_python_path, managed_runtime_root,
+        python_command, server_ready, spawn_web_process, stderr_snapshot, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -309,6 +337,84 @@ mod tests {
     use std::process::Command;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn release_runtime_root_uses_tauri_resources_even_with_debug_override() {
+        let root = managed_runtime_root(
+            std::path::Path::new("/App/Contents/Resources"),
+            Some(std::path::Path::new("/staging/runtime")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            root,
+            std::path::Path::new("/App/Contents/Resources/managed-runtime")
+        );
+    }
+
+    #[test]
+    fn debug_runtime_root_requires_and_uses_explicit_staging() {
+        let resources = std::path::Path::new("/App/Contents/Resources");
+        assert!(managed_runtime_root(resources, None, true).is_err());
+
+        let staging = std::path::Path::new("/build/managed-runtime-dist");
+        let root = managed_runtime_root(resources, Some(staging), true).unwrap();
+        assert_eq!(root, staging);
+        assert!(managed_python_path(&root).is_err());
+    }
+
+    #[test]
+    fn managed_python_path_requires_staged_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "managed-runtime-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+
+        assert!(managed_python_path(&root).is_err());
+
+        let python = root.join("bin/python3");
+        std::fs::write(&python, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(managed_python_path(&root).unwrap(), python);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_python_command_runs_the_web_module_with_the_requested_port() {
+        let command = python_command(std::path::Path::new("/runtime/bin/python3"), "9123");
+        assert_eq!(command.get_program(), "/runtime/bin/python3");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-m", "app.web", "--port", "9123"]
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == std::ffi::OsStr::new("PYTHONDONTWRITEBYTECODE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("1")))
+        );
+        for name in ["PYTHONPATH", "PYTHONHOME"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(env_name, _)| *env_name == std::ffi::OsStr::new(name))
+                    .map(|(_, value)| value),
+                Some(None),
+                "{name} must not leak into the bundled runtime"
+            );
+        }
+    }
 
     #[test]
     fn http_request_preserves_error_response_body() {
@@ -351,11 +457,12 @@ mod tests {
             "-c",
             "printf 'plugin=/tmp/plugins/demo/plugin.toml: invalid protocol\\n' >&2; exit 7",
         ]);
-        let mut sidecar = spawn_sidecar(command, "/bin/sh -c <sidecar>".to_string()).unwrap();
+        let mut process =
+            spawn_web_process(command, "/bin/sh -c <web-service>".to_string()).unwrap();
 
-        let error = server_ready(&mut sidecar, "1", Duration::from_secs(2)).unwrap_err();
+        let error = server_ready(&mut process, "1", Duration::from_secs(2)).unwrap_err();
 
-        assert!(error.contains("sidecar 启动失败"));
+        assert!(error.contains("Web 服务启动失败"));
         assert!(error.contains("等待服务就绪"));
         assert!(error.contains("提前退出"));
         assert!(error.contains("plugin=/tmp/plugins/demo/plugin.toml"));
@@ -363,17 +470,17 @@ mod tests {
     }
 
     #[test]
-    fn stopping_after_timeout_reaps_the_sidecar_process() {
+    fn stopping_after_timeout_reaps_the_web_process() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "exec sleep 60"]);
-        let mut sidecar = spawn_sidecar(command, "/bin/sh -c exec sleep".to_string()).unwrap();
+        let mut process = spawn_web_process(command, "/bin/sh -c exec sleep".to_string()).unwrap();
 
-        let error = server_ready(&mut sidecar, "1", Duration::from_millis(1)).unwrap_err();
+        let error = server_ready(&mut process, "1", Duration::from_millis(1)).unwrap_err();
         assert!(error.contains("超时"));
 
-        sidecar.stop();
+        process.stop();
 
-        assert!(sidecar.child.try_wait().unwrap().is_some());
+        assert!(process.child.try_wait().unwrap().is_some());
     }
 
     #[test]
@@ -391,9 +498,9 @@ mod tests {
 
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "exec sleep 60"]);
-        let mut sidecar = spawn_sidecar(command, "/bin/sh -c exec sleep".to_string()).unwrap();
+        let mut process = spawn_web_process(command, "/bin/sh -c exec sleep".to_string()).unwrap();
         let started = Instant::now();
-        let error = server_ready(&mut sidecar, &port, Duration::from_millis(100)).unwrap_err();
+        let error = server_ready(&mut process, &port, Duration::from_millis(100)).unwrap_err();
 
         assert!(error.contains("超时"));
         assert!(accepted_rx.recv_timeout(Duration::from_secs(1)).is_ok());
@@ -401,26 +508,55 @@ mod tests {
 
         release_tx.send(()).unwrap();
         listener_thread.join().unwrap();
-        sidecar.stop();
+        process.stop();
+    }
+
+    #[test]
+    fn server_ready_reports_child_exit_while_http_listener_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let listener_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            accepted_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 0.1; printf 'PermissionError: app.log\\n' >&2; exit 9",
+        ]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh -c <web-service>".to_string()).unwrap();
+        let started = Instant::now();
+        let error = server_ready(&mut process, &port, Duration::from_secs(2)).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(accepted_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        release_tx.send(()).unwrap();
+        listener_thread.join().unwrap();
+
+        assert!(elapsed < Duration::from_secs(1));
+        assert!(error.contains("提前退出"), "{error}");
+        assert!(error.contains("PermissionError: app.log"), "{error}");
+        assert!(error.contains("退出码：9"), "{error}");
     }
 }
 
 #[tauri::command]
-fn save_export(
-    path: String,
-    filename: String,
-    body: Option<String>,
-) -> Result<String, String> {
+fn save_export(path: String, filename: String, body: Option<String>) -> Result<String, String> {
     let method = if body.is_some() { "POST" } else { "GET" };
     let bytes = http_request(&web_port(), &path, method, body.as_deref())?;
-    let destination = rfd::FileDialog::new()
-        .set_file_name(&filename)
-        .save_file();
+    let destination = rfd::FileDialog::new().set_file_name(&filename).save_file();
     let Some(destination) = destination else {
         return Ok(String::new());
     };
-    let mut file = std::fs::File::create(&destination)
-        .map_err(|error| format!("无法创建文件：{error}"))?;
+    let mut file =
+        std::fs::File::create(&destination).map_err(|error| format!("无法创建文件：{error}"))?;
     file.write_all(&bytes)
         .map_err(|error| format!("写入文件失败：{error}"))?;
     Ok(destination.to_string_lossy().into_owned())
@@ -452,26 +588,26 @@ pub fn run() {
     builder
         .setup(|app| {
             let port = web_port();
-            let url = match start_sidecar() {
-                Ok(mut sidecar) => {
-                    match server_ready(&mut sidecar, &port, Duration::from_secs(30)) {
+            let url = match start_web_process(&app.handle()) {
+                Ok(mut process) => {
+                    match server_ready(&mut process, &port, Duration::from_secs(30)) {
                         Ok(()) => {
-                            *SIDECAR.lock().unwrap() = Some(sidecar);
+                            *WEB_PROCESS.lock().unwrap() = Some(process);
                             WebviewUrl::External(
                                 format!("http://127.0.0.1:{port}")
                                     .parse()
-                                    .expect("invalid sidecar URL"),
+                                    .expect("invalid Web service URL"),
                             )
                         }
                         Err(error) => {
-                            sidecar.stop();
+                            process.stop();
                             eprintln!("{error}");
                             startup_error_url(&error)
                         }
                     }
                 }
                 Err(reason) => {
-                    let error = format!("sidecar 启动失败\n阶段：启动 sidecar\n原因：{reason}");
+                    let error = format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{reason}");
                     eprintln!("{error}");
                     startup_error_url(&error)
                 }
@@ -491,8 +627,8 @@ pub fn run() {
         .expect("failed to build tauri app")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                if let Some(mut sidecar) = SIDECAR.lock().unwrap().take() {
-                    sidecar.stop();
+                if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
+                    process.stop();
                 }
             }
         });
