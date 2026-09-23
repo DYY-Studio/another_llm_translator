@@ -26,6 +26,8 @@ another-llm-translator-web = "app.web:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "plugins"]
+addopts = ["-m", "not packaging"]
+markers = ["packaging: runtime and packaging probe tests"]
 
 [tool.setuptools]
 packages = ["app"]

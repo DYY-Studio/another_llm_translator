@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import subprocess
 import sys
 import sysconfig
@@ -13,6 +14,14 @@ import zipfile
 from pathlib import Path
 
 import pytest
+
+pytestmark = [
+    pytest.mark.packaging,
+    pytest.mark.skipif(
+        sys.platform != "darwin" or platform.machine() != "arm64",
+        reason="managed runtime build requires macOS arm64",
+    ),
+]
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT = ROOT / "scripts" / "build_managed_runtime_macos.sh"
