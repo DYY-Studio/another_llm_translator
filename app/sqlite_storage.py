@@ -506,11 +506,15 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
             old_state = state_payload.get("state")
             if not isinstance(old_state, dict):
                 raise StorageError(f"EPUB Document Adapter 状态无效：{file_id}")
-            old_options = {
+            inner_options = {
                 key: old_state[key]
                 for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
                 if key in old_state
             }
+            outer_options = state_payload.get("run_options", {})
+            if not isinstance(outer_options, dict):
+                raise StorageError(f"EPUB 运行选项无法迁移：{file_id}: 格式无效")
+            old_options = {**inner_options, **outer_options}
             try:
                 state_payload["run_options"] = validate_document_run_options(
                     adapter, old_options

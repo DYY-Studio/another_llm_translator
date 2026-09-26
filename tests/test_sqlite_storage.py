@@ -664,6 +664,12 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             inline_format_mode="markers",
             inline_format_policy="strict",
         )
+        if version == 4:
+            state_payload["run_options"] = {
+                "ruby_mode": "short_xml",
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            }
         segment_ids = [
             str(row[0])
             for row in database.execute(
@@ -744,11 +750,19 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         )
         assert file_payload["document_adapter_version"] == "0.6"
         assert state_payload["adapter_version"] == "0.6"
-        assert state_payload["run_options"] == {
-            "ruby_mode": "compact",
-            "inline_format_mode": "markers",
-            "inline_format_policy": "strict",
-        }
+        assert state_payload["run_options"] == (
+            {
+                "ruby_mode": "compact",
+                "inline_format_mode": "markers",
+                "inline_format_policy": "strict",
+            }
+            if version == 3
+            else {
+                "ruby_mode": "short_xml",
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            }
+        )
         assert state_payload["state"].get("ruby_mode") != "compact"
         assert [
             str(row[0])
@@ -779,9 +793,19 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             )
 
 
-@pytest.mark.parametrize("ruby_mode", ["compact", None])
+@pytest.mark.parametrize(
+    ("ruby_mode", "outer_options", "should_fail"),
+    [
+        ("compact", {"inline_format_mode": "markers"}, False),
+        (None, {"inline_format_mode": "markers"}, True),
+        ("compact", {"ruby_mode": "invalid"}, True),
+    ],
+)
 def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
-    tmp_path: Path, ruby_mode: str | None
+    tmp_path: Path,
+    ruby_mode: str | None,
+    outer_options: dict[str, str],
+    should_fail: bool,
 ) -> None:
     from tests.test_documents import init_epub
 
@@ -793,6 +817,8 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
         state_payload["adapter_version"] = "0.5"
         state_payload.pop("run_options", None)
         state_payload["state"]["ruby_mode"] = ruby_mode
+        state_payload["state"].pop("inline_format_policy", None)
+        state_payload["run_options"] = outer_options
         database.execute("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'")
         database.execute(
             "UPDATE adapter_states SET payload_json = ?",
@@ -800,14 +826,19 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
         )
         database.commit()
 
-    if ruby_mode is None:
+    if should_fail:
         with pytest.raises(StorageError, match="ruby_mode"):
             ensure_supported(project)
         with sqlite3.connect(project / "project.sqlite") as database:
             assert database.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()[0] == "4"
-        assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+        backups = list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+        assert len(backups) == 1
+        with sqlite3.connect(backups[0]) as backup:
+            assert backup.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()[0] == "4"
     else:
         ensure_supported(project)
         with sqlite3.connect(project / "project.sqlite") as database:
@@ -816,7 +847,7 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
             )["run_options"]
         assert options == {
             "ruby_mode": "compact",
-            "inline_format_mode": "plain",
+            "inline_format_mode": "markers",
             "inline_format_policy": "tiered",
         }
 
