@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -672,33 +673,43 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
 
 
 _SUPPORTED_CACHE: set[Path] = set()
+_MIGRATION_BACKUP_NOTICES: dict[Path, Path] = {}
+_SCHEMA_SUPPORT_LOCK = threading.Lock()
 
 
 def ensure_supported(project: Path) -> Path | None:
     path = database_path(project)
-    if path in _SUPPORTED_CACHE:
-        return
-    if not path.is_file():
-        raise ProjectError(
-            f"项目缺少 project.sqlite 或仍使用旧 JSONL 格式：{project}；请重新创建项目"
-        )
-    try:
-        connection = _connect(path)
-        with connection:
-            if _schema_version(connection) is None:
-                raise ProjectError(
-                    "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
-                )
-            backup_path = _ensure_schema(connection, project)
-    except sqlite3.Error as exc:
-        raise StorageError(f"无法读取项目 schema：{path}: {exc}") from exc
-    finally:
+    with _SCHEMA_SUPPORT_LOCK:
+        if path in _SUPPORTED_CACHE:
+            return
+        if not path.is_file():
+            raise ProjectError(
+                f"项目缺少 project.sqlite 或仍使用旧 JSONL 格式：{project}；请重新创建项目"
+            )
         try:
-            connection.close()
-        except UnboundLocalError:
-            pass
-    _SUPPORTED_CACHE.add(path)
-    return backup_path
+            connection = _connect(path)
+            with connection:
+                if _schema_version(connection) is None:
+                    raise ProjectError(
+                        "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
+                    )
+                backup_path = _ensure_schema(connection, project)
+        except sqlite3.Error as exc:
+            raise StorageError(f"无法读取项目 schema：{path}: {exc}") from exc
+        finally:
+            try:
+                connection.close()
+            except UnboundLocalError:
+                pass
+        _SUPPORTED_CACHE.add(path)
+        if backup_path is not None:
+            _MIGRATION_BACKUP_NOTICES[path] = backup_path
+        return backup_path
+
+
+def _take_migration_backup_notice(project: Path) -> Path | None:
+    with _SCHEMA_SUPPORT_LOCK:
+        return _MIGRATION_BACKUP_NOTICES.pop(database_path(project), None)
 
 
 def _json(value: Any) -> str:

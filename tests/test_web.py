@@ -1436,6 +1436,37 @@ def test_web_open_project_rejects_unsupported_storage_schema(
     assert "schema_version" in opened.json()["error"]
 
 
+def test_web_open_project_reports_backup_after_read_triggered_upgrade(
+    tmp_path: Path,
+) -> None:
+    from tests.test_sqlite_storage import _downgrade_epub_project_to_v4
+
+    project = init_epub(tmp_path)
+    _downgrade_epub_project_to_v4(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        file_id = str(database.execute("SELECT file_id FROM files").fetchone()[0])
+    client = TestClient(create_app(projects_root=project.parent))
+
+    options = client.get(
+        f"/api/v1/projects/{project.name}/files/{file_id}/run-options"
+    )
+
+    assert options.status_code == 200
+
+    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
+
+    assert opened.status_code == 200
+    backup_warnings = [
+        warning for warning in opened.json()["warnings"] if "升级前备份位于" in warning
+    ]
+    assert len(backup_warnings) == 1
+    backup = next((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+    assert str(backup) in backup_warnings[0]
+    reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert reopened.status_code == 200
+    assert not any("升级前备份位于" in warning for warning in reopened.json()["warnings"])
+
+
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
     tmp_path: Path,
 ) -> None:

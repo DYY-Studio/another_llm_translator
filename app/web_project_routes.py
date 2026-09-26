@@ -49,6 +49,7 @@ from .sqlite_storage import (
     ensure_supported,
     read_adapter_state,
     read_json,
+    _take_migration_backup_notice,
 )
 from .user_config import user_root
 from .web_store import WebStore
@@ -499,19 +500,22 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError("项目存在运行中的任务，结束或取消任务后才能修复项目")
         with project_write_lock(root):
             warnings = ensure_missing_summary_prompts(root, app_root=app_root)
-            backup = ensure_supported(root)
-            if backup is not None:
-                warnings = [
-                    *warnings,
-                    f"项目 SQLite 已升级至当前版本；升级前备份位于 {backup}",
-                ]
+            ensure_supported(root)
             metadata = read_json(root, root / "project.json")
         remember_project(root)
+        selector = project_selector(root, metadata)
+        external = root.parent != projects_root.resolve()
+        backup = _take_migration_backup_notice(root)
+        if backup is not None:
+            warnings = [
+                *warnings,
+                f"项目 SQLite 已升级至当前版本；升级前备份位于 {backup}",
+            ]
         return {
-            "selector": project_selector(root, metadata),
+            "selector": selector,
             "name": metadata["name"],
             "path": str(root),
-            "external": root.parent != projects_root.resolve(),
+            "external": external,
             "warnings": warnings,
         }
 
