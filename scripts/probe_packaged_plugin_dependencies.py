@@ -289,7 +289,7 @@ def _run_packaged_smoke(
     log_stream = log_path.open("w", encoding="utf-8")
     try:
         process = subprocess.Popen(
-            [str(layout["runtime_python"]), "-m", "app.web", "--port", str(port)],
+            [str(layout["runtime_python"]), "-I", "-m", "app.web", "--port", str(port)],
             cwd=layout["runtime_root"],
             env=env,
             stdout=log_stream,

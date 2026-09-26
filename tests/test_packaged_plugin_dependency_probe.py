@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -45,18 +46,14 @@ def _make_app(
 
     runtime_root = contents / "Resources" / "managed-runtime"
     site_packages = runtime_root / "lib" / "python3.13" / "site-packages"
-    for relative in (
-        "plugins/srt/__init__.py",
-        "plugins/srt/adapter.py",
-        "plugins/srt/plugin.py",
-        "plugins/srt/plugin.toml",
-        "plugins/term_validation/__init__.py",
-        "plugins/term_validation/plugin.py",
-        "plugins/term_validation/plugin.toml",
-    ):
-        resource = runtime_root / relative
-        resource.parent.mkdir(parents=True, exist_ok=True)
-        resource.write_text("", encoding="utf-8")
+    site_packages.mkdir(parents=True)
+    shutil.copytree(ROOT / "app", site_packages / "app")
+    for resource_dir in ("config", "prompts", "llm_adapters", "llm_presets"):
+        shutil.copytree(ROOT / resource_dir, runtime_root / resource_dir)
+    shutil.copytree(ROOT / "plugins/srt", runtime_root / "plugins/srt")
+    shutil.copytree(
+        ROOT / "plugins/term_validation", runtime_root / "plugins/term_validation"
+    )
     (site_packages / "regex-2026.9.10.dist-info").mkdir(parents=True)
     (site_packages / "regex-2026.9.10.dist-info" / "WHEEL").write_text(
         f"Wheel-Version: 1.0\nTag: {wheel_tag}\n", encoding="utf-8"
@@ -79,7 +76,6 @@ def _make_app(
             "MARKER = 'must be injected after build'\n", encoding="utf-8"
         )
 
-    root_literal = repr(str(ROOT))
     failure = (
         "os.environ['ANOTHER_LLM_PROBE_DEPENDENCY_PATH'] = '/path/that/does/not/exist'"
         if dependency_failure
@@ -101,8 +97,8 @@ def _make_app(
         f"#!{sys.executable}\n"
         "import os, runpy, sys\n"
         f"sys.executable = {str(runtime_root / 'bin/python3')!r}\n"
+        f"sys.prefix = {str(runtime_root)!r}\n"
         f"sys.path.insert(0, {str(site_packages)!r})\n"
-        f"sys.path.insert(0, {root_literal})\n"
         f"{clean_env_guard}"
         f"{no_bytecode_guard}"
         f"{failure}\n"
@@ -116,8 +112,8 @@ def _make_app(
         "    binary.fullmatch = re.fullmatch\n"
         "    sys.modules['regex._regex'] = binary\n"
         "    exec(code, {'__name__': '__main__'})\n"
-        "elif sys.argv[1:3] == ['-m', 'app.web']:\n"
-        "    sys.argv = sys.argv[2:]\n"
+        "elif sys.argv[1:4] == ['-I', '-m', 'app.web']:\n"
+        "    sys.argv = sys.argv[3:]\n"
         "    runpy.run_module('app.web', run_name='__main__')\n"
         "else:\n"
         "    raise SystemExit(f'unexpected bundled Python arguments: {sys.argv[1:]}')\n"
@@ -220,8 +216,6 @@ def test_probe_rejects_external_dependency_prebundled_with_app(tmp_path: Path) -
 def test_probe_reports_missing_runtime_site_packages(tmp_path: Path) -> None:
     app = _make_app(tmp_path)
     site_packages = app / "Contents/Resources/managed-runtime/lib/python3.13/site-packages"
-    import shutil
-
     shutil.rmtree(site_packages)
 
     result = _run_probe(app)
