@@ -321,3 +321,51 @@ def test_storage_scan_returns_partial_results_and_blocks_affected_category(
     global_logs = next(item for item in summary["global"] if item["id"] == "logs")
     assert global_logs["can_clear"] is False
     assert global_logs["blocked_reason"]
+
+
+def test_incomplete_project_scan_blocks_all_project_cleanup_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    global_logs = user_root() / "logs"
+    global_logs.mkdir(parents=True)
+    (global_logs / "app.log").write_bytes(b"global-log")
+    (project / "logs" / "app.log").write_bytes(b"project-log")
+    (project / "output" / "result.txt").write_bytes(b"output")
+    _, run_dir = _debug_run(project)
+    finalize_run(project, run_dir, status="completed", completed=1, failed=0)
+    blocked_directory = project / "unrelated"
+    blocked_directory.mkdir()
+    manager = _manager(app_root, projects_root, project)
+    original_scandir = storage_management.os.scandir
+
+    def failing_scandir(path: object):
+        if Path(path) == blocked_directory:
+            raise OSError("permission denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(storage_management.os, "scandir", failing_scandir)
+
+    summary = manager.scan()
+    project_summary = summary["projects"][0]
+    detail = manager.scan_project(project)
+    reason = "项目存储扫描未完成，无法安全清理"
+
+    assert project_summary["complete"] is False
+    global_log_category = next(
+        item for item in summary["global"] if item["id"] == "logs"
+    )
+    assert global_log_category["can_clear"] is True
+    assert all(not item["can_clear"] for item in project_summary["categories"])
+    assert all(
+        item["blocked_reason"] == reason for item in project_summary["categories"]
+    )
+    assert all(not item["can_clear"] for item in detail["logs"])
+    assert all(item["blocked_reason"] == reason for item in detail["logs"])
+    assert all(not item["can_clear"] for item in detail["debug_runs"])
+    assert all(item["blocked_reason"] == reason for item in detail["debug_runs"])
+    assert all(not item["can_clear"] for item in detail["output_files"])
+    assert all(item["blocked_reason"] == reason for item in detail["output_files"])
+    with pytest.raises(UsageError, match="项目存储扫描未完成，无法安全清理"):
+        manager.clear_project_logs(project, confirm=True)

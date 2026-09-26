@@ -37,6 +37,7 @@ _MARKER_NAMES = frozenset({".welcome-seen"})
 _SETTINGS_DIRECTORIES = frozenset(
     {"config", "prompts", "llm_presets", "llm_adapters"}
 )
+_PROJECT_SCAN_BLOCKED_REASON = "项目存储扫描未完成，无法安全清理"
 
 
 @dataclass
@@ -667,7 +668,9 @@ class StorageManager:
             stats = scan.categories[identifier]
             blocked: str | None = None
             can_clear = False
-            if identifier in {"logs", "debug_attachments", "output"}:
+            if not scan.complete:
+                blocked = _PROJECT_SCAN_BLOCKED_REASON
+            elif identifier in {"logs", "debug_attachments", "output"}:
                 if identifier in scan.error_categories or stats.unsafe:
                     blocked = "扫描未完成或目标路径不安全"
                 elif busy_reason is not None:
@@ -742,7 +745,9 @@ class StorageManager:
         for run_id, stats in sorted(scan.run_stats.items()):
             record = scan.run_index.get(run_id, {})
             blocked: str | None = None
-            if stats.unsafe:
+            if not scan.complete:
+                blocked = _PROJECT_SCAN_BLOCKED_REASON
+            elif stats.unsafe:
                 blocked = "目标路径不安全"
             elif "debug_attachments" in scan.error_categories:
                 blocked = "扫描未完成"
@@ -767,7 +772,9 @@ class StorageManager:
         output_files = []
         for item in sorted(scan.output_files, key=lambda value: value.path):
             blocked: str | None = None
-            if item.unsafe:
+            if not scan.complete:
+                blocked = _PROJECT_SCAN_BLOCKED_REASON
+            elif item.unsafe:
                 blocked = "目标路径不安全"
             elif "output" in scan.error_categories:
                 blocked = "扫描未完成"
@@ -786,7 +793,9 @@ class StorageManager:
         logs = []
         for identifier, group in sorted(scan.log_groups.items()):
             blocked = None
-            if group.unsafe:
+            if not scan.complete:
+                blocked = _PROJECT_SCAN_BLOCKED_REASON
+            elif group.unsafe:
                 blocked = "目标路径不安全"
             elif "logs" in scan.error_categories:
                 blocked = "扫描未完成"
@@ -819,7 +828,7 @@ class StorageManager:
         if reason is not None:
             raise UsageError(f"项目当前不可清理：{reason}")
         if not scan.complete:
-            raise UsageError("项目存储扫描未完成，无法安全清理")
+            raise UsageError(_PROJECT_SCAN_BLOCKED_REASON)
         return scan
 
     def clear_global_logs(self, *, confirm: object) -> dict[str, int]:
