@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .errors import ProjectError, StorageError
+from .errors import ProjectError, StorageError, UsageError
 
 SCHEMA_VERSION = 5
 
@@ -502,8 +502,21 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
                 raise StorageError(f"Document Adapter 状态缺失：{file_id}")
             continue
         state_payload = _load(str(state_row["payload_json"]))
-        state_payload["run_options"] = defaults
         if adapter_id == "epub":
+            old_state = state_payload.get("state")
+            if not isinstance(old_state, dict):
+                raise StorageError(f"EPUB Document Adapter 状态无效：{file_id}")
+            old_options = {
+                key: old_state[key]
+                for key in ("ruby_mode", "inline_format_mode", "inline_format_policy")
+                if key in old_state
+            }
+            try:
+                state_payload["run_options"] = validate_document_run_options(
+                    adapter, old_options
+                )
+            except UsageError as exc:
+                raise StorageError(f"EPUB 运行选项无法迁移：{file_id}: {exc}") from exc
             stored_name = file_payload.get("stored_name")
             if not isinstance(stored_name, str) or not stored_name:
                 raise StorageError(f"EPUB 源副本路径缺失：{file_id}")
@@ -574,6 +587,8 @@ def _migrate_to_v5(connection: sqlite3.Connection, project: Path) -> None:
                     for text, row in zip(retained_segments, old, strict=True)
                 ],
             )
+        else:
+            state_payload["run_options"] = defaults
         connection.execute(
             "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
             (_json(state_payload), file_id),

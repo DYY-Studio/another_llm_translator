@@ -658,12 +658,12 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         assert state_row is not None
         state_payload = json.loads(str(state_row["payload_json"]))
         state_payload["adapter_version"] = "0.5"
-        state_payload["run_options"] = {
-            "ruby_mode": "compact",
-            "inline_format_mode": "markers",
-            "inline_format_policy": "strict",
-        }
-        state_payload["state"]["ruby_mode"] = "compact"
+        state_payload.pop("run_options", None)
+        state_payload["state"].update(
+            ruby_mode="compact",
+            inline_format_mode="markers",
+            inline_format_policy="strict",
+        )
         segment_ids = [
             str(row[0])
             for row in database.execute(
@@ -745,9 +745,9 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         assert file_payload["document_adapter_version"] == "0.6"
         assert state_payload["adapter_version"] == "0.6"
         assert state_payload["run_options"] == {
-            "ruby_mode": "aozora",
-            "inline_format_mode": "plain",
-            "inline_format_policy": "tiered",
+            "ruby_mode": "compact",
+            "inline_format_mode": "markers",
+            "inline_format_policy": "strict",
         }
         assert state_payload["state"].get("ruby_mode") != "compact"
         assert [
@@ -777,6 +777,48 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             assert json.loads(str(summary_run["payload_json"]))["error_message"] == (
                 "Document Adapter 运行协议已升级、必须新建 Run"
             )
+
+
+@pytest.mark.parametrize("ruby_mode", ["compact", None])
+def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
+    tmp_path: Path, ruby_mode: str | None
+) -> None:
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        state_payload = json.loads(
+            database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+        )
+        state_payload["adapter_version"] = "0.5"
+        state_payload.pop("run_options", None)
+        state_payload["state"]["ruby_mode"] = ruby_mode
+        database.execute("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'")
+        database.execute(
+            "UPDATE adapter_states SET payload_json = ?",
+            (json.dumps(state_payload),),
+        )
+        database.commit()
+
+    if ruby_mode is None:
+        with pytest.raises(StorageError, match="ruby_mode"):
+            ensure_supported(project)
+        with sqlite3.connect(project / "project.sqlite") as database:
+            assert database.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()[0] == "4"
+        assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+    else:
+        ensure_supported(project)
+        with sqlite3.connect(project / "project.sqlite") as database:
+            options = json.loads(
+                database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+            )["run_options"]
+        assert options == {
+            "ruby_mode": "compact",
+            "inline_format_mode": "plain",
+            "inline_format_policy": "tiered",
+        }
 
 
 @pytest.mark.parametrize("version", [1, 2])
