@@ -335,7 +335,15 @@ export function StorageView({ language }: { language: Language }) {
                           </td>
                           <td>{formatSize(item.total_bytes)}</td>
                           <td>{formatSize(item.reclaimable_bytes)}</td>
-                          <td><ItemStatus canClear={item.complete && item.reclaimable_bytes > 0} blockedReason={item.complete ? "没有可清理文件" : "扫描未完成"} language={language} /></td>
+                          <td>
+                            <ItemStatus
+                              canClear={item.categories.some((category) => category.reclaimable_bytes > 0 && category.can_clear)}
+                              blockedReason={item.complete
+                                ? item.categories.find((category) => category.reclaimable_bytes > 0)?.blocked_reason ?? "没有可清理文件"
+                                : "扫描未完成"}
+                              language={language}
+                            />
+                          </td>
                         </tr>
                       ))}
                     </tbody>
