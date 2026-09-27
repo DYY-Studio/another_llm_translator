@@ -127,20 +127,26 @@ def create_app(
         if normalized.parent != projects_root.resolve():
             app.state.external_projects.add(normalized)
 
+    def local_project_paths() -> list[Path]:
+        if not projects_root.exists():
+            return []
+        return [
+            item
+            for item in sorted(projects_root.iterdir(), key=lambda value: value.name)
+            if database_path(item).is_file()
+        ]
+
     def project_paths() -> list[Path]:
-        paths: list[Path] = []
-        if projects_root.exists():
-            paths.extend(
-                item
-                for item in sorted(projects_root.iterdir(), key=lambda value: value.name)
-                if database_path(item).is_file()
-            )
+        paths = local_project_paths()
         paths.extend(
             path
             for path in sorted(app.state.external_projects)
             if database_path(path).is_file()
         )
         return list({path.resolve() for path in paths})
+
+    def storage_project_paths() -> list[Path]:
+        return [*local_project_paths(), *sorted(app.state.external_projects)]
 
     def project(name: str) -> Path:
         if not name or "/" in name or "\\" in name or name in {".", ".."}:
@@ -161,7 +167,7 @@ def create_app(
         user_data_root=user_root(),
         projects_root=projects_root,
         app_root=app_root,
-        project_paths=project_paths,
+        project_paths=storage_project_paths,
         global_log_path=app.state.diagnostics.log_path,
         is_project_running=lambda root: app.state.tasks.is_project_running(root),
         has_active_tasks=lambda: bool(app.state.tasks.active_tasks()),

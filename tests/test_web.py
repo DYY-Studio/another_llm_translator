@@ -797,6 +797,23 @@ def test_web_segment_query_rejects_non_finite_window_values(
     }
 
 
+def test_web_storage_reports_unavailable_registered_external_project(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    unavailable = tmp_path / "registered-unavailable"
+    app.state.external_projects.add(unavailable)
+
+    response = TestClient(app).get("/api/v1/storage")
+
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["complete"] is False
+    assert any(str(unavailable) in error for error in summary["errors"])
+    assert any(item["path"] == str(project) for item in summary["projects"])
+
+
 def test_web_compacts_project_storage_and_blocks_running_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
