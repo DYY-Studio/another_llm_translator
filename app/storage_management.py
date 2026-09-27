@@ -564,17 +564,19 @@ class StorageManager:
         self.is_project_running = is_project_running or (lambda _project: False)
         self.has_active_tasks = has_active_tasks or (lambda: False)
 
-    def _projects(self) -> list[Path]:
+    def _projects(self) -> tuple[list[Path], list[str]]:
         values: dict[Path, Path] = {}
+        errors: list[str] = []
         for raw in self.project_paths():
             try:
                 path = _safe_resolve(Path(raw))
-            except StorageError:
+            except StorageError as exc:
+                errors.append(str(exc))
                 continue
             if path == self.app_root or _is_relative_to(path, self.app_root):
                 continue
             values[path] = path
-        return sorted(values.values(), key=lambda path: (path.name.casefold(), str(path)))
+        return sorted(values.values(), key=lambda path: (path.name.casefold(), str(path))), errors
 
     def _global_scan(self, projects: list[Path]) -> tuple[dict[str, _CategoryStats], list[str], set[str], dict[str, _LogGroup]]:
         categories = _new_categories(GLOBAL_CATEGORY_IDS)
@@ -710,13 +712,13 @@ class StorageManager:
         }
 
     def scan(self) -> dict[str, Any]:
-        projects = self._projects()
+        projects, project_errors = self._projects()
         global_categories, global_errors, global_error_categories, _ = (
             self._global_scan(projects)
         )
         project_scans = [_scan_project(path, self.projects_root) for path in projects]
         project_summaries = [self._project_summary(scan) for scan in project_scans]
-        errors = [*global_errors, *(error for scan in project_scans for error in scan.errors)]
+        errors = [*project_errors, *global_errors, *(error for scan in project_scans for error in scan.errors)]
         global_values = self._global_categories(
             global_categories, global_errors, global_error_categories
         )

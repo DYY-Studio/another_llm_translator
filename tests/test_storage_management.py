@@ -9,7 +9,7 @@ import pytest
 
 import app.storage_management as storage_management
 from app.config import load_project_config
-from app.errors import UsageError
+from app.errors import StorageError, UsageError
 from app.execution import create_run, finalize_run
 from app.project import init_project
 from app.storage_management import StorageManager, lightweight_project_storage
@@ -321,6 +321,38 @@ def test_storage_scan_returns_partial_results_and_blocks_affected_category(
     global_logs = next(item for item in summary["global"] if item["id"] == "logs")
     assert global_logs["can_clear"] is False
     assert global_logs["blocked_reason"]
+
+
+def test_storage_scan_reports_unresolvable_registered_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    bad_path = tmp_path / "registered-unreadable"
+    global_logs = user_root() / "logs"
+    global_logs.mkdir(parents=True)
+    (global_logs / "app.log").write_bytes(b"global-log")
+    original_resolve = storage_management._safe_resolve
+
+    def failing_resolve(path: Path) -> Path:
+        if path == bad_path:
+            raise StorageError(f"无法解析存储路径：{path}: permission denied")
+        return original_resolve(path)
+
+    monkeypatch.setattr(storage_management, "_safe_resolve", failing_resolve)
+    manager = StorageManager(
+        user_data_root=user_root(),
+        projects_root=projects_root,
+        app_root=app_root,
+        project_paths=lambda: [project, bad_path],
+    )
+
+    summary = manager.scan()
+
+    assert summary["complete"] is False
+    assert any(str(bad_path) in error for error in summary["errors"])
+    assert [item["path"] for item in summary["projects"]] == [str(project)]
+    logs = next(item for item in summary["global"] if item["id"] == "logs")
+    assert logs["can_clear"] is True
 
 
 def test_incomplete_project_scan_blocks_all_project_cleanup_targets(
