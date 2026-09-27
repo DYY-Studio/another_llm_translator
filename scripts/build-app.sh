@@ -45,9 +45,10 @@ bash scripts/build_managed_runtime_macos.sh \
   --output build/managed-runtime-dist
 cargo tauri build
 TARGET_DIR="$(cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 --no-deps 2>/dev/null | "$BUILD_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-APP="$(find "$TARGET_DIR/release/bundle/macos" -maxdepth 1 -name '*.app' | head -1)"
-if [ -z "$APP" ]; then
-  echo "未找到 bundle 产物" >&2
+PRODUCT_NAME="$("$BUILD_PYTHON" -c 'import json; from pathlib import Path; print(json.loads(Path("src-tauri/tauri.conf.json").read_text())["productName"])')"
+APP="$TARGET_DIR/release/bundle/macos/$PRODUCT_NAME.app"
+if [ ! -d "$APP" ]; then
+  echo "未找到预期 bundle 产物：$APP" >&2
   exit 1
 fi
 codesign --force --deep --sign - "$APP"
