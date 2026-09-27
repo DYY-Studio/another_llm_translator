@@ -88,7 +88,7 @@ def _make_app(
         else ""
     )
     no_bytecode_guard = (
-        "if os.environ.get('PYTHONDONTWRITEBYTECODE') != '1':\n"
+        "if sys.argv[1:2] == ['-c'] and os.environ.get('PYTHONDONTWRITEBYTECODE') != '1':\n"
         "    raise SystemExit('bundled runtime may not write bytecode into the signed app')\n"
         if require_no_bytecode
         else ""
@@ -112,8 +112,10 @@ def _make_app(
         "    binary.fullmatch = re.fullmatch\n"
         "    sys.modules['regex._regex'] = binary\n"
         "    exec(code, {'__name__': '__main__'})\n"
-        "elif sys.argv[1:4] == ['-I', '-m', 'app.web']:\n"
-        "    sys.argv = sys.argv[3:]\n"
+        "elif sys.argv[1:5] == ['-I', '-B', '-m', 'app.web']:\n"
+        "    if os.environ.get('PYTHONDONTWRITEBYTECODE') is not None:\n"
+        "        raise SystemExit('Web runtime must disable bytecode with -B')\n"
+        "    sys.argv = sys.argv[4:]\n"
         "    runpy.run_module('app.web', run_name='__main__')\n"
         "else:\n"
         "    raise SystemExit(f'unexpected bundled Python arguments: {sys.argv[1:]}')\n"

@@ -63,8 +63,7 @@ fn managed_runtime_root(
 
 fn python_command(python: &std::path::Path, port: &str) -> Command {
     let mut command = Command::new(python);
-    command.args(["-I", "-m", "app.web", "--port", port]);
-    command.env("PYTHONDONTWRITEBYTECODE", "1");
+    command.args(["-I", "-B", "-m", "app.web", "--port", port]);
     command.env_remove("PYTHONPATH");
     command.env_remove("PYTHONHOME");
     command
@@ -86,7 +85,7 @@ fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
         cfg!(debug_assertions),
     )?;
     let python = managed_python_path(&runtime_root)?;
-    let source = format!("{} -I -m app.web --port {port}", python.display());
+    let source = format!("{} -I -B -m app.web --port {port}", python.display());
     spawn_web_process(python_command(&python, &port), source)
 }
 
@@ -395,14 +394,7 @@ mod tests {
         assert_eq!(command.get_program(), "/runtime/bin/python3");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-I", "-m", "app.web", "--port", "9123"]
-        );
-        assert_eq!(
-            command
-                .get_envs()
-                .find(|(name, _)| *name == std::ffi::OsStr::new("PYTHONDONTWRITEBYTECODE"))
-                .map(|(_, value)| value),
-            Some(Some(std::ffi::OsStr::new("1")))
+            ["-I", "-B", "-m", "app.web", "--port", "9123"]
         );
         for name in ["PYTHONPATH", "PYTHONHOME"] {
             assert_eq!(

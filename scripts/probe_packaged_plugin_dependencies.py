@@ -284,12 +284,11 @@ def _run_packaged_smoke(
     )
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
     process: subprocess.Popen[str] | None = None
     log_stream = log_path.open("w", encoding="utf-8")
     try:
         process = subprocess.Popen(
-            [str(layout["runtime_python"]), "-I", "-m", "app.web", "--port", str(port)],
+            [str(layout["runtime_python"]), "-I", "-B", "-m", "app.web", "--port", str(port)],
             cwd=layout["runtime_root"],
             env=env,
             stdout=log_stream,
