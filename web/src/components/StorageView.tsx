@@ -62,6 +62,7 @@ function blockedLabel(reason: string | null, language: Language): string {
     "扫描未完成或目标路径不安全": "storage.scanUnsafe",
     "目标路径不安全": "storage.unsafe",
     "扫描未完成": "storage.scanIncomplete",
+    "项目存储扫描未完成，无法安全清理": "storage.scanIncomplete",
     "项目存在活动 Web 任务": "storage.projectTaskRunning",
     "项目存在运行中的 Run": "storage.projectRunRunning",
     "无法确认项目 Run 状态": "storage.projectRunUnknown",
@@ -222,7 +223,7 @@ export function StorageView({ language }: { language: Language }) {
   }
 
   function clearGlobalLogCategory(category: StorageCategory) {
-    if (!category.can_clear || !summary?.complete) return;
+    if (!category.can_clear) return;
     void runCleanup(
       "global-logs",
       translate("storage.confirmGlobalLogs", language),
@@ -306,7 +307,7 @@ export function StorageView({ language }: { language: Language }) {
                     </div>
                     {category.id === "logs" ? (
                       <div className="storage-action-cell">
-                        <button className="danger-button" type="button" disabled={busyAction !== null || !category.can_clear || !summary.complete} onClick={() => clearGlobalLogCategory(category)}>
+                        <button className="danger-button" type="button" disabled={busyAction !== null || !category.can_clear} onClick={() => clearGlobalLogCategory(category)}>
                           {translate("storage.clearLogs", language)}
                         </button>
                         {!category.can_clear && <ItemStatus canClear={false} blockedReason={category.blocked_reason} language={language} />}
