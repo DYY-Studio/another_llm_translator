@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ APP_ROOT = BUILTIN_ROOT = (
 
 USER_ROOT_NAME = "another-llm-translator"
 USER_ROOT_OVERRIDE_ENV = "ANOTHER_LLM_USER_ROOT"
+USER_ROOT_LOCATOR_NAME = f"{USER_ROOT_NAME}-location.json"
 
 
 def _platform_data_base() -> Path:
@@ -27,11 +29,47 @@ def default_user_root(*, base: Path | None = None) -> Path:
     return (base or _platform_data_base()) / USER_ROOT_NAME
 
 
+def user_root_locator_path() -> Path:
+    return _platform_data_base() / USER_ROOT_LOCATOR_NAME
+
+
+def _located_user_root() -> Path | None:
+    locator = user_root_locator_path()
+    if not locator.exists() and not locator.is_symlink():
+        return None
+    try:
+        data = json.loads(locator.read_text(encoding="utf-8"))
+        root_value = data["active_root"]
+        root = Path(root_value)
+        if (
+            type(data.get("version")) is not int
+            or data["version"] != 1
+            or not isinstance(root_value, str)
+            or not root.is_absolute()
+        ):
+            raise ValueError("invalid version or non-absolute root")
+        if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError("custom user root is unavailable")
+        return root
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ValueError(f"invalid user data locator {locator}: {exc}") from exc
+
+
 def user_root() -> Path:
-    """Platform user data root; ANOTHER_LLM_USER_ROOT overrides it."""
+    """Resolve the user data root from environment, locator, then platform default."""
     override = os.environ.get(USER_ROOT_OVERRIDE_ENV)
     if override:
         return Path(override).expanduser()
+    located = _located_user_root()
+    if located is not None:
+        return located
     return default_user_root()
 
 
