@@ -17,8 +17,16 @@ struct WebProcess {
     stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy)]
+enum NativeCommand {
+    Apply,
+    Retry,
+    Reset,
+}
+
 static WEB_PROCESS: Mutex<Option<WebProcess>> = Mutex::new(None);
 static LIFECYCLE_OPERATION: Mutex<()> = Mutex::new(());
+static STARTUP_ERROR_STATE: Mutex<Option<bool>> = Mutex::new(None);
 
 fn web_port() -> String {
     std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
@@ -168,6 +176,86 @@ fn startup_error_allows_reset(error: &str) -> bool {
     error.contains("invalid user data locator") || error.contains("custom user root is unavailable")
 }
 
+fn startup_error_state() -> Option<bool> {
+    *STARTUP_ERROR_STATE.lock().unwrap()
+}
+
+fn is_web_service_url(url: &tauri::Url, port: &str) -> bool {
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port_or_known_default() == Some(port)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn is_startup_error_url(url: &tauri::Url) -> bool {
+    let app_local_origin = if cfg!(windows) {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    } else {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    };
+    app_local_origin
+        && url.port().is_none()
+        && url.path() == "/startup-error.html"
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn allowed_webview_navigation(
+    url: &tauri::Url,
+    port: &str,
+    web_process_running: bool,
+    startup_error_state: Option<bool>,
+) -> bool {
+    (web_process_running && is_web_service_url(url, port))
+        || (startup_error_state.is_some() && is_startup_error_url(url))
+}
+
+fn validate_native_command(
+    command: NativeCommand,
+    url: &tauri::Url,
+    web_process_running: bool,
+    startup_error_state: Option<bool>,
+    port: &str,
+) -> Result<(), String> {
+    let authorized = match command {
+        NativeCommand::Apply => web_process_running && is_web_service_url(url, port),
+        NativeCommand::Retry => {
+            !web_process_running && startup_error_state.is_some() && is_startup_error_url(url)
+        }
+        NativeCommand::Reset => {
+            !web_process_running && startup_error_state == Some(true) && is_startup_error_url(url)
+        }
+    };
+    if authorized {
+        Ok(())
+    } else {
+        Err("不允许从当前页面执行此操作".to_string())
+    }
+}
+
+fn authorize_window_command(
+    window: &tauri::WebviewWindow,
+    command: NativeCommand,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("不允许从当前窗口执行此操作".to_string());
+    }
+    let url = window
+        .url()
+        .map_err(|error| format!("无法确认命令调用页面：{error}"))?;
+    validate_native_command(
+        command,
+        &url,
+        WEB_PROCESS.lock().unwrap().is_some(),
+        startup_error_state(),
+        &web_port(),
+    )
+}
+
 fn start_and_store_web_process(app: &tauri::AppHandle) -> Result<(), String> {
     let port = web_port();
     let mut process = start_web_process(app)?;
@@ -176,6 +264,7 @@ fn start_and_store_web_process(app: &tauri::AppHandle) -> Result<(), String> {
         return Err(error);
     }
     *WEB_PROCESS.lock().unwrap() = Some(process);
+    *STARTUP_ERROR_STATE.lock().unwrap() = None;
     Ok(())
 }
 
@@ -428,10 +517,11 @@ fn http_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_stderr_tail, data_root_command, http_request, managed_python_path,
-        managed_runtime_root, python_command, run_relocation_sequence, server_ready,
-        spawn_web_process, startup_error_allows_reset, stderr_snapshot, validate_data_root_reset,
-        with_lifecycle_lock, STDERR_TAIL_LIMIT,
+        allowed_webview_navigation, append_stderr_tail, data_root_command, http_request,
+        is_startup_error_url, is_web_service_url, managed_python_path, managed_runtime_root,
+        python_command, run_relocation_sequence, server_ready, spawn_web_process,
+        startup_error_allows_reset, stderr_snapshot, validate_data_root_reset,
+        validate_native_command, with_lifecycle_lock, NativeCommand, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -439,6 +529,15 @@ mod tests {
     use std::process::Command;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    fn startup_error_test_url(query: &str) -> tauri::Url {
+        let origin = if cfg!(windows) {
+            "http://tauri.localhost"
+        } else {
+            "tauri://localhost"
+        };
+        tauri::Url::parse(&format!("{origin}/startup-error.html?{query}")).unwrap()
+    }
 
     #[test]
     fn release_runtime_root_uses_tauri_resources_even_with_debug_override() {
@@ -574,6 +673,118 @@ mod tests {
         assert!(validate_data_root_reset(false, false).is_err());
         assert!(validate_data_root_reset(true, true).is_err());
         assert!(validate_data_root_reset(true, false).is_ok());
+    }
+
+    #[test]
+    fn data_root_reset_is_not_authorized_without_startup_error_state() {
+        let error_page = startup_error_test_url("allowReset=true");
+        assert!(
+            validate_native_command(NativeCommand::Reset, &error_page, false, None, "8765",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn webview_navigation_allows_only_current_service_and_active_error_page() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let other_port = tauri::Url::parse("http://127.0.0.1:9124/").unwrap();
+        let startup_error = startup_error_test_url("allowReset=false");
+
+        assert!(allowed_webview_navigation(&service, "9123", true, None));
+        assert!(!allowed_webview_navigation(&other_port, "9123", true, None));
+        assert!(allowed_webview_navigation(
+            &startup_error,
+            "9123",
+            false,
+            Some(false)
+        ));
+        assert!(!allowed_webview_navigation(
+            &startup_error,
+            "9123",
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn startup_error_url_requires_the_platform_app_origin_and_exact_path() {
+        let (expected, other_platform_origin) = if cfg!(windows) {
+            (
+                "http://tauri.localhost/startup-error.html?error=broken",
+                "tauri://localhost/startup-error.html?error=broken",
+            )
+        } else {
+            (
+                "tauri://localhost/startup-error.html?error=broken",
+                "https://tauri.localhost/startup-error.html?error=broken",
+            )
+        };
+        assert!(is_startup_error_url(&tauri::Url::parse(expected).unwrap()));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse(other_platform_origin).unwrap()
+        ));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse("tauri://localhost/other.html").unwrap()
+        ));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse("tauri://user@localhost/startup-error.html").unwrap()
+        ));
+    }
+
+    #[test]
+    fn web_service_origin_uses_the_configured_port() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let wrong_port = tauri::Url::parse("http://127.0.0.1:8765/").unwrap();
+        let wrong_host = tauri::Url::parse("http://localhost:9123/").unwrap();
+
+        assert!(is_web_service_url(&service, "9123"));
+        assert!(!is_web_service_url(&wrong_port, "9123"));
+        assert!(!is_web_service_url(&wrong_host, "9123"));
+    }
+
+    #[test]
+    fn native_command_authorization_uses_page_and_service_lifecycle() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let error_page = startup_error_test_url("allowReset=true");
+
+        assert!(
+            validate_native_command(NativeCommand::Apply, &service, true, None, "9123",).is_ok()
+        );
+        assert!(validate_native_command(
+            NativeCommand::Apply,
+            &service,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_err());
+        assert!(validate_native_command(
+            NativeCommand::Retry,
+            &error_page,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_ok());
+        assert!(validate_native_command(
+            NativeCommand::Reset,
+            &error_page,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_err());
+        assert!(validate_native_command(
+            NativeCommand::Reset,
+            &error_page,
+            false,
+            Some(true),
+            "9123",
+        )
+        .is_ok());
+        assert!(
+            validate_native_command(NativeCommand::Retry, &service, true, None, "9123",).is_err()
+        );
     }
 
     #[test]
@@ -767,8 +978,12 @@ fn select_folder() -> Option<String> {
 }
 
 #[tauri::command]
-fn apply_data_root_relocation(app: tauri::AppHandle) -> Result<String, String> {
+fn apply_data_root_relocation(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Apply)?;
         run_relocation_sequence(
             || {
                 if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
@@ -782,8 +997,9 @@ fn apply_data_root_relocation(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn retry_web_service(app: tauri::AppHandle) -> Result<(), String> {
+fn retry_web_service(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Retry)?;
         if WEB_PROCESS.lock().unwrap().is_none() {
             start_and_store_web_process(&app)?;
         }
@@ -792,8 +1008,13 @@ fn retry_web_service(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn reset_data_root(app: tauri::AppHandle, confirm: bool) -> Result<String, String> {
+fn reset_data_root(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    confirm: bool,
+) -> Result<String, String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Reset)?;
         validate_data_root_reset(confirm, WEB_PROCESS.lock().unwrap().is_some())?;
         let result = run_relocation_sequence(
             || {},
@@ -829,12 +1050,22 @@ pub fn run() {
                         format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{error}")
                     };
                     eprintln!("{error}");
+                    *STARTUP_ERROR_STATE.lock().unwrap() = Some(startup_error_allows_reset(&error));
                     startup_error_url(&error)
                 }
             };
+            let port = web_port();
             let _ = tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("译工坊")
                 .inner_size(1280.0, 860.0)
+                .on_navigation(move |url| {
+                    allowed_webview_navigation(
+                        url,
+                        &port,
+                        WEB_PROCESS.lock().unwrap().is_some(),
+                        startup_error_state(),
+                    )
+                })
                 .build();
             Ok(())
         })
