@@ -100,6 +100,37 @@ def test_relocation_rejects_existing_target_without_touching_it(
     assert data_root.user_root() == source
 
 
+def test_request_relocation_preserves_existing_pending_request_and_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "system"
+    )
+    source = tmp_path / "system" / "another-llm-translator"
+    source.mkdir(parents=True)
+    first_parent = tmp_path / "first"
+    first_parent.mkdir()
+    second_parent = tmp_path / "second"
+    second_parent.mkdir()
+
+    first = data_root.request_relocation(first_parent)
+
+    with pytest.raises(ValueError, match="already exists"):
+        data_root.request_relocation(second_parent)
+    assert data_root.status()["pending"] == first
+
+    pending = data_root.pending_path()
+    pending.unlink()
+    existing = tmp_path / "existing-request.json"
+    existing.write_text("keep", encoding="utf-8")
+    pending.symlink_to(existing)
+
+    with pytest.raises(ValueError, match="already exists"):
+        data_root.request_relocation(second_parent)
+    assert pending.is_symlink()
+
+
 def test_relocation_fails_if_selected_volume_disappears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -90,15 +90,29 @@ def _validated_paths(source: Path, target_parent: Path) -> tuple[Path, Path]:
 
 
 def write_pending(source: Path, target: Path, transaction_id: str) -> None:
-    _atomic_json(
-        pending_path(),
-        {
-            "version": 1,
-            "transaction_id": transaction_id,
-            "source_root": str(source),
-            "target_root": str(target),
-        },
-    )
+    path = pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "version": 1,
+                    "transaction_id": transaction_id,
+                    "source_root": str(source),
+                    "target_root": str(target),
+                },
+                stream,
+                ensure_ascii=False,
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ValueError(f"relocation request already exists: {path}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def request_relocation(parent_dir: Path) -> dict[str, str]:
