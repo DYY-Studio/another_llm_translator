@@ -146,6 +146,23 @@ def test_web_data_root_reports_custom_mode(
     assert response.json()["active_root"] == str(custom_root)
 
 
+def test_web_data_root_rejects_incomplete_pending_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    locator = tmp_path / "location.json"
+    monkeypatch.setattr("app.user_config.user_root_locator_path", lambda: locator)
+    monkeypatch.setattr("app.data_root.user_root_locator_path", lambda: locator)
+    pending_path().write_text('{"version": 1}', encoding="utf-8")
+
+    response = TestClient(create_app(projects_root=projects_root)).get(
+        "/api/v1/storage/data-root"
+    )
+
+    assert response.status_code == 400
+    assert "relocation request" in response.json()["error"]
+
+
 def test_web_data_root_relocation_requires_confirmation_and_cancels_without_data_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -202,6 +219,10 @@ def test_web_data_root_relocation_rejects_active_tasks_and_environment_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     projects_root, _ = make_project(tmp_path)
+    locator = tmp_path / "location.json"
+    monkeypatch.setattr("app.user_config.user_root_locator_path", lambda: locator)
+    monkeypatch.setattr("app.data_root.user_root_locator_path", lambda: locator)
+    assert pending_path().parent == tmp_path
     target_parent = tmp_path / "target"
     target_parent.mkdir()
     app = create_app(projects_root=projects_root)

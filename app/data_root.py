@@ -121,13 +121,15 @@ def status() -> dict[str, Any]:
     else:
         mode = "custom"
     pending = pending_path()
+    pending_status = None
+    if pending.exists():
+        source, target, _ = _read_pending()
+        pending_status = {"source_root": str(source), "target_root": str(target)}
     return {
         "active_root": str(active),
         "default_root": str(default_user_root()),
         "mode": mode,
-        "pending": _read_json(pending, "relocation request")
-        if pending.exists()
-        else None,
+        "pending": pending_status,
     }
 
 

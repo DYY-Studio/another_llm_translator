@@ -32,17 +32,12 @@ def register_storage_routes(
             result = data_root.status()
         except (OSError, ValueError) as exc:
             raise UsageError(str(exc)) from exc
-        pending = result["pending"]
         return {
             "active_root": result["active_root"],
             "default_root": result["default_root"],
             "mode": result["mode"],
             "can_change": result["mode"] != "environment",
-            "pending": (
-                {key: pending[key] for key in ("source_root", "target_root")}
-                if pending is not None
-                else None
-            ),
+            "pending": result["pending"],
         }
 
     @app.post("/api/v1/storage/data-root/relocation")
