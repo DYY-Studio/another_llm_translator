@@ -241,13 +241,22 @@ export function StorageView({ language }: { language: Language }) {
       window.location.reload();
     } catch (reason) {
       setError(errorMessage(reason, language));
+      try {
+        setDataRoot(await fetchDataRoot());
+      } catch {
+        // Keep the last pending state available for another retry.
+      }
     } finally {
       setRootBusy(false);
     }
   }
 
   async function relocateDataRoot(parentDir: string, targetRoot: string) {
-    if (!dataRoot || !window.confirm(translate("storage.dataRootConfirm", language, {
+    if (!dataRoot) return;
+    const confirmationKey = nativeBridgeAvailable()
+      ? "storage.dataRootConfirmNative"
+      : "storage.dataRootConfirmWeb";
+    if (!window.confirm(translate(confirmationKey, language, {
       source: dataRoot.active_root,
       target: targetRoot,
     }))) return;
@@ -257,6 +266,7 @@ export function StorageView({ language }: { language: Language }) {
     try {
       await requestDataRootRelocation(parentDir);
       if (nativeBridgeAvailable()) {
+        setDataRoot(await fetchDataRoot());
         await applyDataRootRelocation();
         window.location.reload();
       } else {
@@ -265,6 +275,13 @@ export function StorageView({ language }: { language: Language }) {
       }
     } catch (reason) {
       setError(errorMessage(reason, language));
+      if (nativeBridgeAvailable()) {
+        try {
+          setDataRoot(await fetchDataRoot());
+        } catch {
+          // Keep the last known state available for another retry.
+        }
+      }
     } finally {
       setRootBusy(false);
     }
@@ -391,7 +408,7 @@ export function StorageView({ language }: { language: Language }) {
               <strong>{translate("storage.dataRootPending", language)}</strong>
               <p>{translate("storage.dataRootSource", language)}: <code>{dataRoot.pending.source_root}</code></p>
               <p>{translate("storage.dataRootTarget", language)}: <code>{dataRoot.pending.target_root}</code></p>
-              {nativeBridgeAvailable()
+              {dataRoot.mode === "environment" ? null : nativeBridgeAvailable()
                 ? <button className="primary-button" type="button" disabled={rootBusy} onClick={() => void applyPendingRoot()}>{translate("storage.dataRootApply", language)}</button>
                 : <><p className="muted">{translate("storage.dataRootWebSteps", language)}</p><button className="quiet-button" type="button" disabled={rootBusy} onClick={() => void cancelPendingRoot()}>{translate("storage.dataRootCancel", language)}</button></>}
             </div>
