@@ -345,7 +345,7 @@ def reset_to_default(*, confirm: bool) -> dict[str, str]:
         raise ValueError("reset requires explicit confirmation")
     pending_path().unlink(missing_ok=True)
     locator = user_root_locator_path()
-    if locator.exists():
+    if locator.exists() or locator.is_symlink():
         locator.unlink()
     return {"active_root": str(default_user_root())}
 

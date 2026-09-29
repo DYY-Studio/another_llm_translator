@@ -370,6 +370,25 @@ def test_non_object_pending_json_fails_without_cli_traceback(
     assert "Traceback" not in output.err
 
 
+def test_reset_removes_dangling_locator_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "system"
+    )
+    locator = data_root.user_root_locator_path()
+    locator.parent.mkdir(parents=True)
+    locator.symlink_to(tmp_path / "missing-root.json")
+
+    result = data_root.reset_to_default(confirm=True)
+
+    assert result["active_root"] == str(data_root.default_user_root())
+    assert not locator.exists()
+    assert not locator.is_symlink()
+    assert data_root.user_root() == data_root.default_user_root()
+
+
 def test_environment_override_disables_relocation_and_reset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
