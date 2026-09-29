@@ -25,6 +25,20 @@
 .storage-summary-strip strong { overflow-wrap: anywhere; font-size: 19px; font-variant-numeric: tabular-nums; }
 .storage-overview-grid { max-width: 1280px; display: grid; grid-template-columns: minmax(400px, 2fr) minmax(560px, 3fr); align-items: start; gap: 20px; margin: 0 auto; }
 .storage-panel { max-width: 1280px; margin: 0 auto 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.storage-root-panel { padding-bottom: 16px; }
+.storage-root-panel .storage-panel-heading { align-items: center; padding-bottom: 10px; }
+.storage-root-panel .storage-panel-heading h2 { margin: 0; }
+.storage-root-mode { color: var(--muted); font-size: 12px; }
+.storage-root-paths { display: grid; gap: 10px; margin: 0; padding: 0 20px; }
+.storage-root-paths > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; }
+.storage-root-paths dt { color: var(--muted); font-size: 12px; }
+.storage-root-paths dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.storage-root-paths code, .storage-root-pending code { color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.storage-root-hint, .storage-root-pending { margin: 12px 20px 0; font-size: 12px; line-height: 1.5; }
+.storage-root-pending { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); }
+.storage-root-pending p { margin: 5px 0; overflow-wrap: anywhere; }
+.storage-root-pending .primary-button, .storage-root-pending .quiet-button { margin-top: 8px; }
+.storage-root-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 20px 0; }
 .storage-overview-grid .storage-panel { width: 100%; margin: 0; }
 .storage-panel-heading, .storage-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 14px; }
 .storage-panel-heading > div, .storage-section-heading > div { min-width: 0; }

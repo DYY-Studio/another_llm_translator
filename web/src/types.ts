@@ -261,6 +261,18 @@ export interface StorageCleanupResult {
   reclaimed_bytes: number;
 }
 
+export interface DataRootRelocation {
+  source_root: string;
+  target_root: string;
+}
+
+export interface DataRootStatus {
+  active_root: string;
+  default_root: string;
+  mode: "environment" | "default" | "custom";
+  pending: DataRootRelocation | null;
+}
+
 export interface ErrorPayload {
   code: string;
   params: Record<string, unknown>;
