@@ -18,6 +18,9 @@
     },
     "allow-select-file",
     "allow-select-folder",
-    "allow-save-export"
+    "allow-save-export",
+    "allow-apply-data-root-relocation",
+    "allow-retry-web-service",
+    "allow-reset-data-root"
   ]
 }

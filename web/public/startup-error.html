@@ -51,6 +51,29 @@
         color: #3a2020;
         font: 0.875rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
       }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+
+      button {
+        border: 1px solid #b9c1cc;
+        border-radius: 6px;
+        padding: 0.55rem 0.9rem;
+        background: #fff;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #status {
+        margin: 0.75rem 0 0;
+        color: #8a2424;
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body>
@@ -58,10 +81,40 @@
       <h1>译工坊无法启动</h1>
       <p>请根据下面的阶段、路径和原因修复配置或插件，然后重新启动应用。</p>
       <pre id="error">未提供启动错误详情。</pre>
+      <div class="actions">
+        <button id="retry" type="button">重试启动</button>
+        <button id="reset" type="button" hidden>确认改用默认位置</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
     </main>
     <script>
       const message = new URLSearchParams(window.location.search).get("error");
       if (message) document.getElementById("error").textContent = message;
+      const params = new URLSearchParams(window.location.search);
+      const retryButton = document.getElementById("retry");
+      const resetButton = document.getElementById("reset");
+      const status = document.getElementById("status");
+      resetButton.hidden = params.get("allowReset") !== "true";
+
+      async function run(command, button) {
+        button.disabled = true;
+        status.textContent = "正在启动服务…";
+        try {
+          const invoke = window.__TAURI__?.core?.invoke;
+          if (typeof invoke !== "function") throw new Error("桌面命令不可用，请关闭并重新启动应用。");
+          await invoke(command);
+        } catch (error) {
+          status.textContent = error instanceof Error ? error.message : String(error);
+          button.disabled = false;
+        }
+      }
+
+      retryButton.addEventListener("click", () => void run("retry_web_service", retryButton));
+      resetButton.addEventListener("click", () => {
+        if (window.confirm("将改用系统默认数据目录。自定义目录中的数据不会被删除。继续？")) {
+          void run("reset_data_root", resetButton);
+        }
+      });
     </script>
   </body>
 </html>

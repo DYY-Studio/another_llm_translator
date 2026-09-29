@@ -69,8 +69,16 @@ fn python_command(python: &std::path::Path, port: &str) -> Command {
     command
 }
 
-fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
-    let port = web_port();
+fn data_root_command(python: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::new(python);
+    command.args(["-I", "-B", "-m", "app.data_root"]);
+    command.args(args);
+    command.env_remove("PYTHONPATH");
+    command.env_remove("PYTHONHOME");
+    command
+}
+
+fn managed_python_for_app(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
         .resource_dir()
@@ -84,9 +92,83 @@ fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
         debug_runtime_root.as_deref(),
         cfg!(debug_assertions),
     )?;
-    let python = managed_python_path(&runtime_root)?;
+    managed_python_path(&runtime_root)
+}
+
+fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
+    let port = web_port();
+    let python = managed_python_for_app(app)?;
     let source = format!("{} -I -B -m app.web --port {port}", python.display());
     spawn_web_process(python_command(&python, &port), source)
+}
+
+fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String, String> {
+    let python = managed_python_for_app(app)?;
+    let command_name = format!(
+        "{} -I -B -m app.data_root {}",
+        python.display(),
+        args.join(" ")
+    );
+    let output = data_root_command(&python, args)
+        .output()
+        .map_err(|error| format!("无法启动数据目录工具 {command_name}：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = [stderr, stdout]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "数据目录工具执行失败（{}）{details}",
+            exit_status_description(output.status)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_relocation_sequence<T>(
+    stop: impl FnOnce(),
+    relocate: impl FnOnce() -> Result<T, String>,
+    restart: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    stop();
+    let relocation_result = relocate();
+    let restart_result = restart();
+    match (relocation_result, restart_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(relocation), Err(restart)) => Err(format!(
+            "数据目录迁移失败：{relocation}\n恢复 Web 服务也失败：{restart}"
+        )),
+    }
+}
+
+fn startup_error_allows_reset(error: &str) -> bool {
+    error.contains("invalid user data locator") || error.contains("custom user root is unavailable")
+}
+
+fn start_and_store_web_process(app: &tauri::AppHandle) -> Result<(), String> {
+    let port = web_port();
+    let mut process = start_web_process(app)?;
+    if let Err(error) = server_ready(&mut process, &port, Duration::from_secs(30)) {
+        process.stop();
+        return Err(error);
+    }
+    *WEB_PROCESS.lock().unwrap() = Some(process);
+    Ok(())
+}
+
+fn navigate_to_web_service(app: &tauri::AppHandle) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}", web_port())
+        .parse()
+        .map_err(|error| format!("服务地址无效：{error}"))?;
+    app.get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?
+        .navigate(url)
+        .map_err(|error| format!("无法打开 Web 服务：{error}"))
 }
 
 fn spawn_web_process(mut command: Command, source: String) -> Result<WebProcess, String> {
@@ -276,8 +358,9 @@ fn percent_encode_query(value: &str) -> String {
 
 fn startup_error_url(error: &str) -> WebviewUrl {
     WebviewUrl::App(PathBuf::from(format!(
-        "startup-error.html?error={}",
-        percent_encode_query(error)
+        "startup-error.html?error={}&allowReset={}",
+        percent_encode_query(error),
+        startup_error_allows_reset(error)
     )))
 }
 
@@ -327,8 +410,9 @@ fn http_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_stderr_tail, http_request, managed_python_path, managed_runtime_root,
-        python_command, server_ready, spawn_web_process, stderr_snapshot, STDERR_TAIL_LIMIT,
+        append_stderr_tail, data_root_command, http_request, managed_python_path,
+        managed_runtime_root, python_command, run_relocation_sequence, server_ready,
+        spawn_web_process, startup_error_allows_reset, stderr_snapshot, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -406,6 +490,62 @@ mod tests {
                 "{name} must not leak into the bundled runtime"
             );
         }
+    }
+
+    #[test]
+    fn data_root_helper_command_uses_managed_python_and_clears_python_overrides() {
+        let command = data_root_command(
+            std::path::Path::new("/runtime/bin/python3"),
+            &["apply-pending"],
+        );
+
+        assert_eq!(command.get_program(), "/runtime/bin/python3");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-I", "-B", "-m", "app.data_root", "apply-pending"]
+        );
+        for name in ["PYTHONPATH", "PYTHONHOME"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(env_name, _)| *env_name == std::ffi::OsStr::new(name))
+                    .map(|(_, value)| value),
+                Some(None),
+                "{name} must not leak into the bundled runtime"
+            );
+        }
+    }
+
+    #[test]
+    fn relocation_restarts_after_helper_failure_and_reports_both_errors() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = run_relocation_sequence(
+            || calls.borrow_mut().push("stop"),
+            || {
+                calls.borrow_mut().push("helper");
+                Err::<String, _>("relocation failed".to_string())
+            },
+            || {
+                calls.borrow_mut().push("restart");
+                Err("restart failed".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), ["stop", "helper", "restart"]);
+        assert!(error.contains("relocation failed"));
+        assert!(error.contains("restart failed"));
+    }
+
+    #[test]
+    fn locator_errors_allow_default_reset_but_plugin_errors_do_not() {
+        assert!(startup_error_allows_reset("invalid user data locator /x"));
+        assert!(startup_error_allows_reset(
+            "custom user root is unavailable: /x"
+        ));
+        assert!(!startup_error_allows_reset(
+            "plugin protocol version is unsupported"
+        ));
     }
 
     #[test]
@@ -568,6 +708,42 @@ fn select_folder() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn apply_data_root_relocation(app: tauri::AppHandle) -> Result<String, String> {
+    run_relocation_sequence(
+        || {
+            if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
+                process.stop();
+            }
+        },
+        || run_data_root_helper(&app, &["apply-pending"]),
+        || start_and_store_web_process(&app),
+    )
+}
+
+#[tauri::command]
+fn retry_web_service(app: tauri::AppHandle) -> Result<(), String> {
+    if WEB_PROCESS.lock().unwrap().is_none() {
+        start_and_store_web_process(&app)?;
+    }
+    navigate_to_web_service(&app)
+}
+
+#[tauri::command]
+fn reset_data_root(app: tauri::AppHandle) -> Result<String, String> {
+    let result = run_relocation_sequence(
+        || {
+            if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
+                process.stop();
+            }
+        },
+        || run_data_root_helper(&app, &["reset", "--confirm"]),
+        || start_and_store_web_process(&app),
+    )?;
+    navigate_to_web_service(&app)?;
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
@@ -579,27 +755,18 @@ pub fn run() {
     );
     builder
         .setup(|app| {
-            let port = web_port();
-            let url = match start_web_process(&app.handle()) {
-                Ok(mut process) => {
-                    match server_ready(&mut process, &port, Duration::from_secs(30)) {
-                        Ok(()) => {
-                            *WEB_PROCESS.lock().unwrap() = Some(process);
-                            WebviewUrl::External(
-                                format!("http://127.0.0.1:{port}")
-                                    .parse()
-                                    .expect("invalid Web service URL"),
-                            )
-                        }
-                        Err(error) => {
-                            process.stop();
-                            eprintln!("{error}");
-                            startup_error_url(&error)
-                        }
-                    }
-                }
-                Err(reason) => {
-                    let error = format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{reason}");
+            let url = match start_and_store_web_process(&app.handle()) {
+                Ok(()) => WebviewUrl::External(
+                    format!("http://127.0.0.1:{}", web_port())
+                        .parse()
+                        .expect("invalid Web service URL"),
+                ),
+                Err(error) => {
+                    let error = if error.contains("Web 服务启动失败") {
+                        error
+                    } else {
+                        format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{error}")
+                    };
                     eprintln!("{error}");
                     startup_error_url(&error)
                 }
@@ -613,7 +780,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             select_file,
             select_folder,
-            save_export
+            save_export,
+            apply_data_root_relocation,
+            retry_web_service,
+            reset_data_root
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")

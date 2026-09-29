@@ -237,7 +237,8 @@ export function StorageView({ language }: { language: Language }) {
     setRootBusy(true);
     setError("");
     try {
-      await applyDataRootRelocation();
+      const warning = await applyDataRootRelocation();
+      if (warning) window.alert(warning);
       window.location.reload();
     } catch (reason) {
       setError(errorMessage(reason, language));
@@ -267,7 +268,8 @@ export function StorageView({ language }: { language: Language }) {
       await requestDataRootRelocation(parentDir);
       if (nativeBridgeAvailable()) {
         setDataRoot(await fetchDataRoot());
-        await applyDataRootRelocation();
+        const warning = await applyDataRootRelocation();
+        if (warning) window.alert(warning);
         window.location.reload();
       } else {
         setDataRoot(await fetchDataRoot());
