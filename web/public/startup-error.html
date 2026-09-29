@@ -96,23 +96,29 @@
       const status = document.getElementById("status");
       resetButton.hidden = params.get("allowReset") !== "true";
 
-      async function run(command, button) {
-        button.disabled = true;
+      async function run(command, args) {
+        const retryWasDisabled = retryButton.disabled;
+        const resetWasDisabled = resetButton.disabled;
+        const resetWasHidden = resetButton.hidden;
+        retryButton.disabled = true;
+        resetButton.disabled = true;
         status.textContent = "正在启动服务…";
         try {
           const invoke = window.__TAURI__?.core?.invoke;
           if (typeof invoke !== "function") throw new Error("桌面命令不可用，请关闭并重新启动应用。");
-          await invoke(command);
+          await invoke(command, args);
         } catch (error) {
           status.textContent = error instanceof Error ? error.message : String(error);
-          button.disabled = false;
+          retryButton.disabled = retryWasDisabled;
+          resetButton.disabled = resetWasDisabled;
+          resetButton.hidden = resetWasHidden;
         }
       }
 
-      retryButton.addEventListener("click", () => void run("retry_web_service", retryButton));
+      retryButton.addEventListener("click", () => void run("retry_web_service"));
       resetButton.addEventListener("click", () => {
         if (window.confirm("将改用系统默认数据目录。自定义目录中的数据不会被删除。继续？")) {
-          void run("reset_data_root", resetButton);
+          void run("reset_data_root", { confirm: true });
         }
       });
     </script>

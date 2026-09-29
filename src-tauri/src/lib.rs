@@ -18,6 +18,7 @@ struct WebProcess {
 }
 
 static WEB_PROCESS: Mutex<Option<WebProcess>> = Mutex::new(None);
+static LIFECYCLE_OPERATION: Mutex<()> = Mutex::new(());
 
 fn web_port() -> String {
     std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
@@ -128,7 +129,7 @@ fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn run_relocation_sequence<T>(
+fn run_relocation_sequence<T: std::fmt::Display>(
     stop: impl FnOnce(),
     relocate: impl FnOnce() -> Result<T, String>,
     restart: impl FnOnce() -> Result<(), String>,
@@ -139,11 +140,28 @@ fn run_relocation_sequence<T>(
     match (relocation_result, restart_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Err(error)) => Err(format!(
+            "数据目录工具已完成：{value}\nWeb 服务启动失败：{error}"
+        )),
         (Err(relocation), Err(restart)) => Err(format!(
             "数据目录迁移失败：{relocation}\n恢复 Web 服务也失败：{restart}"
         )),
     }
+}
+
+fn validate_data_root_reset(confirm: bool, web_process_running: bool) -> Result<(), String> {
+    if !confirm {
+        return Err("切换默认数据目录需要显式确认".to_string());
+    }
+    if web_process_running {
+        return Err("Web 服务运行时不能重置数据目录".to_string());
+    }
+    Ok(())
+}
+
+fn with_lifecycle_lock<T>(lock: &Mutex<()>, operation: impl FnOnce() -> T) -> T {
+    let _guard = lock.lock().unwrap();
+    operation()
 }
 
 fn startup_error_allows_reset(error: &str) -> bool {
@@ -412,7 +430,8 @@ mod tests {
     use super::{
         append_stderr_tail, data_root_command, http_request, managed_python_path,
         managed_runtime_root, python_command, run_relocation_sequence, server_ready,
-        spawn_web_process, startup_error_allows_reset, stderr_snapshot, STDERR_TAIL_LIMIT,
+        spawn_web_process, startup_error_allows_reset, stderr_snapshot, validate_data_root_reset,
+        with_lifecycle_lock, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -535,6 +554,45 @@ mod tests {
         assert_eq!(*calls.borrow(), ["stop", "helper", "restart"]);
         assert!(error.contains("relocation failed"));
         assert!(error.contains("restart failed"));
+    }
+
+    #[test]
+    fn relocation_preserves_successful_helper_output_when_restart_fails() {
+        let error = run_relocation_sequence(
+            || {},
+            || Ok("{\"warning\":\"old directory retained\"}".to_string()),
+            || Err("restart failed".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("old directory retained"));
+        assert!(error.contains("restart failed"));
+    }
+
+    #[test]
+    fn data_root_reset_requires_confirmation_and_no_running_web_process() {
+        assert!(validate_data_root_reset(false, false).is_err());
+        assert!(validate_data_root_reset(true, true).is_err());
+        assert!(validate_data_root_reset(true, false).is_ok());
+    }
+
+    #[test]
+    fn lifecycle_lock_serializes_operations() {
+        let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let guard = lifecycle.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker_lock = std::sync::Arc::clone(&lifecycle);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            with_lifecycle_lock(&worker_lock, || finished_tx.send(()).unwrap());
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(guard);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
@@ -710,38 +768,41 @@ fn select_folder() -> Option<String> {
 
 #[tauri::command]
 fn apply_data_root_relocation(app: tauri::AppHandle) -> Result<String, String> {
-    run_relocation_sequence(
-        || {
-            if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
-                process.stop();
-            }
-        },
-        || run_data_root_helper(&app, &["apply-pending"]),
-        || start_and_store_web_process(&app),
-    )
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        run_relocation_sequence(
+            || {
+                if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
+                    process.stop();
+                }
+            },
+            || run_data_root_helper(&app, &["apply-pending"]),
+            || start_and_store_web_process(&app),
+        )
+    })
 }
 
 #[tauri::command]
 fn retry_web_service(app: tauri::AppHandle) -> Result<(), String> {
-    if WEB_PROCESS.lock().unwrap().is_none() {
-        start_and_store_web_process(&app)?;
-    }
-    navigate_to_web_service(&app)
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        if WEB_PROCESS.lock().unwrap().is_none() {
+            start_and_store_web_process(&app)?;
+        }
+        navigate_to_web_service(&app)
+    })
 }
 
 #[tauri::command]
-fn reset_data_root(app: tauri::AppHandle) -> Result<String, String> {
-    let result = run_relocation_sequence(
-        || {
-            if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
-                process.stop();
-            }
-        },
-        || run_data_root_helper(&app, &["reset", "--confirm"]),
-        || start_and_store_web_process(&app),
-    )?;
-    navigate_to_web_service(&app)?;
-    Ok(result)
+fn reset_data_root(app: tauri::AppHandle, confirm: bool) -> Result<String, String> {
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        validate_data_root_reset(confirm, WEB_PROCESS.lock().unwrap().is_some())?;
+        let result = run_relocation_sequence(
+            || {},
+            || run_data_root_helper(&app, &["reset", "--confirm"]),
+            || start_and_store_web_process(&app),
+        )?;
+        navigate_to_web_service(&app)?;
+        Ok(result)
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
