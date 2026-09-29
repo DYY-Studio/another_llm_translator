@@ -21,7 +21,7 @@ import app.web_continuous as web_continuous_module
 import app.web_resource_routes as web_resource_module
 import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
-from app import sqlite_storage
+from app import data_root, sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import ConfigError, IncompleteError, UsageError
@@ -76,6 +76,36 @@ def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_cancelled_dangling_pending_locator_allows_task_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "user-data"
+    )
+    pending = data_root.pending_path()
+    pending.parent.mkdir(parents=True)
+    pending.symlink_to(tmp_path / "missing-pending-request")
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    monkeypatch.setattr(app.state.tasks, "_dispatch_locked", lambda: None)
+
+    blocked = client.post(
+        "/api/v1/projects/sample/tasks", json={"stage": "translation"}
+    )
+    cancelled = data_root.cancel_relocation(confirm=True)
+    resumed = client.post(
+        "/api/v1/projects/sample/tasks", json={"stage": "translation"}
+    )
+
+    assert blocked.status_code == 400
+    assert cancelled == {"cancelled": True}
+    assert resumed.status_code == 200
+    assert resumed.json()["task_id"]
 
 
 def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(

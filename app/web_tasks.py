@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import data_root
 from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
 from .errors import (
@@ -1186,6 +1187,9 @@ class WebTaskManager:
         async with self.guard:
             if self._shutting_down:
                 raise UsageError("任务管理器正在关闭")
+            pending = data_root.pending_path()
+            if pending.exists() or pending.is_symlink():
+                raise UsageError("数据目录迁移待执行，不能启动新任务")
             if stage == CONTINUOUS_STAGE and (
                 replace_draft or acknowledge_manual_review
             ):
