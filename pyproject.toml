@@ -24,6 +24,11 @@ dependencies = [
 another-llm-translator = "app.main:main"
 another-llm-translator-web = "app.web:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests", "plugins"]
+addopts = ["-m", "not packaging"]
+markers = ["packaging: runtime and packaging probe tests"]
+
 [tool.setuptools]
 packages = ["app"]
 include-package-data = true
@@ -60,4 +65,15 @@ llm_presets = [
   "llm_presets/default.json",
   "llm_presets/google-gemini.json",
   "llm_presets/openai-responses.json",
+]
+"plugins/srt" = [
+  "plugins/srt/__init__.py",
+  "plugins/srt/adapter.py",
+  "plugins/srt/plugin.py",
+  "plugins/srt/plugin.toml",
+]
+"plugins/term_validation" = [
+  "plugins/term_validation/__init__.py",
+  "plugins/term_validation/plugin.py",
+  "plugins/term_validation/plugin.toml",
 ]

@@ -62,6 +62,7 @@ from .stage_runtime import (
     _create_or_continue_run,
     _document_prompt_requirement_helpers,
     _execute_stage_run,
+    _frozen_run_options,
     _project_context,
     _prompt_factory,
     _prompt_language_for_stages,
@@ -303,7 +304,11 @@ async def run_terminology(
         raise UsageError(
             "include_summaries 要求完整项目范围，不支持部分 Scope"
         )
-    config, metadata, files, segments = _project_context(project, stage="terminology")
+    run_options_snapshot = _frozen_run_options(project, resume_run_id)
+    context_kwargs: dict[str, object] = {"stage": "terminology"}
+    if run_options_snapshot is not None:
+        context_kwargs["frozen_run_options"] = run_options_snapshot
+    config, metadata, files, segments = _project_context(project, **context_kwargs)
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
@@ -337,7 +342,10 @@ async def run_terminology(
     def prompt_config_for_stage(stage: str) -> dict[str, Any]:
         stage_config = prompt_configs.get(stage)
         if stage_config is None:
-            stage_config, _, _, _ = _project_context(project, stage=stage)
+            prompt_context_kwargs: dict[str, object] = {"stage": stage}
+            if run_options_snapshot is not None:
+                prompt_context_kwargs["frozen_run_options"] = run_options_snapshot
+            stage_config, _, _, _ = _project_context(project, **prompt_context_kwargs)
             prompt_configs[stage] = stage_config
         return stage_config
 
@@ -817,13 +825,28 @@ async def run_terminology(
             if context_config["enabled"]
             else []
         )
+        response_mode = mode_for_item(
+            items[0], default=TerminologyResponseMode.TERMS_ONLY
+        )
+        source_segments: list[object]
+        if response_mode in {
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+            TerminologyResponseMode.SUMMARY_ONLY,
+        }:
+            source_segments = [
+                {
+                    "id": str(index),
+                    "text": segment_model_source(item),
+                }
+                for index, item in enumerate(items, 1)
+            ]
+        else:
+            source_segments = [segment_model_source(item) for item in items]
         payload = {
             "target_language": config["project"]["target_language"],
             "reference_context": [item["source"] for item in raw_context],
-            "source_segments": [segment_model_source(item) for item in items],
+            "source_segments": source_segments,
         }
-        if include_summaries:
-            payload["source_refs"] = [str(index) for index, _ in enumerate(items, 1)]
         return payload
 
     run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(

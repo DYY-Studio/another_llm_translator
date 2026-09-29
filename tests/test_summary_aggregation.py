@@ -187,8 +187,9 @@ class SummaryRequirementAdapter(RecordDocumentAdapter):
         stage: str,
         language: str,
         opaque_state: dict[str, object] | None,
+        run_options: dict[str, str],
     ) -> str | None:
-        del opaque_state
+        del opaque_state, run_options
         if stage == "content_summary" and language == "en":
             return "Preserve the source-boundary order in the consolidated summary."
         return None

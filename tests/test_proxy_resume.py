@@ -15,7 +15,7 @@ from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.execution import Scope, choose_running_run, create_run
 from app.main import build_parser, run as run_cli
 from app.project import init_project
-from app.stage_runtime import _confirm_fingerprint_reuse
+from app.stage_runtime import _confirm_fingerprint_reuse, _project_context
 from app.stage_review import run_review
 from app.stage_terminology import run_terminology
 from app.stage_translation import run_translation
@@ -62,9 +62,10 @@ def _new_running_run(
     }
     if active_task_id is not None:
         details["active_task_id"] = active_task_id
+    run_config, _, _, _ = _project_context(project, stage=stage)
     run_id, _ = create_run(
         project,
-        config=load_project_config(project),
+        config=run_config,
         stage=stage,
         fingerprint="old-fingerprint",
         prompt="old prompt",

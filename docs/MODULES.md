@@ -9,11 +9,11 @@
 
 - `app/`：Python CLI、Web API、领域执行、存储、Adapter 宿主与导出。
 - `web/`：React/Vite/TypeScript 前端，只通过 HTTP API 使用后端能力。
-- `src-tauri/`：Tauri 2 桌面壳、sidecar 生命周期和原生选择器。
+- `src-tauri/`：Tauri 2 桌面壳、managed Python Web 进程生命周期和原生选择器。
 - `config/`、`prompts/`、`llm_adapters/`、`llm_presets/`：随应用分发的内置资源。
 - `plugins/`：可独立构建的可信 Python 示例插件。
 - `tests/`：使用临时项目和模拟模型响应的契约与工作流测试。
-- `packaging/`、`scripts/`：sidecar、前端和桌面构建入口。
+- `packaging/`、`scripts/`：PBS 与依赖 lock、managed runtime、前端和桌面构建/探针入口。
 - `docs/`：产品、协议、模块、开发、使用和路线图文档；各自职责由根目录
   [`AGENTS.md`](../AGENTS.md) 定义。
 
@@ -36,7 +36,7 @@ CLI / Web / Tauri
 - `app/main.py` 和 Web route 只负责入口解析、权限与响应装配，不实现第二套阶段规则。
 - 具体阶段模块调用共享运行时和执行模块；共享模块不得反向依赖 CLI 或 Web。
 - 项目与存储模块拥有持久状态；Chunk、HTTP Attempt 和 Web 任务对象不是持久业务状态。
-- Document Adapter 通过 `app/documents.py` / `app/plugins.py` 的协议进入宿主，不直接操作项目数据库、
+- Document Adapter 通过 `app/plugin_api.py` 的公开协议和 `app/plugins.py` 的宿主发现进入宿主，不直接操作项目数据库、
   Run 或正式输出目录。
 - 前端只呈现服务端状态并提交用户决定，不推导 Segment 进度、结果复用或恢复结论。
 
@@ -61,7 +61,9 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
+- `web_continuous.py`：连续运行阶段区间、预检快照、阶段选项摘要和运行编排；复用共享阶段入口，不拥有第二套阶段语义。
 - `web_export_routes.py`：项目导出、下载和桌面保存位置。
+- `web_storage_routes.py`：存储占用查询以及需要明确确认的可清理项入口。
 
 Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_payloads.py`；Web 进程内项目缓存
 和打开状态位于 `web_store.py`；任务生命周期位于 `web_tasks.py`。
@@ -87,6 +89,12 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 选择当前阶段结果、恢复宿主级文本规则、调用来源或 TXT Document Adapter、验证暂存输出并发布
 导出文件。格式专属重建留在各 Document Adapter。
+
+### `app/storage_management.py`
+
+按需扫描用户数据根目录和已登记的项目路径，排除应用安装资源，按产品类别汇总占用并标记扫描
+完整性。它只清理可再生的 DEBUG 附件、输出文件和日志，并在清理前检查项目写锁、活动任务和
+运行中的 Run；不拥有 SQLite schema、阶段结果或项目生命周期。
 
 ### `app/locking.py`
 
@@ -127,7 +135,7 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ### `app/llm_preset.py` 与 `app/llm_keys.py`
 
-`llm_preset.py` 解析连接、模型、限流和凭据引用；`llm_keys.py` 管理一次执行中的多 Key 选择、
+`llm_preset.py` 解析 Base URL、模型、限流和凭据引用；`llm_keys.py` 管理一次执行中的多 Key 选择、
 限流、冷却和安全审计。二者不读取或写入阶段结果。
 
 ### `app/llm_client.py`
@@ -158,8 +166,14 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/plugins.py`
 
-可信 Python 插件发现、描述符和协议版本校验。插件在同一进程运行，但只能通过公开协议注册
-Document Adapter 与 Translation Validator。
+可信 Python 目录插件的 manifest 发现、独立模块加载、描述符和协议版本校验。它先检查官方
+资源与用户数据目录的全部 manifest，再在同一进程中加载插件；成功的注册结果按进程缓存。插件
+只能通过公开协议注册 Document Adapter 与 Translation Validator。
+
+### `app/plugin_api.py`
+
+可信 Python 插件使用的公开契约入口，集中导出 PluginDescriptor、Document Adapter 与翻译校验
+类型、严格文本解码 API 和插件所需的宿主错误类型；不负责插件发现或业务执行。
 
 ### `app/translation_validation.py`
 
@@ -200,11 +214,16 @@ Document Adapter 与 Translation Validator。
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
 拥有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
 
+`StorageView.tsx` 负责设置页中的存储汇总、项目明细和逐项清理交互；它不复制后端扫描或安全判断，
+清理后重新读取服务端状态。
+
 页面局部 UI 状态留在对应 workspace/component；服务端拥有的项目、运行和结果状态必须重新
 读取 API，不在前端建立权威副本。
 
-`src-tauri/src/` 只负责桌面窗口、sidecar 生命周期和原生选择器。`packaging/` 与 `scripts/`
-负责冻结和构建；桌面壳不实现独立业务后端。
+`src-tauri/src/` 负责桌面窗口、从应用资源目录定位 bundled managed Python 并以
+`-m app.web` 启动 Web 服务、管理该进程及原生选择器；开发构建从明确的 runtime 目录启动，
+正式构建使用 app 内的 runtime。`packaging/` 与 `scripts/` 负责 runtime 组装、检查和 Tauri
+打包；桌面壳不实现独立业务后端。
 
 ## 11. 变更规则
 

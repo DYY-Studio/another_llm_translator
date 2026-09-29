@@ -1,0 +1,52 @@
+# Resolved once for CPython 3.13 on macOS 13+ arm64 from requirements.txt.
+# Each wheel filename, compatibility tag, and SHA-256 below is the offline build inventory.
+# wheel=annotated_doc-0.0.5-py3-none-any.whl tag=py3-none-any sha256=117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101
+annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101
+# wheel=annotated_types-0.8.0-py3-none-any.whl tag=py3-none-any sha256=f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+# wheel=anyio-4.15.1-py3-none-any.whl tag=py3-none-any sha256=6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+anyio==4.15.1 --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+# wheel=certifi-2026.7.22-py3-none-any.whl tag=py3-none-any sha256=62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+# wheel=chardet-5.2.0-py3-none-any.whl tag=py3-none-any sha256=e1cf59446890a00105fe7b7912492ea04b6e6f06d4b742b2c788469e34c82970
+chardet==5.2.0 --hash=sha256:e1cf59446890a00105fe7b7912492ea04b6e6f06d4b742b2c788469e34c82970
+# wheel=click-8.5.0-py3-none-any.whl tag=py3-none-any sha256=255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+click==8.5.0 --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+# wheel=fastapi-0.141.1-py3-none-any.whl tag=py3-none-any sha256=bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
+fastapi==0.141.1 --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
+# wheel=h11-0.16.0-py3-none-any.whl tag=py3-none-any sha256=63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+h11==0.16.0 --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+# wheel=httpcore-1.0.9-py3-none-any.whl tag=py3-none-any sha256=2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+httpcore==1.0.9 --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+# wheel=httpx-0.28.1-py3-none-any.whl tag=py3-none-any sha256=d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+httpx==0.28.1 --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+# wheel=idna-3.20-py3-none-any.whl tag=py3-none-any sha256=ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+# wheel=jaraco.classes-3.4.0-py3-none-any.whl tag=py3-none-any sha256=f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
+jaraco-classes==3.4.0 --hash=sha256:f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
+# wheel=jaraco_context-6.1.2-py3-none-any.whl tag=py3-none-any sha256=bf8150b79a2d5d91ae48629d8b427a8f7ba0e1097dd6202a9059f29a36379535
+jaraco-context==6.1.2 --hash=sha256:bf8150b79a2d5d91ae48629d8b427a8f7ba0e1097dd6202a9059f29a36379535
+# wheel=jaraco_functools-4.6.0-py3-none-any.whl tag=py3-none-any sha256=99e3dc0060c5cbe8fcd1cdb36258e2a65ca40f1566b2033b12abb1bb44dd3c30
+jaraco-functools==4.6.0 --hash=sha256:99e3dc0060c5cbe8fcd1cdb36258e2a65ca40f1566b2033b12abb1bb44dd3c30
+# wheel=keyring-25.7.0-py3-none-any.whl tag=py3-none-any sha256=be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f
+keyring==25.7.0 --hash=sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f
+# wheel=more_itertools-11.1.0-py3-none-any.whl tag=py3-none-any sha256=4b65538ae22f6fed0ce4874efd317463a7489796a0939fa66824dd542125a192
+more-itertools==11.1.0 --hash=sha256:4b65538ae22f6fed0ce4874efd317463a7489796a0939fa66824dd542125a192
+# wheel=psutil-6.1.1-cp36-abi3-macosx_11_0_arm64.whl tag=cp36-abi3-macosx_11_0_arm64 sha256=0bdd4eab935276290ad3cb718e9809412895ca6b5b334f5a9111ee6d9aff9377
+psutil==6.1.1 --hash=sha256:0bdd4eab935276290ad3cb718e9809412895ca6b5b334f5a9111ee6d9aff9377
+# wheel=pydantic-2.13.5-py3-none-any.whl tag=py3-none-any sha256=346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73
+pydantic==2.13.5 --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73
+# wheel=pydantic_core-2.46.5-cp313-cp313-macosx_11_0_arm64.whl tag=cp313-cp313-macosx_11_0_arm64 sha256=f332f0e72a5a0400141f830744e141bf9f97917878dbe968669e8a7fefea78ff
+pydantic-core==2.46.5 --hash=sha256:f332f0e72a5a0400141f830744e141bf9f97917878dbe968669e8a7fefea78ff
+# wheel=python_multipart-0.0.32-py3-none-any.whl tag=py3-none-any sha256=ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+python-multipart==0.0.32 --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+# wheel=regex-2026.9.10-cp313-cp313-macosx_11_0_arm64.whl tag=cp313-cp313-macosx_11_0_arm64 sha256=d8c668af8f7bdb1d18739c27d30cd9f4b371495a883f75a002fb7a39d740fecd
+regex==2026.9.10 --hash=sha256:d8c668af8f7bdb1d18739c27d30cd9f4b371495a883f75a002fb7a39d740fecd
+# wheel=starlette-1.6.0-py3-none-any.whl tag=py3-none-any sha256=a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
+starlette==1.6.0 --hash=sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
+# wheel=typing_extensions-4.16.0-py3-none-any.whl tag=py3-none-any sha256=481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+# wheel=typing_inspection-0.4.4-py3-none-any.whl tag=py3-none-any sha256=65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+typing-inspection==0.4.4 --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+# wheel=uvicorn-0.53.0-py3-none-any.whl tag=py3-none-any sha256=e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e
+uvicorn==0.53.0 --hash=sha256:e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e

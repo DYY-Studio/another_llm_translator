@@ -238,12 +238,17 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert "术语候选提取器" not in terminology["assembled_modes"]["summary-only"]
 
     decision = client.get("/api/v1/global/prompts/terminology_decision").json()
-    assert set(decision["assembled_phases"]) == {"adjudication", "consistency"}
+    assert set(decision["assembled_phases"]) == {
+        "adjudication",
+        "consistency",
+        "final_review",
+    }
     assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
     assert (
         "当前是第二阶段“跨术语一致性复核”"
         in decision["assembled_phases"]["consistency"]
     )
+    assert "当前是第三阶段“术语自动终审”" in decision["assembled_phases"]["final_review"]
 
     assert (
         client.put(

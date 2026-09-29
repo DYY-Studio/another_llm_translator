@@ -56,3 +56,8 @@ def isolated_user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             json.dumps(preset, ensure_ascii=False), encoding="utf-8"
         )
     monkeypatch.setattr("app.config.APP_ROOT", runtime_root)
+
+
+@pytest.fixture(autouse=True)
+def clear_plugin_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)

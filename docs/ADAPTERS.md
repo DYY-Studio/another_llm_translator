@@ -17,8 +17,9 @@
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "adapter_id": "openai-compatible",
+  "endpoint": "/chat/completions",
   "headers": {
     "Authorization": "Bearer ${api_key}"
   },
@@ -65,9 +66,9 @@
 
 ### 请求边界
 
-- 请求地址只由当前 Preset 的 `base_url` 与 `endpoint` 组成。API 版本前缀
-  （如 `/v1`、`/v1beta`）写入 `base_url`，`endpoint` 必须是相对路径。
-- Preset `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
+- 请求地址只由当前 Preset 的 `base_url` 与 Adapter 的 `endpoint` 组成。API 版本前缀
+  （如 `/v1`、`/v1beta`）写入 `base_url`，Adapter `endpoint` 必须是相对路径。
+- Adapter `endpoint` 允许且只允许 `${model}` 占位符（如 Gemini 的
   `/models/${model}:generateContent`），请求时由宿主替换为模型名；
   其他占位符立即失败。
 - 未声明 `streaming` 的 Adapter 只支持普通 JSON POST；声明后可由 Preset 显式
@@ -87,13 +88,14 @@
 
 ### SSE 流式规则（可选）
 
-schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
 `streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
 
 ```json
 {
   "streaming": {
     "transport": "sse",
+    "endpoint": "/chat/completions",
     "request_body": {"stream_options": {"include_usage": true}},
     "content_events": [
       {"pointer": "/choices/0/delta/content"}
@@ -120,7 +122,9 @@ schema 2 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 }
 ```
 
-`request_body` 只在流式请求加入，不能与基础 `body` 或 Preset `extra_body` 的顶层字段冲突。
+`streaming.endpoint` 是启用流式请求时使用的必填相对路径，与顶层 `endpoint` 使用相同
+占位符规则；即使两种请求使用同一路径也必须显式声明。`request_body` 只在流式请求加入，
+不能与基础 `body` 或 Preset `extra_body` 的顶层字段冲突。
 
 `content_events` 必须非空；每项以 `pointer` 指向字符串增量，可选 `when` 条件为 `{"pointer": "...", "equals": <primitive>}` 或 `{"pointer": "...", "exists": true}`。条件匹配后路径缺失或类型错误立即失败，未知事件忽略。
 
@@ -235,7 +239,7 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
 
   未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Preset `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
+- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Adapter `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
 
   不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
 - `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
@@ -244,12 +248,12 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
 
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的 `models` 端点与示例 Preset 的 `endpoint` 都是不含版本前缀的相对路径；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
 ## 2. Document Adapter（Beta）
 
-Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；独立发行的
-`another-llm-translator-srt` 插件提供 `srt` Adapter：
+Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；官方目录插件
+`plugins/srt/` 提供 `srt` Adapter：
 
 ```python
 class DocumentAdapter(Protocol):
@@ -261,8 +265,18 @@ class DocumentAdapter(Protocol):
     run_options: tuple[DocumentChoiceOption, ...]
 
     def model_prompt_requirements(
-        *, stage: str, language: str, opaque_state: dict | None
+        *, stage: str, language: str, opaque_state: dict | None,
+        run_options: dict[str, str]
     ) -> str | None: ...
+
+    def render_model_source(
+        *, segment: dict, opaque_state: dict | None,
+        run_options: dict[str, str]
+    ) -> str: ...
+
+    def segment_format_count(
+        *, segment: dict, opaque_state: dict | None
+    ) -> int: ...
 
     def replacement_options(
         *, opaque_state: dict | None
@@ -272,18 +286,35 @@ class DocumentAdapter(Protocol):
     def export_sources(...) -> list[Path]: ...
 ```
 
+可选属性 `readable_versions: frozenset[str]` 声明当前实现可安全读取的历史版本；未声明时只读取与 `version` 相同的状态，声明时必须包含当前 `version`。
+
+可选的模型输出规范化方法签名为：
+
+```python
+def normalize_model_output(
+    *,
+    segment: dict,
+    text: str,
+    stage: str,
+    opaque_state: dict | None,
+    run_options: dict[str, str],
+) -> str: ...
+```
+
+未实现时宿主原样使用模型文本。
+
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。更新该导出参数后，Document Adapter 插件协议版本为 `11`；旧协议插件会快速失败。
+宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `12`；旧协议插件会快速失败，不保留旧调用路径。
 
-`model_prompt_requirements` 只允许返回该格式重建所需的可信模型处理要求；宿主按当前 File 的 `opaque_state` 和请求语言调用它，并将不同要求集合拆分到不同 Chunk。返回值不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
+`render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。`normalize_model_output` 是可选方法；实现时接收相同快照，未实现时宿主原样使用模型文本。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
-青空 `｜base《reading》` 属于宿主通用文本规则，TXT、EPUB 等 Adapter 均可使用，不通过此方法重复声明。内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`。
+内置 TXT 与 SRT 插件没有额外的格式 Prompt 要求，返回 `None`，并原样返回模型源文。
 
 所有基于纯文本的 Document Adapter 都可以复用宿主提供的严格字节解码 API：
 
 ```python
-from app.documents import DecodedPlaintext, decode_plaintext
+from app.plugin_api import DecodedPlaintext, decode_plaintext
 
 decoded: DecodedPlaintext = decode_plaintext(
     data,
@@ -322,25 +353,21 @@ Adapter 返回有序 `ImportedFile`，每项包含原始文件位置、展示名
 
 “内容概括 · 实验”直接复用这条通用边界契约。Adapter 不需要实现概括专用方法，也
 不需要声明章节；每个 `(file_id, part_id)` 可独立生成片段概括、聚合和 Markdown 导出。
-`model_sources` 只作为模型输入格式，不改变持久化的原文 Segment。宿主保存原文和实际
-模型文本的摘要及引用范围；当外部 Adapter 的 `model_source` 需要拆分而无法安全保留
-原始定位时，概括请求明确失败，不猜测字符级映射。
+持久化 Segment 原文不随运行设置改变。运行时模型文本由 `render_model_source` 生成；宿主保存原文和实际模型文本的摘要及引用范围。当转换后的文本无法安全映射到切片时，概括请求明确失败，不猜测字符级映射。
 
-每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其保存在
-`source/adapters/<adapter_id>/<file_id>.json`，并在 File 记录中保存 Adapter
-ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释内部字段。
+每个 `ImportedFile` 可携带 JSON 可序列化的 `opaque_state`。宿主将其与完整的字符串 `run_options` 映射分别保存为状态记录的 `state` 与 `run_options` 字段，并在 File 记录中保存 Adapter ID、版本和状态位置；宿主只校验归属、版本和完整性，不解释 `state` 内部字段。
 
-Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并校验取值；导入选项只在导入调用中传入，运行选项由 Adapter 固化在 File 的 `opaque_state`。
+Adapter 可声明由固定字符串选项组成的 `import_options` 和类型相同的 `run_options`。宿主展示声明并严格校验取值；导入选项只传入 `import_sources()`，运行选项只写在 File 状态记录外层，绝不混入 `opaque_state`。
 
-`replacement_options()` 用 File 的 `opaque_state` 恢复当前 File 的全部导入和运行选项。它必须返回与声明完全一致的字符串键值，并由宿主再次校验取值；缺失、额外、类型错误或非法值都直接失败，不静默使用声明默认值。Adapter 可以在读取旧的、仍可读状态时按该版本既有语义提供默认值。
+`replacement_options()` 只用 File 的 `opaque_state` 恢复当前导入选项。运行选项由宿主从状态记录外层恢复；替换时两类选项都可覆盖，未覆盖值沿用当前 File。缺失、额外、类型错误或非法值都直接失败。
 
 仅供受控替换使用的历史选项可以声明为 `replacement_choices`；它们不会出现在新导入选项中，但会在逐 File 替换对话框中作为当前值保留并允许用户改为现行选项。
 
-普通设置修改不会追溯既有 File。`files-replace` 是受控重新导入：替换预览通过逐 File 的 `replacement-options` API 显示当前值，用户可以修改任意已声明选项；未覆盖的选项沿用当前 File 值，确认前会展示旧值、新值和变化键。新选项随后固化到新的 `opaque_state`，不需要迁移既有项目。
+概览可逐 File 修改运行选项，也可按 Adapter 对项目内全部当前 File 部分覆盖；批量操作没有文件筛选。运行选项的修改不改写 Segment、定位状态或既有结果。`files-replace` 是受控重新导入：替换预览显示当前值，未覆盖值沿用当前 File，确认前会展示导入设置与运行设置的变化。
 
 CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=VALUE` 传入选项（如 `--adapter-option epub.ruby_mode=aozora`）；Web 上传使用同名 `adapter_options` JSON。
 
-两者构建同一形状，取值语义统一在宿主 `validate_document_import_options` 边界校验。
+两者构建同一形状，取值语义统一在宿主的导入与运行选项边界校验。CLI 的 `files-options` 可逐 File 查看/部分更新，或按 Adapter 对项目内全部当前 File 查看/部分更新。
 
 ### 契约测试
 
@@ -350,14 +377,14 @@ CLI 的 `init` 与 `files-add` 用可重复的 `--adapter-option ADAPTER.OPTION=
 - 按扩展名与显式 ID 导入、选项校验与透传；
 - `opaque_state` 存储往返及 `part_id`/`model_source` 落地；
 - 翻译时应用 `normalize_model_output`，以及双语和纯译文导出；
-- 运行选项固化、指纹跟踪；
+- 运行选项的 File 存储、动态渲染、冻结快照和指纹跟踪；
 - Adapter 缺失、版本不匹配、状态损坏和能力不足。
 
 任何标准第三方 Adapter 必须通过该套件的通用路径。
 
 ### 版本与升级策略
 
-Adapter 默认只能读取与自身 `version` 相同的 File 状态。Adapter 可选声明 `readable_versions: frozenset[str]`，且必须包含当前版本；这只表示当前实现能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
+Adapter 默认只能读取与自身 `version` 相同的 File 状态；可选的 `readable_versions` 语义见上文。这只表示当前实现能安全解释旧状态，不会改写 File、`opaque_state`、Segment 或阶段结果。
 
 File 版本与状态记录版本仍必须一致，未声明可读的版本立即失败。外部 Adapter 未声明时仍保持严格相等语义。
 
@@ -367,7 +394,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 11。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 12。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -375,8 +402,7 @@ Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都
 
 ### SRT 0.1（外部插件示例）
 
-SRT 插件位于 `plugins/srt/`，发行包名为 `another-llm-translator-srt`，通过
-`another_llm_translator.plugins` entry point 注册。
+SRT 插件位于 `plugins/srt/`，作为官方目录插件随宿主资源分发。
 
 每个 cue 是一个 Segment，所有 cue 使用 `document` part；`opaque_state` 只保存原始序号和时间行。
 
@@ -388,7 +414,7 @@ HTML/ASS 样式标记作为普通正文交给模型，插件不解析或保证�
 空白分隔行，否则会改变 SRT cue 边界并进入现有格式失败流程。插件不接受缺序号、点号
 毫秒或时间行尾定位参数等非核心变体。
 
-### EPUB 0.5
+### EPUB 0.6
 
 EPUB Adapter 每次导入一个 `.epub`；同一项目可包含多个 EPUB File。Adapter 保存各 File 的原始容器，并记录 OPF、spine 顺序、导航资源以及 Segment 到 XHTML/NCX 文本流和 `text`/`tail` 槽位的定位。
 
@@ -418,11 +444,11 @@ NCX 可无 DOCTYPE，或使用 PUBLIC `-//NISO//DTD ncx 2005-1//EN` 与标准 `n
 
 普通透明内联元素中的相邻文本槽构成一个复合 Segment；纯译文把整条译文写入首槽并清空其余槽，保留标签及 attrs 骨架，不猜测局部格式对应关系。双语导出保留源槽并在末槽后写入译文。
 
-Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽，只有没有相邻文本的独立 Ruby 才继续使用旧的 `kind: "ruby"` 形状。新导入可选择 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`。
+Ruby 是同一文本流中的内联成员；包含 Ruby 的复合 locator 可以按源文顺序混合普通 `text`/`tail` 槽和 Ruby 槽。新导入总是保存青空 Ruby 的规范 Segment 原文与完整 locator。`ruby_mode` 是 File 级运行选项，可选 `aozora`（默认）、`short_xml`、`compact` 或 `base_only`。
 
-除 `base_only` 完全删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。
+除 `base_only` 只从模型输入删除 Ruby/reading 外，用户 source 和阶段结果均使用青空 `｜base《reading》`；`short_xml` 只向模型使用 `<r><b>base</b><y>reading</y></r>`，`compact` 只向模型使用 `⟦R:base|Y:reading⟧`。这些转换与输出规范化都只发生在冻结的运行上下文。
 
-新导入不再提供 `parenthetical`；EPUB 0.5 可直接读取和导出既有 0.3/0.4 File，包括旧 `parenthetical` 状态，但不迁移或改写。旧 File 需重新导入才会生成目录 Segment。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
+新导入不提供 `parenthetical`。无法确定基础文字和读音的嵌套或残缺结构会带 XHTML 位置快速失败。
 
 纯译文导出把整条译文写入混合 Segment 的首个可用位置，清空其余普通槽并删除该 Segment 内全部 Ruby；双语导出保留完整源句和 Ruby，并只在整个 Segment 末尾追加普通译文。
 
@@ -440,7 +466,7 @@ base 可跨相邻 Ruby 匹配连续正文，直接相邻 Ruby 的 reading 也会
 
 该匹配规则不改写 Segment 原文或发送给模型的 `source`。
 
-当 `inline_format_mode=markers` 时，EPUB 另保存 `model_source`，把符合 `inline_format_policy` 的普通内联标签转换为无 attrs 的唯一成对标记；`plain` 是默认值，模型只看到净文本。
+`inline_format_mode=markers` 与 `inline_format_policy=tiered|strict` 也是 File 级运行选项。marker 在运行时生成，EPUB 不持久化依赖这些选项的 `model_source`；`plain` 是默认值，模型只看到净文本。
 
 `tiered` 要求语义关键标签保留，表现层标签可整体省略；`strict` 要求全部源标签保留。
 
@@ -463,22 +489,38 @@ EPUB Adapter 仅在 `markers` 模式向对应请求的 Prompt 注入上述保留
 
 ## 3. 可信 Python 插件宿主（Beta）
 
-插件包在 entry-point 组 `another_llm_translator.plugins` 注册一个
-`PluginDescriptor` 实例或返回该实例的无参函数：
+插件使用的宿主契约统一从 `app.plugin_api` 导入；该模块只公开稳定的协议类型、严格解码
+API 和插件所需错误类型，不提供插件发现或业务执行入口。官方插件和用户插件均是一个
+直接位于插件根目录下的可信 Python 包：
 
 ```toml
-[project.entry-points."another_llm_translator.plugins"]
-my_plugin = "my_package.plugin:descriptor"
+schema = 1
+
+[plugin]
+id = "my-documents"
+version = "1.0.0"
+protocol = 12
+entrypoint = "plugin:descriptor"
 ```
 
+目录同时包含 `__init__.py`、入口模块和入口模块需要的相对导入文件。宿主只扫描官方
+资源 `plugins/` 和用户数据目录 `<用户数据目录>/plugins/` 的直接子目录；子目录按名称
+稳定排序，用户目录不存在表示没有用户插件。源码运行和冻结运行使用各自随应用分发的
+官方 `plugins/` 资源。用户插件修改后重启应用生效。
+
+宿主先读取并校验全部 `plugin.toml`，再执行任何插件代码。未知字段、缺失文件、协议不符、
+重复插件 ID、入口不在插件目录内、描述符元数据不一致或入口失败都会带路径、阶段和原因
+直接阻止启动；不跳过插件，也不回落到另一种发现机制。插件代码与宿主同进程运行，拥有
+当前进程权限；目录命名空间只隔离模块名，不构成安全沙箱。
+
 ```python
-from app.plugins import PluginDescriptor
+from app.plugin_api import PluginDescriptor
 
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=11,
+        protocol_version=12,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -487,7 +529,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `11`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `12`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
 
 上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 
@@ -495,10 +537,11 @@ def descriptor() -> PluginDescriptor:
 
 `error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。
 
-首个真实外部示例是可选的 `another-llm-translator-term-validation`，提供 `preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
+首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
+`preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
 
 ```python
-from app.translation_validation import (
+from app.plugin_api import (
     TranslationValidationContext,
     TranslationValidationMatch,
 )
@@ -517,13 +560,13 @@ class MyValidator:
 
 ## 4. LLM Preset（已实现）
 
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存端点、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
-Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和定义内容 Hash。
+Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
 
-当前 Preset schema 为 5。除现有连接字段外，`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力，`stream_endpoint` 是可选的流式专用相对路径（空字符串复用 `endpoint`，只允许 `${model}` 占位符）。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 7。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2/3/4 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 5，补入流式默认值和 `max_parallel_per_key = max_parallel`；Run 内历史快照只在内存中补齐默认值，不改写审计文件。
+schema 2–6 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 7，补入缺失字段；旧 `endpoint` 与 `stream_endpoint` 字段原样保留，但不校验、不参与请求或指纹。`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史 Preset 快照只在内存中补齐默认值，不改写审计文件；schema 1/2 Adapter 快照不兼容 schema 3，不从 Preset 回退 Endpoint。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 

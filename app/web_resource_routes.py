@@ -261,7 +261,7 @@ def register_resource_routes(
         if stage == "terminology_decision":
             assembled_phases = {
                 phase: full_prompt(stage, content, resolved, phase=phase)
-                for phase in ("adjudication", "consistency")
+                for phase in ("adjudication", "consistency", "final_review")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
@@ -564,7 +564,7 @@ def register_resource_routes(
         if stage == "terminology_decision":
             assembled_phases = {
                 phase: full_prompt(stage, content, language, phase=phase)
-                for phase in ("adjudication", "consistency")
+                for phase in ("adjudication", "consistency", "final_review")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
@@ -762,9 +762,9 @@ def register_resource_routes(
             request_id="REQ-PREVIEW",
         )
         endpoint = (
-            preset.definition["stream_endpoint"]
-            if preset.definition["stream"] and preset.definition["stream_endpoint"]
-            else preset.definition["endpoint"]
+            adapter.streaming_spec["endpoint"]
+            if preset.definition["stream"] and adapter.streaming_spec is not None
+            else adapter.endpoint
         )
         return {
             "url": endpoint_url(

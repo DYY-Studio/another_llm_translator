@@ -1,12 +1,12 @@
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "preset_id": "default",
   "adapter_id": "openai-compatible",
   "base_url": "https://example.com/v1",
-  "endpoint": "/chat/completions",
   "model": "example-model",
   "proxy_url": "",
   "context_window_tokens": 16384,
+  "target_chunk_input_tokens": 8192,
   "max_output_tokens": 4096,
   "context_safety_margin_tokens": 512,
   "token_safety_factor": 1.25,
@@ -16,7 +16,6 @@
   "max_parallel_per_key": 4,
   "request_timeout_seconds": 120,
   "stream": false,
-  "stream_endpoint": "",
   "stream_read_timeout_enabled": true,
   "extra_body": {},
   "credential": {

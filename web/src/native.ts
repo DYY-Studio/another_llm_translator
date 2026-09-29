@@ -1,10 +1,13 @@
-import { ApiError, errorPayloadFrom } from "./api";
+import { ApiError, errorPayloadFrom } from "./api.ts";
 
 declare global {
   interface Window {
     __TAURI__?: {
       core: {
         invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      opener?: {
+        openUrl: (url: string) => Promise<void>;
       };
     };
   }
@@ -25,6 +28,19 @@ export function pickNativeFile(): Promise<string | null> {
 
 export function pickNativeFolder(): Promise<string | null> {
   return pick("select_folder");
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (nativeBridgeAvailable()) {
+    const openUrl = window.__TAURI__?.opener?.openUrl;
+    if (typeof openUrl !== "function") {
+      throw new Error("Tauri opener is unavailable");
+    }
+    await openUrl(url);
+    return;
+  }
+
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export async function saveExport(

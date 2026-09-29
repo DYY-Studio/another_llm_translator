@@ -7,11 +7,6 @@ The validator reports an advisory finding when a published terminology match has
 
 The host decides which terms matched; this plugin does not read project files or the terminology database.
 
-Install it in a Python environment with the host package:
-
-```bash
-python -m pip install another-llm-translator-term-validation
-```
-
-The official desktop build includes the plugin, but disables it by default.
-The desktop application does not support runtime plugin installation or upgrades.
+The official desktop build includes this directory plugin. A user plugin can be unpacked into
+the host user's `plugins/` directory and is loaded after the application restarts. The plugin
+must use the manifest and public `app.plugin_api` contract documented in `docs/ADAPTERS.md`.

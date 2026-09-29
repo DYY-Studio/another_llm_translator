@@ -147,6 +147,7 @@ def test_prompt_api_reports_sync_and_keeps_library_separate(
     assert set(decision_detail.json()["assembled_phases"]) == {
         "adjudication",
         "consistency",
+        "final_review",
     }
     assert project_prompt_path.read_text(encoding="utf-8") == changed_global
     assert (

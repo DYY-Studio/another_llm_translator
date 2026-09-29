@@ -19,6 +19,7 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
     {
         "schema_version",
         "adapter_id",
+        "endpoint",
         "headers",
         "body",
         "response_content_pointer",
@@ -53,6 +54,7 @@ _USAGE_KEYS = frozenset(
 _STREAMING_KEYS = frozenset(
     {
         "transport",
+        "endpoint",
         "request_body",
         "content_events",
         "reasoning_events",
@@ -91,6 +93,7 @@ class StreamErrorDetails:
 @dataclass(frozen=True)
 class JSONLLMAdapter:
     adapter_id: str
+    endpoint: str
     headers_template: dict[str, str]
     body_template: dict[str, Any]
     response_content_pointer: str
@@ -394,15 +397,15 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError(f"LLM Adapter 不是合法 JSON：{path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigError(f"LLM Adapter 顶层必须是 JSON 对象：{path}")
+    schema_version = value.get("schema_version")
+    if schema_version != 3:
+        raise ConfigError("LLM Adapter schema_version 必须是 3")
     unknown = set(value) - _REQUIRED_ADAPTER_KEYS - _OPTIONAL_ADAPTER_KEYS
     missing = _REQUIRED_ADAPTER_KEYS - set(value)
     if unknown:
         raise ConfigError(f"LLM Adapter 包含未知字段：{', '.join(sorted(unknown))}")
     if missing:
         raise ConfigError(f"LLM Adapter 缺少字段：{', '.join(sorted(missing))}")
-    schema_version = value["schema_version"]
-    if schema_version not in {1, 2}:
-        raise ConfigError("LLM Adapter schema_version 必须是 2")
     adapter_id = value["adapter_id"]
     if (
         not isinstance(adapter_id, str)
@@ -410,6 +413,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         or not re.fullmatch(r"[a-z][a-z0-9-]*", adapter_id)
     ):
         raise ConfigError("LLM Adapter adapter_id 格式无效")
+    endpoint = _validate_endpoint(value["endpoint"], "endpoint")
     messages_format = value.get("messages_format", "openai")
     if not isinstance(messages_format, str) or messages_format not in _MESSAGES_FORMATS:
         raise ConfigError("LLM Adapter messages_format 无效")
@@ -461,6 +465,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
+        endpoint=endpoint,
         headers_template=dict(headers),
         body_template=deepcopy(body),
         response_content_pointer=pointer,
@@ -567,7 +572,7 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise ConfigError("LLM Adapter streaming 必须是 JSON 对象")
     unknown = set(value) - _STREAMING_KEYS
-    required = {"transport", "content_events", "terminal"}
+    required = {"transport", "endpoint", "content_events", "terminal"}
     missing = required - set(value)
     if unknown:
         raise ConfigError(
@@ -579,6 +584,7 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
         )
     if value["transport"] != "sse":
         raise ConfigError("LLM Adapter streaming transport 必须是 sse")
+    endpoint = _validate_endpoint(value["endpoint"], "streaming endpoint")
     request_body = value.get("request_body", {})
     if not isinstance(request_body, dict):
         raise ConfigError("LLM Adapter streaming request_body 必须是 JSON 对象")
@@ -624,6 +630,7 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
     usage = _validate_stream_usage(value.get("usage", {}))
     return {
         "transport": "sse",
+        "endpoint": endpoint,
         "request_body": deepcopy(request_body),
         "content_events": content_events,
         "reasoning_events": reasoning_events,
@@ -632,6 +639,16 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
         "error_events": error_events,
         "usage": usage,
     }
+
+
+def _validate_endpoint(value: Any, location: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"LLM Adapter {location} 必须是非空字符串")
+    if "${" in value.replace("${model}", ""):
+        raise ConfigError(f"LLM Adapter {location} 只允许 ${{model}} 占位符")
+    if "://" in value or value.startswith("//"):
+        raise ConfigError(f"LLM Adapter {location} 必须是相对路径")
+    return value
 
 
 def _validate_stream_events(

@@ -7,7 +7,7 @@ import { errorMessage, formatErrorPayload, translate, type Language } from "../i
 import type { AdapterSummary } from "./ProjectInputs";
 
 type ProjectFile = import("../types").ProjectOverview["files"][number];
-interface ReplacementImpact { file_id: string; old_segment_count: number; new_segment_count: number; preserved_segment_count: number; added_segment_count: number; removed_segment_count: number; ambiguous_old_segment_count: number; ambiguous_new_segment_count: number; preserved_completed_by_stage: Record<string, number>; removed_completed_by_stage: Record<string, number>; warnings: string[]; previous_adapter_options: Record<string, string>; replacement_adapter_options: Record<string, string>; changed_adapter_options: string[]; }
+interface ReplacementImpact { file_id: string; old_segment_count: number; new_segment_count: number; preserved_segment_count: number; added_segment_count: number; removed_segment_count: number; ambiguous_old_segment_count: number; ambiguous_new_segment_count: number; preserved_completed_by_stage: Record<string, number>; removed_completed_by_stage: Record<string, number>; warnings: string[]; previous_adapter_options: Record<string, string>; replacement_adapter_options: Record<string, string>; changed_adapter_options: string[]; previous_run_options: Record<string, string>; replacement_run_options: Record<string, string>; changed_run_options: string[]; }
 interface ReplacementSource { file?: File; serverPath?: string; label: string; }
 interface ReplacementOptionsResponse { adapter: AdapterSummary; values: Record<string, string>; }
 
@@ -146,6 +146,9 @@ export function ReplacementDialog({
   const optionDefinitions = adapter
     ? [...adapter.import_options, ...adapter.run_options]
     : [];
+  const optionGroups: Array<[string, AdapterSummary["import_options"]]> = adapter
+    ? [["导入设置", adapter.import_options], ["运行格式设置", adapter.run_options]]
+    : [];
 
   return (
     <div className="modal-backdrop" onMouseDown={() => void cancelPreview()}>
@@ -193,17 +196,22 @@ export function ReplacementDialog({
             </div>
             {optionDefinitions.length > 0 && (
               <div className="replacement-options">
-                {optionDefinitions.map((option) => (
-                  <label key={option.option_id}>
-                    {option.label}
-                    <select
-                      disabled={busy || parentBusy}
-                      value={options[option.option_id] ?? ""}
-                      onChange={(event) => setOptions({ ...options, [option.option_id]: event.target.value })}
-                    >
-                      {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
-                    </select>
-                  </label>
+                {optionGroups.filter(([, definitions]) => definitions.length).map(([heading, definitions]) => (
+                  <fieldset key={heading}>
+                    <legend>{heading}</legend>
+                    {definitions.map((option) => (
+                      <label key={option.option_id}>
+                        {option.label}
+                        <select
+                          disabled={busy || parentBusy}
+                          value={options[option.option_id] ?? ""}
+                          onChange={(event) => setOptions({ ...options, [option.option_id]: event.target.value })}
+                        >
+                          {option.choices.map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                  </fieldset>
                 ))}
               </div>
             )}
@@ -238,6 +246,19 @@ export function ReplacementDialog({
                   return (
                     <div key={optionId}>
                       {option?.label ?? optionId}: {preview.previous_adapter_options[optionId]} → {preview.replacement_adapter_options[optionId]}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {preview.changed_run_options.length > 0 && (
+              <div className="replacement-option-changes">
+                <strong>运行格式设置：</strong>
+                {preview.changed_run_options.map((optionId) => {
+                  const option = optionDefinitions.find((item) => item.option_id === optionId);
+                  return (
+                    <div key={optionId}>
+                      {option?.label ?? optionId}: {preview.previous_run_options[optionId]} → {preview.replacement_run_options[optionId]}
                     </div>
                   );
                 })}

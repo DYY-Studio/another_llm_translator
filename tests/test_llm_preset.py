@@ -97,12 +97,35 @@ def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
     assert preset.definition["max_output_tokens"] == 0
 
 
-def test_preset_v5_requires_per_key_concurrency(tmp_path: Path) -> None:
+def test_preset_v5_is_normalized_with_chunk_target(tmp_path: Path) -> None:
     value = preset_definition()
     value["schema_version"] = 5
     value["max_parallel_per_key"] = 2
     preset = load_llm_preset(write_preset(tmp_path, value))
+
+    assert preset.definition["schema_version"] == 7
     assert preset.definition["max_parallel_per_key"] == 2
+    assert preset.definition["target_chunk_input_tokens"] == 8192
+
+
+def test_legacy_preset_endpoints_are_preserved_but_ignored(
+    tmp_path: Path,
+) -> None:
+    first_value = preset_definition()
+    first_value["schema_version"] = 6
+    second_value = {
+        **first_value,
+        "endpoint": "/ignored",
+        "stream_endpoint": "/also-ignored",
+    }
+
+    first = load_llm_preset(write_preset(tmp_path, first_value))
+    second = load_llm_preset(write_preset(tmp_path, second_value))
+
+    assert second.definition["schema_version"] == 7
+    assert second.definition["endpoint"] == "/ignored"
+    assert second.definition["stream_endpoint"] == "/also-ignored"
+    assert second.digest == first.digest
 
 
 def test_preset_v5_rejects_invalid_per_key_concurrency(tmp_path: Path) -> None:
@@ -119,18 +142,11 @@ def test_preset_v5_rejects_invalid_per_key_concurrency(tmp_path: Path) -> None:
         ({"extra_body": []}, "extra_body 必须是 JSON 对象"),
         ({"extra_body": {"secret": "${api_key}"}}, "不允许模板占位符"),
         ({"context_window_tokens": 0}, "context_window_tokens 必须是正整数"),
+        ({"target_chunk_input_tokens": 0}, "target_chunk_input_tokens 必须是正整数"),
         ({"max_output_tokens": -1}, "max_output_tokens 必须是非负整数"),
         ({"requests_per_minute": -1}, "requests_per_minute 必须是非负整数"),
         ({"token_safety_factor": 0}, "token_safety_factor 必须大于 0"),
         ({"base_url": "not-a-url"}, "base_url 必须是有效"),
-        (
-            {"endpoint": "/v1/models/${other}:generateContent"},
-            "endpoint 只允许",
-        ),
-        (
-            {"endpoint": "/v1/models/${model"},
-            "endpoint 只允许",
-        ),
     ],
 )
 def test_preset_rejects_invalid_values(
@@ -144,7 +160,7 @@ def test_preset_rejects_invalid_values(
         load_llm_preset(write_preset(tmp_path, value))
 
 
-def test_preset_endpoint_allows_model_placeholder(tmp_path: Path) -> None:
+def test_preset_preserves_legacy_endpoint(tmp_path: Path) -> None:
     value = preset_definition()
     value["endpoint"] = "/v1beta/models/${model}:generateContent"
     preset = load_llm_preset(write_preset(tmp_path, value))
@@ -157,9 +173,9 @@ def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> N
     value = preset_definition()
     value["schema_version"] = 2
     value.pop("stream")
-    value.pop("stream_endpoint")
+    value.pop("stream_endpoint", None)
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 5
+    assert preset.definition["schema_version"] == 7
     assert preset.definition["stream"] is False
     assert preset.definition["stream_endpoint"] == ""
     assert preset.definition["stream_read_timeout_enabled"] is True
@@ -171,27 +187,9 @@ def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None
     value["schema_version"] = 3
     value.pop("stream_read_timeout_enabled")
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 5
+    assert preset.definition["schema_version"] == 7
     assert preset.definition["stream_read_timeout_enabled"] is True
     assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
-
-
-@pytest.mark.parametrize(
-    "stream_endpoint",
-    [
-        "https://provider.example/stream",
-        "/v1/${other}/stream",
-        "/v1/${model}/stream/${other}",
-    ],
-)
-def test_preset_rejects_invalid_stream_endpoint(
-    tmp_path: Path, stream_endpoint: str
-) -> None:
-    value = preset_definition()
-    value["stream"] = True
-    value["stream_endpoint"] = stream_endpoint
-    with pytest.raises(ConfigError, match="stream_endpoint|相对路径"):
-        load_llm_preset(write_preset(tmp_path, value))
 
 
 def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
@@ -237,7 +235,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 5"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 7"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -287,6 +285,7 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
 
     first = load_project_config(project, presets_root=app_root)
     assert first["execution"]["max_parallel_per_key"] == 4
+    assert first["execution"]["target_chunk_input_tokens"] == 8192
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))
@@ -330,9 +329,80 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     }
     assert load_run_config(run_dir)["llm"]["model"] == "changed-model"
 
+    adapter_snapshot_path = run_dir / "llm_adapter.json"
+    adapter_snapshot = json.loads(adapter_snapshot_path.read_text("utf-8"))
+    adapter_snapshot["schema_version"] = 2
+    adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
+    with pytest.raises(ConfigError, match="Adapter schema_version 必须是 3"):
+        load_run_config(run_dir)
+    adapter_snapshot["schema_version"] = 3
+    adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
+
     (run_dir / "llm_preset.json").unlink()
     with pytest.raises(ConfigError, match="无法读取 LLM Preset"):
         load_run_config(run_dir)
+
+
+def test_preset_chunk_target_changes_execution_not_stage_fingerprint(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="preset-chunk-target",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    first = load_project_config(project, presets_root=app_root)
+    fingerprint = stage_fingerprint(first, "translation", "prompt")
+    preset_file = app_root / "llm_presets" / "default.json"
+    definition = json.loads(preset_file.read_text("utf-8"))
+    definition["target_chunk_input_tokens"] = 4096
+    preset_file.write_text(json.dumps(definition), encoding="utf-8")
+
+    second = load_project_config(project, presets_root=app_root)
+
+    assert second["execution"]["target_chunk_input_tokens"] == 4096
+    assert stage_fingerprint(second, "translation", "prompt") == fingerprint
+
+
+def test_legacy_project_chunk_target_is_preserved_but_ignored(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="legacy-project-chunk-target",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    new_config = load_config(project / "config.toml")
+    assert "target_chunk_input_tokens" not in new_config["chunking"]
+    legacy_text = (project / "config.toml").read_text(encoding="utf-8")
+    legacy_text = legacy_text.replace(
+        "target_chunk_input_tokens = 11000\n", ""
+    ).replace(
+        "[chunking]\n",
+        '[chunking]\ntarget_chunk_input_tokens = "ignored"\n',
+    )
+    (project / "config.toml").write_text(legacy_text, encoding="utf-8")
+
+    legacy_config = load_config(project / "config.toml")
+    (project / "config.toml").write_text(
+        dump_config(legacy_config), encoding="utf-8"
+    )
+    resolved = load_project_config(project, presets_root=app_root)
+
+    assert 'target_chunk_input_tokens = "ignored"' in (
+        project / "config.toml"
+    ).read_text(encoding="utf-8")
+    assert resolved["execution"]["target_chunk_input_tokens"] == 8192
 
 
 def test_project_resolves_stage_preset_override_and_inherits_global(
@@ -491,3 +561,41 @@ def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> 
         "/models/${model}:generateContent"
     )
     assert resolved["_llm_adapter"].messages_format == "gemini"
+
+
+def test_project_resolves_endpoints_from_adapter_not_legacy_preset(
+    tmp_path: Path,
+) -> None:
+    app_root = make_app_root(tmp_path)
+    preset_path = app_root / "llm_presets" / "default.json"
+    preset = json.loads(preset_path.read_text("utf-8"))
+    preset["endpoint"] = "/ignored-preset-endpoint"
+    preset["stream_endpoint"] = "/ignored-preset-stream-endpoint"
+    preset_path.write_text(json.dumps(preset), encoding="utf-8")
+    adapter_path = app_root / "llm_adapters" / "openai-compatible.json"
+    adapter = json.loads(adapter_path.read_text("utf-8"))
+    adapter["endpoint"] = "/adapter-endpoint"
+    adapter["streaming"]["endpoint"] = "/adapter-stream-endpoint"
+    adapter_path.write_text(json.dumps(adapter), encoding="utf-8")
+    source = tmp_path / "input.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project(
+        [str(source)],
+        name="adapter-endpoint-project",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    resolved = load_project_config(project, presets_root=app_root)
+
+    assert resolved["llm"]["endpoint"] == "/adapter-endpoint"
+    assert resolved["llm"]["stream_endpoint"] == "/adapter-stream-endpoint"
+    preset["endpoint"] = "/another-ignored-endpoint"
+    preset["stream_endpoint"] = "/another-ignored-stream-endpoint"
+    preset_path.write_text(json.dumps(preset), encoding="utf-8")
+    changed = load_project_config(project, presets_root=app_root)
+    assert changed["_llm_preset_hash"] == resolved["_llm_preset_hash"]
+    assert stage_fingerprint(changed, "translation", "prompt") == stage_fingerprint(
+        resolved, "translation", "prompt"
+    )

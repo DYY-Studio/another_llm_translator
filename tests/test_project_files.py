@@ -720,14 +720,13 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
     assert project is not None
 
     preserved = prepare_file_replacement(project, "F0001", replacement)
-    assert preserved.impact["previous_adapter_options"] == {
+    assert preserved.impact["previous_adapter_options"] == {}
+    assert preserved.impact["previous_run_options"] == {
         "ruby_mode": "base_only",
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
-    assert preserved.impact["replacement_adapter_options"] == preserved.impact[
-        "previous_adapter_options"
-    ]
+    assert preserved.impact["replacement_run_options"] == preserved.impact["previous_run_options"]
     assert preserved.impact["changed_adapter_options"] == []
 
     overridden = prepare_file_replacement(
@@ -736,15 +735,15 @@ def test_epub_file_replacement_uses_existing_options_and_allows_overrides(
         replacement,
         adapter_options={"epub": {"ruby_mode": "short_xml"}},
     )
-    assert overridden.impact["replacement_adapter_options"] == {
+    assert overridden.impact["replacement_run_options"] == {
         "ruby_mode": "short_xml",
         "inline_format_mode": "markers",
         "inline_format_policy": "strict",
     }
-    assert overridden.impact["changed_adapter_options"] == ["ruby_mode"]
+    assert overridden.impact["changed_adapter_options"] == []
 
 
-def test_file_replacement_supports_legacy_epub_parenthetical_state(
+def test_file_replacement_ignores_legacy_epub_private_run_state(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "book.epub"
@@ -780,15 +779,9 @@ def test_file_replacement_supports_legacy_epub_parenthetical_state(
         adapter_options={"epub": {"ruby_mode": "aozora"}},
     )
     try:
-        assert preserved.impact["previous_adapter_options"]["ruby_mode"] == (
-            "parenthetical"
-        )
-        assert preserved.impact["replacement_adapter_options"]["ruby_mode"] == (
-            "parenthetical"
-        )
-        assert overridden.impact["replacement_adapter_options"]["ruby_mode"] == (
-            "aozora"
-        )
+        assert preserved.impact["previous_run_options"]["ruby_mode"] == "aozora"
+        assert preserved.impact["replacement_run_options"]["ruby_mode"] == "aozora"
+        assert overridden.impact["replacement_run_options"]["ruby_mode"] == "aozora"
     finally:
         preserved.cleanup()
         overridden.cleanup()
@@ -836,7 +829,7 @@ def test_file_replacement_rejects_stale_adapter_state_snapshot(
         first.cleanup()
         second.cleanup()
     state = read_json(project, project / "source/adapters/epub/F0001.json")
-    assert state["state"]["inline_format_policy"] == "strict"
+    assert state["run_options"]["inline_format_policy"] == "strict"
 
 
 def test_file_replacement_restores_source_when_publish_fails(
@@ -984,6 +977,105 @@ def test_parse_adapter_option_args_builds_adapter_dict() -> None:
     for value in ("a.b", "=x", "a=x", ".b=x", "a.=x", "a.b.c=x"):
         with pytest.raises(UsageError, match="格式无效"):
             parse_adapter_option_args([value])
+
+
+def test_files_options_cli_reads_and_updates_one_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "book.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="cli-options",
+        document_adapter_id="epub",
+        adapter_options={"epub": {"ruby_mode": "base_only"}},
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    assert run(["files-options", str(project), "--file-id", "F0001"]) == 0
+    read_summary = json.loads(capsys.readouterr().out)
+    assert read_summary["target"]["name"] == "book.epub"
+    assert read_summary["values"]["ruby_mode"] == "base_only"
+
+    assert (
+        run(
+            [
+                "files-options",
+                str(project),
+                "--file-id",
+                "F0001",
+                "--adapter-option",
+                "epub.ruby_mode=compact",
+            ]
+        )
+        == 0
+    )
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["values"]["ruby_mode"] == "compact"
+    assert updated["values"]["inline_format_mode"] == "plain"
+    state = read_json(project, project / "source/adapters/epub/F0001.json")
+    assert state["run_options"]["ruby_mode"] == "compact"
+
+
+def test_files_options_cli_updates_every_file_of_an_adapter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    project = init_empty(tmp_path)
+    add_project_files(project, [str(first), str(second)])
+
+    assert (
+        run(["files-options", str(project), "--document-adapter", "txt"]) == 0
+    )
+    summary = json.loads(capsys.readouterr().out)
+    assert [item["name"] for item in summary["targets"]] == [
+        "first.txt",
+        "second.txt",
+    ]
+    assert summary["values"] == {"F0001": {}, "F0002": {}}
+
+
+def test_files_options_cli_rejects_unknown_targets_and_foreign_options(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    make_epub(source, xhtml=RUBY_XHTML)
+    project, _ = init_project(
+        [str(source)],
+        name="cli-options-errors",
+        document_adapter_id="epub",
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["files-options", str(project)])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["files-options", str(project), "--file-id", "F0001", "--document-adapter", "epub"]
+        )
+    with pytest.raises(UsageError, match="未知文件 ID"):
+        run(["files-options", str(project), "--file-id", "F9999"])
+    with pytest.raises(UsageError, match="没有使用 Document Adapter"):
+        run(["files-options", str(project), "--document-adapter", "txt"])
+    with pytest.raises(UsageError, match="必须属于目标 File"):
+        run(
+            [
+                "files-options",
+                str(project),
+                "--file-id",
+                "F0001",
+                "--adapter-option",
+                "txt.x=1",
+            ]
+        )
 
 
 def test_files_replace_cli_parser_accepts_preview_and_confirmation_flags() -> None:

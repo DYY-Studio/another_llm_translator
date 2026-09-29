@@ -81,6 +81,7 @@ export type LLMStage =
   | "polishing";
 
 export type RunStage = LLMStage | "content_summary";
+export type TaskStage = RunStage | "continuous";
 
 export interface ResultView {
   record_id: string;
@@ -148,6 +149,7 @@ export interface ProjectOverview {
     file_order: number;
     name: string;
     document_adapter_id: string;
+    has_run_options: boolean;
     part_ids: string[];
     size_bytes: number;
   }>;
@@ -174,6 +176,91 @@ export interface ProjectSummary {
   repair_needed: boolean;
 }
 
+export type StorageCategoryId =
+  | "settings"
+  | "logs"
+  | "sqlite"
+  | "input"
+  | "project_config"
+  | "run_snapshots"
+  | "debug_attachments"
+  | "output"
+  | "snapshots"
+  | "other";
+
+export interface StorageCategory {
+  id: StorageCategoryId;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageProjectSummary {
+  selector: string;
+  name: string;
+  project_id: string | null;
+  path: string;
+  external: boolean;
+  categories: StorageCategory[];
+  total_bytes: number;
+  reclaimable_bytes: number;
+  complete: boolean;
+  errors: string[];
+}
+
+export interface StorageSummary {
+  scanned_at: string;
+  complete: boolean;
+  errors: string[];
+  total_bytes: number;
+  reclaimable_bytes: number;
+  global: StorageCategory[];
+  projects: StorageProjectSummary[];
+}
+
+export interface StorageDebugRun {
+  run_id: string;
+  stage: string | null;
+  status: string | null;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageOutputFile {
+  path: string;
+  bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageLogGroup {
+  id: string;
+  bytes: number;
+  file_count: number;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
+}
+
+export interface StorageProjectDetail {
+  complete: boolean;
+  project: StorageProjectSummary;
+  debug_runs: StorageDebugRun[];
+  output_files: StorageOutputFile[];
+  logs: StorageLogGroup[];
+  errors: string[];
+}
+
+export interface StorageCleanupResult {
+  affected_files: number;
+  reclaimed_bytes: number;
+}
+
 export interface ErrorPayload {
   code: string;
   params: Record<string, unknown>;
@@ -198,6 +285,9 @@ export interface TaskState {
   project: string;
   project_id: string;
   stage: string;
+  current_stage?: string | null;
+  steps?: TaskStep[];
+  final_review?: boolean;
   status: string;
   include_summaries?: boolean;
   summary_selection?: Array<{ file_id: string; part_id: string }>;
@@ -210,6 +300,18 @@ export interface TaskState {
   summary_selection_progress?: { completed: number; failed: number; total: number } | null;
   failure_counts: Record<string, number>;
   usage: TaskUsage;
+}
+
+export interface TaskStep {
+  stage: string;
+  status: string;
+  selected: number;
+  completed: number;
+  failed: number;
+  pending: number;
+  run_id?: string | null;
+  summary?: Record<string, unknown>;
+  applied?: Record<string, unknown>;
 }
 
 export interface TaskUsage {
@@ -476,6 +578,7 @@ export interface ModelRow {
 
 export interface TaskOptions {
   stage: RunStage;
+  final_review?: boolean;
   preset: {
     id: string;
     model: string;
@@ -502,31 +605,79 @@ export interface TaskOptions {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
   };
-  running_run: {
-    run_id: string;
-    started_at: string | null;
-    scope: Record<string, unknown> | null;
-    previous: { model: string; endpoint: string };
-    current: { model: string; endpoint: string };
-    completed_steps?: number;
-    total_steps?: number;
-    resume_compatible?: boolean;
-    resume_incompatibility_reason?: string | null;
-    last_interruption?: {
-      at: string;
-      error_code: string;
-      reason: string;
-      request_id?: string;
-      completed_steps: number;
-      total_steps: number;
-    };
-  } | null;
+  document_adapter_run_options?: Array<{
+    adapter_id: string;
+    file_count: number;
+    options: Array<{ option_id: string; label: string; value: string | null }>;
+  }>;
+  running_run: RunningRun | null;
+}
+
+export interface ContinuousTaskOptions {
+  stage: "continuous";
+  stages: LLMStage[];
+  steps: ContinuousOptionStep[];
+  blocking: Array<{ code: string; message: string; stage?: string }>;
+  rules: {
+    canonical_order?: string[];
+    start_stages?: string[];
+    whole_project?: boolean;
+    decision_requires_apply?: boolean;
+    decision_final_review?: boolean;
+  };
+}
+
+export interface RunningRun {
+  run_id: string;
+  started_at: string | null;
+  scope: Record<string, unknown> | null;
+  previous: { model: string; endpoint: string };
+  current: { model: string; endpoint: string };
+  final_review?: boolean | null;
+  final_review_target_count?: number;
+  completed_steps?: number;
+  total_steps?: number;
+  resume_compatible?: boolean;
+  resume_incompatibility_reason?: string | null;
+  last_interruption?: {
+    at: string;
+    error_code: string;
+    reason: string;
+    request_id?: string;
+    completed_steps: number;
+    total_steps: number;
+  };
+}
+
+export interface ContinuousOptionStep {
+  stage: string;
+  status: string;
+  selected: number;
+  completed?: number;
+  failed?: number;
+  pending?: number;
+  reason?: string;
+  preset?: { id: string; model: string };
+  running_run?: RunningRun | null;
+  current_fingerprint_completed?: number;
+  mismatched_fingerprint_completed?: number;
+}
+
+export interface ContinuousRunDecision {
+  stage: "continuous";
+  stages: LLMStage[];
+  run_actions: Record<string, "resume" | "decline">;
+  force: boolean;
+  reuse_mixed_fingerprints: boolean;
+  final_review: boolean;
+  apply_terminology_decision: boolean;
 }
 
 export interface RunDecision {
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
+  final_review: boolean;
 }
 
 export interface TermDecisionConflicts {
@@ -729,7 +880,6 @@ export interface ProjectConfig {
     scheduling_mode: "ordered_by_file" | "parallel";
   };
   chunking: {
-    target_chunk_input_tokens: number;
     allow_split_oversized_segment: boolean;
     cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
   };
@@ -789,15 +939,15 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 5;
+  schema_version: 7;
   preset_id: string;
   adapter_id: string;
   base_url: string;
-  endpoint: string;
   model: string;
   credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
+  target_chunk_input_tokens: number;
   max_output_tokens: number;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
@@ -807,7 +957,6 @@ export interface LLMPreset {
   max_parallel_per_key: number;
   request_timeout_seconds: number;
   stream: boolean;
-  stream_endpoint: string;
   stream_read_timeout_enabled: boolean;
   extra_body: Record<string, unknown>;
   extra_headers: Record<string, string>;

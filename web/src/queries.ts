@@ -6,6 +6,9 @@ import type {
   HistoricalRunRequestDetail,
   HistoricalRunSummary,
   RelatedTermsResponse,
+  StorageCleanupResult,
+  StorageProjectDetail,
+  StorageSummary,
   SummariesResponse,
   TermHitsResponse,
   TermsResponse,
@@ -20,6 +23,8 @@ export const queryKeys = {
   termHits: ({ projectId }: ProjectQueryIdentity, normalized: string) => ["term-hits", projectId, normalized] as const,
   relatedTerms: ({ projectId }: ProjectQueryIdentity, termsRevision: number | null, matchKey: string) => ["related-terms", projectId, termsRevision, matchKey] as const,
   summaries: ({ projectId }: ProjectQueryIdentity) => ["summaries", projectId] as const,
+  storage: () => ["storage"] as const,
+  storageProject: (selector: string) => ["storage-project", selector] as const,
   historicalRuns: ({ project, stage, status, offset, limit }: HistoricalRunQuery) => (
     ["historical-runs", project, stage, status, offset, limit] as const
   ),
@@ -96,6 +101,72 @@ export function fetchRelatedTerms(
 
 export function fetchSummaries(project: string, signal?: AbortSignal): Promise<SummariesResponse> {
   return api<SummariesResponse>(`/api/v1/projects/${project}/summaries`, { signal });
+}
+
+export function fetchStorage(signal?: AbortSignal): Promise<StorageSummary> {
+  return api<StorageSummary>("/api/v1/storage", { signal });
+}
+
+export function fetchStorageProject(
+  selector: string,
+  signal?: AbortSignal,
+): Promise<StorageProjectDetail> {
+  return api<StorageProjectDetail>(
+    `/api/v1/storage/projects/${encodeURIComponent(selector)}`,
+    { signal },
+  );
+}
+
+export function clearGlobalLogs(signal?: AbortSignal): Promise<StorageCleanupResult> {
+  return api<StorageCleanupResult>("/api/v1/storage/logs/clear", {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+    signal,
+  });
+}
+
+export function clearDebugAttachments(
+  project: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<StorageCleanupResult> {
+  return api<StorageCleanupResult>(
+    `/api/v1/projects/${encodeURIComponent(project)}/storage/runs/${encodeURIComponent(runId)}/debug/clear`,
+    {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+      signal,
+    },
+  );
+}
+
+export function clearOutputFile(
+  project: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<StorageCleanupResult> {
+  return api<StorageCleanupResult>(
+    `/api/v1/projects/${encodeURIComponent(project)}/storage/outputs/clear`,
+    {
+      method: "POST",
+      body: JSON.stringify({ path, confirm: true }),
+      signal,
+    },
+  );
+}
+
+export function clearProjectLogs(
+  project: string,
+  signal?: AbortSignal,
+): Promise<StorageCleanupResult> {
+  return api<StorageCleanupResult>(
+    `/api/v1/projects/${encodeURIComponent(project)}/storage/logs/clear`,
+    {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+      signal,
+    },
+  );
 }
 
 export function fetchHistoricalRuns(

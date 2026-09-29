@@ -8,6 +8,12 @@ import {
   fetchHistoricalRuns,
   fetchProjects,
   fetchRelatedTerms,
+  fetchStorage,
+  fetchStorageProject,
+  clearGlobalLogs,
+  clearDebugAttachments,
+  clearOutputFile,
+  clearProjectLogs,
   fetchSummaries,
   fetchTermHits,
   fetchTerms,
@@ -108,6 +114,38 @@ test("fetchSummaries uses the project-specific summaries URL", async () => {
   await fetchSummaries("project-a", signal);
 
   assertGet(calls[0], "/api/v1/projects/project-a/summaries", signal);
+});
+
+test("storage queries use cancellable summary and lazy detail URLs", async () => {
+  const signal = new AbortController().signal;
+  const calls = stubFetch({});
+
+  await fetchStorage(signal);
+  await fetchStorageProject("project/a", signal);
+
+  assertGet(calls[0], "/api/v1/storage", signal);
+  assertGet(calls[1], "/api/v1/storage/projects/project%2Fa", signal);
+});
+
+test("storage cleanup requests always send explicit confirmation", async () => {
+  const signal = new AbortController().signal;
+  const calls = stubFetch({ affected_files: 1, reclaimed_bytes: 2 });
+
+  await clearGlobalLogs(signal);
+  await clearDebugAttachments("project/a", "RUN/1", signal);
+  await clearOutputFile("project/a", "output/result.txt", signal);
+  await clearProjectLogs("project/a", signal);
+
+  assert.equal(calls[0].input, "/api/v1/storage/logs/clear");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.body, JSON.stringify({ confirm: true }));
+  assert.equal(calls[0].init.signal, signal);
+  assert.equal(calls[1].input, "/api/v1/projects/project%2Fa/storage/runs/RUN%2F1/debug/clear");
+  assert.equal(calls[1].init.body, JSON.stringify({ confirm: true }));
+  assert.equal(calls[2].input, "/api/v1/projects/project%2Fa/storage/outputs/clear");
+  assert.equal(calls[2].init.body, JSON.stringify({ path: "output/result.txt", confirm: true }));
+  assert.equal(calls[3].input, "/api/v1/projects/project%2Fa/storage/logs/clear");
+  assert.equal(calls[3].init.body, JSON.stringify({ confirm: true }));
 });
 
 test("historical run query keys include scope and pagination", () => {

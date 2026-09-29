@@ -17,15 +17,24 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .diagnostics import DiagnosticsHub
-from .errors import AppError, ProjectError, UsageError, app_error_payload, internal_error_payload
+from .errors import (
+    AppError,
+    ProjectError,
+    UsageError,
+    app_error_payload,
+    internal_error_payload,
+)
 from .llm_migration import migrate_llm_resources
 from .logging_utils import get_logger
-from .project import APP_ROOT as DEFAULT_APP_ROOT, PROJECTS_ROOT, resolve_project
-from .sqlite_storage import database_path, read_json
+from .plugins import load_plugins
+from .project import APP_ROOT as DEFAULT_APP_ROOT
+from .project import PROJECTS_ROOT, resolve_project
 from .server_config import load_server_config
+from .sqlite_storage import database_path, read_json
+from .storage_management import StorageManager
 from .user_config import user_root
-from .web_tasks import WebTaskManager
 from .web_project_routes import ReplacementPreviewSession
+from .web_tasks import WebTaskManager
 
 WEB_DIST = (
     Path(__file__).with_name("web_dist")
@@ -91,6 +100,7 @@ def create_app(
     log_path: Path | None = None,
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
+    load_plugins()
     migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
@@ -117,20 +127,26 @@ def create_app(
         if normalized.parent != projects_root.resolve():
             app.state.external_projects.add(normalized)
 
+    def local_project_paths() -> list[Path]:
+        if not projects_root.exists():
+            return []
+        return [
+            item
+            for item in sorted(projects_root.iterdir(), key=lambda value: value.name)
+            if database_path(item).is_file()
+        ]
+
     def project_paths() -> list[Path]:
-        paths: list[Path] = []
-        if projects_root.exists():
-            paths.extend(
-                item
-                for item in sorted(projects_root.iterdir(), key=lambda value: value.name)
-                if database_path(item).is_file()
-            )
+        paths = local_project_paths()
         paths.extend(
             path
             for path in sorted(app.state.external_projects)
             if database_path(path).is_file()
         )
         return list({path.resolve() for path in paths})
+
+    def storage_project_paths() -> list[Path]:
+        return [*local_project_paths(), *sorted(app.state.external_projects)]
 
     def project(name: str) -> Path:
         if not name or "/" in name or "\\" in name or name in {".", ".."}:
@@ -146,6 +162,16 @@ def create_app(
             if len(matches) != 1:
                 raise ProjectError(f"项目不存在或标识冲突：{name}")
             return matches[0]
+
+    app.state.storage_manager = StorageManager(
+        user_data_root=user_root(),
+        projects_root=projects_root,
+        app_root=app_root,
+        project_paths=storage_project_paths,
+        global_log_path=app.state.diagnostics.log_path,
+        is_project_running=lambda root: app.state.tasks.is_project_running(root),
+        has_active_tasks=lambda: bool(app.state.tasks.active_tasks()),
+    )
 
     async def cleanup_replacement_previews() -> None:
         for session in app.state.replacement_previews.values():
@@ -398,6 +424,14 @@ def create_app(
     )
     from .web_project_routes import register_project_routes
     register_project_routes(app=app, projects_root=projects_root, app_root=app_root, project=project, project_paths=project_paths, remember_project=remember_project)
+    from .web_storage_routes import register_storage_routes
+    register_storage_routes(
+        app=app,
+        projects_root=projects_root,
+        app_root=app_root,
+        project=project,
+        storage_manager=app.state.storage_manager,
+    )
 
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")

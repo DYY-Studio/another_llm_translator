@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.plugins import PluginDescriptor
+from app.plugin_api import PluginDescriptor
 
 from .adapter import SRTDocumentAdapter
 
@@ -9,6 +9,6 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="srt-documents",
         version="0.1.0",
-        protocol_version=11,
+        protocol_version=12,
         document_adapters=(SRTDocumentAdapter(),),
     )

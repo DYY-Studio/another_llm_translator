@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.superpowers/
 htmlcov/
 
 # Virtual environments and packaging output
@@ -40,8 +41,6 @@ app/web_dist/
 /src-tauri/gen
 /src-tauri/permissions/
 
-# PyInstaller sidecar
-sidecar-dist/
 build/
 /dist/
 

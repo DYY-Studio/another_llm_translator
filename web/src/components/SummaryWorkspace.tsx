@@ -318,6 +318,7 @@ function SourcePanel({
 function SelectionDialog({
   boundaries,
   selected,
+  artifacts,
   names,
   language,
   path,
@@ -329,6 +330,7 @@ function SelectionDialog({
 }: {
   boundaries: SummaryBoundary[];
   selected: Set<string>;
+  artifacts: SummaryArtifact[];
   names: Map<string, string>;
   language: Language;
   path?: string;
@@ -340,6 +342,10 @@ function SelectionDialog({
 }) {
   const [search, setSearch] = useState("");
   const hasSelection = selected.size > 0;
+  const hasExpiredSelection = hasSelection && boundaries.some((boundary) => (
+    selected.has(boundaryKey(boundary.file_id, boundary.part_id))
+    && summaryArtifactIsExpired(artifactFor(artifacts, boundary, "full") ?? {})
+  ));
   return (
     <Modal ariaLabel={translate("terms.summaryChooseExport", language)}>
       <div className="summary-dialog-heading">
@@ -362,6 +368,7 @@ function SelectionDialog({
           <input value={path ?? ""} onChange={(event) => onPath(event.target.value)} />
         </label>
       )}
+      {hasExpiredSelection && <div className="warning-banner summary-message" role="status">{translate("terms.summaryExportExpired", language)}</div>}
       {!hasSelection && <p className="error-text summary-message">{translate("terms.summaryExportEmpty", language)}</p>}
       {error && <p className="error-text summary-message">{error}</p>}
       <div className="button-group summary-dialog-actions">
@@ -736,7 +743,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
         </main>
         {sourceOpen && <SourcePanel project={project} boundary={focused} language={language} focusSegmentIds={sourceSegmentIds} onClose={() => setSourceOpen(false)} />}
       </div>
-      {dialog === "export" && <SelectionDialog boundaries={boundaries} selected={dialogSelection} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
+      {dialog === "export" && <SelectionDialog boundaries={boundaries} selected={dialogSelection} artifacts={data?.artifacts ?? []} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
       {runOptions && runKind && <RunDialog
         key={`${runKind}-${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
         options={runOptions}
@@ -802,9 +809,9 @@ function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, on
       <span>{labels.length ? translate("terms.summaryReferenceList", language, { refs: labels.join(translate("terms.summaryReferenceSeparator", language)) }) : ""}</span>
       <div className="summary-artifact-actions">
         <button className="quiet-button" type="button" onClick={() => onSource(refs)}>{translate("terms.summarySource", language)}</button>
-        {expired && <button className="quiet-button" type="button" disabled={retryDisabled} onClick={onRetry}>{translate("terms.summaryRetry", language)}</button>}
+        {expired && <button className="quiet-button" type="button" disabled={retryDisabled} onClick={onRetry}>{translate("terms.summaryRegenerate", language)}</button>}
       </div>
     </div>
-    {expired && retryDisabled && <small>{translate("terms.summaryRetrySelect", language)}</small>}
+    {expired && retryDisabled && <small>{translate("terms.summaryRegenerateSelect", language)}</small>}
   </article>;
 }

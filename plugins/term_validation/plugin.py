@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from app.plugins import PluginDescriptor
-from app.translation_validation import (
+from app.plugin_api import (
+    PluginDescriptor,
     TranslationValidationContext,
     TranslationValidationMatch,
 )
@@ -53,6 +53,6 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
         version="0.1.0",
-        protocol_version=11,
+        protocol_version=12,
         translation_validators=(PreferredTermUsageValidator(),),
     )

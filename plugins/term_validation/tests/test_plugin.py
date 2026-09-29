@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from another_llm_translator_term_validation.plugin import (
-    PreferredTermUsageValidator,
-    descriptor,
-)
-
-from app.translation_validation import (
+from app.plugin_api import (
     TranslationTermMatch,
     TranslationValidationContext,
+)
+from plugins.term_validation.plugin import (
+    PreferredTermUsageValidator,
+    descriptor,
 )
 
 
@@ -65,4 +64,4 @@ def test_preferred_term_usage_is_advisory_and_normalizes_text() -> None:
 def test_descriptor_uses_fixed_protocol_version() -> None:
     value = descriptor()
     assert value.plugin_id == "term-validation"
-    assert value.protocol_version == 11
+    assert value.protocol_version == 12

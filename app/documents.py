@@ -262,6 +262,9 @@ class ImportedFile:
     opaque_state: dict[str, Any] | None = None
     segment_part_ids: tuple[str, ...] | None = None
     model_sources: tuple[str | None, ...] | None = None
+    # Filled by the host after validating declared run options; adapters do not
+    # own this field.
+    run_options: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -296,7 +299,23 @@ class DocumentAdapter(Protocol):
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str | None: ...
+
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
+    ) -> str: ...
+
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int: ...
 
     def replacement_options(
         self,
@@ -344,11 +363,19 @@ def normalize_document_output(
     segment: dict[str, Any],
     text: str,
     stage: str,
+    opaque_state: dict[str, Any] | None,
+    run_options: dict[str, str],
 ) -> str:
     normalizer = getattr(adapter, "normalize_model_output", None)
     if normalizer is None:
         return text
-    value = normalizer(segment=segment, text=text, stage=stage)
+    value = normalizer(
+        segment=segment,
+        text=text,
+        stage=stage,
+        opaque_state=opaque_state,
+        run_options=run_options,
+    )
     if not isinstance(value, str):
         raise ProjectError("Document Adapter 返回了无效的模型文本")
     return value

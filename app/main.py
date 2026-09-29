@@ -14,27 +14,30 @@ from .i18n import cli_language
 from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
+from .plugins import document_adapter_summaries, load_plugins
 from .project import (
     add_project_files,
     apply_file_replacement,
+    file_run_options,
     init_project,
+    load_source_files,
     prepare_file_replacement,
     remove_project_files,
     resolve_project,
     resolve_project_parent,
     sync_global_templates,
+    update_adapter_run_options,
+    update_file_run_options,
 )
+from .project_export import export_project
 from .sqlite_storage import compact_project_database
+from .stage_review import run_apply, run_review
+from .stage_terminology import run_terminology
+from .stage_translation import run_translation
 from .stages import (
     inspect_full,
     run_all,
 )
-from .project_export import export_project
-from .stage_review import run_apply, run_review
-from .stage_terminology import run_terminology
-from .stage_translation import run_translation
-from .term_exchange import export_terms, import_terms
-from .term_library import publish_partial_terms
 from .term_decision import run_terminology_decision
 from .term_decision_drafts import (
     apply_decision_draft,
@@ -42,6 +45,8 @@ from .term_decision_drafts import (
     manual_review_state,
     rollback_decision,
 )
+from .term_exchange import export_terms, import_terms
+from .term_library import publish_partial_terms
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,6 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     files_remove.add_argument("project")
     files_remove.add_argument("file_ids", nargs="+")
+
+    files_options = subparsers.add_parser("files-options", help="查看或更新 File 运行设置")
+    files_options.add_argument("project")
+    target = files_options.add_mutually_exclusive_group(required=True)
+    target.add_argument("--file-id")
+    target.add_argument("--document-adapter")
+    files_options.add_argument("--adapter-option", dest="adapter_options", action="append", metavar="ADAPTER.OPTION=VALUE")
 
     files_replace = subparsers.add_parser(
         "files-replace", help="用新源文件原位替换项目中的一个文件"
@@ -283,6 +295,7 @@ def run(argv: list[str] | None = None) -> int:
     logger = get_logger()
     parser = build_parser()
     args = parser.parse_args(argv)
+    load_plugins()
     cli_language(None if args.language == "system" else args.language)
     logger.info("command start command=%s", args.command)
     if args.command == "init":
@@ -352,6 +365,49 @@ def run(argv: list[str] | None = None) -> int:
             summary["removed_files"],
             summary["removed_segments"],
         )
+        return 0
+    if args.command == "files-options":
+        project = _resolve_project(args)
+        requested = parse_adapter_option_args(args.adapter_options) if args.adapter_options else {}
+        adapter_summaries = {
+            str(item["adapter_id"]): item for item in document_adapter_summaries()
+        }
+        if args.file_id:
+            file_record = next((item for item in load_source_files(project) if str(item["file_id"]) == args.file_id), None)
+            if file_record is None:
+                raise UsageError(f"未知文件 ID：{args.file_id}")
+            adapter_id = str(file_record["document_adapter_id"])
+            options = requested.get(adapter_id, {})
+            if set(requested) - {adapter_id}:
+                raise UsageError("选项必须属于目标 File 的 Document Adapter")
+            with project_write_lock(project):
+                values = update_file_run_options(project, args.file_id, options) if options else file_run_options(project, args.file_id)
+            emit_summary({
+                "adapter": adapter_summaries[adapter_id],
+                "target": {"file_id": args.file_id, "name": file_record["original_name"]},
+                "values": values,
+            })
+            return 0
+        adapter_id = args.document_adapter
+        if set(requested) - {adapter_id}:
+            raise UsageError("选项必须属于目标 Document Adapter")
+        target_records = [
+            item for item in load_source_files(project)
+            if str(item["document_adapter_id"]) == adapter_id
+        ]
+        targets = [str(item["file_id"]) for item in target_records]
+        if not targets:
+            raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+        with project_write_lock(project):
+            values = update_adapter_run_options(project, adapter_id, requested.get(adapter_id, {})) if requested else {file_id: file_run_options(project, file_id) for file_id in targets}
+        emit_summary({
+            "adapter": adapter_summaries[adapter_id],
+            "targets": [
+                {"file_id": item["file_id"], "name": item["original_name"]}
+                for item in target_records
+            ],
+            "values": values,
+        })
         return 0
     if args.command == "files-replace":
         project = _resolve_project(args)

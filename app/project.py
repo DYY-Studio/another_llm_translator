@@ -17,13 +17,11 @@ from .documents import (
     DocumentAdapter,
     DocumentImport,
     ImportedFile,
-    compact_emphasis_aozora,
     decode_plaintext,
 )
 from .errors import (
     ConfigError,
     ExportError,
-    IncompleteError,
     ProjectError,
     UsageError,
 )
@@ -274,7 +272,7 @@ def _import_project_inputs(
     from .plugins import (
         get_document_adapter,
         get_document_adapter_for_extension,
-        validate_document_import_options,
+        split_document_adapter_options,
     )
 
     option_values = adapter_options or {}
@@ -285,17 +283,18 @@ def _import_project_inputs(
             raise UsageError(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
+        import_options, run_options = split_document_adapter_options(
+            adapter,
+            option_values.get(adapter.adapter_id),
+            allow_replacement_choices=allow_replacement_choices,
+        )
         imported = adapter.import_sources(
             inputs,
             recursive=recursive,
             config=config,
-            options=validate_document_import_options(
-                adapter,
-                option_values.get(adapter.adapter_id),
-                allow_replacement_choices=allow_replacement_choices,
-            ),
+            options=import_options,
         )
-        files = [_normalize_imported_file(item) for item in imported.files]
+        files = [replace(_normalize_imported_file(item), run_options=run_options) for item in imported.files]
         if original_names is not None:
             if len(files) != len(original_names):
                 raise UsageError("Adapter 返回文件数与输入相对路径数量不一致")
@@ -315,15 +314,16 @@ def _import_project_inputs(
             raise UsageError(
                 f"Document Adapter 不支持导入：{adapter.adapter_id}"
             )
+        import_options, run_options = split_document_adapter_options(
+            adapter,
+            option_values.get(adapter.adapter_id),
+            allow_replacement_choices=allow_replacement_choices,
+        )
         imported = adapter.import_sources(
             [str(source.path)],
             recursive=False,
             config=config,
-            options=validate_document_import_options(
-                adapter,
-                option_values.get(adapter.adapter_id),
-                allow_replacement_choices=allow_replacement_choices,
-            ),
+            options=import_options,
         )
         if len(imported.files) != 1:
             raise UsageError(
@@ -335,6 +335,7 @@ def _import_project_inputs(
                 replace(
                     _normalize_imported_file(imported.files[0]),
                     original_name=source.original_name,
+                    run_options=run_options,
                 ),
             )
         )
@@ -380,9 +381,30 @@ class TXTDocumentAdapter:
         stage: str,
         language: str,
         opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
     ) -> str | None:
-        del stage, language, opaque_state
+        del stage, language, opaque_state, run_options
         return None
+
+    def render_model_source(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+        run_options: dict[str, str],
+    ) -> str:
+        del opaque_state, run_options
+        value = segment.get("model_source")
+        return value if isinstance(value, str) else str(segment["source"])
+
+    def segment_format_count(
+        self,
+        *,
+        segment: dict[str, Any],
+        opaque_state: dict[str, Any] | None,
+    ) -> int:
+        del segment, opaque_state
+        return 0
 
     def replacement_options(
         self, *, opaque_state: dict[str, Any] | None
@@ -631,7 +653,7 @@ def init_project(
 
             segments = item.segments
             state_path = None
-            if item.opaque_state is not None:
+            if item.opaque_state is not None or item.run_options:
                 state_path = (
                     Path("source")
                     / "adapters"
@@ -647,6 +669,7 @@ def init_project(
                         adapter_version=document_adapter.version,
                         file_id=file_id,
                         state=item.opaque_state,
+                        run_options=item.run_options or {},
                     )
                 )
             file_records.append(
@@ -821,6 +844,7 @@ def _replacement_source_snapshot(
     *,
     source_digest: str | None = None,
     adapter_state: dict[str, Any] | None = None,
+    run_options: dict[str, str] | None = None,
 ) -> str:
     return _replacement_digest(
         {
@@ -839,6 +863,7 @@ def _replacement_source_snapshot(
                 )
             },
             "adapter_state": adapter_state,
+            "run_options": run_options,
             "source_digest": source_digest,
             "segments": [
                 {
@@ -1011,8 +1036,92 @@ def _adapter_opaque_state(
 ) -> dict[str, Any] | None:
     if state is None:
         return None
-    nested = state.get("state")
-    return nested if isinstance(nested, dict) else state
+    if "state" not in state:
+        return state
+    nested = state["state"]
+    if nested is not None and not isinstance(nested, dict):
+        raise ConfigError("Document Adapter 状态缺少有效 state")
+    return nested if isinstance(nested, dict) else None
+
+
+def file_run_options(project: Path, file_id: str) -> dict[str, str]:
+    """Return the complete, validated host-owned run options for one File."""
+    file_record = next(
+        (item for item in load_source_files(project) if str(item["file_id"]) == file_id),
+        None,
+    )
+    if file_record is None:
+        raise UsageError(f"未知文件 ID：{file_id}")
+    from .plugins import get_document_adapter, validate_document_run_options
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+    state = read_adapter_state(project, file_id)
+    if state is None and not adapter.run_options:
+        return {}
+    if not isinstance(state, dict) or not isinstance(state.get("run_options"), dict):
+        raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
+    try:
+        return validate_document_run_options(
+            adapter, state["run_options"], use_defaults=False
+        )
+    except UsageError as exc:
+        raise ConfigError(
+            f"Document Adapter run_options 无效：{file_id}"
+        ) from exc
+
+
+def update_file_run_options(
+    project: Path, file_id: str, options: dict[str, str]
+) -> dict[str, str]:
+    """Partially update one File without touching adapter-private state or segments."""
+    metadata, files, segments = _source_records(project)
+    record = _replacement_file(files, file_id)
+    current = file_run_options(project, file_id)
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    adapter = get_document_adapter(str(record["document_adapter_id"]))
+    resolved = validate_document_run_options(adapter, {**current, **options})
+    states: list[dict[str, Any]] = []
+    for item in files:
+        state = read_adapter_state(project, str(item["file_id"]))
+        if state is None:
+            continue
+        if str(item["file_id"]) == file_id:
+            state = {**state, "run_options": resolved}
+        states.append(state)
+    replace_source(project, files, segments, metadata, states)
+    return resolved
+
+
+def update_adapter_run_options(
+    project: Path, adapter_id: str, options: dict[str, str]
+) -> dict[str, dict[str, str]]:
+    """Apply one partial map to every current File of an Adapter."""
+    metadata, files, segments = _source_records(project)
+    targets = [str(item["file_id"]) for item in files if str(item["document_adapter_id"]) == adapter_id]
+    if not targets:
+        raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
+    from .plugins import get_document_adapter, validate_document_run_options
+
+    adapter = get_document_adapter(adapter_id)
+    states: list[dict[str, Any]] = []
+    result: dict[str, dict[str, str]] = {}
+    for item in files:
+        file_id = str(item["file_id"])
+        state = read_adapter_state(project, file_id)
+        if file_id in targets:
+            current = file_run_options(project, file_id)
+            current = validate_document_run_options(adapter, {**current, **options})
+            if state is None:
+                if adapter.run_options:
+                    raise ConfigError(f"Document Adapter 状态缺失：{file_id}")
+                continue
+            state = {**state, "run_options": current}
+            result[file_id] = current
+        elif state is None:
+            continue
+        states.append(state)
+    replace_source(project, files, segments, metadata, states)
+    return result
 
 
 def prepare_file_replacement(
@@ -1045,6 +1154,11 @@ def prepare_file_replacement(
     if adapter_options and set(adapter_options) - {adapter_id}:
         raise UsageError("替换只能使用目标 Document Adapter 的选项")
     adapter = get_document_adapter(adapter_id)
+    overrides = (adapter_options or {}).get(adapter_id, {})
+    import_ids = {option.option_id for option in adapter.import_options}
+    run_ids = {option.option_id for option in adapter.run_options}
+    if set(overrides) - import_ids - run_ids:
+        raise UsageError("替换包含未知 Document Adapter 选项")
     previous_state = _adapter_opaque_state(
         read_adapter_state(project, file_id)
     )
@@ -1055,7 +1169,13 @@ def prepare_file_replacement(
     replacement_adapter_options = document_adapter_replacement_options(
         adapter,
         opaque_state=previous_state,
-        overrides=(adapter_options or {}).get(adapter_id),
+        overrides={key: value for key, value in overrides.items() if key in import_ids},
+    )
+    previous_run_options = file_run_options(project, file_id)
+    from .plugins import validate_document_run_options
+    replacement_run_options = validate_document_run_options(
+        adapter,
+        {**previous_run_options, **{key: value for key, value in overrides.items() if key in run_ids}},
     )
     temporary_root = Path(tempfile.mkdtemp(prefix="translator-replacement-"))
     staged_input = temporary_root / input_path.name
@@ -1068,7 +1188,7 @@ def prepare_file_replacement(
             recursive=False,
             config=config,
             document_adapter_id=adapter_id,
-            adapter_options={adapter_id: replacement_adapter_options},
+            adapter_options={adapter_id: {**replacement_adapter_options, **replacement_run_options}},
             allow_replacement_choices=True,
         )
         if len(imports) != 1:
@@ -1109,7 +1229,7 @@ def prepare_file_replacement(
             next_segment_sequence=next_sequence,
         )
         state_path = old_file.get("document_adapter_state")
-        if imported.opaque_state is None:
+        if imported.opaque_state is None and not imported.run_options:
             new_file["document_adapter_state"] = None
             adapter_states: tuple[dict[str, Any], ...] = ()
         else:
@@ -1130,6 +1250,7 @@ def prepare_file_replacement(
                     adapter_version=adapter.version,
                     file_id=file_id,
                     state=imported.opaque_state,
+                    run_options=imported.run_options or {},
                 ),
             )
         source_snapshot = _replacement_source_snapshot(
@@ -1137,6 +1258,7 @@ def prepare_file_replacement(
             old_segments,
             source_digest=old_input_digest,
             adapter_state=previous_state,
+            run_options=previous_run_options,
         )
         impact = _replacement_impact(
             project,
@@ -1148,10 +1270,17 @@ def prepare_file_replacement(
         impact["file_id"] = file_id
         impact["previous_adapter_options"] = previous_adapter_options
         impact["replacement_adapter_options"] = replacement_adapter_options
+        impact["previous_run_options"] = previous_run_options
+        impact["replacement_run_options"] = replacement_run_options
         impact["changed_adapter_options"] = sorted(
             option_id
             for option_id, value in replacement_adapter_options.items()
             if previous_adapter_options.get(option_id) != value
+        )
+        impact["changed_run_options"] = sorted(
+            option_id
+            for option_id, value in replacement_run_options.items()
+            if previous_run_options.get(option_id) != value
         )
         return FileReplacementPlan(
             project=project.resolve(),
@@ -1207,6 +1336,7 @@ def apply_file_replacement(
         current_segments,
         source_digest=current_input_digest,
         adapter_state=current_state,
+        run_options=file_run_options(root, plan.file_id),
     ) != plan.source_snapshot:
         raise UsageError("项目源文件已变化，请重新生成替换预览")
     if _replacement_input_digest(plan.staged_input) != plan.input_digest:
@@ -1319,7 +1449,7 @@ def add_project_files(
             staged_input.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item.source_path, staged_input)
             state_path = None
-            if item.opaque_state is not None:
+            if item.opaque_state is not None or item.run_options:
                 state_path = (
                     Path("source")
                     / "adapters"
@@ -1335,6 +1465,7 @@ def add_project_files(
                         adapter_version=adapter.version,
                         file_id=file_id,
                         state=item.opaque_state,
+                        run_options=item.run_options or {},
                     )
                 )
             file_record = record_header(
@@ -1702,70 +1833,4 @@ def _load_segment_records(
         )
     if not include_model_contract:
         return segments
-    files = read_sqlite_files(project)
-    state_by_file: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
-    for file_record in files:
-        state_path = file_record.get("document_adapter_state")
-        if not isinstance(state_path, str):
-            continue
-        state = read_adapter_state(project, str(file_record.get("file_id")))
-        if not isinstance(state, dict):
-            raise IncompleteError(
-                f"Document Adapter 状态缺失：{file_record.get('file_id')}"
-            )
-        if isinstance(state.get("state"), dict):
-            state = state["state"]
-        locators = state.get("locators")
-        if isinstance(locators, list):
-            ruby_mode = state.get("ruby_mode")
-            state_by_file[str(file_record.get("file_id"))] = (
-                locators,
-                str(ruby_mode) if isinstance(ruby_mode, str) else None,
-            )
-    by_file: dict[str, list[dict[str, Any]]] = {}
-    for segment in segments:
-        by_file.setdefault(str(segment.get("file_id")), []).append(segment)
-    for file_id, items in by_file.items():
-        state_entry = state_by_file.get(file_id)
-        if state_entry is None:
-            continue
-        locators, ruby_mode = state_entry
-        if len(locators) != len(items):
-            continue
-        for segment, locator in zip(
-            sorted(items, key=lambda value: int(value["line_index"])),
-            locators,
-            strict=True,
-        ):
-            if isinstance(locator, dict):
-                if ruby_mode is not None:
-                    segment["_ruby_mode"] = ruby_mode
-                    if ruby_mode in {"aozora", "short_xml", "compact"}:
-                        raw_source = str(segment["source"])
-                        display_source = compact_emphasis_aozora(raw_source)
-                        if display_source != raw_source:
-                            segment["_adapter_source"] = raw_source
-                            segment["source"] = display_source
-                        model_source = segment.get("model_source")
-                        if isinstance(model_source, str) and ruby_mode == "aozora":
-                            parts = re.split(
-                                r"(</?[a-z][a-z0-9]*\d+>)", model_source
-                            )
-                            segment["model_source"] = "".join(
-                                part
-                                if re.fullmatch(r"</?[a-z][a-z0-9]*\d+>", part)
-                                else compact_emphasis_aozora(part)
-                                for part in parts
-                            )
-                slot = locator.get("slot")
-                adapter_source = (
-                    slot.get("adapter_source")
-                    if isinstance(slot, dict)
-                    else None
-                )
-                if isinstance(adapter_source, str):
-                    segment["_adapter_source"] = adapter_source
-                formats = slot.get("formats") if isinstance(slot, dict) else None
-                if isinstance(formats, list):
-                    segment["_format_markers"] = formats
     return segments

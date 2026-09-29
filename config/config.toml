@@ -49,9 +49,6 @@ temperature_polishing = 0.3
 scheduling_mode = "ordered_by_file"
 
 [chunking]
-# 单个请求完整输入 Prompt 的期望 Token 上限；这是软目标。
-# 实际值还会受模型输入硬限制以及启用时的 ITPM 限制约束。
-target_chunk_input_tokens = 11000
 # 单个 Segment 超过输入硬限制时，是否允许内部切分并在完成后重新合并。
 # false 表示不切分，直接将该 Segment 记录为 failed。
 allow_split_oversized_segment = true

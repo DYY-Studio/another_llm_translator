@@ -1,14 +1,16 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
+import { openExternalUrl } from "../native";
 import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
+import { StorageView } from "./StorageView";
 import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server" | "storage";
 
 interface AdapterRow {
   adapter_id: string;
@@ -16,9 +18,12 @@ interface AdapterRow {
   streaming_supported?: boolean;
 }
 
+const CONFIGURATION_GUIDE_URL = "https://github.com/DYY-Studio/another_llm_translator/blob/main/docs/USER_GUIDE.md#2-%E9%85%8D%E7%BD%AE%E6%A8%A1%E5%9E%8B%E8%BF%9E%E6%8E%A5%E4%B8%8E%E5%87%AD%E6%8D%AE";
+
 export function SettingsView({ project, language, focusField, onFocusConsumed }: { project: string; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
   const [scope, setScope] = useState<ConfigScope>(project ? "project" : "global");
   const [section, setSection] = useState<SettingsSection>("config");
+  const [guideError, setGuideError] = useState("");
   useEffect(() => {
     if (!project) {
       setScope("global");
@@ -32,18 +37,32 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
     }
   }, [focusField, project]);
   const activeScope: ConfigScope = project ? scope : "global";
-  const globalSections: SettingsSection[] = ["presets", "adapters"];
+  const globalSections: SettingsSection[] = ["presets", "adapters", "credentials", "server", "storage"];
   useEffect(() => {
     if (activeScope === "project" && globalSections.includes(section)) {
       setSection("config");
     }
   }, [activeScope, section]);
+  async function openConfigurationGuide() {
+    setGuideError("");
+    try {
+      await openExternalUrl(CONFIGURATION_GUIDE_URL);
+    } catch {
+      setGuideError(translate("settings.configurationGuideError", language));
+    }
+  }
   return (
     <div className="settings-page">
       <nav className="settings-navigation" aria-label={translate("settings.title", language)}>
-        <div className="settings-scope-tabs" aria-label={translate("settings.scope", language)}>
-          <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>{translate("settings.project", language)}</button>
-          <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>{translate("settings.global", language)}</button>
+        <div className="settings-scope-row">
+          <div className="settings-scope-tabs" aria-label={translate("settings.scope", language)}>
+            <button disabled={!project} className={activeScope === "project" ? "active" : ""} onClick={() => setScope("project")}>{translate("settings.project", language)}</button>
+            <button className={activeScope === "global" ? "active" : ""} onClick={() => setScope("global")}>{translate("settings.global", language)}</button>
+          </div>
+          <div className="settings-guide-control">
+            <button type="button" className="settings-guide-link" onClick={() => void openConfigurationGuide()}>{translate("settings.configurationGuide", language)}</button>
+            {guideError && <small className="settings-guide-error" role="alert">{guideError}</small>}
+          </div>
         </div>
         <div className="settings-section-tabs" aria-label={translate("settings.sectionsAria", language, { scope: translate(activeScope === "project" ? "settings.projectShort" : "settings.globalShort", language) })}>
           <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>{translate("settings.config", language)}</button>
@@ -52,6 +71,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
           {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
           {activeScope === "global" && <button className={section === "server" ? "active" : ""} onClick={() => setSection("server")}>{translate("server.title", language)}</button>}
+          {activeScope === "global" && <button className={section === "storage" ? "active" : ""} onClick={() => setSection("storage")}>{translate("storage.title", language)}</button>}
         </div>
       </nav>
       <div className="settings-content">
@@ -61,6 +81,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
         {section === "adapters" && <AdapterSettings language={language} />}
         {section === "credentials" && <CredentialsSettings language={language} />}
         {section === "server" && <ServerSettings language={language} onChanged={() => {}} />}
+        {section === "storage" && <StorageView language={language} />}
       </div>
     </div>
   );
@@ -246,7 +267,6 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
           <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
-          <NumberField label={translate("settings.targetChunkTokens", language)} value={config.chunking.target_chunk_input_tokens} min={1} step={1} help={translate("settings.targetChunkTokensHint", language)} onChange={(value) => update((draft) => { draft.chunking.target_chunk_input_tokens = value; })} />
           <ToggleField label={translate("settings.splitOversized", language)} checked={config.chunking.allow_split_oversized_segment} help={translate("settings.splitOversizedHint", language)} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
           {crossBoundaryStages.map(([stage, label]) => <ToggleField key={stage} label={translate("settings.crossBoundary", language, { stage: label })} checked={config.chunking.cross_boundary_batching.includes(stage)} help={translate("settings.crossBoundaryHint", language)} onChange={(value) => update((draft) => { const selected = new Set<ContextStage>(draft.chunking.cross_boundary_batching); if (value) selected.add(stage); else selected.delete(stage); draft.chunking.cross_boundary_batching = crossBoundaryStages.map(([candidate]) => candidate).filter((candidate) => selected.has(candidate)); })} />)}
         </ConfigSection>
@@ -301,7 +321,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} help={translate("settings.jitterHint", language)} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.debug", language)} description={translate("settings.debugHint", language)} warning>
-          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} help={translate("settings.enableDebugHint", language)} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
+          <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
           <NumberField label={translate("settings.inject429", language)} value={config.debug.inject_429_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_429_every = value; })} />
           <NumberField label={translate("settings.inject500", language)} value={config.debug.inject_500_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_500_every = value; })} />
           <NumberField label={translate("settings.injectTimeout", language)} value={config.debug.inject_timeout_every} min={0} step={1} help={translate("settings.debugInjectionHint", language)} onChange={(value) => update((draft) => { draft.debug.inject_timeout_every = value; })} />
@@ -453,7 +473,6 @@ function PresetSettings({ language }: { language: Language }) {
             <div className="config-grid preset-fields">
               <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
               <Field label="Base URL" help={translate("preset.baseUrlHint", language)}><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
-              <Field label="Endpoint" help={translate("preset.endpointHint", language)}><input value={preset.endpoint} onChange={(event) => update((draft) => { draft.endpoint = event.target.value; })} /></Field>
               <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}>
                 <div className="credential-selector">
                   <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
@@ -476,6 +495,7 @@ function PresetSettings({ language }: { language: Language }) {
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
+              <NumberField label={translate("preset.targetChunkInputTokens", language)} value={preset.target_chunk_input_tokens} min={1} step={1} help={translate("preset.targetChunkInputTokensHint", language)} onChange={(value) => update((draft) => { draft.target_chunk_input_tokens = value; })} />
               <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={0} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
               <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
@@ -498,13 +518,6 @@ function PresetSettings({ language }: { language: Language }) {
                 help={translate("preset.streamReadTimeoutHint", language)}
                 onChange={(value) => updateConnection((draft) => { draft.stream_read_timeout_enabled = value; })}
               />
-              <Field label={translate("preset.streamEndpoint", language)} help={translate("preset.streamEndpointHint", language)}>
-                <input
-                  value={preset.stream_endpoint}
-                  disabled={!preset.stream}
-                  onChange={(event) => updateConnection((draft) => { draft.stream_endpoint = event.target.value; })}
-                />
-              </Field>
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
               <label className="code-field preset-extra"><span>{translate("preset.extraHeaders", language)}</span><small>{translate("preset.extraHeadersHint", language)}</small><textarea spellCheck={false} value={extraHeaders} onChange={(event) => setExtraHeaders(event.target.value)} /></label>
             </div>
@@ -949,6 +962,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
         <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptPhaseHint", language)}>
           <button type="button" role="tab" aria-selected={previewPhase === "adjudication"} className={previewPhase === "adjudication" ? "active" : ""} onClick={() => setPreviewPhase("adjudication")}>{translate("settings.promptPhaseAdjudication", language)}</button>
           <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
+          <button type="button" role="tab" aria-selected={previewPhase === "final_review"} className={previewPhase === "final_review" ? "active" : ""} onClick={() => setPreviewPhase("final_review")}>{translate("settings.promptPhaseFinalReview", language)}</button>
         </div>
       </>}
       <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>

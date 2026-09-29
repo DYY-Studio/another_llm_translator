@@ -866,17 +866,13 @@ async def test_oversized_review_segment_is_combined_once(
     client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
     try:
         await run_translation(project, Scope(), http_client=client)
-        config_path = project / "config.toml"
-        text = config_path.read_text(encoding="utf-8")
         use_llm_preset(
             tmp_path,
             context_window_tokens=1200,
             max_output_tokens=300,
             context_safety_margin_tokens=100,
+            target_chunk_input_tokens=700,
         )
-        for key, value in (("target_chunk_input_tokens", "700"),):
-            text = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {value}", text)
-        config_path.write_text(text, encoding="utf-8")
         summary = await run_review(
             project, "proofreading", Scope(), http_client=client
         )

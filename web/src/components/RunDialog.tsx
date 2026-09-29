@@ -16,11 +16,13 @@ export function RunDialog({
   options,
   onClose,
   onStart,
+  onOpenOverview,
   language,
 }: {
   options: TaskOptions;
   onClose: () => void;
   onStart: (decision: RunDecision) => void;
+  onOpenOverview?: () => void;
   language: Language;
 }) {
   const [runAction, setRunAction] = useState<"resume" | "decline" | null>(
@@ -34,6 +36,9 @@ export function RunDialog({
       : options.mismatched_fingerprint_completed ? null : "pending",
   );
   const decisionMode = options.stage === "terminology_decision";
+  const [finalReview, setFinalReview] = useState(
+    options.running_run?.final_review ?? options.final_review ?? false,
+  );
   const hybridSummary = options.stage === "terminology" && options.summary_selected_boundaries !== undefined;
   const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
   const summaryConfigurationBlocked = hybridSummary && (
@@ -42,13 +47,19 @@ export function RunDialog({
     || Boolean(options.summary_only_work)
   );
   const resuming = runAction === "resume";
+  const finalReviewLocked = decisionMode && Boolean(options.running_run && resuming);
   const ready = summaryConfigurationBlocked ? false : decisionMode
     ? !options.running_run || resuming || resultPolicy === "force"
     : resuming || resultPolicy !== null;
 
   function chooseRunAction(action: "resume" | "decline") {
     setRunAction(action);
-    if (decisionMode && action === "decline") setResultPolicy("force");
+    if (decisionMode && action === "decline") {
+      setResultPolicy("force");
+      setFinalReview(options.final_review ?? false);
+    } else if (decisionMode && action === "resume" && options.running_run) {
+      setFinalReview(options.running_run.final_review ?? false);
+    }
   }
 
   function submit() {
@@ -57,6 +68,7 @@ export function RunDialog({
       force: !resuming && resultPolicy === "force",
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
+      final_review: decisionMode && finalReview,
     });
   }
 
@@ -86,6 +98,19 @@ export function RunDialog({
           <span><strong>{options.pending}</strong>{translate("runDialog.pending", language)}</span>
           <span><strong>{options.failed}</strong>{translate("runDialog.failed", language)}</span>
         </div>
+        {(options.document_adapter_run_options?.length ?? 0) > 0 && (
+          <section className="run-adapter-options" aria-label={translate("runOptions.summaryTitle", language)}>
+            <div className="run-adapter-options-heading"><strong>{translate("runOptions.summaryTitle", language)}</strong>{onOpenOverview && <button className="link-button" onClick={onOpenOverview}>{translate("runOptions.openOverview", language)}</button>}</div>
+            <div className="run-adapter-summary-list">
+              {options.document_adapter_run_options?.map((adapter) => (
+                <article className="run-adapter-summary" key={adapter.adapter_id}>
+                  <header><code>{adapter.adapter_id}</code><span>{translate("runOptions.fileCount", language, { count: adapter.file_count })}</span></header>
+                  <dl>{adapter.options.map((option) => <div key={option.option_id}><dt>{option.label}</dt><dd>{option.value ?? translate("runOptions.multiple", language)}</dd></div>)}</dl>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
         {decisionMode && <div className="run-decision-info">
           <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
@@ -93,6 +118,25 @@ export function RunDialog({
             soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
             mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
           })}</span>}
+          <label className="config-toggle">
+            <span>
+              <input
+                type="checkbox"
+                checked={finalReview}
+                disabled={finalReviewLocked}
+                onChange={(event) => setFinalReview(event.target.checked)}
+              />
+              {translate("terms.decisionFinalReview", language)}
+            </span>
+            <small>
+              {finalReviewLocked
+                ? translate("terms.decisionFinalReviewLocked", language)
+                : translate("terms.decisionFinalReviewHint", language)}
+            </small>
+            {finalReview && (
+              <small>{translate("terms.decisionFinalReviewEstimateHint", language)}</small>
+            )}
+          </label>
         </div>}
 
         {hybridSummary && <div className="run-decision-info">

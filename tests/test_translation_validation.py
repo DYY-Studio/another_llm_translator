@@ -6,31 +6,23 @@ import pytest
 
 from app.config import load_project_config
 from app.errors import ConfigError, ProjectError
-from app.plugins import (
+from app.plugin_api import (
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,
+    TranslationValidationContext,
+    TranslationValidationMatch,
+)
+from app.plugins import (
     load_plugins,
     resolve_translation_validators,
 )
 from app.project import init_project
 from app.translation_validation import (
     SourceTextResidualValidator,
-    TranslationValidationContext,
-    TranslationValidationMatch,
     validate_translation_text,
 )
 from app.web_store import WebStore
 from tests.test_foundation import make_app_root
-
-
-class FakeEntryPoint:
-    name = "validator-fixture"
-
-    def __init__(self, descriptor: PluginDescriptor) -> None:
-        self.descriptor = descriptor
-
-    def load(self) -> object:
-        return self.descriptor
 
 
 def test_source_text_residual_reports_complete_and_long_partial_matches() -> None:
@@ -141,11 +133,17 @@ def test_plugin_host_rejects_duplicate_translation_validator(
         translation_validators=(Validator(),),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor), FakeEntryPoint(duplicate)],
+        "app.plugins._load_external_descriptors",
+        lambda: [
+            (descriptor, Path("<fixture-plugin-1>")),
+            (duplicate, Path("<fixture-plugin-2>")),
+        ],
     )
-    with pytest.raises(ConfigError, match="翻译校验器描述不完整"):
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+    with pytest.raises(ConfigError, match="翻译校验器 ID 重复") as raised:
         load_plugins()
+    assert "<fixture-plugin-1>" in str(raised.value)
+    assert "<fixture-plugin-2>" in str(raised.value)
 
 
 def test_plugin_host_rejects_old_validator_protocol(
@@ -158,9 +156,10 @@ def test_plugin_host_rejects_old_validator_protocol(
         translation_validators=(),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
     with pytest.raises(ConfigError, match="协议版本不兼容"):
         load_plugins()
 
@@ -200,9 +199,10 @@ def test_external_translation_validator_is_discoverable(
         translation_validators=(ExternalValidator(),),
     )
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [FakeEntryPoint(descriptor)],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
 
     summary = next(
         item
@@ -218,7 +218,7 @@ def test_external_translation_validator_is_discoverable(
     }
 
 
-def test_translation_validator_resolution_loads_entry_point_once_and_reuses_instance(
+def test_translation_validator_resolution_reuses_loaded_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ExternalValidator:
@@ -237,24 +237,14 @@ def test_translation_validator_resolution_loads_entry_point_once_and_reuses_inst
         protocol_version=PLUGIN_PROTOCOL_VERSION,
         translation_validators=(validator,),
     )
-    load_count = 0
-
-    class CountingEntryPoint:
-        name = "validator-fixture"
-
-        def load(self) -> object:
-            nonlocal load_count
-            load_count += 1
-            return descriptor
-
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [CountingEntryPoint()],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
 
     bindings = resolve_translation_validators(["external_example"])
 
-    assert load_count == 1
     assert len(bindings) == 1
     instance, summary = bindings[0]
     assert instance is validator
@@ -299,24 +289,14 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
         protocol_version=PLUGIN_PROTOCOL_VERSION,
         translation_validators=(validator,),
     )
-    load_count = 0
-
-    class CountingEntryPoint:
-        name = "validator-fixture"
-
-        def load(self) -> object:
-            nonlocal load_count
-            load_count += 1
-            return descriptor
-
     monkeypatch.setattr(
-        "app.plugins.entry_points",
-        lambda **_: [CountingEntryPoint()],
+        "app.plugins._load_external_descriptors",
+        lambda: [(descriptor, Path("<fixture-plugin>"))],
     )
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
 
     config = load_project_config(project, presets_root=app_root)
 
-    assert load_count == 1
     assert config["_translation_validators"] == [
         {
             "validator_id": "external_example",
@@ -329,7 +309,5 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
     assert config["_translation_validator_instances"] == (validator,)
     assert config["_translation_validator_instances"][0] is validator
 
-    load_count = 0
     store = WebStore(project)
-    assert load_count == 1
     assert store.config["_translation_validator_instances"][0] is validator
