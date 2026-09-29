@@ -48,6 +48,10 @@ def _located_user_root() -> Path | None:
             or not root.is_absolute()
         ):
             raise ValueError("invalid version or non-absolute root")
+        if root.name != USER_ROOT_NAME:
+            raise ValueError(f"custom user root must end in {USER_ROOT_NAME}")
+        if root.is_symlink():
+            raise ValueError("custom user root must not be a symbolic link")
         if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
             raise ValueError("custom user root is unavailable")
         return root

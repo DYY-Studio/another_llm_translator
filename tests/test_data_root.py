@@ -8,7 +8,7 @@ import pytest
 from app import data_root
 
 
-@pytest.mark.parametrize("mismatch", ("paths", "type", "size", "symlink"))
+@pytest.mark.parametrize("mismatch", ("paths", "type", "size", "content", "symlink"))
 def test_copy_mismatch_is_rejected_before_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
 ) -> None:
@@ -35,6 +35,8 @@ def test_copy_mismatch_is_rejected_before_publish(
             (dst / "entry.txt").mkdir()
         elif mismatch == "size":
             (dst / "entry.txt").write_text("different size", encoding="utf-8")
+        elif mismatch == "content":
+            (dst / "entry.txt").write_text("corrupt", encoding="utf-8")
         else:
             (dst / "linked.txt").unlink()
             (dst / "linked.txt").symlink_to("missing.txt")
@@ -368,6 +370,30 @@ def test_non_object_pending_json_fails_without_cli_traceback(
     assert exit_code == 1
     assert output.err.startswith("error:")
     assert "Traceback" not in output.err
+
+
+def test_pending_version_rejects_boolean_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "system"
+    )
+    data_root.pending_path().parent.mkdir(parents=True)
+    data_root.pending_path().write_text(
+        json.dumps(
+            {
+                "version": True,
+                "transaction_id": "tx-test",
+                "source_root": str(tmp_path / "system" / "another-llm-translator"),
+                "target_root": str(tmp_path / "external" / "another-llm-translator"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid relocation request"):
+        data_root._read_pending()
 
 
 def test_reset_removes_dangling_locator_symlink(

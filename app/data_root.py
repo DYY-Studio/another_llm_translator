@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -164,7 +165,8 @@ def _read_pending() -> tuple[Path, Path, str]:
         target = Path(value["target_root"])
         transaction_id = value["transaction_id"]
         if (
-            value.get("version") != 1
+            type(value.get("version")) is not int
+            or value["version"] != 1
             or not source.is_absolute()
             or not target.is_absolute()
             or source.name != USER_ROOT_NAME
@@ -184,12 +186,6 @@ def _read_pending() -> tuple[Path, Path, str]:
     return source, target, transaction_id
 
 
-def _has_our_marker(target: Path, source: Path, transaction_id: str) -> bool:
-    return _has_transaction_marker(
-        transaction_marker(target), source, target, transaction_id
-    )
-
-
 def _has_transaction_marker(
     marker: Path, source: Path, target: Path, transaction_id: str
 ) -> bool:
@@ -203,18 +199,20 @@ def _has_transaction_marker(
     }
 
 
-def _tree_manifest(root: Path) -> dict[str, tuple[str, int | str | None]]:
-    manifest: dict[str, tuple[str, int | str | None]] = {}
+def _tree_manifest(root: Path) -> dict[str, tuple[str, int | str | None, str | None]]:
+    manifest: dict[str, tuple[str, int | str | None, str | None]] = {}
     for path in root.rglob("*"):
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
-            entry = ("symlink", os.readlink(path))
+            entry = ("symlink", os.readlink(path), None)
         elif path.is_dir():
-            entry = ("directory", None)
+            entry = ("directory", None, None)
         elif path.is_file():
-            entry = ("file", path.stat().st_size)
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            entry = ("file", path.stat().st_size, digest)
         else:
-            entry = ("other", None)
+            entry = ("other", None, None)
         manifest[relative] = entry
     return manifest
 
@@ -247,7 +245,9 @@ def apply_pending() -> dict[str, str]:
     if target.is_symlink():
         raise ValueError(f"target user root is a symbolic link: {target}")
     if target.exists():
-        has_marker = _has_our_marker(target, source, transaction_id)
+        has_marker = _has_transaction_marker(
+            transaction_marker(target), source, target, transaction_id
+        )
         completed_cleanup = current == target.resolve() and not source.exists()
         if not has_marker and not completed_cleanup:
             raise ValueError(f"target user root already exists: {target}")
