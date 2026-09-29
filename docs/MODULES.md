@@ -196,7 +196,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 ## 9. 配置、资源与诊断
 
 - `config.py`：项目配置 schema、严格加载和规范写入。
-- `user_config.py`：平台用户数据根与内置/用户资源覆盖路径。
+- `user_config.py`：按环境变量、应用定位和平台默认顺序解析用户数据根，并提供内置/用户资源覆盖路径。
+- `data_root.py`：用户数据根状态、待迁移请求、离线迁移与默认位置重置；不拥有 Web 或桌面进程生命周期。
 - `prompt_library.py`：用户级 Prompt 条目及项目载入边界。
 - `credentials.py`：环境变量和系统钥匙串访问，不向持久化层暴露密钥正文。
 - `server_config.py`：监听、局域网共享与认证设置。
@@ -214,16 +215,18 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
 拥有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
 
-`StorageView.tsx` 负责设置页中的存储汇总、项目明细和逐项清理交互；它不复制后端扫描或安全判断，
-清理后重新读取服务端状态。
+`StorageView.tsx` 负责设置页中的存储汇总、数据位置设置、项目明细和逐项清理交互；它不复制后端
+扫描、迁移或安全判断，操作后重新读取服务端状态。`web_storage_routes.py` 暴露数据根状态和迁移
+请求/取消，并拒绝活动任务期间的变更；实际迁移委托给 `data_root.py`。
 
 页面局部 UI 状态留在对应 workspace/component；服务端拥有的项目、运行和结果状态必须重新
 读取 API，不在前端建立权威副本。
 
 `src-tauri/src/` 负责桌面窗口、从应用资源目录定位 bundled managed Python 并以
 `-m app.web` 启动 Web 服务、管理该进程及原生选择器；开发构建从明确的 runtime 目录启动，
-正式构建使用 app 内的 runtime。`packaging/` 与 `scripts/` 负责 runtime 组装、检查和 Tauri
-打包；桌面壳不实现独立业务后端。
+正式构建使用 app 内的 runtime。它也负责迁移期间停止和重启服务，以及自定义根不可用时的重试和
+重置入口；数据复制与定位由 Python 后端完成。`packaging/` 与 `scripts/` 负责 runtime 组装、检查
+和 Tauri 打包；桌面壳不实现独立业务后端。
 
 ## 11. 变更规则
 

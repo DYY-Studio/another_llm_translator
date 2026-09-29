@@ -51,6 +51,16 @@ python -m app.web
 默认地址为 `http://127.0.0.1:8765`，可通过 `--port` 更换端口。开发时可以设置
 `ANOTHER_LLM_USER_ROOT` 指向专用测试数据目录，避免混用日常项目。
 
+查看当前数据位置或执行源码 Web 中已安排的离线迁移：
+
+```bash
+python -m app.data_root status
+python -m app.data_root apply-pending
+```
+
+迁移必须在 Web 服务停止后执行；成功后再按上面的命令重启服务。`apply-pending` 失败会输出错误并
+以非零状态退出；旧目录清理失败时，迁移结果会包含旧目录路径和警告。
+
 后端模块的职责和入口依赖见[模块职责](MODULES.md)。调试业务行为时应从 CLI/Web 入口追踪到
 共享领域模块，不在前端复制项目状态或恢复逻辑。
 
