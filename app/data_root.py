@@ -30,6 +30,11 @@ def transaction_marker(target: Path) -> Path:
     return target / MARKER_NAME
 
 
+def staging_marker_path(target: Path, transaction_id: str) -> Path:
+    staging = target.with_name(f".{target.name}.staging-{transaction_id}")
+    return staging.with_name(f"{staging.name}.json")
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -49,7 +54,9 @@ def _read_json(path: Path, description: str) -> dict[str, Any]:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read {description} {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise TypeError(f"invalid {description} {path}: expected an object")
+        raise ValueError(  # noqa: TRY004 - CLI treats malformed files as user errors.
+            f"invalid {description} {path}: expected an object"
+        )
     return value
 
 
@@ -152,7 +159,14 @@ def _read_pending() -> tuple[Path, Path, str]:
 
 
 def _has_our_marker(target: Path, source: Path, transaction_id: str) -> bool:
-    marker = transaction_marker(target)
+    return _has_transaction_marker(
+        transaction_marker(target), source, target, transaction_id
+    )
+
+
+def _has_transaction_marker(
+    marker: Path, source: Path, target: Path, transaction_id: str
+) -> bool:
     if not marker.is_file():
         return False
     value = _read_json(marker, "relocation transaction marker")
@@ -163,6 +177,22 @@ def _has_our_marker(target: Path, source: Path, transaction_id: str) -> bool:
     }
 
 
+def _tree_manifest(root: Path) -> dict[str, tuple[str, int | str | None]]:
+    manifest: dict[str, tuple[str, int | str | None]] = {}
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            entry = ("symlink", os.readlink(path))
+        elif path.is_dir():
+            entry = ("directory", None)
+        elif path.is_file():
+            entry = ("file", path.stat().st_size)
+        else:
+            entry = ("other", None)
+        manifest[relative] = entry
+    return manifest
+
+
 def _write_locator(target: Path) -> None:
     _atomic_json(user_root_locator_path(), {"version": 1, "active_root": str(target)})
 
@@ -170,6 +200,18 @@ def _write_locator(target: Path) -> None:
 def apply_pending() -> dict[str, str]:
     _reject_environment_override()
     source, target, transaction_id = _read_pending()
+    canonical_source = source.resolve()
+    canonical_parent = target.parent.resolve()
+    if canonical_source != source or canonical_parent != target.parent:
+        raise ValueError("source or target parent canonical path changed")
+    target = canonical_parent / USER_ROOT_NAME
+    if (
+        canonical_source == target
+        or canonical_source.is_relative_to(target)
+        or target.is_relative_to(canonical_source)
+    ):
+        raise ValueError("source and target roots must not overlap")
+    source = canonical_source
     current = _active_root_without_environment().resolve()
     if current not in (source.resolve(), target.resolve()):
         raise ValueError("active user root no longer matches the relocation request")
@@ -193,10 +235,34 @@ def apply_pending() -> dict[str, str]:
         ):
             raise ValueError(f"target parent is unavailable: {target.parent}")
         staging = target.with_name(f".{target.name}.staging-{transaction_id}")
-        if staging.exists():
-            raise ValueError(f"staging directory already exists: {staging}")
+        staging_marker = staging_marker_path(target, transaction_id)
+        if staging_marker.exists():
+            if not _has_transaction_marker(
+                staging_marker, source, target, transaction_id
+            ):
+                raise ValueError(
+                    f"staging marker does not match this transaction: {staging_marker}"
+                )
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging_marker.unlink()
+        elif staging.exists():
+            raise ValueError(f"staging directory has no transaction marker: {staging}")
+        created_staging = False
         try:
-            shutil.copytree(source, staging, symlinks=True)
+            _atomic_json(
+                staging_marker,
+                {
+                    "transaction_id": transaction_id,
+                    "source_root": str(source),
+                    "target_root": str(target),
+                },
+            )
+            staging.mkdir()
+            created_staging = True
+            shutil.copytree(source, staging, symlinks=True, dirs_exist_ok=True)
+            if _tree_manifest(source) != _tree_manifest(staging):
+                raise ValueError("data root copy verification failed")
             _atomic_json(
                 transaction_marker(staging),
                 {
@@ -210,14 +276,37 @@ def apply_pending() -> dict[str, str]:
             os.replace(staging, target)
             has_marker = True
         except BaseException:
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
+            if created_staging and staging.exists():
+                try:
+                    shutil.rmtree(staging)
+                except OSError:
+                    pass
+            if not created_staging or not staging.exists():
+                staging_marker.unlink(missing_ok=True)
             raise
+
+    staging_marker = staging_marker_path(target, transaction_id)
+    if staging_marker.exists():
+        if not _has_transaction_marker(staging_marker, source, target, transaction_id):
+            raise ValueError(
+                f"staging marker does not match this transaction: {staging_marker}"
+            )
+        staging_marker.unlink()
 
     if current != target.resolve():
         _write_locator(target)
     if source.exists():
-        shutil.rmtree(source)
+        try:
+            shutil.rmtree(source)
+        except OSError as exc:
+            return {
+                "active_root": str(target),
+                "old_root": str(source),
+                "warning": (
+                    "New data root is active; old root was not removed: "
+                    f"{source} ({exc})"
+                ),
+            }
     if has_marker and marker.exists():
         marker.unlink()
     pending_path().unlink(missing_ok=True)
