@@ -431,6 +431,7 @@ def create_app(
         app_root=app_root,
         project=project,
         storage_manager=app.state.storage_manager,
+        has_active_tasks=lambda: bool(app.state.tasks.active_tasks()),
     )
 
     if web_dist.is_dir():

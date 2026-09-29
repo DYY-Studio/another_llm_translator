@@ -131,6 +131,16 @@ def status() -> dict[str, Any]:
     }
 
 
+def cancel_relocation(*, confirm: bool) -> dict[str, bool]:
+    _reject_environment_override()
+    if not confirm:
+        raise ValueError("cancelling relocation requires explicit confirmation")
+    pending = pending_path()
+    cancelled = pending.exists() or pending.is_symlink()
+    pending.unlink(missing_ok=True)
+    return {"cancelled": cancelled}
+
+
 def _read_pending() -> tuple[Path, Path, str]:
     value = _read_json(pending_path(), "relocation request")
     try:

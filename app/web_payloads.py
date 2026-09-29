@@ -88,5 +88,9 @@ class StorageConfirmPayload(_WebPayload):
     confirm: StrictBool
 
 
+class DataRootRelocationPayload(StorageConfirmPayload):
+    parent_dir: StrictStr = Field(min_length=1)
+
+
 class StorageOutputClearPayload(StorageConfirmPayload):
     path: StrictStr = Field(min_length=1)
