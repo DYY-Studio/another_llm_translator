@@ -138,11 +138,11 @@ fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String,
 }
 
 fn run_relocation_sequence<T: std::fmt::Display>(
-    stop: impl FnOnce(),
+    stop: impl FnOnce() -> Result<(), String>,
     relocate: impl FnOnce() -> Result<T, String>,
     restart: impl FnOnce() -> Result<(), String>,
 ) -> Result<T, String> {
-    stop();
+    stop().map_err(|error| format!("迁移前无法安全停止 Web 服务：{error}"))?;
     let relocation_result = relocate();
     let restart_result = restart();
     match (relocation_result, restart_result) {
@@ -223,9 +223,7 @@ fn validate_native_command(
 ) -> Result<(), String> {
     let authorized = match command {
         NativeCommand::Apply => web_process_running && is_web_service_url(url, port),
-        NativeCommand::Retry => {
-            !web_process_running && startup_error_state.is_some() && is_startup_error_url(url)
-        }
+        NativeCommand::Retry => startup_error_state.is_some() && is_startup_error_url(url),
         NativeCommand::Reset => {
             !web_process_running && startup_error_state == Some(true) && is_startup_error_url(url)
         }
@@ -471,6 +469,99 @@ fn startup_error_url(error: &str) -> WebviewUrl {
     )))
 }
 
+fn startup_error_navigation_url(error: &str) -> Result<tauri::Url, String> {
+    let origin = if cfg!(windows) {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    };
+    tauri::Url::parse(&format!(
+        "{origin}/startup-error.html?error={}&allowReset=false",
+        percent_encode_query(error)
+    ))
+    .map_err(|error| format!("启动错误页地址无效：{error}"))
+}
+
+fn request_graceful_shutdown(port: &str, timeout: Duration) -> Result<(), String> {
+    let address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("服务地址无效：{error}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("无法请求服务安全停服：{error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("无法设置停服请求超时：{error}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("无法设置停服响应超时：{error}"))?;
+    stream
+        .write_all(b"POST /api/v1/server/desktop-shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        .map_err(|error| format!("无法发送安全停服请求：{error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("读取安全停服响应失败：{error}"))?;
+    let response = String::from_utf8_lossy(&response);
+    let status = response.lines().next().unwrap_or("无状态行");
+    if status.starts_with("HTTP/1.1 200 ") || status.starts_with("HTTP/1.0 200 ") {
+        Ok(())
+    } else {
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("")
+            .trim();
+        Err(if body.is_empty() {
+            format!("服务拒绝安全停服请求：{status}")
+        } else {
+            format!("服务拒绝安全停服请求：{status}：{body}")
+        })
+    }
+}
+
+fn graceful_stop_web_process(
+    process: &mut WebProcess,
+    port: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    request_graceful_shutdown(port, timeout.min(Duration::from_secs(2)))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match process.child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                process.finish_stderr();
+                return Ok(());
+            }
+            Ok(Some(status)) => {
+                process.finish_stderr();
+                return Err(process.failure(
+                    "等待安全停服",
+                    format!("服务退出失败（{}）", exit_status_description(status)),
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
+            }
+            Ok(None) => return Err("服务已接受安全停服请求，但等待退出超时".to_string()),
+            Err(error) => return Err(format!("检查服务停服状态失败：{error}")),
+        }
+    }
+}
+
+fn stop_web_process_for_relocation(port: &str) -> Result<(), String> {
+    let current_process = WEB_PROCESS.lock().unwrap().take();
+    let Some(mut process) = current_process else {
+        return Err("找不到正在运行的 Web 服务进程".to_string());
+    };
+    match graceful_stop_web_process(&mut process, port, Duration::from_secs(15)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *WEB_PROCESS.lock().unwrap() = Some(process);
+            Err(error)
+        }
+    }
+}
+
 fn http_request(
     port: &str,
     path: &str,
@@ -517,11 +608,12 @@ fn http_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_webview_navigation, append_stderr_tail, data_root_command, http_request,
-        is_startup_error_url, is_web_service_url, managed_python_path, managed_runtime_root,
-        python_command, run_relocation_sequence, server_ready, spawn_web_process,
-        startup_error_allows_reset, stderr_snapshot, validate_data_root_reset,
-        validate_native_command, with_lifecycle_lock, NativeCommand, STDERR_TAIL_LIMIT,
+        allowed_webview_navigation, append_stderr_tail, data_root_command,
+        graceful_stop_web_process, http_request, is_startup_error_url, is_web_service_url,
+        managed_python_path, managed_runtime_root, python_command, request_graceful_shutdown,
+        run_relocation_sequence, server_ready, spawn_web_process, startup_error_allows_reset,
+        stderr_snapshot, validate_data_root_reset, validate_native_command, with_lifecycle_lock,
+        NativeCommand, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -638,7 +730,10 @@ mod tests {
     fn relocation_restarts_after_helper_failure_and_reports_both_errors() {
         let calls = std::cell::RefCell::new(Vec::new());
         let error = run_relocation_sequence(
-            || calls.borrow_mut().push("stop"),
+            || {
+                calls.borrow_mut().push("stop");
+                Ok::<(), String>(())
+            },
             || {
                 calls.borrow_mut().push("helper");
                 Err::<String, _>("relocation failed".to_string())
@@ -656,9 +751,32 @@ mod tests {
     }
 
     #[test]
+    fn relocation_does_not_run_helper_when_graceful_stop_fails() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = run_relocation_sequence(
+            || {
+                calls.borrow_mut().push("stop");
+                Err("graceful stop timed out".to_string())
+            },
+            || {
+                calls.borrow_mut().push("helper");
+                Ok::<String, String>("completed".to_string())
+            },
+            || {
+                calls.borrow_mut().push("restart");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), ["stop"]);
+        assert!(error.contains("graceful stop timed out"));
+    }
+
+    #[test]
     fn relocation_preserves_successful_helper_output_when_restart_fails() {
         let error = run_relocation_sequence(
-            || {},
+            || Ok(()),
             || Ok("{\"warning\":\"old directory retained\"}".to_string()),
             || Err("restart failed".to_string()),
         )
@@ -762,6 +880,14 @@ mod tests {
             NativeCommand::Retry,
             &error_page,
             false,
+            Some(false),
+            "9123",
+        )
+        .is_ok());
+        assert!(validate_native_command(
+            NativeCommand::Retry,
+            &error_page,
+            true,
             Some(false),
             "9123",
         )
@@ -885,6 +1011,81 @@ mod tests {
     }
 
     #[test]
+    fn graceful_stop_requests_shutdown_and_waits_for_process_exit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let size = stream.read(&mut request).unwrap();
+            request_tx
+                .send(String::from_utf8_lossy(&request[..size]).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 0.1; exit 0"]);
+        let mut process = spawn_web_process(command, "/bin/sh graceful exit".to_string()).unwrap();
+
+        graceful_stop_web_process(&mut process, &port, Duration::from_secs(2)).unwrap();
+
+        server.join().unwrap();
+        let request = request_rx.recv().unwrap();
+        assert!(request.starts_with("POST /api/v1/server/desktop-shutdown HTTP/1.1"));
+        assert_eq!(process.child.try_wait().unwrap().unwrap().code(), Some(0));
+    }
+
+    #[test]
+    fn graceful_stop_timeout_does_not_kill_the_web_process() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh long-running service".to_string()).unwrap();
+
+        let error =
+            graceful_stop_web_process(&mut process, &port, Duration::from_millis(100)).unwrap_err();
+
+        server.join().unwrap();
+        assert!(error.contains("超时"));
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
+        assert!(process.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn graceful_stop_rejects_server_conflict_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 20\r\nConnection: close\r\n\r\nactive backend tasks")
+                .unwrap();
+        });
+
+        let error = request_graceful_shutdown(&port, Duration::from_secs(1)).unwrap_err();
+
+        server.join().unwrap();
+        assert!(error.contains("409 Conflict"));
+        assert!(error.contains("active backend tasks"));
+    }
+
+    #[test]
     fn server_ready_times_out_when_http_listener_does_not_respond() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
@@ -984,15 +1185,22 @@ fn apply_data_root_relocation(
 ) -> Result<String, String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
         authorize_window_command(&window, NativeCommand::Apply)?;
-        run_relocation_sequence(
-            || {
-                if let Some(mut process) = WEB_PROCESS.lock().unwrap().take() {
-                    process.stop();
-                }
-            },
+        let result = run_relocation_sequence(
+            || stop_web_process_for_relocation(&web_port()),
             || run_data_root_helper(&app, &["apply-pending"]),
             || start_and_store_web_process(&app),
-        )
+        );
+        if let Err(error) = &result {
+            if error.contains("已接受安全停服请求") || error.contains("服务退出失败")
+            {
+                *STARTUP_ERROR_STATE.lock().unwrap() = Some(false);
+                let url = startup_error_navigation_url(error)?;
+                window.navigate(url).map_err(|navigation_error| {
+                    format!("{error}\n无法打开恢复页面：{navigation_error}")
+                })?;
+            }
+        }
+        result
     })
 }
 
@@ -1000,9 +1208,21 @@ fn apply_data_root_relocation(
 fn retry_web_service(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
         authorize_window_command(&window, NativeCommand::Retry)?;
-        if WEB_PROCESS.lock().unwrap().is_none() {
-            start_and_store_web_process(&app)?;
+        let old_process = WEB_PROCESS.lock().unwrap().take();
+        if let Some(mut process) = old_process {
+            match process.child.try_wait() {
+                Ok(Some(_)) => process.finish_stderr(),
+                Ok(None) => {
+                    *WEB_PROCESS.lock().unwrap() = Some(process);
+                    return Err("Web 服务仍在安全退出，请稍后重试".to_string());
+                }
+                Err(error) => {
+                    *WEB_PROCESS.lock().unwrap() = Some(process);
+                    return Err(format!("检查旧 Web 服务状态失败：{error}"));
+                }
+            }
         }
+        start_and_store_web_process(&app)?;
         navigate_to_web_service(&app)
     })
 }
@@ -1017,7 +1237,7 @@ fn reset_data_root(
         authorize_window_command(&window, NativeCommand::Reset)?;
         validate_data_root_reset(confirm, WEB_PROCESS.lock().unwrap().is_some())?;
         let result = run_relocation_sequence(
-            || {},
+            || Ok(()),
             || run_data_root_helper(&app, &["reset", "--confirm"]),
             || start_and_store_web_process(&app),
         )?;
