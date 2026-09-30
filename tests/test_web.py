@@ -108,6 +108,51 @@ def test_cancelled_dangling_pending_locator_allows_task_start(
     assert resumed.json()["task_id"]
 
 
+def test_desktop_shutdown_rejects_active_backend_tasks(tmp_path: Path) -> None:
+    app = create_app(projects_root=tmp_path / "projects")
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: [{"status": "running"}]
+
+    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
+
+    assert response.status_code == 409
+    assert app.state.uvicorn_server.should_exit is False
+
+
+def test_desktop_shutdown_requests_uvicorn_exit_from_loopback(tmp_path: Path) -> None:
+    app = create_app(projects_root=tmp_path / "projects")
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: []
+
+    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
+
+    assert response.status_code == 200
+    assert app.state.uvicorn_server.should_exit is True
+
+
+def test_desktop_shutdown_is_not_exposed_to_lan_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web_module, "_client_allowed_on_bind", lambda *_: True)
+    app = create_app(
+        projects_root=tmp_path / "projects",
+        server_config={
+            "lan": {"enabled": True, "bind_address": "0.0.0.0"},
+            "auth": {"required": False},
+            "tasks": {},
+        },
+    )
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: []
+
+    response = TestClient(app, client=("192.168.1.12", 12345)).post(
+        "http://192.168.1.10/api/v1/server/desktop-shutdown"
+    )
+
+    assert response.status_code == 403
+    assert app.state.uvicorn_server.should_exit is False
+
+
 def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(
     tmp_path: Path,
 ) -> None:

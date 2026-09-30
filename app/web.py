@@ -107,6 +107,7 @@ def create_app(
     except OSError as exc:
         raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
     app = FastAPI(title="Another LLM Translator", version="1")
+    app.state.uvicorn_server = None
     app.state.projects_root = projects_root
     app.state.app_root = app_root
     app.state.diagnostics = DiagnosticsHub(
@@ -434,6 +435,18 @@ def create_app(
         has_active_tasks=lambda: bool(app.state.tasks.active_tasks()),
     )
 
+    @app.post("/api/v1/server/desktop-shutdown")
+    async def desktop_shutdown(request: Request) -> JSONResponse:
+        if not _is_loopback(request):
+            return JSONResponse({"error": "只允许本机访问"}, status_code=403)
+        if app.state.tasks.active_tasks():
+            return JSONResponse({"error": "存在活动任务，无法安全退出"}, status_code=409)
+        server = app.state.uvicorn_server
+        if server is None:
+            return JSONResponse({"error": "服务尚未就绪"}, status_code=503)
+        server.should_exit = True
+        return JSONResponse({"stopping": True})
+
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
     else:
@@ -454,12 +467,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    uvicorn.run(
-        "app.web:create_app",
-        factory=True,
-        host="0.0.0.0",
-        port=args.port,
-    )
+    app = create_app()
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=args.port))
+    app.state.uvicorn_server = server
+    server.run()
 
 
 if __name__ == "__main__":
