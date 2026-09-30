@@ -137,23 +137,38 @@ fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+enum RelocationError {
+    ServiceAvailable(String),
+    RecoveryRequired(String),
+}
+
+impl RelocationError {
+    fn message(&self) -> &str {
+        match self {
+            Self::ServiceAvailable(message) | Self::RecoveryRequired(message) => message,
+        }
+    }
+}
+
 fn run_relocation_sequence<T: std::fmt::Display>(
     stop: impl FnOnce() -> Result<(), String>,
     relocate: impl FnOnce() -> Result<T, String>,
     restart: impl FnOnce() -> Result<(), String>,
-) -> Result<T, String> {
-    stop().map_err(|error| format!("迁移前无法安全停止 Web 服务：{error}"))?;
+) -> Result<T, RelocationError> {
+    stop().map_err(|error| {
+        RelocationError::ServiceAvailable(format!("迁移前无法安全停止 Web 服务：{error}"))
+    })?;
     let relocation_result = relocate();
     let restart_result = restart();
     match (relocation_result, restart_result) {
         (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(value), Err(error)) => Err(format!(
+        (Err(error), Ok(())) => Err(RelocationError::ServiceAvailable(error)),
+        (Ok(value), Err(error)) => Err(RelocationError::RecoveryRequired(format!(
             "数据目录工具已完成：{value}\nWeb 服务启动失败：{error}"
-        )),
-        (Err(relocation), Err(restart)) => Err(format!(
+        ))),
+        (Err(relocation), Err(restart)) => Err(RelocationError::RecoveryRequired(format!(
             "数据目录迁移失败：{relocation}\n恢复 Web 服务也失败：{restart}"
-        )),
+        ))),
     }
 }
 
@@ -469,15 +484,15 @@ fn startup_error_url(error: &str) -> WebviewUrl {
     )))
 }
 
-fn startup_error_navigation_url(error: &str) -> Result<tauri::Url, String> {
+fn startup_error_navigation_url(error: &str, allow_reset: bool) -> Result<tauri::Url, String> {
     let origin = if cfg!(windows) {
         "http://tauri.localhost"
     } else {
         "tauri://localhost"
     };
     tauri::Url::parse(&format!(
-        "{origin}/startup-error.html?error={}&allowReset=false",
-        percent_encode_query(error)
+        "{origin}/startup-error.html?error={}&allowReset={allow_reset}",
+        percent_encode_query(error),
     ))
     .map_err(|error| format!("启动错误页地址无效：{error}"))
 }
@@ -612,8 +627,9 @@ mod tests {
         graceful_stop_web_process, http_request, is_startup_error_url, is_web_service_url,
         managed_python_path, managed_runtime_root, python_command, request_graceful_shutdown,
         run_relocation_sequence, server_ready, spawn_web_process, startup_error_allows_reset,
-        stderr_snapshot, validate_data_root_reset, validate_native_command, with_lifecycle_lock,
-        NativeCommand, STDERR_TAIL_LIMIT,
+        startup_error_navigation_url, stderr_snapshot, validate_data_root_reset,
+        validate_native_command, with_lifecycle_lock, NativeCommand, RelocationError,
+        STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -746,8 +762,9 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(*calls.borrow(), ["stop", "helper", "restart"]);
-        assert!(error.contains("relocation failed"));
-        assert!(error.contains("restart failed"));
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("relocation failed"));
+        assert!(error.message().contains("restart failed"));
     }
 
     #[test]
@@ -770,7 +787,8 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(*calls.borrow(), ["stop"]);
-        assert!(error.contains("graceful stop timed out"));
+        assert!(matches!(error, RelocationError::ServiceAvailable(_)));
+        assert!(error.message().contains("graceful stop timed out"));
     }
 
     #[test]
@@ -782,8 +800,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("old directory retained"));
-        assert!(error.contains("restart failed"));
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("old directory retained"));
+        assert!(error.message().contains("restart failed"));
     }
 
     #[test]
@@ -847,6 +866,18 @@ mod tests {
         assert!(!is_startup_error_url(
             &tauri::Url::parse("tauri://user@localhost/startup-error.html").unwrap()
         ));
+    }
+
+    #[test]
+    fn relocation_recovery_url_is_trusted_and_preserves_reset_authorization() {
+        let error = "invalid user data locator /custom";
+        let url = startup_error_navigation_url(error, true).unwrap();
+
+        assert!(is_startup_error_url(&url));
+        assert!(url.query().unwrap().contains("allowReset=true"));
+        assert!(
+            validate_native_command(NativeCommand::Reset, &url, false, Some(true), "8765",).is_ok()
+        );
     }
 
     #[test]
@@ -1185,22 +1216,23 @@ fn apply_data_root_relocation(
 ) -> Result<String, String> {
     with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
         authorize_window_command(&window, NativeCommand::Apply)?;
-        let result = run_relocation_sequence(
+        match run_relocation_sequence(
             || stop_web_process_for_relocation(&web_port()),
             || run_data_root_helper(&app, &["apply-pending"]),
             || start_and_store_web_process(&app),
-        );
-        if let Err(error) = &result {
-            if error.contains("已接受安全停服请求") || error.contains("服务退出失败")
-            {
-                *STARTUP_ERROR_STATE.lock().unwrap() = Some(false);
-                let url = startup_error_navigation_url(error)?;
+        ) {
+            Ok(value) => Ok(value),
+            Err(RelocationError::ServiceAvailable(error)) => Err(error),
+            Err(RelocationError::RecoveryRequired(error)) => {
+                let allow_reset = startup_error_allows_reset(&error);
+                *STARTUP_ERROR_STATE.lock().unwrap() = Some(allow_reset);
+                let url = startup_error_navigation_url(&error, allow_reset)?;
                 window.navigate(url).map_err(|navigation_error| {
                     format!("{error}\n无法打开恢复页面：{navigation_error}")
                 })?;
+                Err(error)
             }
         }
-        result
     })
 }
 
@@ -1240,7 +1272,8 @@ fn reset_data_root(
             || Ok(()),
             || run_data_root_helper(&app, &["reset", "--confirm"]),
             || start_and_store_web_process(&app),
-        )?;
+        )
+        .map_err(|error| error.message().to_string())?;
         navigate_to_web_service(&app)?;
         Ok(result)
     })
