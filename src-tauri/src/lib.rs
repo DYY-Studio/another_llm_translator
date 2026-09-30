@@ -137,6 +137,7 @@ fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[derive(Debug)]
 enum RelocationError {
     ServiceAvailable(String),
     RecoveryRequired(String),
@@ -151,13 +152,11 @@ impl RelocationError {
 }
 
 fn run_relocation_sequence<T: std::fmt::Display>(
-    stop: impl FnOnce() -> Result<(), String>,
+    stop: impl FnOnce() -> Result<(), RelocationError>,
     relocate: impl FnOnce() -> Result<T, String>,
     restart: impl FnOnce() -> Result<(), String>,
 ) -> Result<T, RelocationError> {
-    stop().map_err(|error| {
-        RelocationError::ServiceAvailable(format!("迁移前无法安全停止 Web 服务：{error}"))
-    })?;
+    stop()?;
     let relocation_result = relocate();
     let restart_result = restart();
     match (relocation_result, restart_result) {
@@ -497,28 +496,35 @@ fn startup_error_navigation_url(error: &str, allow_reset: bool) -> Result<tauri:
     .map_err(|error| format!("启动错误页地址无效：{error}"))
 }
 
-fn request_graceful_shutdown(port: &str, timeout: Duration) -> Result<(), String> {
+fn request_graceful_shutdown(port: &str, timeout: Duration) -> Result<(), RelocationError> {
     let address: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
-        .map_err(|error| format!("服务地址无效：{error}"))?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout)
-        .map_err(|error| format!("无法请求服务安全停服：{error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("无法设置停服请求超时：{error}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("无法设置停服响应超时：{error}"))?;
+        .map_err(|error| RelocationError::RecoveryRequired(format!("服务地址无效：{error}")))?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法请求服务安全停服：{error}"))
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法设置停服请求超时：{error}"))
+    })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法设置停服响应超时：{error}"))
+    })?;
     stream
         .write_all(b"POST /api/v1/server/desktop-shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
-        .map_err(|error| format!("无法发送安全停服请求：{error}"))?;
+        .map_err(|error| {
+            RelocationError::RecoveryRequired(format!("无法发送安全停服请求：{error}"))
+        })?;
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("读取安全停服响应失败：{error}"))?;
+    stream.read_to_end(&mut response).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("读取安全停服响应失败：{error}"))
+    })?;
     let response = String::from_utf8_lossy(&response);
     let status = response.lines().next().unwrap_or("无状态行");
-    if status.starts_with("HTTP/1.1 200 ") || status.starts_with("HTTP/1.0 200 ") {
+    let status_code = status
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok());
+    if status_code == Some(200) {
         Ok(())
     } else {
         let body = response
@@ -526,11 +532,20 @@ fn request_graceful_shutdown(port: &str, timeout: Duration) -> Result<(), String
             .map(|(_, body)| body)
             .unwrap_or("")
             .trim();
-        Err(if body.is_empty() {
-            format!("服务拒绝安全停服请求：{status}")
+        let detail = if body.is_empty() {
+            status.to_string()
         } else {
-            format!("服务拒绝安全停服请求：{status}：{body}")
-        })
+            format!("{status}：{body}")
+        };
+        if status_code == Some(409) {
+            Err(RelocationError::ServiceAvailable(format!(
+                "服务拒绝安全停服请求：{detail}"
+            )))
+        } else {
+            Err(RelocationError::RecoveryRequired(format!(
+                "无法确认安全停服请求结果：{detail}"
+            )))
+        }
     }
 }
 
@@ -538,7 +553,7 @@ fn graceful_stop_web_process(
     process: &mut WebProcess,
     port: &str,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<(), RelocationError> {
     request_graceful_shutdown(port, timeout.min(Duration::from_secs(2)))?;
     let deadline = Instant::now() + timeout;
     loop {
@@ -549,24 +564,34 @@ fn graceful_stop_web_process(
             }
             Ok(Some(status)) => {
                 process.finish_stderr();
-                return Err(process.failure(
+                return Err(RelocationError::RecoveryRequired(process.failure(
                     "等待安全停服",
                     format!("服务退出失败（{}）", exit_status_description(status)),
-                ));
+                )));
             }
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
             }
-            Ok(None) => return Err("服务已接受安全停服请求，但等待退出超时".to_string()),
-            Err(error) => return Err(format!("检查服务停服状态失败：{error}")),
+            Ok(None) => {
+                return Err(RelocationError::RecoveryRequired(
+                    "服务已接受安全停服请求，但等待退出超时".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(RelocationError::RecoveryRequired(format!(
+                    "检查服务停服状态失败：{error}"
+                )));
+            }
         }
     }
 }
 
-fn stop_web_process_for_relocation(port: &str) -> Result<(), String> {
+fn stop_web_process_for_relocation(port: &str) -> Result<(), RelocationError> {
     let current_process = WEB_PROCESS.lock().unwrap().take();
     let Some(mut process) = current_process else {
-        return Err("找不到正在运行的 Web 服务进程".to_string());
+        return Err(RelocationError::RecoveryRequired(
+            "找不到正在运行的 Web 服务进程".to_string(),
+        ));
     };
     match graceful_stop_web_process(&mut process, port, Duration::from_secs(15)) {
         Ok(()) => Ok(()),
@@ -625,11 +650,10 @@ mod tests {
     use super::{
         allowed_webview_navigation, append_stderr_tail, data_root_command,
         graceful_stop_web_process, http_request, is_startup_error_url, is_web_service_url,
-        managed_python_path, managed_runtime_root, python_command, request_graceful_shutdown,
-        run_relocation_sequence, server_ready, spawn_web_process, startup_error_allows_reset,
-        startup_error_navigation_url, stderr_snapshot, validate_data_root_reset,
-        validate_native_command, with_lifecycle_lock, NativeCommand, RelocationError,
-        STDERR_TAIL_LIMIT,
+        managed_python_path, managed_runtime_root, python_command, run_relocation_sequence,
+        server_ready, spawn_web_process, startup_error_allows_reset, startup_error_navigation_url,
+        stderr_snapshot, validate_data_root_reset, validate_native_command, with_lifecycle_lock,
+        NativeCommand, RelocationError, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -748,7 +772,7 @@ mod tests {
         let error = run_relocation_sequence(
             || {
                 calls.borrow_mut().push("stop");
-                Ok::<(), String>(())
+                Ok::<(), RelocationError>(())
             },
             || {
                 calls.borrow_mut().push("helper");
@@ -773,7 +797,9 @@ mod tests {
         let error = run_relocation_sequence(
             || {
                 calls.borrow_mut().push("stop");
-                Err("graceful stop timed out".to_string())
+                Err(RelocationError::ServiceAvailable(
+                    "graceful stop timed out".to_string(),
+                ))
             },
             || {
                 calls.borrow_mut().push("helper");
@@ -1085,12 +1111,22 @@ mod tests {
         command.args(["-c", "exec sleep 60"]);
         let mut process =
             spawn_web_process(command, "/bin/sh long-running service".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
 
-        let error =
-            graceful_stop_web_process(&mut process, &port, Duration::from_millis(100)).unwrap_err();
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_millis(100)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
 
         server.join().unwrap();
-        assert!(error.contains("超时"));
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("超时"));
+        assert!(!helper_ran.get());
         assert!(process.child.try_wait().unwrap().is_none());
         process.stop();
         assert!(process.child.try_wait().unwrap().is_some());
@@ -1109,11 +1145,62 @@ mod tests {
                 .unwrap();
         });
 
-        let error = request_graceful_shutdown(&port, Duration::from_secs(1)).unwrap_err();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh active backend rejection".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_secs(1)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
 
         server.join().unwrap();
-        assert!(error.contains("409 Conflict"));
-        assert!(error.contains("active backend tasks"));
+        assert!(matches!(error, RelocationError::ServiceAvailable(_)));
+        assert!(error.message().contains("409 Conflict"));
+        assert!(error.message().contains("active backend tasks"));
+        assert!(!helper_ran.get());
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
+    }
+
+    #[test]
+    fn lost_shutdown_response_requires_recovery_without_running_helper() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let expected = b"POST /api/v1/server/desktop-shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let mut request = vec![0; expected.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected);
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh lost shutdown response".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
+
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_secs(1)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(!helper_ran.get());
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
     }
 
     #[test]
