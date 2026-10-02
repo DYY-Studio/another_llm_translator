@@ -1655,6 +1655,7 @@ async def run_terminology(
                 ):
                     for owner in mark_class_success(unresolved, "summary"):
                         maybe_complete(owner)
+                report_progress()
             if term_ok and summary_ok:
                 return len(unresolved), 0
             if (
