@@ -658,7 +658,7 @@ class LLMClient:
                 timeout=client_timeout,
                 limits=limits,
                 proxy=self.config["llm"]["proxy_url"] or None,
-                trust_env=self.chatgpt is None,
+                **({"trust_env": False} if self.chatgpt is not None else {}),
             )
         return self
 

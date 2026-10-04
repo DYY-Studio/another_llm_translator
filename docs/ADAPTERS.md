@@ -53,6 +53,7 @@
 需要把规范化的 system/user/assistant 消息转换为 Provider 原生形状时，可设置
 `messages_format`（可选，默认 `openai` 原样透传）：
 
+- `responses`：保留 input 消息和文本，将 system 角色改为 developer；
 - `anthropic`：system 消息剥离到顶层字段，其余 user/assistant 消息保留
   字符串 content；
 - `gemini`：system 消息剥离到顶层字段，user/assistant 映射为 `contents`
@@ -63,6 +64,27 @@
 
 该占位符对 `openai` 格式同样可渲染，但 system 消息仍保留在 `${messages}` 中，
 通常不应同时使用。
+
+### ChatGPT Plan 连接
+
+`credential: {"kind": "chatgpt", "name": "default"}` 必须配对 `chatgpt-plan` Adapter。
+该组合固定 `base_url: "https://api.openai.com/v1"`、`/responses` 端点、
+`messages_format: "responses"`、`stream: true`、`store: false`，Preset 的 `proxy_url` 留空；
+实际代理由唯一 ChatGPT 连接提供。请求每次尝试前获取有效 access token，令牌不进入
+Preset、Run 快照或调度身份。令牌刷新不改变连接身份；重新登录产生新会话，旧任务不能继续请求。
+
+模型目录从账户返回的 `models` 中读取 `slug` 与 `display_name`，只列出 `visibility: "list"`。
+模型发现允许尚未选择模型的 Plan 草稿；保存和执行要求明确模型。`max_output_tokens` 仅供本地
+分块估算，temperature 不参与 Plan 请求或阶段指纹。额外请求体中的不支持字段直接拒绝。
+额度耗尽、授权失效及账户或能力不符合条件停止执行；临时网络及服务错误使用现有有界重试。
+
+授权遵循官方 [Sign in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、
+[Sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions) 与
+[Inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) 规范。
+动态注册按用户数据根目录保存稳定 host ID 和各账户 client ID；重授权复用注册并验证原账户。
+ID Token 验证签名、issuer、audience、expiry 和 nonce，授权以返回 scopes 为准。
+刷新通过现有跨进程写锁串行化并重新读取钥匙串令牌。退出撤销 renewable session 并删除本地令牌，
+远端撤销未确认时显示结果。凭据保存失败直接报错。
 
 ### 请求边界
 

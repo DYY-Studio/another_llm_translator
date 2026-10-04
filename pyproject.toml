@@ -60,6 +60,7 @@ llm_adapters = [
   "llm_adapters/google-gemini.json",
   "llm_adapters/openai-compatible.json",
   "llm_adapters/openai-responses.json",
+  "llm_adapters/chatgpt-plan.json",
 ]
 llm_presets = [
   "llm_presets/anthropic-claude.json",
