@@ -154,3 +154,37 @@ def test_loopback_success_and_single_login(oauth_server, monkeypatch):
             async with oauth_server[2](trust_env=False) as client:
                 await client.get(query["redirect_uri"][0])
     asyncio.run(run())
+
+
+def test_logout_disables_connection_even_when_keychain_delete_fails(oauth_server, monkeypatch):
+    from app.errors import ConfigError
+    async def run():
+        connection = ChatGPTConnection()
+        await connection.complete_login("code", "oaiapp_test", "nonce", "verifier", "http://127.0.0.1:1455/auth/callback", None)
+        identity = connection.identity()
+        def fail_delete(client_id):
+            raise ConfigError("无法删除 ChatGPT 系统钥匙串凭据")
+        monkeypatch.setattr(connection, "clear_tokens", fail_delete)
+        with pytest.raises(ConfigError, match="钥匙串"):
+            await connection.logout()
+        assert connection.read()["active"] is None
+        with pytest.raises(AppError):
+            await connection.access_token(identity)
+        with pytest.raises(ConfigError, match="钥匙串"):
+            await connection.login()
+        assert connection.read()["active"] is None
+    asyncio.run(run())
+
+
+def test_failed_connection_save_clears_new_tokens(oauth_server, monkeypatch):
+    from app.errors import ConfigError
+    async def run():
+        connection = ChatGPTConnection()
+        def fail_save(*args):
+            raise OSError("disk unavailable")
+        monkeypatch.setattr("app.chatgpt_oauth.atomic_write_json", fail_save)
+        with pytest.raises(ConfigError, match="保存"):
+            await connection.complete_login("code", "oaiapp_test", "nonce", "verifier", "http://127.0.0.1:1455/auth/callback", None)
+        assert connection.tokens("oaiapp_test") is None
+        assert connection.read()["active"] is None
+    asyncio.run(run())

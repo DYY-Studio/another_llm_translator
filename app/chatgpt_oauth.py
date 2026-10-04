@@ -284,7 +284,11 @@ class ChatGPTConnection:
             self.save_tokens(client_id, tokens)
             state["registrations"][client_id] = {"subject": identity["sub"], "email": identity.get("email", ""), "session": uuid.uuid4().hex}
             state["active"] = client_id
-            atomic_write_json(self.path, state)
+            try:
+                atomic_write_json(self.path, state)
+            except OSError as exc:
+                self.clear_tokens(client_id)
+                raise ConfigError("无法保存 ChatGPT 连接设置，请重新登录") from exc
 
     async def access_token(self, expected: tuple[str, str]) -> str:
         async with self.locked():
@@ -315,6 +319,10 @@ class ChatGPTConnection:
         async with self.locked():
             state = self.read()
             active = state["active"]
+            if active:
+                state["last_client"] = active
+            state["active"] = None
+            atomic_write_json(self.path, state)
             tokens = self.tokens(active) if active else None
             if tokens:
                 try:
@@ -329,10 +337,6 @@ class ChatGPTConnection:
                 except ExternalError:
                     warning = "已在本机退出；未确认远端撤销，请到 ChatGPT 设置中断开连接"
                 self.clear_tokens(active)
-            if active:
-                state["last_client"] = active
-            state["active"] = None
-            atomic_write_json(self.path, state)
         self.error = warning
         return warning
 
@@ -349,6 +353,7 @@ class ChatGPTConnection:
             if new_account and state["active"]:
                 raise UsageError("请先退出当前 ChatGPT 连接，再更换账户")
             if not new_account and not state["active"] and state.get("last_client"):
+                self.clear_tokens(state["last_client"])
                 state["active"] = state["last_client"]
                 atomic_write_json(self.path, state)
             if not state["host_id"]:
