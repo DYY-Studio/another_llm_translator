@@ -594,7 +594,6 @@ export interface TaskOptions {
   preset: {
     id: string;
     model: string;
-    chatgpt_plan: boolean;
   };
   selected: number;
   completed: number;
@@ -670,7 +669,7 @@ export interface ContinuousOptionStep {
   failed?: number;
   pending?: number;
   reason?: string;
-  preset?: { id: string; model: string; chatgpt_plan: boolean };
+  preset?: { id: string; model: string };
   running_run?: RunningRun | null;
   current_fingerprint_completed?: number;
   mismatched_fingerprint_completed?: number;

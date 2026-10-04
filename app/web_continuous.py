@@ -247,11 +247,10 @@ def terminology_summary(
     }
 
 
-def _preset_summary(config: Mapping[str, Any]) -> dict[str, Any]:
+def _preset_summary(config: Mapping[str, Any]) -> dict[str, str]:
     return {
         "id": str(config["_llm_preset_id"]),
         "model": str(config["llm"]["model"]),
-        "chatgpt_plan": config["llm"]["credential"]["kind"] == "chatgpt",
     }
 
 

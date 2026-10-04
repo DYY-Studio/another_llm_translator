@@ -223,7 +223,6 @@ def task_options(
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
-            "chatgpt_plan": config["llm"]["credential"]["kind"] == "chatgpt",
             },
             "selected": selected,
             "protected": len(plan["protected"]) if plan else len(protected),
@@ -285,7 +284,6 @@ def task_options(
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
-            "chatgpt_plan": config["llm"]["credential"]["kind"] == "chatgpt",
             },
             "selected": len(boundaries),
             "completed": len(boundaries & full),
@@ -330,7 +328,6 @@ def task_options(
         "preset": {
             "id": str(config["_llm_preset_id"]),
             "model": str(config["llm"]["model"]),
-            "chatgpt_plan": config["llm"]["credential"]["kind"] == "chatgpt",
         },
         "selected": len(nonempty),
         "completed": completed,

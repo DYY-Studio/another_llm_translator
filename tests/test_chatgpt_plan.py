@@ -120,7 +120,7 @@ def test_models_and_lan_session_boundary(tmp_path, oauth_server):
         assert client.get("/api/v1/projects/demo/task-options/translation").status_code == 401
         assert client.post("/api/v1/projects/demo/tasks", json={"stage": "translation"}).status_code == 401
         assert client.post("/api/v1/auth/login", json={"username": "owner", "password": "password"}).status_code == 200
-        assert client.get("/api/v1/projects/demo/task-options/translation").json()["preset"]["chatgpt_plan"]
+        assert client.get("/api/v1/projects/demo/task-options/translation").json()["preset"] == {"id": "openai-responses", "model": definition["model"]}
         summary = client.get("/api/v1/chatgpt/connection").json()
         assert summary["connected"] and not summary["local"]
         assert client.post("/api/v1/chatgpt/connection/logout").status_code == 400

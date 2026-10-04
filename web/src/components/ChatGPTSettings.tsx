@@ -42,7 +42,11 @@ export function ChatGPTSettings({ language }: { language: Language }) {
   async function action(name: string) {
     setBusy(true); setError(""); setSaved(false);
     try { setConnection(await api<ChatGPTConnectionSummary>(`/api/v1/chatgpt/connection/${name}`, { method: "POST" })); }
-    catch (reason) { setError(errorMessage(reason, language)); }
+    catch (reason) {
+      setError(errorMessage(reason, language));
+      try { setConnection(await api<ChatGPTConnectionSummary>("/api/v1/chatgpt/connection")); }
+      catch (refreshReason) { setError(`${errorMessage(reason, language)} · ${errorMessage(refreshReason, language)}`); }
+    }
     finally { setBusy(false); }
   }
   async function saveProxy() {
