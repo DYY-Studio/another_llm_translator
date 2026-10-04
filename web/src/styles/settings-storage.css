@@ -163,7 +163,7 @@
 .preset-row small { overflow-wrap: anywhere; color: var(--muted); }
 .preset-editor-heading { grid-area: editor-heading; min-width: 0; margin: 0; padding: 24px 30px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .preset-editor-body { grid-area: editor-body; min-width: 0; min-height: 0; overflow: auto; padding: 24px 30px 70px; }
-.preset-fields { max-width: 1050px; }
+.preset-fields { min-width: 0; max-width: 1050px; margin: 0; padding: 0; border: 0; }
 .credential-selector { min-width: 0; display: grid; grid-template-columns: minmax(140px, .6fr) minmax(0, 1fr); gap: 10px; }
 .credential-selector > span { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
 .credential-list { min-width: 0; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
@@ -180,11 +180,13 @@
 .model-picker-control input { border-radius: 6px 0 0 6px; }
 .model-discover-button { min-height: 38px; display: inline-flex; align-items: center; gap: 7px; padding-inline: 13px; border-left: 0; border-radius: 0 6px 6px 0; white-space: nowrap; }
 .model-discover-button .icon { width: 16px; height: 16px; }
-.model-picker-popover { width: 100%; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); }
+.model-picker-popover { position: fixed; inset: auto; margin: 0; padding: 0; display: none; flex-direction: column; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); }
+.model-picker-popover:popover-open { display: flex; box-shadow: 0 16px 40px var(--modal-shadow); }
+.model-search, .model-picker-footer { flex: none; }
 .model-search { position: relative; padding: 10px; border-bottom: 1px solid var(--row-border); }
 .model-search .icon { position: absolute; top: 19px; left: 20px; width: 17px; height: 17px; color: var(--muted); pointer-events: none; }
 .model-search input { width: 100%; padding-left: 36px; background: var(--surface-soft); }
-.model-options { max-height: min(300px, 42vh); overflow-y: auto; }
+.model-options { min-height: 0; max-height: min(300px, 42vh); overflow-y: auto; }
 .model-option { width: 100%; min-height: 57px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--row-border); background: transparent; color: var(--text); text-align: left; }
 .model-option:hover, .model-option.active { background: var(--hover); }
 .model-option.selected { background: var(--accent-soft); }

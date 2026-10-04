@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
@@ -344,11 +344,13 @@ function PresetSettings({ language }: { language: Language }) {
   const [selected, setSelected] = useState("");
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
+  const switchingPreset = presetLoading || Boolean(preset && preset.preset_id !== selected);
   const [extraBody, setExtraBody] = useState("{}");
   const [extraHeaders, setExtraHeaders] = useState("{}");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const modelRequest = useRef<AbortController | null>(null);
   const [modelsError, setModelsError] = useState("");
   const [keyIndex, setKeyIndex] = useState(1);
   const [message, setMessage] = useState("");
@@ -387,9 +389,10 @@ function PresetSettings({ language }: { language: Language }) {
     if (!selected) return;
     let active = true;
     setError("");
-    setPreset(null);
     setPresetLoading(true);
-    setPreview(null);
+    setMessage("");
+    modelRequest.current?.abort();
+    setModelsLoading(false);
     setModels(null);
     setModelsError("");
     void Promise.all([
@@ -402,11 +405,11 @@ function PresetSettings({ language }: { language: Language }) {
       setExtraHeaders(JSON.stringify(definition.extra_headers ?? {}, null, 2));
       setPreview(requestPreview);
     }).catch((reason) => {
-      if (active) setError(errorMessage(reason, language));
+      if (active) { setPreset(null); setError(errorMessage(reason, language)); }
     }).finally(() => {
       if (active) setPresetLoading(false);
     });
-    return () => { active = false; };
+    return () => { active = false; modelRequest.current?.abort(); };
   }, [selected]);
 
   async function discoverModels() {
@@ -415,15 +418,18 @@ function PresetSettings({ language }: { language: Language }) {
       setModelsError(translate("preset.keyIndexInvalid", language));
       return;
     }
+    modelRequest.current?.abort();
+    const controller = new AbortController();
+    modelRequest.current = controller;
     setModels(null);
     setModelsLoading(true);
     setModelsError(""); setMessage(""); setError("");
     try {
       const definition = { ...preset, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
-      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models?key_index=${encodeURIComponent(String(keyIndex))}`, { method: "POST", body: JSON.stringify(definition) });
-      setModels(result.models);
-    } catch (reason) { setModelsError(errorMessage(reason, language)); }
-    finally { setModelsLoading(false); }
+      const result = await api<{ models: ModelRow[] }>(`/api/v1/global/presets/${preset.preset_id}/models?key_index=${encodeURIComponent(String(keyIndex))}`, { method: "POST", body: JSON.stringify(definition), signal: controller.signal });
+      if (!controller.signal.aborted) setModels(result.models);
+    } catch (reason) { if (!controller.signal.aborted) setModelsError(errorMessage(reason, language)); }
+    finally { if (!controller.signal.aborted) setModelsLoading(false); }
   }
 
   function update(change: (draft: LLMPreset) => void) {
@@ -432,6 +438,8 @@ function PresetSettings({ language }: { language: Language }) {
   }
 
   function updateConnection(change: (draft: LLMPreset) => void) {
+    modelRequest.current?.abort();
+    setModelsLoading(false);
     setModels(null);
     setModelsError("");
     update(change);
@@ -470,22 +478,22 @@ function PresetSettings({ language }: { language: Language }) {
 
   return (
     <div className="preset-layout">
-      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset} onClick={createPreset}>{translate("common.new", language)}</button></div>
+      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset} onClick={createPreset}>{translate("common.new", language)}</button></div>
       <aside className="preset-list-body">
         {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
       <div className="page-heading settings-action-heading preset-editor-heading">
-        <div><h1>{preset?.preset_id ?? (presetLoading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{preset ? translate("preset.changeHint", language) : presetLoading ? translate("preset.loadingHint", language) : translate("preset.selectHint", language)} </p></div>
-        {preset && <div className="button-group"><button className="danger-button" onClick={removePreset}>{translate("common.delete", language)}</button><button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button></div>}
+        <div><h1>{preset?.preset_id ?? (presetLoading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{switchingPreset ? translate("preset.loading", language, { id: selected }) : preset ? translate("preset.changeHint", language) : translate("preset.selectHint", language)} </p></div>
+        {preset && <div className="button-group"><button className="danger-button" disabled={switchingPreset} onClick={removePreset}>{translate("common.delete", language)}</button><button className="primary-button" disabled={switchingPreset} onClick={save}>{translate("common.validateSave", language)}</button></div>}
       </div>
-      <section className="preset-editor-body">
+      <section className="preset-editor-body" aria-busy={switchingPreset}>
         {!preset ? (
           <>{error && <div className="error-banner">{error}</div>}<p className="muted">{presetLoading ? translate("preset.loadingPreset", language) : translate("preset.selectHint", language)}</p></>
         ) : (
           <>
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
-            <div className="config-grid preset-fields">
+            <fieldset className="config-grid preset-fields" disabled={switchingPreset}>
               <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value;
                   const next = adapters.find((item) => item.adapter_id === draft.adapter_id)?.capabilities;
                   if (next?.connection) {
@@ -516,7 +524,7 @@ function PresetSettings({ language }: { language: Language }) {
                 </div>
               </Field>
               {!usesChatGPT && <Field label={translate("preset.keyIndex", language)} help={translate("preset.keyIndexHint", language)}><input type="number" min={1} step={1} value={keyIndex} onChange={(event) => setKeyIndex(Number(event.target.value))} /></Field>}
-              <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
+              <ModelPicker key={`${selected}:${preset.adapter_id}`} language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)} help={translate(fixedConnection?.proxy_source === "connection" ? "preset.connectionProxyHint" : "preset.proxyUrlHint", language)}>{fixedConnection?.proxy_source === "connection" ? <span>{chatgpt?.proxy_url || translate("preset.noProxy", language)}</span> : <input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} />}</Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
               <NumberField label={translate("preset.targetChunkInputTokens", language)} value={preset.target_chunk_input_tokens} min={1} step={1} help={translate("preset.targetChunkInputTokensHint", language)} onChange={(value) => update((draft) => { draft.target_chunk_input_tokens = value; })} />
@@ -544,7 +552,7 @@ function PresetSettings({ language }: { language: Language }) {
               />
               <label className="code-field preset-extra"><span>{translate("preset.extraBody", language)}</span><small>{translate("preset.extraBodyHint", language)}</small><textarea spellCheck={false} value={extraBody} onChange={(event) => setExtraBody(event.target.value)} /></label>
               <label className="code-field preset-extra"><span>{translate("preset.extraHeaders", language)}</span><small>{translate("preset.extraHeadersHint", language)}</small><textarea spellCheck={false} value={extraHeaders} onChange={(event) => setExtraHeaders(event.target.value)} /></label>
-            </div>
+            </fieldset>
             <h2 className="preview-heading">{translate("preset.requestPreview", language)}</h2>
             <pre className="result-box">{preview ? JSON.stringify(preview, null, 2) : translate("preset.previewHint", language)}</pre>
           </>
@@ -662,6 +670,8 @@ function CredentialsSettings({ language }: { language: Language }) {
 
 function ModelPicker({ language, value, models, loading, error, onChange, onDiscover, onSelect }: { language: Language; value: string; models: ModelRow[] | null; loading: boolean; error: string; onChange: (value: string) => void; onDiscover: () => void; onSelect: (value: string) => void }) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const controlRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
   const [open, setOpen] = useState(false);
@@ -686,11 +696,45 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : filteredModels.length > 0 ? 0 : -1);
   }, [query, models, value]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const panel = popoverRef.current!;
+    function position() {
+      const control = controlRef.current!;
+      const anchor = control.getBoundingClientRect();
+      const editor = control.closest(".preset-editor-body")!.getBoundingClientRect();
+      if (anchor.bottom <= Math.max(0, editor.top) || anchor.top >= Math.min(window.innerHeight, editor.bottom)) {
+        setOpen(false);
+        return;
+      }
+      const gap = 6;
+      const margin = 8;
+      const below = window.innerHeight - anchor.bottom - gap - margin;
+      const above = anchor.top - gap - margin;
+      const upward = below < Math.min(panel.scrollHeight, 240) && above > below;
+      panel.style.width = `${Math.min(anchor.width, window.innerWidth - 2 * margin)}px`;
+      panel.style.maxHeight = `${Math.max(0, upward ? above : below)}px`;
+      panel.style.left = `${Math.max(margin, Math.min(anchor.left, window.innerWidth - panel.offsetWidth - margin))}px`;
+      panel.style.top = `${upward ? anchor.top - gap - panel.offsetHeight : anchor.bottom + gap}px`;
+    }
+    panel.showPopover();
+    position();
+    searchRef.current?.focus({ preventScroll: true });
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    const observer = new ResizeObserver(position);
+    observer.observe(controlRef.current!);
+    observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+      panel.hidePopover();
+    };
+  }, [open]);
+
   function openPicker() {
     setOpen(true);
-    window.setTimeout(() => {
-      searchRef.current?.focus({ preventScroll: true });
-    }, 0);
   }
 
   function choose(item: ModelRow) {
@@ -724,12 +768,12 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
   return (
     <div className="config-field model-picker" ref={rootRef}>
       <span>{translate("preset.modelId", language)}</span>
-      <div className="model-picker-control">
+      <div className="model-picker-control" ref={controlRef}>
         <input value={value} role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-activedescendant={activeOptionId} onKeyDown={handleKeys} onChange={(event) => onChange(event.target.value)} />
         <button type="button" className="quiet-button model-discover-button" disabled={loading} onClick={() => { setQuery(""); openPicker(); onDiscover(); }}><Icon><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 9" /><path d="M5.8 15A7 7 0 0 0 17.6 17.6L20 15" /></Icon>{loading ? translate("preset.discoverLoading", language) : translate("preset.discoverModels", language)}</button>
       </div>
       {open && (
-        <div className="model-picker-popover">
+        <div className="model-picker-popover" ref={popoverRef} popover="manual">
           <div className="model-search">
             <Icon><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></Icon>
             <input ref={searchRef} aria-label={translate("preset.searchModels", language)} placeholder={translate("preset.searchModelsPlaceholder", language)} value={query} onKeyDown={handleKeys} onChange={(event) => setQuery(event.target.value)} />

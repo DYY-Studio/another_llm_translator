@@ -248,7 +248,6 @@
   .preset-editor-body { order: 4; }
   .preset-editor-heading { padding: 20px 14px; }
   .preset-editor-body { overflow: visible; padding: 20px 14px 60px; }
-  .model-picker-popover { max-height: calc(100vh - 150px); }
   .model-options { max-height: min(280px, 42vh); }
   .page { padding: 24px 16px; }
   .diagnostics-page { padding: 20px 12px 70px; }
