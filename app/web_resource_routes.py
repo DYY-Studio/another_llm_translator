@@ -781,7 +781,7 @@ def register_resource_routes(
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
     async def discover_preset_models(
-        preset_id: str, payload: dict[str, Any], key_index: int
+        preset_id: str, payload: dict[str, Any], request: Request, key_index: int = 1
     ) -> dict[str, Any]:
         if key_index < 1:
             raise UsageError("key_index 必须从 1 开始")
@@ -793,7 +793,15 @@ def register_resource_routes(
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_keys = resolve_api_keys(preset.definition["credential"])
+        plan = preset.definition["credential"]["kind"] == "chatgpt"
+        if plan:
+            from .chatgpt_oauth import ChatGPTConnection
+            from .web_chatgpt_routes import require_plan_session
+            require_plan_session(request)
+            connection = ChatGPTConnection()
+            api_keys = (await connection.access_token(connection.identity()),)
+        else:
+            api_keys = resolve_api_keys(preset.definition["credential"])
         if key_index > len(api_keys):
             raise UsageError("key_index 超出 API Key 范围")
         api_key = api_keys[key_index - 1]
@@ -802,9 +810,9 @@ def register_resource_routes(
             preset.definition["base_url"], endpoint, model=preset.definition["model"]
         )
         timeout = float(preset.definition["request_timeout_seconds"])
-        proxy = str(preset.definition["proxy_url"]) or None
+        proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
         try:
-            async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=not plan) as client:
                 response = await client.get(url, headers=headers)
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
@@ -959,7 +967,7 @@ def register_resource_routes(
         if not isinstance(username, str) or not isinstance(password, str):
             raise UsageError("用户名和密码必须是字符串")
         stored = read_lan_password()
-        if not config["auth"]["required"]:
+        if not config["auth"]["required"] and (not stored or not config["auth"]["username"]):
             raise UsageError("当前未开启认证")
         if username != config["auth"]["username"] or not stored:
             raise InvalidCredentialsError("用户名或密码错误")

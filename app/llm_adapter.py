@@ -35,7 +35,7 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "streaming",
     }
 )
-_MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
+_MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini", "responses"})
 _MODELS_KEYS = frozenset(
     {
         "endpoint",
@@ -175,6 +175,9 @@ class JSONLLMAdapter:
                     + ", ".join(sorted(conflicts))
                 )
             body.update(deepcopy(extra_body))
+        if self.adapter_id == "chatgpt-plan":
+            from .chatgpt_oauth import validate_plan_body
+            validate_plan_body(body)
         return headers, body
 
     @property
@@ -354,6 +357,8 @@ class JSONLLMAdapter:
         strip_prefix = self.models_spec.get("response_model_strip_prefix", "")
         result: list[dict[str, str]] = []
         for item in items:
+            if self.adapter_id == "chatgpt-plan" and isinstance(item, dict) and item.get("visibility") != "list":
+                continue
             if not isinstance(item, dict) or not isinstance(item.get(id_key), str):
                 raise ExternalError("LLM 模型列表条目缺少模型 ID")
             model_id = item[id_key]
@@ -822,6 +827,8 @@ def _transform_messages(
 ) -> list[dict[str, Any]]:
     if messages_format == "openai":
         return messages
+    if messages_format == "responses":
+        return [{"role": "developer" if message["role"] == "system" else message["role"], "content": message["content"]} for message in messages]
     if messages_format == "anthropic":
         return [
             {"role": message["role"], "content": message["content"]}

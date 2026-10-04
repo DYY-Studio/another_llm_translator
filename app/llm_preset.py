@@ -113,9 +113,9 @@ def load_llm_preset(path: Path) -> LLMPreset:
     credential = value["credential"]
     if not isinstance(credential, dict) or set(credential) != {"kind", "name"}:
         raise ConfigError("LLM Preset credential 必须是包含 kind 和 name 的对象")
-    if credential["kind"] not in {"environment", "keychain"}:
+    if credential["kind"] not in {"environment", "keychain", "chatgpt"}:
         raise ConfigError(
-            "LLM Preset credential.kind 必须是 environment 或 keychain"
+            "LLM Preset credential.kind 必须是 environment、keychain 或 chatgpt"
         )
     if (
         not isinstance(credential["name"], str)
@@ -124,6 +124,11 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
+    if (credential["kind"] == "chatgpt") != (value["adapter_id"] == "chatgpt-plan"):
+        raise ConfigError("ChatGPT credential 必须与 chatgpt-plan Adapter 配对")
+    if credential["kind"] == "chatgpt":
+        if credential["name"] != "default" or value["base_url"] != "https://api.openai.com/v1" or not value["stream"] or value["proxy_url"]:
+            raise ConfigError("ChatGPT Plan 必须使用 default 连接、官方 Base URL、流式请求及连接页代理")
     parsed_base = urlsplit(value["base_url"])
     if parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname:
         raise ConfigError("LLM Preset base_url 必须是有效的 HTTP/HTTPS URL")

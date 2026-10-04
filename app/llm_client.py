@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 import httpx
 from .credentials import resolve_api_keys
+from .chatgpt_oauth import ChatGPTConnection, plan_error
 from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
@@ -279,6 +280,8 @@ class LLMClient:
         if not isinstance(adapter, JSONLLMAdapter):
             raise ConfigError("项目配置缺少已加载的 LLM Adapter")
         self.adapter = adapter
+        self.chatgpt = ChatGPTConnection() if config["llm"]["credential"]["kind"] == "chatgpt" else None
+        self.chatgpt_identity: tuple[str, str] | None = config.get("_chatgpt_identity")
 
     def _prepare_keys(self) -> None:
         if self._api_keys is not None:
@@ -286,7 +289,11 @@ class LLMClient:
         if self._key_resolution_error is not None:
             raise self._key_resolution_error
         try:
-            self._api_keys = resolve_api_keys(self.config["llm"]["credential"])
+            if self.chatgpt is not None:
+                self.chatgpt_identity = self.chatgpt_identity or self.chatgpt.identity()
+                self._api_keys = ("chatgpt:" + self.chatgpt_identity[0],)
+            else:
+                self._api_keys = resolve_api_keys(self.config["llm"]["credential"])
         except ExternalError as exc:
             self._key_resolution_error = FatalExternalError(str(exc))
             raise self._key_resolution_error from exc
@@ -525,6 +532,10 @@ class LLMClient:
                         raise ExternalError("LLM 流式 SSE data 不是合法 JSON") from exc
                     if not isinstance(event, dict):
                         raise ExternalError("LLM 流式 SSE data 必须是 JSON 对象")
+                    if self.chatgpt is not None:
+                        fatal = plan_error(event, status, request_id)
+                        if fatal is not None:
+                            raise fatal
                     for key, value in self.adapter.extract_stream_usage(event).items():
                         usage_values[key] = value
                     stream_error = self.adapter.stream_error_details(event)
@@ -573,6 +584,8 @@ class LLMClient:
                     retry_after=response.headers.get("Retry-After"),
                     usage_values=usage_values,
                 ) from exc
+            except FatalExternalError:
+                raise
             except ExternalError as exc:
                 raise _StreamProtocolError(
                     str(exc),
@@ -645,6 +658,7 @@ class LLMClient:
                 timeout=client_timeout,
                 limits=limits,
                 proxy=self.config["llm"]["proxy_url"] or None,
+                trust_env=self.chatgpt is None,
             )
         return self
 
@@ -739,7 +753,7 @@ class LLMClient:
             - estimated_input_tokens,
         )
         effective_output = min(configured_output, available_output)
-        if effective_output < configured_output and not self._reported_output_clamp:
+        if effective_output < configured_output and not self._reported_output_clamp and self.chatgpt is None:
             warning = (
                 "max_output_tokens "
                 f"已从配置上限 {configured_output} 按本次剩余上下文"
@@ -829,6 +843,8 @@ class LLMClient:
                 waited = 0.0
             api_key = api_keys[key_index]
             try:
+                if self.chatgpt is not None:
+                    api_key = await self.chatgpt.access_token(self.chatgpt_identity)
                 headers, payload = self.adapter.build_request(
                     api_key=api_key,
                     model=str(self.config["llm"]["model"]),
@@ -962,6 +978,13 @@ class LLMClient:
                         if response_status >= 400
                         else "succeeded"
                     )
+            except FatalExternalError as exc:
+                attempt_error = True
+                attempt_outcome = "chatgpt_plan_error"
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "chatgpt_plan_error")
+                await self._debug_attempt(request_id, send_attempt, payload, retry_round=attempt, key_index=key_index, error=str(exc), status=exc.params.get("http_status"), outcome=attempt_outcome, parent_request_id=parent_request_id)
+                raise
             except _StreamRetryable as exc:
                 attempt_error = True
                 provider_status = exc.provider_error_status
@@ -1386,6 +1409,16 @@ class LLMClient:
                 outcome=attempt_outcome,
                 parent_request_id=parent_request_id,
             )
+            if self.chatgpt is not None:
+                try:
+                    error_data = response.json()
+                except ValueError:
+                    error_data = None
+                fatal = plan_error(error_data, response.status_code, request_id)
+                if fatal is not None:
+                    if diagnostics is not None:
+                        diagnostics.fail_request(request_id, "chatgpt_plan_error")
+                    raise fatal
             if response.status_code in {401, 403}:
                 self._audit_authentication_error(key_index)
                 self.warnings.append(

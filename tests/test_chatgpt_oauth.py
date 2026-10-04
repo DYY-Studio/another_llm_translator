@@ -31,6 +31,8 @@ def oauth_server(monkeypatch):
             return httpx.Response(200, json={"keys": [public]})
         if request.url.path == "/revoke":
             return httpx.Response(200)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"models": [{"slug": "visible", "display_name": "Visible model", "visibility": "list"}, {"slug": "hidden", "visibility": "hidden"}]})
         form = parse_qs(request.content.decode())
         if options.get("refresh_error") and form["grant_type"] == ["refresh_token"]:
             return httpx.Response(400, json={"error": "invalid_grant"})
@@ -39,7 +41,7 @@ def oauth_server(monkeypatch):
 
     original = httpx.AsyncClient
     monkeypatch.setattr("app.chatgpt_oauth.httpx.AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(handler)))
-    return calls, options
+    return calls, options, original
 
 
 def test_login_identity_permissions_and_secret_storage(oauth_server):

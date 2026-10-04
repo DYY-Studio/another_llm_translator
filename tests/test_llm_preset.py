@@ -215,7 +215,7 @@ def test_preset_requires_boolean_stream_read_timeout(tmp_path: Path) -> None:
         ("string", "必须是包含 kind 和 name 的对象"),
         ({"kind": "environment"}, "必须是包含 kind 和 name 的对象"),
         ({"kind": "environment", "name": "X", "extra": 1}, "必须是包含 kind 和 name 的对象"),
-        ({"kind": "file", "name": "X"}, "kind 必须是 environment 或 keychain"),
+        ({"kind": "file", "name": "X"}, "kind 必须是 environment、keychain 或 chatgpt"),
         ({"kind": "environment", "name": " "}, "name 必须是非空字符串"),
     ],
 )

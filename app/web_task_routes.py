@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 
 from .errors import UsageError
 from .execution import Scope
@@ -719,9 +719,13 @@ def register_task_routes(
 
     @app.post("/api/v1/projects/{name}/tasks")
     async def start_task(
-        name: str, payload: TaskStartPayload
+        name: str, payload: TaskStartPayload, request: Request
     ) -> dict[str, Any]:
         stage = payload.stage
+        from .config import LLM_MODEL_STAGES
+        from .web_chatgpt_routes import require_project_plan_session
+        stages = (payload.stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        require_project_plan_session(request, project(name), stages)
         scope = Scope(
             from_file=payload.from_file,
             only_file=payload.only_file,

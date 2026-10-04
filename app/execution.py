@@ -686,7 +686,7 @@ def stage_fingerprint(
             ),
             "prompt_rules_version": PROMPT_RULES_VERSION,
             "prompt_languages": prompt_languages or {},
-            "temperature": config["llm"][temperature_key],
+            "temperature": None if config["llm"]["credential"]["kind"] == "chatgpt" else config["llm"][temperature_key],
             "context": config["context"].get(stage, {}),
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,

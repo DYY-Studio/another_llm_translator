@@ -30,6 +30,42 @@ USAGE_URL = "https://chatgpt.com/#settings/Usage"
 PLAN_SCOPE = "chatgpt.tokens.use.direct"
 SCOPES = "openid profile email offline_access resource.invoke " + PLAN_SCOPE
 _TERMINAL_REFRESH = {"invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"}
+_UNSUPPORTED_BODY = {"background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation", "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p", "truncation", "user", "previous_response_id"}
+
+
+def validate_plan_body(body: dict[str, Any]) -> None:
+    unsupported = set(body) & _UNSUPPORTED_BODY
+    if unsupported:
+        raise ConfigError("ChatGPT Plan 不支持请求字段：" + ", ".join(sorted(unsupported)))
+    if body.get("store") is not False or body.get("stream") is not True:
+        raise ConfigError("ChatGPT Plan 要求 store=false、stream=true")
+    if not isinstance(body.get("input"), list) or any(isinstance(item, dict) and item.get("role") == "system" for item in body["input"]):
+        raise ConfigError("ChatGPT Plan 要求数组 input 和 developer 指令")
+
+
+def plan_error(data: Any, status: int, request_id: str) -> FatalExternalError | None:
+    if not isinstance(data, dict):
+        return None
+    detail = data.get("error", data)
+    if isinstance(data.get("response"), dict):
+        detail = data["response"].get("error", detail)
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("code")
+    messages = {
+        "subscription_sharing_usage_limit_exceeded": "ChatGPT Plan 用量已达限制，请打开 ChatGPT 设置中的管理用量",
+        "subscription_sharing_user_not_eligible": "当前 ChatGPT 账户不符合 Plan 使用条件",
+        "subscription_sharing_unsupported_capability": "ChatGPT Plan 不支持当前请求能力，请检查参数",
+        "subscription_sharing_route_not_supported": "ChatGPT Plan 不支持当前请求端点",
+        "subscription_sharing_invalid_user": "ChatGPT 授权无效，请在本机设置页检查连接并重新登录",
+        "chatpass_v2_scope_not_authorized": "ChatGPT Plan 权限不足，请重新授权",
+        "chatpass_v2_invalid_authorization_context": "ChatGPT Plan 授权上下文无效，请检查连接",
+    }
+    if not isinstance(code, str) or code not in messages:
+        return None
+    error = FatalExternalError(messages[code])
+    error.params = {"provider_code": code, "http_status": status, "request_id": request_id, "usage_url": USAGE_URL}
+    return error
 
 
 class ChatGPTConnection:
