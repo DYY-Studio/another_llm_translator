@@ -46,7 +46,11 @@ export function ContinuousRunDialog({
 }) {
   const [startStage, setStartStage] = useState<ContinuousStartStage>("translation");
   const [endIndex, setEndIndex] = useState(CONTINUOUS_ORDER.indexOf("translation"));
-  const [options, setOptions] = useState<ContinuousTaskOptions | null>(null);
+  const [preflight, setPreflight] = useState<{ request: string; options: ContinuousTaskOptions } | null>(null);
+  const [displayCache, setDisplayCache] = useState<{
+    project: string;
+    steps: Record<string, Pick<ContinuousOptionStep, "preset" | "selected">>;
+  }>({ project, steps: {} });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [submitError, setSubmitError] = useState<unknown>(null);
@@ -60,27 +64,37 @@ export function ContinuousRunDialog({
   const terminalDecision = stages.at(-1) === "terminology_decision";
   const hasDecision = stages.includes("terminology_decision");
   const decisionInMiddle = hasDecision && !terminalDecision;
+  const params = new URLSearchParams();
+  for (const stage of stages) params.append("stages", stage);
+  params.set("language", language);
+  params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
+  params.set("apply_terminology_decision", String(decisionInMiddle && applyTerminologyDecision));
+  const request = `/api/v1/projects/${project}/task-options/continuous?${params.toString()}`;
+  const options = preflight?.request === request ? preflight.options : null;
+  const displaySteps = displayCache.project === project ? displayCache.steps : {};
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setOptions(null);
+    setPreflight(null);
+    setDisplayCache((current) => current.project === project ? current : { project, steps: {} });
     setLoadError(null);
-    const params = new URLSearchParams();
-    for (const stage of stages) params.append("stages", stage);
-    params.set("language", language);
-    params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
-    params.set("apply_terminology_decision", String(decisionInMiddle && applyTerminologyDecision));
-    void api<ContinuousTaskOptions>(
-      `/api/v1/projects/${project}/task-options/continuous?${params.toString()}`,
-    ).then((value) => {
-      if (active) setOptions(value);
+    void api<ContinuousTaskOptions>(request).then((value) => {
+      if (!active) return;
+      setPreflight({ request, options: value });
+      setDisplayCache((current) => ({
+        project,
+        steps: {
+          ...current.steps,
+          ...Object.fromEntries(value.steps.map(({ stage, preset, selected }) => [stage, { preset, selected }])),
+        },
+      }));
     }).catch((reason) => {
       if (active) setLoadError(reason);
     }).finally(() => {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [applyTerminologyDecision, decisionInMiddle, finalReview, hasDecision, language, project, stages, terminalDecision]);
+  }, [project, request]);
 
   useEffect(() => {
     setRunActions((current) => {
@@ -226,6 +240,7 @@ export function ContinuousRunDialog({
                 : stageIndex <= endIndex + 1;
               const stageState = selected ? "selected" : canToggle ? "next" : "disabled";
               const step = stepFor(options, stage);
+              const displayStep = displaySteps[stage];
               const stageBlocking = blocking.filter((item) => item.stage === stage);
               return (
                 <label className={`continuous-run-stage ${stageState}`} key={stage}>
@@ -240,7 +255,7 @@ export function ContinuousRunDialog({
                     {stage === "terminology_decision" && startStage === "terminology" && (
                       <small>{translate("continuousRun.decisionInserted", language)}</small>
                     )}
-                    {step?.preset && <small>{step.preset.id} · {step.preset.model} · {step.selected}</small>}
+                    {displayStep?.preset && <small>{displayStep.preset.id} · {displayStep.preset.model} · {displayStep.selected}</small>}
                     {step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
                     {stageBlocking.map((item) => (
                       <small className="error-text" key={item.code}>
@@ -333,6 +348,7 @@ export function ContinuousRunDialog({
             )}
             {loading && <p className="muted">{translate("common.loading", language)}</p>}
             {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
+            {loadError != null && Object.keys(displaySteps).length > 0 && <p className="muted">{translate("continuousRun.previousPreflight", language)}</p>}
             {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
           </div>
         </div>
