@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useId, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import { useLayoutEffect, useMemo, useEffect, useRef, useState, useId, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } from "../native";
 import { moveFileBlock, moveFilesByCommand, type DropPosition, type FileMoveCommand } from "../fileOrder";
@@ -44,20 +44,31 @@ export function ProjectPicker({
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const optionsRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("newest");
   const [activeIndex, setActiveIndex] = useState(-1);
   const selected = projects.find((item) => item.selector === project) ?? null;
   const selectedRunning = Boolean(selected && runningProjectIds.has(selected.project_id));
   const otherRunning = projects.filter((item) => item.selector !== project && runningProjectIds.has(item.project_id)).length;
+  const sortedProjects = useMemo(() => [...projects].sort((left, right) => {
+    if (sort !== "name") {
+      if (!left.created_at && right.created_at) return 1;
+      if (left.created_at && !right.created_at) return -1;
+      const delta = (left.created_at ?? "").localeCompare(right.created_at ?? "");
+      if (delta) return sort === "newest" ? -delta : delta;
+    }
+    return left.name.localeCompare(right.name) || left.path.localeCompare(right.path);
+  }), [projects, sort]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredProjects = normalizedQuery
-    ? projects.filter((item) => (
+    ? sortedProjects.filter((item) => (
       item.name.toLocaleLowerCase().includes(normalizedQuery)
       || item.path.toLocaleLowerCase().includes(normalizedQuery)
     ))
-    : projects;
+    : sortedProjects;
 
   useEffect(() => {
     function closeOnOutsideClick(event: PointerEvent) {
@@ -67,11 +78,22 @@ export function ProjectPicker({
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     const selectedIndex = filteredProjects.findIndex((item) => item.selector === project);
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : filteredProjects.length > 0 ? 0 : -1);
-  }, [open, query, project, projects]);
+  }, [open, query, project, sortedProjects]);
+
+  useLayoutEffect(() => {
+    if (!open || activeIndex < 0) return;
+    const options = optionsRef.current!;
+    const option = options.children[activeIndex] as HTMLElement | undefined;
+    if (!option) return;
+    const bounds = options.getBoundingClientRect();
+    const row = option.getBoundingClientRect();
+    if (row.top < bounds.top) options.scrollTop += row.top - bounds.top;
+    else if (row.bottom > bounds.bottom) options.scrollTop += row.bottom - bounds.bottom;
+  }, [open, activeIndex, query, sortedProjects]);
 
   function closePicker() {
     setOpen(false);
@@ -146,6 +168,10 @@ export function ProjectPicker({
           <div className="project-search">
             <input
               ref={searchRef}
+              role="combobox"
+              aria-expanded={open}
+              aria-controls={listId}
+              aria-activedescendant={activeOptionId}
               aria-label={translate("project.search", language)}
               placeholder={translate("project.searchPlaceholder", language)}
               value={query}
@@ -153,7 +179,15 @@ export function ProjectPicker({
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <div className="project-options" id={listId} role="listbox" aria-label={translate("project.select", language)}>
+          <div className="project-sort">
+            <label htmlFor={`${listId}-sort`}>{translate("project.sort", language)}</label>
+            <select id={`${listId}-sort`} value={sort} onChange={(event) => setSort(event.target.value)}>
+              <option value="newest">{translate("project.newest", language)}</option>
+              <option value="oldest">{translate("project.oldest", language)}</option>
+              <option value="name">{translate("project.byName", language)}</option>
+            </select>
+          </div>
+          <div className="project-options" ref={optionsRef} id={listId} role="listbox" aria-label={translate("project.select", language)}>
             {filteredProjects.length === 0 && (
               <div className="project-picker-state" role="status">{translate("project.noMatch", language)}</div>
             )}

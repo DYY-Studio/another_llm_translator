@@ -166,6 +166,7 @@ export interface SegmentQueryResponse {
 }
 
 export interface ProjectSummary {
+  created_at: string | null;
   selector: string;
   name: string;
   project_id: string;

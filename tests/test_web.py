@@ -673,13 +673,16 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
 def test_web_project_list_reports_no_repair_for_complete_project(
     tmp_path: Path,
 ) -> None:
-    projects_root, _ = make_project(tmp_path)
+    projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
 
     listed = client.get("/api/v1/projects")
 
     assert listed.status_code == 200
     assert listed.json()["projects"][0]["repair_needed"] is False
+    assert listed.json()["projects"][0]["created_at"] == read_json(
+        project, project / "project.json"
+    )["created_at"]
 
 
 def test_web_project_list_reports_repair_for_missing_prompt(
@@ -1442,6 +1445,7 @@ def test_web_lists_legacy_project_from_read_only_project_json(
             "selector": "legacy",
             "name": "legacy",
             "project_id": "PRJ-LEGACY",
+            "created_at": None,
             "path": str(legacy.resolve()),
             "external": False,
             "file_count": 0,
