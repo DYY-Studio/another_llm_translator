@@ -164,7 +164,7 @@ def register_resource_routes(
         (user_root() / ".welcome-seen").write_text("1", encoding="utf-8")
 
     def validate_preset_payload(
-        preset_id: str, payload: dict[str, Any]
+        preset_id: str, payload: dict[str, Any], *, model_discovery: bool = False
     ) -> LLMPreset:
         if payload.get("preset_id") != preset_id:
             raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
@@ -181,7 +181,7 @@ def register_resource_routes(
             json.dump(payload, handle, ensure_ascii=False)
             temporary = Path(handle.name)
         try:
-            preset = load_llm_preset(temporary)
+            preset = load_llm_preset(temporary, model_discovery=model_discovery)
             adapter = load_json_adapter(
                 effective_path(
                     f"llm_adapters/{preset.adapter_id}.json",
@@ -192,6 +192,7 @@ def register_resource_routes(
                 raise UsageError(
                     "全局 Adapter 文件中的 adapter_id 与 Preset 不一致"
                 )
+            adapter.validate_preset(preset.definition)
             adapter.build_request(
                 api_key="***",
                 model=str(preset.definition["model"]),
@@ -687,6 +688,7 @@ def register_resource_routes(
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
                         "stream": bool(preset.definition["stream"]),
+                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"],
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -781,11 +783,11 @@ def register_resource_routes(
 
     @app.post("/api/v1/global/presets/{preset_id}/models")
     async def discover_preset_models(
-        preset_id: str, payload: dict[str, Any], key_index: int
+        preset_id: str, payload: dict[str, Any], request: Request, key_index: int = 1
     ) -> dict[str, Any]:
         if key_index < 1:
             raise UsageError("key_index 必须从 1 开始")
-        preset = validate_preset_payload(preset_id, payload)
+        preset = validate_preset_payload(preset_id, payload, model_discovery=True)
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
@@ -793,7 +795,15 @@ def register_resource_routes(
         )
         if adapter.models_spec is None:
             raise UsageError("该 Adapter 未声明模型发现规格")
-        api_keys = resolve_api_keys(preset.definition["credential"])
+        plan = preset.definition["credential"]["kind"] == "chatgpt"
+        if plan:
+            from .chatgpt_oauth import ChatGPTConnection
+            from .web_chatgpt_routes import require_plan_session
+            require_plan_session(request)
+            connection = ChatGPTConnection()
+            api_keys = (await connection.access_token(connection.identity()),)
+        else:
+            api_keys = resolve_api_keys(preset.definition["credential"])
         if key_index > len(api_keys):
             raise UsageError("key_index 超出 API Key 范围")
         api_key = api_keys[key_index - 1]
@@ -802,9 +812,9 @@ def register_resource_routes(
             preset.definition["base_url"], endpoint, model=preset.definition["model"]
         )
         timeout = float(preset.definition["request_timeout_seconds"])
-        proxy = str(preset.definition["proxy_url"]) or None
+        proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
         try:
-            async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
                 response = await client.get(url, headers=headers)
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
@@ -959,7 +969,7 @@ def register_resource_routes(
         if not isinstance(username, str) or not isinstance(password, str):
             raise UsageError("用户名和密码必须是字符串")
         stored = read_lan_password()
-        if not config["auth"]["required"]:
+        if not config["auth"]["required"] and (not stored or not config["auth"]["username"]):
             raise UsageError("当前未开启认证")
         if username != config["auth"]["username"] or not stored:
             raise InvalidCredentialsError("用户名或密码错误")
@@ -1001,6 +1011,7 @@ def register_resource_routes(
                         "valid": True,
                         "digest": adapter.digest,
                         "streaming_supported": adapter.streaming_supported,
+                        "capabilities": adapter.capabilities,
                     }
                 )
             except AppError as exc:

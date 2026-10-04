@@ -568,6 +568,7 @@ def _resolve_llm_config(
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != preset.adapter_id:
         raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
+    adapter.validate_preset(definition)
     config["llm"].update(
         {
             key: definition[key]
@@ -612,6 +613,16 @@ def _resolve_llm_config(
         for key, value in definition.items()
         if key not in {"target_chunk_input_tokens", "endpoint", "stream_endpoint"}
     }
+    if definition["credential"]["kind"] == "chatgpt":
+        from .chatgpt_oauth import ChatGPTConnection
+        connection = ChatGPTConnection()
+        state = connection.read()
+        config["llm"]["proxy_url"] = state["proxy_url"]
+        config["_chatgpt_identity"] = connection.identity() if state["active"] else None
+        fingerprint_definition["chatgpt_connection"] = state["active"]
+        fingerprint_definition["proxy_url"] = state["proxy_url"]
+        if adapter.endpoint != "/responses" or adapter.streaming_spec is None or adapter.streaming_spec["endpoint"] != "/responses" or adapter.messages_format != "responses":
+            raise ConfigError("ChatGPT Plan Adapter 必须使用 /responses 和 responses 消息格式")
     config["_llm_preset_stage_hash"] = "sha256:" + hashlib.sha256(
         json.dumps(
             fingerprint_definition,

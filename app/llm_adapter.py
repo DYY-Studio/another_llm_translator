@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ConfigError, ExternalError
 
@@ -33,9 +34,10 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "response_reasoning_content_pointers",
         "usage",
         "streaming",
+        "connection",
     }
 )
-_MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini"})
+_MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini", "responses"})
 _MODELS_KEYS = frozenset(
     {
         "endpoint",
@@ -175,11 +177,38 @@ class JSONLLMAdapter:
                     + ", ".join(sorted(conflicts))
                 )
             body.update(deepcopy(extra_body))
+        if self.adapter_id == "chatgpt-plan":
+            from .chatgpt_oauth import validate_plan_body
+            validate_plan_body(body)
         return headers, body
 
     @property
     def streaming_supported(self) -> bool:
         return self.streaming_spec is not None
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        templates = [self.body_template]
+        if self.streaming_spec is not None:
+            templates.append(self.streaming_spec["request_body"])
+        placeholders = set(_PLACEHOLDER_RE.findall(json.dumps(templates)))
+        return {
+            "temperature": "temperature" in placeholders,
+            "max_output_tokens": "max_output_tokens" in placeholders,
+            "streaming": "required" if self.streaming_supported and self.body_template.get("stream") is True else "optional" if self.streaming_supported else "unsupported",
+            "connection": deepcopy(self.definition.get("connection")),
+        }
+
+    def validate_preset(self, definition: dict[str, Any]) -> None:
+        capabilities = self.capabilities
+        connection = capabilities["connection"]
+        if connection is not None:
+            if definition["base_url"] != connection["base_url"] or definition["credential"] != connection["credential"]:
+                raise ConfigError("LLM Preset 与 Adapter 固定连接不一致")
+            if connection["proxy_source"] == "connection" and definition["proxy_url"]:
+                raise ConfigError("该 Adapter 的代理由连接管理")
+        if capabilities["streaming"] == "required" and not definition["stream"]:
+            raise ConfigError("该 Adapter 要求流式请求")
 
     def stream_content_deltas(self, event: dict[str, Any]) -> list[str]:
         if self.streaming_spec is None:
@@ -354,6 +383,8 @@ class JSONLLMAdapter:
         strip_prefix = self.models_spec.get("response_model_strip_prefix", "")
         result: list[dict[str, str]] = []
         for item in items:
+            if self.adapter_id == "chatgpt-plan" and isinstance(item, dict) and item.get("visibility") != "list":
+                continue
             if not isinstance(item, dict) or not isinstance(item.get(id_key), str):
                 raise ExternalError("LLM 模型列表条目缺少模型 ID")
             model_id = item[id_key]
@@ -462,6 +493,22 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     models_spec = _validate_models_spec(value.get("models"))
     usage_pointers = _validate_usage_mapping(value.get("usage"))
     streaming_spec = _validate_streaming_spec(value.get("streaming"))
+    connection = value.get("connection")
+    if connection is not None:
+        if not isinstance(connection, dict) or set(connection) != {"base_url", "credential", "proxy_source"}:
+            raise ConfigError("LLM Adapter connection 必须包含 base_url、credential 和 proxy_source")
+        if not isinstance(connection["base_url"], str):
+            raise ConfigError("LLM Adapter connection base_url 必须是字符串")
+        base = urlsplit(connection["base_url"])
+        credential = connection["credential"]
+        if base.scheme not in {"http", "https"} or not base.hostname:
+            raise ConfigError("LLM Adapter connection base_url 无效")
+        if not isinstance(credential, dict) or set(credential) != {"kind", "name"} or credential["kind"] not in ("environment", "keychain", "chatgpt") or not isinstance(credential["name"], str) or not credential["name"]:
+            raise ConfigError("LLM Adapter connection credential 无效")
+        if connection["proxy_source"] not in ("preset", "connection"):
+            raise ConfigError("LLM Adapter connection proxy_source 无效")
+        if connection["proxy_source"] == "connection" and credential["kind"] != "chatgpt":
+            raise ConfigError("该凭据类型没有授权连接代理")
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
@@ -822,6 +869,8 @@ def _transform_messages(
 ) -> list[dict[str, Any]]:
     if messages_format == "openai":
         return messages
+    if messages_format == "responses":
+        return [{"role": "developer" if message["role"] == "system" else message["role"], "content": message["content"]} for message in messages]
     if messages_format == "anthropic":
         return [
             {"role": message["role"], "content": message["content"]}

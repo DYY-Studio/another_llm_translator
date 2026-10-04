@@ -57,7 +57,7 @@ def preset_path(root: Path, preset_id: str) -> Path:
     return root / "llm_presets" / f"{preset_id}.json"
 
 
-def load_llm_preset(path: Path) -> LLMPreset:
+def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
     try:
         raw = path.read_bytes()
         value = json.loads(raw)
@@ -108,14 +108,16 @@ def load_llm_preset(path: Path) -> LLMPreset:
         "base_url",
         "model",
     ):
+        if key == "model" and model_discovery and value[key] == "":
+            continue
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
     credential = value["credential"]
     if not isinstance(credential, dict) or set(credential) != {"kind", "name"}:
         raise ConfigError("LLM Preset credential 必须是包含 kind 和 name 的对象")
-    if credential["kind"] not in {"environment", "keychain"}:
+    if credential["kind"] not in {"environment", "keychain", "chatgpt"}:
         raise ConfigError(
-            "LLM Preset credential.kind 必须是 environment 或 keychain"
+            "LLM Preset credential.kind 必须是 environment、keychain 或 chatgpt"
         )
     if (
         not isinstance(credential["name"], str)
@@ -124,6 +126,8 @@ def load_llm_preset(path: Path) -> LLMPreset:
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
+    from .chatgpt_oauth import validate_plan_preset
+    validate_plan_preset(value)
     parsed_base = urlsplit(value["base_url"])
     if parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname:
         raise ConfigError("LLM Preset base_url 必须是有效的 HTTP/HTTPS URL")

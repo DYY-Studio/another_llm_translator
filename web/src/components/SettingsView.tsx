@@ -2,7 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type R
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
-import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
+import type { AdapterCapabilities, CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
+import { ChatGPTSettings, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { StorageView } from "./StorageView";
@@ -10,12 +11,13 @@ import { Icon } from "./Icons";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "server" | "storage";
+type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "chatgpt" | "server" | "storage";
 
 interface AdapterRow {
   adapter_id: string;
   valid?: boolean;
   streaming_supported?: boolean;
+  capabilities?: AdapterCapabilities;
 }
 
 const CONFIGURATION_GUIDE_URL = "https://github.com/DYY-Studio/another_llm_translator/blob/main/docs/USER_GUIDE.md#2-%E9%85%8D%E7%BD%AE%E6%A8%A1%E5%9E%8B%E8%BF%9E%E6%8E%A5%E4%B8%8E%E5%87%AD%E6%8D%AE";
@@ -37,7 +39,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
     }
   }, [focusField, project]);
   const activeScope: ConfigScope = project ? scope : "global";
-  const globalSections: SettingsSection[] = ["presets", "adapters", "credentials", "server", "storage"];
+  const globalSections: SettingsSection[] = ["presets", "adapters", "credentials", "chatgpt", "server", "storage"];
   useEffect(() => {
     if (activeScope === "project" && globalSections.includes(section)) {
       setSection("config");
@@ -70,6 +72,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
           {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
           {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
+          {activeScope === "global" && <button className={section === "chatgpt" ? "active" : ""} onClick={() => setSection("chatgpt")}>ChatGPT Plan</button>}
           {activeScope === "global" && <button className={section === "server" ? "active" : ""} onClick={() => setSection("server")}>{translate("server.title", language)}</button>}
           {activeScope === "global" && <button className={section === "storage" ? "active" : ""} onClick={() => setSection("storage")}>{translate("storage.title", language)}</button>}
         </div>
@@ -79,6 +82,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
         {section === "prompts" && <PromptSettings project={project} scope={activeScope} language={language} />}
         {section === "presets" && <PresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings language={language} />}
+        {section === "chatgpt" && <ChatGPTSettings language={language} />}
         {section === "credentials" && <CredentialsSettings language={language} />}
         {section === "server" && <ServerSettings language={language} onChanged={() => {}} />}
         {section === "storage" && <StorageView language={language} />}
@@ -199,6 +203,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error ? errorMessage(error, language) : translate("settings.loadingConfig", language)}</p></section>;
 
   const presetOptions = presets.filter((item) => item.valid);
+  const supportsTemperature = (stage: RunStage) => presetOptions.find((item) => item.preset_id === (config.llm[`preset_${stage}`] || config.llm.preset))?.temperature_supported !== false;
   const configuredValidatorIds = new Set(config.validation.translation.validators);
   const validatorRows = [
     ...validators,
@@ -258,12 +263,12 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         <ConfigSection title={translate("settings.llmSampling", language)} description={translate("settings.llmSamplingHint", language)}>
           <Field className="grid-span" label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
           {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
-          <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
-          <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
-          <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
-          <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
-          <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
-          <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} help={translate("settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
+          <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} disabled={!supportsTemperature("terminology")} help={translate(supportsTemperature("terminology") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
+          <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} disabled={!supportsTemperature("terminology_decision")} help={translate(supportsTemperature("terminology_decision") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
+          <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} disabled={!supportsTemperature("content_summary")} help={translate(supportsTemperature("content_summary") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
+          <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} disabled={!supportsTemperature("translation")} help={translate(supportsTemperature("translation") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
+          <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} disabled={!supportsTemperature("proofreading")} help={translate(supportsTemperature("proofreading") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
+          <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} disabled={!supportsTemperature("polishing")} help={translate(supportsTemperature("polishing") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
           <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
@@ -348,6 +353,16 @@ function PresetSettings({ language }: { language: Language }) {
   const [keyIndex, setKeyIndex] = useState(1);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [chatgpt, setChatgpt] = useState<ChatGPTConnectionSummary | null>(null);
+  const capabilities = adapters.find((item) => item.adapter_id === preset?.adapter_id)?.capabilities;
+  const fixedConnection = capabilities?.connection;
+  const usesChatGPT = preset?.credential.kind === "chatgpt";
+  useEffect(() => {
+    if (!usesChatGPT) return;
+    let active = true;
+    void api<ChatGPTConnectionSummary>("/api/v1/chatgpt/connection").then((value) => { if (active) setChatgpt(value); }).catch((reason) => { if (active) setError(errorMessage(reason, language)); });
+    return () => { active = false; };
+  }, [usesChatGPT]);
   const [keychainCredentials, setKeychainCredentials] = useState<CredentialSummary[]>([]);
 
   async function loadLists(preferred?: string | null) {
@@ -471,10 +486,18 @@ function PresetSettings({ language }: { language: Language }) {
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
             <div className="config-grid preset-fields">
-              <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
-              <Field label="Base URL" help={translate("preset.baseUrlHint", language)}><input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} /></Field>
-              <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}>
+              <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value;
+                  const next = adapters.find((item) => item.adapter_id === draft.adapter_id)?.capabilities;
+                  if (next?.connection) {
+                    draft.credential = structuredClone(next.connection.credential); draft.base_url = next.connection.base_url;
+                    if (next.connection.proxy_source === "connection") draft.proxy_url = "";
+                  } else if (draft.credential.kind === "chatgpt") { draft.credential = { kind: "environment", name: "OPENAI_API_KEY" }; }
+                  if (next?.streaming !== "optional") draft.stream = next?.streaming === "required";
+                  draft.model = ""; })}>{adapters.filter((item) => item.valid !== false).map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}</select></Field>
+              <Field label="Base URL" help={fixedConnection ? translate("preset.fixedConnectionHint", language) : translate("preset.baseUrlHint", language)}>{fixedConnection ? <span>{fixedConnection.base_url}</span> : <input value={preset.base_url} onChange={(event) => updateConnection((draft) => { draft.base_url = event.target.value; })} />}</Field>
+              <Field label={translate("preset.credential", language)} help={usesChatGPT ? translate("chatgpt.connectionHint", language) : translate("preset.credentialHint", language)}>
                 <div className="credential-selector">
+                  {usesChatGPT ? <span>{chatgpt?.email || translate("chatgpt.disconnected", language)} · {translate(chatgpt?.plan_enabled ? "chatgpt.ready" : "chatgpt.notGranted", language)}</span> : fixedConnection ? <span>{fixedConnection.credential.kind} · {fixedConnection.credential.name}</span> : <>
                   <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
                     <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
                     <option value="keychain">{translate("preset.credentialKeychain", language)}</option>
@@ -489,14 +512,15 @@ function PresetSettings({ language }: { language: Language }) {
                       {keychainCredentials.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
                     </select>
                   )}
+                </>}
                 </div>
               </Field>
-              <Field label={translate("preset.keyIndex", language)} help={translate("preset.keyIndexHint", language)}><input type="number" min={1} step={1} value={keyIndex} onChange={(event) => setKeyIndex(Number(event.target.value))} /></Field>
+              {!usesChatGPT && <Field label={translate("preset.keyIndex", language)} help={translate("preset.keyIndexHint", language)}><input type="number" min={1} step={1} value={keyIndex} onChange={(event) => setKeyIndex(Number(event.target.value))} /></Field>}
               <ModelPicker language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
-              <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} /></Field>
+              <Field label={translate("preset.proxyUrl", language)} help={translate(fixedConnection?.proxy_source === "connection" ? "preset.connectionProxyHint" : "preset.proxyUrlHint", language)}>{fixedConnection?.proxy_source === "connection" ? <span>{chatgpt?.proxy_url || translate("preset.noProxy", language)}</span> : <input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} />}</Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
               <NumberField label={translate("preset.targetChunkInputTokens", language)} value={preset.target_chunk_input_tokens} min={1} step={1} help={translate("preset.targetChunkInputTokensHint", language)} onChange={(value) => update((draft) => { draft.target_chunk_input_tokens = value; })} />
-              <NumberField label={translate("preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={0} step={1} help={translate("preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
+              <NumberField label={translate(capabilities?.max_output_tokens === false ? "preset.outputBudget" : "preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={0} step={1} help={translate(capabilities?.max_output_tokens === false ? "preset.outputBudgetHint" : "preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
               <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
               <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
@@ -504,13 +528,13 @@ function PresetSettings({ language }: { language: Language }) {
               <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
               <NumberField label={translate("preset.maxConcurrencyPerKey", language)} value={preset.max_parallel_per_key} min={1} step={1} help={translate("preset.maxConcurrencyPerKeyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel_per_key = value; })} />
               <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("preset.timeoutSecondsHint", language)} onChange={(value) => updateConnection((draft) => { draft.request_timeout_seconds = value; })} />
-              <ToggleField
+              {capabilities?.streaming === "required" ? <Field label={translate("preset.streaming", language)} help={translate("preset.streamingRequiredHint", language)}><span>{translate("preset.streamingRequired", language)}</span></Field> : <ToggleField
                 label={translate("preset.streaming", language)}
                 checked={preset.stream}
-                disabled={!adapters.find((item) => item.adapter_id === preset.adapter_id)?.streaming_supported && !preset.stream}
+                disabled={capabilities?.streaming === "unsupported" && !preset.stream}
                 help={translate("preset.streamingHint", language)}
                 onChange={(value) => updateConnection((draft) => { draft.stream = value; })}
-              />
+              />}
               <ToggleField
                 label={translate("preset.streamReadTimeout", language)}
                 checked={preset.stream_read_timeout_enabled}
@@ -665,8 +689,7 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
   function openPicker() {
     setOpen(true);
     window.setTimeout(() => {
-      rootRef.current?.scrollIntoView({ block: "start" });
-      searchRef.current?.focus();
+      searchRef.current?.focus({ preventScroll: true });
     }, 0);
   }
 
@@ -732,7 +755,7 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
 
 function ConfigSection({ title, description, warning = false, children }: { title: string; description: string; warning?: boolean; children: ReactNode }) { return <fieldset className={`config-section${warning ? " warning" : ""}`}><legend>{title}</legend><p>{description}</p><div className="config-grid">{children}</div></fieldset>; }
 function Field({ label, help, children, className = "" }: { label: string; help?: string; children: ReactNode; className?: string }) { return <label className={`config-field${className ? ` ${className}` : ""}`}><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
-function NumberField({ label, value, onChange, help, min, max, step }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number }) { return <Field label={label} help={help}><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
+function NumberField({ label, value, onChange, help, min, max, step, disabled }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number; disabled?: boolean }) { return <Field label={label} help={help}><input type="number" disabled={disabled} value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }
 function ToggleField({ label, checked, onChange, help, disabled = false, className = "" }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean; className?: string }) { return <label className={`config-toggle${className ? ` ${className}` : ""}`}><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
 interface PromptView {

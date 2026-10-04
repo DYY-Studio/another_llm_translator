@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .errors import UsageError
 from .execution import Scope
@@ -155,9 +155,11 @@ def register_summary_routes(
 
     @app.post("/api/v1/projects/{name}/summaries/aggregate")
     async def aggregate(
-        name: str, payload: SummarySelectionPayload
+        name: str, payload: SummarySelectionPayload, request: Request
     ) -> dict[str, Any]:
         root = project(name)
+        from .web_chatgpt_routes import require_project_plan_session
+        require_project_plan_session(request, root, ("content_summary",))
         values = _selection(payload.boundaries)
         return await app.state.tasks.start(
             root,

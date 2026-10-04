@@ -29,6 +29,7 @@ export function AdapterSettings({ language }: { language: Language }) {
   useEffect(() => {
     if (!selected) return;
     setError("");
+    setPreview(null);
     void api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}`)
       .then((value) => setContent(JSON.stringify(value, null, 2)));
     void api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}/preview`)

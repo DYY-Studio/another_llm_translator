@@ -55,6 +55,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 按资源职责处理 HTTP 边界：
 
+- `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
@@ -128,9 +129,14 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ## 6. LLM 通信
 
+### ChatGPT 连接
+
+- `app/chatgpt_oauth.py`：主机 OAuth 回调、身份验证、账户注册映射、钥匙串令牌及跨进程刷新、撤销；提供 Plan 凭据目标与请求约束及终止错误分类。
+- `web/src/components/ChatGPTSettings.tsx`：连接设置、授权状态和用量入口；登录浏览器由后端打开。
+
 ### `app/llm_adapter.py`
 
-声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、响应指针和 SSE 规则。协议字段以
+声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
 [Adapter 契约](ADAPTERS.md)为准。
 
 ### `app/llm_preset.py` 与 `app/llm_keys.py`

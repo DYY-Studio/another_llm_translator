@@ -1,3 +1,4 @@
+import { PlanUsageLink } from "./ChatGPTSettings";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Stage, TaskState, TaskStep, ThemeMode } from "../types";
 import { icons } from "./Icons";
@@ -333,6 +334,7 @@ export function AppShell({
               )}
             </div>
           )}
+          {typeof task.error?.params.usage_url === "string" && <PlanUsageLink language={language} />}
           {canCancelTaskStatus(task.status) && <button className="danger-link" onClick={onCancel}>{translate("run.cancel", language)}</button>}
           {terminal && (
             <button

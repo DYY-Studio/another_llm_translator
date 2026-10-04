@@ -939,9 +939,17 @@ export interface ProjectConfig {
   };
 }
 
+export interface AdapterCapabilities {
+  temperature: boolean;
+  max_output_tokens: boolean;
+  streaming: "required" | "optional" | "unsupported";
+  connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
+}
+
 export interface LLMPresetSummary {
   preset_id: string;
   adapter_id?: string;
+  temperature_supported?: boolean;
   model?: string;
   stream?: boolean;
   selected: boolean;
@@ -975,7 +983,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain";
+  kind: "environment" | "keychain" | "chatgpt";
   name: string;
 }
 

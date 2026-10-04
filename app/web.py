@@ -121,6 +121,8 @@ def create_app(
         max_active_projects=tasks_config.get("max_active_projects", 2),
     )
     app.state.sessions: dict[str, float] = {}
+    from .web_chatgpt_routes import register_chatgpt_routes
+    register_chatgpt_routes(app)
     app.state.replacement_previews: dict[tuple[Path, str], ReplacementPreviewSession] = {}
 
     def remember_project(path: Path) -> None:

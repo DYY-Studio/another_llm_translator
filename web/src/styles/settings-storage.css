@@ -165,6 +165,7 @@
 .preset-editor-body { grid-area: editor-body; min-width: 0; min-height: 0; overflow: auto; padding: 24px 30px 70px; }
 .preset-fields { max-width: 1050px; }
 .credential-selector { min-width: 0; display: grid; grid-template-columns: minmax(140px, .6fr) minmax(0, 1fr); gap: 10px; }
+.credential-selector > span { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
 .credential-list { min-width: 0; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .credential-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); flex-wrap: wrap; }
 .credential-list li > div:first-child { min-width: 0; display: grid; gap: 3px; }
@@ -175,13 +176,11 @@
 .preset-extra textarea { min-height: 180px; }
 .preview-heading { margin-top: 28px; }
 .preset-editor-body .result-box { max-width: 1050px; max-height: 420px; }
-.model-picker { position: relative; z-index: 2; }
-.model-picker:focus-within { z-index: 4; }
 .model-picker-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
 .model-picker-control input { border-radius: 6px 0 0 6px; }
 .model-discover-button { min-height: 38px; display: inline-flex; align-items: center; gap: 7px; padding-inline: 13px; border-left: 0; border-radius: 0 6px 6px 0; white-space: nowrap; }
 .model-discover-button .icon { width: 16px; height: 16px; }
-.model-picker-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 12; width: 100%; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); box-shadow: 0 16px 40px var(--modal-shadow); }
+.model-picker-popover { width: 100%; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); }
 .model-search { position: relative; padding: 10px; border-bottom: 1px solid var(--row-border); }
 .model-search .icon { position: absolute; top: 19px; left: 20px; width: 17px; height: 17px; color: var(--muted); pointer-events: none; }
 .model-search input { width: 100%; padding-left: 36px; background: var(--surface-soft); }
