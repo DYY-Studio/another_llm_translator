@@ -65,6 +65,16 @@
 该占位符对 `openai` 格式同样可渲染，但 system 消息仍保留在 `${messages}` 中，
 通常不应同时使用。
 
+### Adapter 能力与固定连接
+
+宿主从请求模板中的 `${temperature}`、`${max_output_tokens}` 判断参数支持；
+声明 SSE 且顶层 `body.stream` 固定为 `true` 时要求流式，否则由 Preset 选择。
+Adapter 摘要通过 `capabilities` 返回这些能力，Preset 编辑器据此展示字段。
+可选 `connection` 对象包含固定 `base_url`、`credential: {kind, name}` 和
+`proxy_source: "preset" | "connection"`；保存与执行必须满足这些约束。
+当前授权连接代理由 `chatgpt` 凭据提供。
+连接描述不替代凭据模块对令牌目标和授权的安全校验。
+
 ### ChatGPT Plan 连接
 
 `credential: {"kind": "chatgpt", "name": "default"}` 必须配对 `chatgpt-plan` Adapter。
@@ -74,7 +84,7 @@
 Preset、Run 快照或调度身份。令牌刷新不改变连接身份；重新登录产生新会话，旧任务不能继续请求。
 
 模型目录从账户返回的 `models` 中读取 `slug` 与 `display_name`，只列出 `visibility: "list"`。
-模型发现允许尚未选择模型的 Plan 草稿；保存和执行要求明确模型。`max_output_tokens` 仅供本地
+模型发现允许尚未选择模型的草稿；保存和执行要求明确模型。`max_output_tokens` 仅供本地
 分块估算，temperature 不参与 Plan 请求或阶段指纹。额外请求体中的不支持字段直接拒绝。
 额度耗尽、授权失效及账户或能力不符合条件停止执行；临时网络及服务错误使用现有有界重试。
 

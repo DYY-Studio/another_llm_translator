@@ -568,6 +568,7 @@ def _resolve_llm_config(
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != preset.adapter_id:
         raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
+    adapter.validate_preset(definition)
     config["llm"].update(
         {
             key: definition[key]

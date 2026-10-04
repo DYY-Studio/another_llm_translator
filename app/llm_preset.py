@@ -108,7 +108,7 @@ def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
         "base_url",
         "model",
     ):
-        if key == "model" and model_discovery and value["adapter_id"] == "chatgpt-plan" and value[key] == "":
+        if key == "model" and model_discovery and value[key] == "":
             continue
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
@@ -126,11 +126,8 @@ def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
     if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
-    if (credential["kind"] == "chatgpt") != (value["adapter_id"] == "chatgpt-plan"):
-        raise ConfigError("ChatGPT credential 必须与 chatgpt-plan Adapter 配对")
-    if credential["kind"] == "chatgpt":
-        if credential["name"] != "default" or value["base_url"] != "https://api.openai.com/v1" or not value["stream"] or value["proxy_url"]:
-            raise ConfigError("ChatGPT Plan 必须使用 default 连接、官方 Base URL、流式请求及连接页代理")
+    from .chatgpt_oauth import validate_plan_preset
+    validate_plan_preset(value)
     parsed_base = urlsplit(value["base_url"])
     if parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname:
         raise ConfigError("LLM Preset base_url 必须是有效的 HTTP/HTTPS URL")

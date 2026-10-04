@@ -184,3 +184,31 @@ async def test_plan_missing_content_type_warns_but_explicit_wrong_type_fails(tmp
             else:
                 with pytest.raises(ExternalError, match="HTTP 200，Content-Type: application/json"):
                     await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)
+
+
+def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
+    plan = load_json_adapter(ROOT / "llm_adapters/chatgpt-plan.json")
+    assert plan.capabilities == {
+        "temperature": False, "max_output_tokens": False, "streaming": "required",
+        "connection": {"base_url": "https://api.openai.com/v1", "credential": {"kind": "chatgpt", "name": "default"}, "proxy_source": "connection"},
+    }
+    regular = load_json_adapter(ROOT / "llm_adapters/openai-responses.json")
+    assert regular.capabilities["streaming"] == "optional"
+    assert regular.capabilities["max_output_tokens"] is True
+    definition = json.loads((ROOT / "llm_adapters/openai-responses.json").read_text())
+    definition["connection"] = {"base_url": "https://example.com/v1", "credential": {"kind": "environment", "name": "EXAMPLE_KEY"}, "proxy_source": "preset"}
+    path = tmp_path / "adapter.json"
+    path.write_text(json.dumps(definition))
+    preset = json.loads((ROOT / "llm_presets/openai-responses.json").read_text())
+    preset_path = tmp_path / "preset.json"
+    preset_path.write_text(json.dumps(preset))
+    with pytest.raises(ConfigError, match="固定连接"):
+        _resolve_llm_config(load_global_config(ROOT), adapter_file=path, preset=load_llm_preset(preset_path))
+    definition["body"]["stream"] = True
+    path.write_text(json.dumps(definition))
+    adapter = load_json_adapter(path)
+    preset.update(base_url=definition["connection"]["base_url"], credential=definition["connection"]["credential"], stream=True)
+    adapter.validate_preset(preset)
+    preset["stream"] = False
+    with pytest.raises(ConfigError, match="要求流式"):
+        adapter.validate_preset(preset)

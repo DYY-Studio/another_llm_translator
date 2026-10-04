@@ -33,6 +33,14 @@ _TERMINAL_REFRESH = {"invalid_grant", "invalid_refresh_token", "token_expired", 
 _UNSUPPORTED_BODY = {"background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation", "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p", "truncation", "user", "previous_response_id"}
 
 
+def validate_plan_preset(value: dict[str, Any]) -> None:
+    if (value["credential"]["kind"] == "chatgpt") != (value["adapter_id"] == "chatgpt-plan"):
+        raise ConfigError("ChatGPT credential 必须与 chatgpt-plan Adapter 配对")
+    if value["credential"]["kind"] == "chatgpt":
+        if value["credential"]["name"] != "default" or value["base_url"] != "https://api.openai.com/v1" or not value["stream"] or value["proxy_url"]:
+            raise ConfigError("ChatGPT Plan 必须使用 default 连接、官方 Base URL、流式请求及连接页代理")
+
+
 def validate_plan_body(body: dict[str, Any]) -> None:
     unsupported = set(body) & _UNSUPPORTED_BODY
     if unsupported:

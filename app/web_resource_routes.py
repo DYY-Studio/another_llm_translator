@@ -192,6 +192,7 @@ def register_resource_routes(
                 raise UsageError(
                     "全局 Adapter 文件中的 adapter_id 与 Preset 不一致"
                 )
+            adapter.validate_preset(preset.definition)
             adapter.build_request(
                 api_key="***",
                 model=str(preset.definition["model"]),
@@ -687,6 +688,7 @@ def register_resource_routes(
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
                         "stream": bool(preset.definition["stream"]),
+                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"],
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -1009,6 +1011,7 @@ def register_resource_routes(
                         "valid": True,
                         "digest": adapter.digest,
                         "streaming_supported": adapter.streaming_supported,
+                        "capabilities": adapter.capabilities,
                     }
                 )
             except AppError as exc:
