@@ -4,9 +4,17 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "preset.fixedConnectionHint": "由 Adapter 固定。",
+    "preset.connectionProxyHint": "由授权连接管理，请在连接设置中修改。",
+    "preset.noProxy": "未设置代理",
+    "preset.outputBudget": "本地输出预算",
+    "preset.outputBudgetHint": "仅用于本地分块估算，不能限制服务端生成长度。",
+    "preset.temperatureUnsupported": "该 Adapter 请求模板未使用 temperature。",
+    "preset.streamingRequired": "流式（必需）",
+    "preset.streamingRequiredHint": "该 Adapter 仅使用流式请求。",
+
     "chatgpt.connection": "账户与连接",
     "chatgpt.connectionHint": "引用全局 ChatGPT 连接。",
-    "chatgpt.streamingHint": "ChatGPT Plan 要求流式请求。",
     "chatgpt.subtitle": "使用自己的 ChatGPT Plan 执行模型阶段。",
     "chatgpt.manageUsage": "管理用量",
     "chatgpt.pending": "等待系统浏览器授权",
@@ -20,9 +28,6 @@ const messages: Record<Language, Record<string, string>> = {
     "chatgpt.switch": "连接其他账户",
     "chatgpt.welcome": "此连接使用你的 ChatGPT Plan 用量。额度耗尽时任务停止，已有进度保留；可在管理用量中查看额度。",
     "chatgpt.gotIt": "知道了",
-    "chatgpt.outputBudget": "本地输出预算",
-    "chatgpt.outputBudgetHint": "仅用于本地分块估算，不能限制服务端生成长度。",
-    "chatgpt.temperatureHint": "ChatGPT Plan 不支持 temperature。",
 
     "brand": "译工坊",
     "welcome.title": "欢迎使用译工坊",
@@ -1214,7 +1219,6 @@ const messages: Record<Language, Record<string, string>> = {
   en: {
     "chatgpt.connection": "Account and connection",
     "chatgpt.connectionHint": "Uses the global ChatGPT connection.",
-    "chatgpt.streamingHint": "ChatGPT Plan requires streaming requests.",
     "chatgpt.subtitle": "Run model stages with your own ChatGPT Plan.",
     "chatgpt.manageUsage": "Manage usage",
     "chatgpt.pending": "Waiting for authorization in your system browser",
@@ -1228,9 +1232,6 @@ const messages: Record<Language, Record<string, string>> = {
     "chatgpt.switch": "Connect another account",
     "chatgpt.welcome": "This connection uses your ChatGPT Plan allowance. Tasks stop when the allowance is exhausted and retain their progress. Manage usage to view your allowance.",
     "chatgpt.gotIt": "Got it",
-    "chatgpt.outputBudget": "Local output budget",
-    "chatgpt.outputBudgetHint": "Used for local chunk estimation only; it cannot limit server generation length.",
-    "chatgpt.temperatureHint": "ChatGPT Plan does not support temperature.",
 
     "brand": "Translator",
     "welcome.title": "Welcome to Translator",
