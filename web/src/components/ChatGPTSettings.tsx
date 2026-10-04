@@ -67,7 +67,7 @@ export function ChatGPTSettings({ language }: { language: Language }) {
         {connection.can_switch_account && <button className="quiet-button" disabled={busy || connection.pending || proxy !== connection.proxy_url} onClick={() => void action("login-new")}>{translate("chatgpt.switch", language)}</button>}
       </div>}
       </section>
-      {connection.local && connection.welcome_required && <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-label="ChatGPT Plan"><h2>ChatGPT Plan</h2><p>{translate("chatgpt.welcome", language)}</p><div className="button-group"><PlanUsageLink language={language} /><button className="primary-button" disabled={busy} onClick={() => void action("welcome-dismiss")}>{translate("chatgpt.gotIt", language)}</button></div></section></div>}
+      {connection.local && connection.welcome_required && <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-label="ChatGPT Plan"><h2>ChatGPT Plan</h2><p>{translate("chatgpt.welcome", language)}</p><div className="button-group"><button className="primary-button" disabled={busy} onClick={() => void action("welcome-dismiss")}>{translate("chatgpt.gotIt", language)}</button></div></section></div>}
     </div>}
   </div>;
 }

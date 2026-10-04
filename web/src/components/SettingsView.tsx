@@ -3,7 +3,7 @@ import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
 import type { CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
-import { ChatGPTSettings, PlanUsageLink, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
+import { ChatGPTSettings, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { StorageView } from "./StorageView";
@@ -261,7 +261,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         </ConfigSection>
         <ConfigSection title={translate("settings.llmSampling", language)} description={translate("settings.llmSamplingHint", language)}>
           <Field className="grid-span" label={translate("settings.globalPreset", language)}><select value={config.llm.preset} onChange={(event) => update((draft) => { draft.llm.preset = event.target.value; })}>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
-          {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select>{usesPlan(stage) && <PlanUsageLink language={language} />}</Field>)}
+          {stagePresetFields.map(([stage, label]) => <Field label={label} help={translate("settings.presetEmptyHint", language)} key={stage}><select value={config.llm[`preset_${stage}`]} onChange={(event) => update((draft) => { draft.llm[`preset_${stage}`] = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>)}
           <NumberField label={translate("settings.tempTerms", language)} value={config.llm.temperature_terminology} min={0} step={0.1} disabled={usesPlan("terminology")} help={translate(usesPlan("terminology") ? "chatgpt.temperatureHint" : "settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology = value; })} />
           <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} disabled={usesPlan("terminology_decision")} help={translate(usesPlan("terminology_decision") ? "chatgpt.temperatureHint" : "settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
           <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} disabled={usesPlan("content_summary")} help={translate(usesPlan("content_summary") ? "chatgpt.temperatureHint" : "settings.temperatureHint", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
@@ -482,7 +482,6 @@ function PresetSettings({ language }: { language: Language }) {
           <>
             {error && <div className="error-banner">{error}</div>}
             {message && <p className="success-text">{message}</p>}
-            {isPlan && <PlanUsageLink language={language} />}
             <div className="config-grid preset-fields">
               <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value;
                   if (draft.adapter_id === "chatgpt-plan") {

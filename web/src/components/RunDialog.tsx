@@ -1,4 +1,3 @@
-import { PlanUsageLink } from "./ChatGPTSettings";
 import { useState } from "react";
 import { translate, type Language } from "../i18n";
 import type { RunDecision, TaskOptions } from "../types";
@@ -92,7 +91,6 @@ export function RunDialog({
           <span>{translate("runDialog.currentPreset", language)}</span>
           <strong><code>{options.preset.id}</code></strong>
           <small>{options.preset.model}</small>
-          {options.preset.chatgpt_plan && <PlanUsageLink language={language} />}
         </div>
         <div className="run-counts">
           <span><strong>{options.selected}</strong>{translate("runDialog.total", language)}</span>
