@@ -34,9 +34,11 @@ def oauth_server(monkeypatch):
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"models": [{"slug": "visible", "display_name": "Visible model", "visibility": "list"}, {"slug": "hidden", "visibility": "hidden"}]})
         form = parse_qs(request.content.decode())
+        if options.get("refresh_transient") and form["grant_type"] == ["refresh_token"]:
+            return httpx.Response(503, json={"error": "temporarily_unavailable"})
         if options.get("refresh_error") and form["grant_type"] == ["refresh_token"]:
             return httpx.Response(400, json={"error": "invalid_grant"})
-        token = jwt.encode({"iss": ISSUER, "aud": form["client_id"][0], "sub": options["subject"], "email": "test@example.com", "exp": time.time() + 3600, "nonce": options["nonce"]}, key, algorithm="RS256", headers={"kid": "test"})
+        token = jwt.encode({"iss": ISSUER, "aud": options.get("audience", form["client_id"][0]), "sub": options["subject"], "email": "test@example.com", "exp": options.get("expiry", time.time() + 3600), "nonce": options["nonce"]}, key, algorithm="RS256", headers={"kid": "test"})
         return httpx.Response(200, json={"access_token": "access-secret", "refresh_token": "refresh-secret", "id_token": token, "token_type": "Bearer", "expires_in": 3600, "scope": options["scope"]})
 
     original = httpx.AsyncClient
@@ -63,7 +65,7 @@ def test_login_identity_permissions_and_secret_storage(oauth_server):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("change", [{"nonce": "wrong"}, {"subject": "other"}])
+@pytest.mark.parametrize("change", [{"nonce": "wrong"}, {"subject": "other"}, {"expiry": 0}, {"audience": "other-client"}])
 def test_invalid_identity_does_not_replace_connection(oauth_server, change):
     async def run():
         connection = ChatGPTConnection()
@@ -130,4 +132,25 @@ def test_loopback_state_cancel_and_browser_failure(monkeypatch):
         with pytest.raises(AppError, match="浏览器"):
             await connection.login()
         assert not connection.summary()["pending"]
+    asyncio.run(run())
+
+
+def test_loopback_success_and_single_login(oauth_server, monkeypatch):
+    async def run():
+        connection = ChatGPTConnection()
+        urls = []
+        monkeypatch.setattr("app.chatgpt_oauth.webbrowser.open", lambda url: urls.append(url) or True)
+        await connection.login()
+        with pytest.raises(AppError, match="正在进行"):
+            await connection.login()
+        query = parse_qs(urlsplit(urls[0]).query)
+        oauth_server[1]["nonce"] = query["nonce"][0]
+        async with oauth_server[2](trust_env=False) as client:
+            response = await client.get(query["redirect_uri"][0], params={"state": query["state"][0], "code": "secret", "client_id": "oaiapp_test"})
+        assert response.status_code == 200
+        await connection.task
+        assert connection.summary()["plan_enabled"]
+        with pytest.raises(httpx.ConnectError):
+            async with oauth_server[2](trust_env=False) as client:
+                await client.get(query["redirect_uri"][0])
     asyncio.run(run())

@@ -3605,7 +3605,7 @@ def test_web_task_options_report_mixed_fingerprints_and_reject_missing_choice(
     assert options.json()["completed"] == 1
     assert options.json()["current_fingerprint_completed"] == 0
     assert options.json()["mismatched_fingerprint_completed"] == 1
-    assert options.json()["preset"] == {"id": "default", "model": "example-model"}
+    assert options.json()["preset"] == {"id": "default", "model": "example-model", "chatgpt_plan": False}
     assert options.json()["running_run"] is None
 
     undecided = client.post(
@@ -3765,11 +3765,13 @@ def test_web_task_options_report_effective_stage_preset(
     assert translation.json()["preset"] == {
         "id": "alternate",
         "model": "alternate-model",
+        "chatgpt_plan": False,
     }
     assert terminology.status_code == 200
     assert terminology.json()["preset"] == {
         "id": "default",
         "model": "example-model",
+        "chatgpt_plan": False,
     }
 
 
@@ -3830,6 +3832,7 @@ def test_web_task_options_require_explicit_running_run_action(
         assert options["preset"] == {
             "id": "google-gemini",
             "model": "gemini-2.5-flash",
+            "chatgpt_plan": False,
         }
 
         undecided = client.post(

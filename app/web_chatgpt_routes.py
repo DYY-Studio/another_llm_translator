@@ -59,7 +59,7 @@ def register_chatgpt_routes(app: FastAPI) -> None:
         if set(payload) != {"proxy_url"}:
             raise UsageError("ChatGPT 连接设置只接受 proxy_url")
         await connection.configure(payload["proxy_url"])
-        return connection.summary()
+        return {**connection.summary(), "local": True}
 
     @app.post("/api/v1/chatgpt/connection/{action}")
     async def operate(action: str, request: Request) -> dict:
@@ -67,8 +67,8 @@ def register_chatgpt_routes(app: FastAPI) -> None:
         operations = {"login": connection.login, "cancel": connection.cancel, "logout": connection.logout, "welcome-dismiss": connection.dismiss_welcome}
         if action == "login-new":
             await connection.login(new_account=True)
-            return connection.summary()
+            return {**connection.summary(), "local": True}
         if action not in operations:
             raise UsageError("未知 ChatGPT 连接操作")
         await operations[action]()
-        return connection.summary()
+        return {**connection.summary(), "local": True}

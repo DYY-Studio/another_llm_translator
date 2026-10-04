@@ -117,11 +117,33 @@ def test_models_and_lan_session_boundary(tmp_path, oauth_server):
     with TestClient(app, client=("192.168.1.20", 12345)) as client:
         assert client.get("/api/v1/chatgpt/connection").status_code == 401
         assert client.post("/api/v1/global/presets/openai-responses/models", json=definition).status_code == 401
+        assert client.get("/api/v1/projects/demo/task-options/translation").status_code == 401
         assert client.post("/api/v1/projects/demo/tasks", json={"stage": "translation"}).status_code == 401
         assert client.post("/api/v1/auth/login", json={"username": "owner", "password": "password"}).status_code == 200
+        assert client.get("/api/v1/projects/demo/task-options/translation").json()["preset"]["chatgpt_plan"]
         summary = client.get("/api/v1/chatgpt/connection").json()
         assert summary["connected"] and not summary["local"]
         assert client.post("/api/v1/chatgpt/connection/logout").status_code == 400
+        definition["model"] = ""
         response = client.post("/api/v1/global/presets/openai-responses/models", json=definition)
         assert response.status_code == 200, response.text
         assert response.json()["models"] == [{"id": "visible", "display": "Visible model"}]
+
+
+@pytest.mark.asyncio
+async def test_plan_refresh_transient_errors_obey_retry_limit(tmp_path, oauth_server):
+    from app.errors import ExternalError
+    connection = ChatGPTConnection()
+    await connection.complete_login("code", "oaiapp_test", "nonce", "verifier", "http://127.0.0.1:1455/auth/callback", None)
+    tokens = connection.tokens("oaiapp_test")
+    tokens["expires_at"] = 0
+    connection.save_tokens("oaiapp_test", tokens)
+    oauth_server[1]["refresh_transient"] = True
+    current = plan_config(tmp_path)
+    current["retry"].update(http_max_attempts=2, base_delay_seconds=0, jitter_seconds=0)
+    async with oauth_server[2](transport=httpx.MockTransport(lambda r: pytest.fail("inference before refresh"))) as client:
+        async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
+            with pytest.raises(ExternalError, match="503"):
+                await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)
+    assert len([r for r in oauth_server[0] if b"grant_type=refresh_token" in r.content]) == 2
+    assert connection.summary()["connected"]

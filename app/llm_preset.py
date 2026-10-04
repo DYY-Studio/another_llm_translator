@@ -57,7 +57,7 @@ def preset_path(root: Path, preset_id: str) -> Path:
     return root / "llm_presets" / f"{preset_id}.json"
 
 
-def load_llm_preset(path: Path) -> LLMPreset:
+def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
     try:
         raw = path.read_bytes()
         value = json.loads(raw)
@@ -108,6 +108,8 @@ def load_llm_preset(path: Path) -> LLMPreset:
         "base_url",
         "model",
     ):
+        if key == "model" and model_discovery and value["adapter_id"] == "chatgpt-plan" and value[key] == "":
+            continue
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
     credential = value["credential"]

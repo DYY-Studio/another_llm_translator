@@ -1,3 +1,4 @@
+import { PlanUsageLink } from "./ChatGPTSettings";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import {
@@ -240,7 +241,7 @@ export function ContinuousRunDialog({
                     {stage === "terminology_decision" && startStage === "terminology" && (
                       <small>{translate("continuousRun.decisionInserted", language)}</small>
                     )}
-                    {step?.preset && <small>{step.preset.id} · {step.preset.model} · {step.selected}</small>}
+                    {step?.preset && <><small>{step.preset.id} · {step.preset.model} · {step.selected}</small>{step.preset.chatgpt_plan && <PlanUsageLink language={language} />}</>}
                     {step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
                     {stageBlocking.map((item) => (
                       <small className="error-text" key={item.code}>

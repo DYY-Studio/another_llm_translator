@@ -763,6 +763,7 @@ def register_task_routes(
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
     async def get_task_options(
+        request: Request,
         name: str,
         stage: str,
         include_summaries: bool = False,
@@ -771,6 +772,10 @@ def register_task_routes(
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
     ) -> dict[str, Any]:
+        from .config import LLM_MODEL_STAGES
+        from .web_chatgpt_routes import require_project_plan_session
+        checked_stages = (stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        require_project_plan_session(request, project(name), checked_stages)
         return task_options(
             project(name),
             stage,

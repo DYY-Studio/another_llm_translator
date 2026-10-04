@@ -594,6 +594,7 @@ export interface TaskOptions {
   preset: {
     id: string;
     model: string;
+    chatgpt_plan: boolean;
   };
   selected: number;
   completed: number;
@@ -669,7 +670,7 @@ export interface ContinuousOptionStep {
   failed?: number;
   pending?: number;
   reason?: string;
-  preset?: { id: string; model: string };
+  preset?: { id: string; model: string; chatgpt_plan: boolean };
   running_run?: RunningRun | null;
   current_fingerprint_completed?: number;
   mismatched_fingerprint_completed?: number;
@@ -975,7 +976,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain";
+  kind: "environment" | "keychain" | "chatgpt";
   name: string;
 }
 

@@ -74,6 +74,7 @@ class ChatGPTConnection:
         self.path = self.root / "connection.json"
         self.service = "another-llm-translator-chatgpt-" + hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
         self.task: asyncio.Task[None] | None = None
+        self._login_lock = asyncio.Lock()
         self.error = ""
         self._metadata: dict[str, Any] | None = None
 
@@ -143,6 +144,7 @@ class ChatGPTConnection:
         return {
             "email": registration.get("email", ""),
             "connected": tokens is not None,
+            "can_switch_account": not active and bool(state["registrations"]),
             "plan_enabled": bool(tokens and PLAN_SCOPE in tokens["scopes"] and "resource.invoke" in tokens["scopes"]),
             "proxy_url": state["proxy_url"],
             "pending": self.task is not None and not self.task.done(),
@@ -162,7 +164,11 @@ class ChatGPTConnection:
         if not isinstance(proxy_url, str):
             raise UsageError("ChatGPT 代理地址必须是字符串")
         if proxy_url:
-            parsed = urlsplit(proxy_url)
+            try:
+                parsed = urlsplit(proxy_url)
+                parsed.port
+            except ValueError:
+                raise UsageError("ChatGPT 代理地址无效") from None
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
                 raise UsageError("ChatGPT 代理必须是不含凭据的 HTTP/HTTPS 地址")
         if self.summary()["pending"]:
@@ -185,7 +191,9 @@ class ChatGPTConnection:
                 return await client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             # Exception strings can contain URLs or credential-bearing headers.
-            raise ExternalError("ChatGPT 网络请求失败，请检查连接代理") from exc
+            error = ExternalError("ChatGPT 网络请求失败，请检查连接代理")
+            error.params = {"retryable": True}
+            raise error from exc
 
     async def metadata(self) -> dict[str, Any]:
         if self._metadata is None:
@@ -213,7 +221,7 @@ class ChatGPTConnection:
             code = value.get("error")
             code = code if isinstance(code, str) and code.isascii() and all(c.isalnum() or c == "_" for c in code) and len(code) < 100 else "oauth_error"
             error = ExternalError(f"ChatGPT OAuth 请求失败：HTTP {response.status_code} ({code})")
-            error.params = {"oauth_code": code}
+            error.params = {"oauth_code": code, "retryable": response.status_code == 429 or response.status_code >= 500}
             raise error
         return value
 
@@ -321,8 +329,12 @@ class ChatGPTConnection:
         return warning
 
     async def login(self, *, new_account: bool = False) -> None:
-        if self.summary()["pending"]:
+        if self._login_lock.locked() or self.summary()["pending"]:
             raise UsageError("ChatGPT 登录正在进行")
+        async with self._login_lock:
+            await self._login(new_account=new_account)
+
+    async def _login(self, *, new_account: bool) -> None:
         self.error = ""
         async with self.locked():
             state = self.read()
@@ -346,15 +358,14 @@ class ChatGPTConnection:
                 params["prompt"] = "consent"
         else:
             params["agent_name_hint"] = "Another LLM Translator"
+        self.task = asyncio.create_task(self.finish_login(server, future, state["active"], nonce, verifier, redirect))
         try:
             opened = await asyncio.to_thread(webbrowser.open, ISSUER + "/api/accounts/authorize?" + urlencode(params))
         except Exception:
             opened = False
         if not opened:
-            server.close()
-            await server.wait_closed()
+            await self.cancel()
             raise UsageError("无法打开系统浏览器，请检查本机浏览器配置")
-        self.task = asyncio.create_task(self.finish_login(server, future, state["active"], nonce, verifier, redirect))
 
     async def finish_login(self, server: asyncio.Server, future: asyncio.Future[dict[str, str]], expected: str | None, nonce: str, verifier: str, redirect: str) -> None:
         try:

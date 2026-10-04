@@ -857,6 +857,17 @@ class LLMClient:
                     session_id=self.run_id,
                     request_id=request_id,
                 )
+            except ExternalError as exc:
+                if lease is not None:
+                    await lease.release()
+                if isinstance(exc, FatalExternalError) or not exc.params.get("retryable") or attempt == attempts:
+                    raise
+                self.logger.warning("ChatGPT token request failed; retry=%d/%d", attempt, attempts)
+                if diagnostics is not None:
+                    diagnostics.retried()
+                await self._backoff(attempt)
+                attempt += 1
+                continue
             except BaseException:
                 if lease is not None:
                     await lease.release()

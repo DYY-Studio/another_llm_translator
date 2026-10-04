@@ -164,7 +164,7 @@ def register_resource_routes(
         (user_root() / ".welcome-seen").write_text("1", encoding="utf-8")
 
     def validate_preset_payload(
-        preset_id: str, payload: dict[str, Any]
+        preset_id: str, payload: dict[str, Any], *, model_discovery: bool = False
     ) -> LLMPreset:
         if payload.get("preset_id") != preset_id:
             raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
@@ -181,7 +181,7 @@ def register_resource_routes(
             json.dump(payload, handle, ensure_ascii=False)
             temporary = Path(handle.name)
         try:
-            preset = load_llm_preset(temporary)
+            preset = load_llm_preset(temporary, model_discovery=model_discovery)
             adapter = load_json_adapter(
                 effective_path(
                     f"llm_adapters/{preset.adapter_id}.json",
@@ -785,7 +785,7 @@ def register_resource_routes(
     ) -> dict[str, Any]:
         if key_index < 1:
             raise UsageError("key_index 必须从 1 开始")
-        preset = validate_preset_payload(preset_id, payload)
+        preset = validate_preset_payload(preset_id, payload, model_discovery=True)
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
@@ -812,7 +812,7 @@ def register_resource_routes(
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
         try:
-            async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=not plan) as client:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
                 response = await client.get(url, headers=headers)
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
