@@ -30,19 +30,22 @@
 .task-step small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
 .task-steps.compact .task-step { padding: 5px 7px; }
 .task-steps.task-step-track { display: grid; grid-template-rows: auto auto; gap: 5px; min-width: 0; }
-.task-step-track-stages { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); align-items: start; gap: 0; min-width: 0; }
-.task-step-track-stages::before { position: absolute; z-index: 0; top: 7px; inset-inline: 8px; height: 2px; background: var(--border); content: ""; }
-.task-step-track-item { position: relative; z-index: 1; display: grid; grid-template-columns: 16px max-content; grid-template-rows: 16px; column-gap: 6px; min-width: 0; padding: 0 4px; }
-.task-step-track-node { position: relative; z-index: 1; grid-column: 1; grid-row: 1; width: 14px; height: 14px; border: 2px solid var(--status-idle); border-radius: 50%; background: var(--surface-raised); }
+.task-step-track-stages { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); align-items: start; gap: 0; min-width: 0; }
+.task-step-track-item { position: relative; z-index: 1; display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-rows: 16px 16px; column-gap: 6px; min-width: 0; padding: 0 4px; }
+.task-step-track-node { position: relative; z-index: 1; grid-column: 1; grid-row: 2; width: 14px; height: 14px; border: 2px solid var(--status-idle); border-radius: 50%; background: var(--surface-raised); }
 .task-step-track-item.status-running .task-step-track-node, .task-step-track-item.status-cancelling .task-step-track-node { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .task-step-track-item.status-completed .task-step-track-node { border-color: var(--status-success); background: var(--status-success); }
 .task-step-track-item.status-skipped .task-step-track-node, .task-step-track-item.status-cancelled .task-step-track-node { border-color: var(--status-warning); background: var(--status-warning); }
 .task-step-track-item.status-failed .task-step-track-node { border-color: var(--danger); background: var(--danger); }
-.task-step-track-label { position: relative; z-index: 1; grid-column: 2; grid-row: 1; padding-inline: 2px; color: var(--muted); background: var(--surface-raised); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.task-step-track-label { position: relative; z-index: 1; grid-column: 1 / -1; grid-row: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .task-step-track-item.current .task-step-track-label { color: var(--accent-text); font-weight: 650; }
-.task-step-track-current-progress { display: none; position: relative; z-index: 1; grid-column: 2; grid-row: 2; padding-inline: 2px; color: var(--muted); background: var(--surface-raised); font-size: 10px; line-height: 15px; white-space: nowrap; }
-.task-step-track-item-connector { display: none; }
-.task-step-track-progress { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.task-step-track-item-connector { position: absolute; top: 22px; left: 11px; right: -11px; display: flex; height: 3px; overflow: hidden; background: var(--border); }
+.task-step-track-item:last-child .task-step-track-item-connector { right: 4px; border-radius: 0 999px 999px 0; }
+.task-step-track-item-connector > span { display: block; height: 100%; transition: width .2s ease; }
+.task-step-track-connector-completed { background: var(--status-success); }
+.task-step-track-connector-failed { background: var(--danger); }
+.status-skipped .task-step-track-connector-completed { background: var(--status-warning); }
+.task-step-track-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
 .task-step-track-progress-bar { display: flex; min-width: 0; height: 5px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .task-step-track-progress-bar > span { display: block; height: 100%; transition: width .2s ease; }
 .task-step-track-progress strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }

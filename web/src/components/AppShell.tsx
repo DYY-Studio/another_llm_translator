@@ -52,6 +52,10 @@ function TaskSteps({
           {steps.map((step) => {
             const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
             const current = step.stage === currentStage;
+            const failedPercent = status === "queued" || status === "skipped" || !step.selected ? 0 : step.failed / step.selected * 100;
+            const completedPercent = status === "completed" || status === "skipped"
+              ? 100 - failedPercent
+              : status === "queued" || !step.selected ? 0 : step.completed / step.selected * 100;
             const label = translate(taskStageLabelKey(step.stage), language);
             const statusLabel = translate(`run.${status}`, language);
             const progress = translate("run.stepProgressCompact", language, {
@@ -69,13 +73,10 @@ function TaskSteps({
               >
                 <span className="task-step-track-node" aria-hidden="true" />
                 <span className="task-step-track-label">{label}</span>
-                {current && <small className="task-step-track-current-progress">{progress}</small>}
-                {current && (
-                  <span className="task-step-track-item-connector" aria-hidden="true">
-                    <span className="task-step-track-connector-completed" style={{ width: `${currentTotal ? currentCompleted / currentTotal * 100 : 0}%` }} />
-                    <span className="task-step-track-connector-failed" style={{ width: `${currentTotal ? currentFailed / currentTotal * 100 : 0}%` }} />
-                  </span>
-                )}
+                <span className="task-step-track-item-connector" aria-hidden="true">
+                  <span className="task-step-track-connector-completed" style={{ width: `${completedPercent}%` }} />
+                  <span className="task-step-track-connector-failed" style={{ width: `${failedPercent}%` }} />
+                </span>
               </div>
             );
           })}
@@ -89,11 +90,11 @@ function TaskSteps({
             aria-valuemax={currentTotal}
             aria-valuenow={currentCompleted + currentFailed}
           >
+            <strong>{currentProgress}</strong>
             <div className="task-step-track-progress-bar">
               <span className="progress-completed" style={{ width: `${currentTotal ? currentCompleted / currentTotal * 100 : 0}%` }} />
               <span className="progress-failed" style={{ width: `${currentTotal ? currentFailed / currentTotal * 100 : 0}%` }} />
             </div>
-            <strong>{currentProgress}</strong>
           </div>
         )}
       </div>
