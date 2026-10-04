@@ -1,0 +1,374 @@
+"""Local ChatGPT plan authorization and renewable sessions."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
+import uuid
+import webbrowser
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, AsyncIterator
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import httpx
+import jwt
+import keyring
+
+from .errors import ConfigError, ExternalError, FatalExternalError, UsageError
+from .locking import project_write_lock
+from .sqlite_storage import atomic_write_json
+from .user_config import user_root
+
+ISSUER = "https://auth.openai.com"
+RESOURCE = "https://api.openai.com/v1"
+USAGE_URL = "https://chatgpt.com/#settings/Usage"
+PLAN_SCOPE = "chatgpt.tokens.use.direct"
+SCOPES = "openid profile email offline_access resource.invoke " + PLAN_SCOPE
+_TERMINAL_REFRESH = {"invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"}
+
+
+class ChatGPTConnection:
+    def __init__(self) -> None:
+        self.root = user_root() / "chatgpt"
+        self.path = self.root / "connection.json"
+        self.service = "another-llm-translator-chatgpt-" + hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
+        self.task: asyncio.Task[None] | None = None
+        self.error = ""
+        self._metadata: dict[str, Any] | None = None
+
+    def read(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"host_id": "", "proxy_url": "", "active": None, "registrations": {}, "welcome_seen": False}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ConfigError("无法读取 ChatGPT 连接设置") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("registrations"), dict):
+            raise ConfigError("ChatGPT 连接设置格式无效")
+        return value
+
+    @asynccontextmanager
+    async def locked(self) -> AsyncIterator[None]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 35
+        while True:
+            lock = project_write_lock(self.root)
+            try:
+                lock.__enter__()
+                break
+            except UsageError:
+                if time.monotonic() >= deadline:
+                    raise UsageError("ChatGPT 连接正在被另一进程使用，请稍后重试") from None
+                await asyncio.sleep(0.05)
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+
+    def tokens(self, client_id: str) -> dict[str, Any] | None:
+        try:
+            raw = keyring.get_password(self.service, client_id)
+        except keyring.errors.KeyringError as exc:
+            raise ConfigError("无法读取 ChatGPT 系统钥匙串凭据") from exc
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError as exc:
+            raise ConfigError("ChatGPT 系统钥匙串凭据格式无效") from exc
+        if not isinstance(value, dict):
+            raise ConfigError("ChatGPT 系统钥匙串凭据格式无效")
+        return value
+
+    def save_tokens(self, client_id: str, tokens: dict[str, Any]) -> None:
+        try:
+            keyring.set_password(self.service, client_id, json.dumps(tokens))
+        except keyring.errors.KeyringError as exc:
+            raise ConfigError("无法保存 ChatGPT 系统钥匙串凭据") from exc
+
+    def clear_tokens(self, client_id: str) -> None:
+        if self.tokens(client_id) is None:
+            return
+        try:
+            keyring.delete_password(self.service, client_id)
+        except keyring.errors.KeyringError as exc:
+            raise ConfigError("无法删除 ChatGPT 系统钥匙串凭据") from exc
+
+    def summary(self) -> dict[str, Any]:
+        state = self.read()
+        active = state["active"]
+        registration = state["registrations"].get(active, {})
+        tokens = self.tokens(active) if active else None
+        return {
+            "email": registration.get("email", ""),
+            "connected": tokens is not None,
+            "plan_enabled": bool(tokens and PLAN_SCOPE in tokens["scopes"] and "resource.invoke" in tokens["scopes"]),
+            "proxy_url": state["proxy_url"],
+            "pending": self.task is not None and not self.task.done(),
+            "error": self.error,
+            "welcome_required": bool(tokens and PLAN_SCOPE in tokens["scopes"] and not state["welcome_seen"]),
+            "usage_url": USAGE_URL,
+        }
+
+    def identity(self) -> tuple[str, str]:
+        state = self.read()
+        active = state["active"]
+        if not active:
+            raise FatalExternalError("请在本机设置页登录 ChatGPT 并授权使用 Plan")
+        return active, state["registrations"][active]["session"]
+
+    async def configure(self, proxy_url: str) -> None:
+        if not isinstance(proxy_url, str):
+            raise UsageError("ChatGPT 代理地址必须是字符串")
+        if proxy_url:
+            parsed = urlsplit(proxy_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                raise UsageError("ChatGPT 代理必须是不含凭据的 HTTP/HTTPS 地址")
+        if self.summary()["pending"]:
+            raise UsageError("请先结束当前 ChatGPT 登录")
+        async with self.locked():
+            state = self.read()
+            state["proxy_url"] = proxy_url
+            atomic_write_json(self.path, state)
+            self._metadata = None
+
+    async def dismiss_welcome(self) -> None:
+        async with self.locked():
+            state = self.read()
+            state["welcome_seen"] = True
+            atomic_write_json(self.path, state)
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        try:
+            async with httpx.AsyncClient(proxy=self.read()["proxy_url"] or None, timeout=30, trust_env=False) as client:
+                return await client.request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            # Exception strings can contain URLs or credential-bearing headers.
+            raise ExternalError("ChatGPT 网络请求失败，请检查连接代理") from exc
+
+    async def metadata(self) -> dict[str, Any]:
+        if self._metadata is None:
+            response = await self.request("GET", ISSUER + "/.well-known/openid-configuration")
+            value = self.response_json(response)
+            if value.get("issuer") != ISSUER:
+                raise ExternalError("ChatGPT OIDC issuer 无效")
+            for field in ("jwks_uri", "revocation_endpoint"):
+                parsed = urlsplit(str(value.get(field, "")))
+                if parsed.scheme != "https" or parsed.hostname != "auth.openai.com" or parsed.username or parsed.password:
+                    raise ExternalError("ChatGPT OIDC endpoint 无效")
+            self._metadata = value
+        return self._metadata
+
+    @staticmethod
+    def response_json(response: httpx.Response) -> dict[str, Any]:
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise ExternalError(f"ChatGPT 响应无效：HTTP {response.status_code}") from exc
+        if not isinstance(value, dict):
+            raise ExternalError("ChatGPT 响应不是对象")
+        if response.status_code != 200:
+            # Only a short protocol error identifier is safe to include.
+            code = value.get("error")
+            code = code if isinstance(code, str) and code.isascii() and all(c.isalnum() or c == "_" for c in code) and len(code) < 100 else "oauth_error"
+            error = ExternalError(f"ChatGPT OAuth 请求失败：HTTP {response.status_code} ({code})")
+            error.params = {"oauth_code": code}
+            raise error
+        return value
+
+    @staticmethod
+    def token_record(value: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
+        for field in ("access_token", "refresh_token"):
+            if not isinstance(value.get(field), str) or not value[field]:
+                raise ExternalError(f"ChatGPT 响应缺少 {field}")
+        if str(value.get("token_type", "")).lower() != "bearer" or not isinstance(value.get("expires_in"), int) or value["expires_in"] <= 0:
+            raise ExternalError("ChatGPT 令牌类型或有效期无效")
+        scope = value.get("scope")
+        if scope is not None and not isinstance(scope, str):
+            raise ExternalError("ChatGPT 授权 scope 无效")
+        if scope is None and previous is None:
+            raise ExternalError("ChatGPT 响应缺少授权 scope")
+        return {
+            "access_token": value["access_token"], "refresh_token": value["refresh_token"],
+            "id_token": value.get("id_token") or (previous or {}).get("id_token"),
+            "scopes": scope.split() if scope is not None else previous["scopes"],
+            "expires_at": time.time() + value["expires_in"],
+        }
+
+    async def complete_login(self, code: str, client_id: str, nonce: str, verifier: str, redirect_uri: str, expected_client: str | None) -> None:
+        if not client_id or client_id == "dynamic_agent_client" or (expected_client and client_id != expected_client):
+            raise ExternalError("ChatGPT 登录返回的 client ID 不匹配")
+        async with self.locked():
+            state = self.read()
+            if state["active"] != expected_client:
+                raise ExternalError("ChatGPT 连接已变更，请重新登录")
+            value = self.response_json(await self.request("POST", ISSUER + "/api/accounts/oauth/token", data={"grant_type": "authorization_code", "client_id": client_id, "code": code, "code_verifier": verifier, "redirect_uri": redirect_uri, "resource": RESOURCE}))
+            metadata = await self.metadata()
+            jwks = self.response_json(await self.request("GET", metadata["jwks_uri"]))
+            try:
+                header = jwt.get_unverified_header(value["id_token"])
+                keys = [key for key in jwks["keys"] if key.get("kid") == header.get("kid")]
+                if len(keys) != 1:
+                    raise ValueError("unknown signing key")
+                key = jwt.PyJWK.from_dict(keys[0])
+                if header.get("alg") not in {"RS256", "ES256"} or key.algorithm_name != header["alg"]:
+                    raise ValueError("invalid signing algorithm")
+                identity = jwt.decode(value["id_token"], key.key, algorithms=[header["alg"]], audience=client_id, issuer=ISSUER, options={"require": ["exp", "iss", "aud", "sub", "nonce"]})
+                if not isinstance(identity["sub"], str) or not identity["sub"] or not hmac.compare_digest(identity["nonce"], nonce):
+                    raise ValueError("invalid identity")
+                registration = state["registrations"].get(client_id)
+                if registration and registration["subject"] != identity["sub"]:
+                    raise ValueError("account changed")
+            except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
+                raise ExternalError("ChatGPT 身份验证失败，未替换现有连接") from exc
+            tokens = self.token_record(value)
+            if not isinstance(tokens["id_token"], str):
+                raise ExternalError("ChatGPT 响应缺少 ID Token")
+            self.save_tokens(client_id, tokens)
+            state["registrations"][client_id] = {"subject": identity["sub"], "email": identity.get("email", ""), "session": uuid.uuid4().hex}
+            state["active"] = client_id
+            atomic_write_json(self.path, state)
+
+    async def access_token(self, expected: tuple[str, str]) -> str:
+        async with self.locked():
+            if self.identity() != expected:
+                raise FatalExternalError("ChatGPT 连接已变更，请重新启动任务")
+            tokens = self.tokens(expected[0])
+            if not tokens:
+                raise FatalExternalError("请在本机设置页重新登录 ChatGPT")
+            if not {PLAN_SCOPE, "resource.invoke"}.issubset(tokens["scopes"]):
+                raise FatalExternalError("ChatGPT 尚未授权使用 Plan，请在本机设置页重新授权")
+            if tokens["expires_at"] <= time.time() + 60:
+                try:
+                    value = self.response_json(await self.request("POST", ISSUER + "/api/accounts/oauth/token", data={"grant_type": "refresh_token", "client_id": expected[0], "refresh_token": tokens["refresh_token"], "resource": RESOURCE}))
+                except ExternalError as exc:
+                    if exc.params.get("oauth_code") in _TERMINAL_REFRESH:
+                        self.clear_tokens(expected[0])
+                        raise FatalExternalError("ChatGPT 会话已失效，请在本机设置页重新登录") from exc
+                    raise
+                tokens = self.token_record(value, tokens)
+                self.save_tokens(expected[0], tokens)
+                if not {PLAN_SCOPE, "resource.invoke"}.issubset(tokens["scopes"]):
+                    raise FatalExternalError("ChatGPT Plan 授权已失效，请重新授权")
+            return tokens["access_token"]
+
+    async def logout(self) -> str:
+        await self.cancel()
+        warning = ""
+        async with self.locked():
+            state = self.read()
+            active = state["active"]
+            tokens = self.tokens(active) if active else None
+            if tokens:
+                try:
+                    endpoint = (await self.metadata())["revocation_endpoint"]
+                    for attempt in range(2):
+                        response = await self.request("POST", endpoint, data={"token": tokens["refresh_token"], "token_type_hint": "refresh_token", "client_id": active})
+                        if response.status_code < 500:
+                            break
+                        await asyncio.sleep(0.2)
+                    if response.status_code != 200:
+                        raise ExternalError("revocation failed")
+                except ExternalError:
+                    warning = "已在本机退出；未确认远端撤销，请到 ChatGPT 设置中断开连接"
+                self.clear_tokens(active)
+            if active:
+                state["last_client"] = active
+            state["active"] = None
+            atomic_write_json(self.path, state)
+        self.error = warning
+        return warning
+
+    async def login(self, *, new_account: bool = False) -> None:
+        if self.summary()["pending"]:
+            raise UsageError("ChatGPT 登录正在进行")
+        self.error = ""
+        async with self.locked():
+            state = self.read()
+            if new_account and state["active"]:
+                raise UsageError("请先退出当前 ChatGPT 连接，再更换账户")
+            if not new_account and not state["active"] and state.get("last_client"):
+                state["active"] = state["last_client"]
+                atomic_write_json(self.path, state)
+            if not state["host_id"]:
+                state["host_id"] = "urn:uuid:" + str(uuid.uuid4())
+                atomic_write_json(self.path, state)
+        future: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
+        verifier, nonce, oauth_state = (secrets.token_urlsafe(32) for _ in range(3))
+        server = await asyncio.start_server(lambda r, w: self.callback(r, w, future, oauth_state), "127.0.0.1", 0, limit=8192)
+        redirect = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/auth/callback"
+        params = {"client_id": state["active"] or "dynamic_agent_client", "ext_agent_host_id": state["host_id"], "redirect_uri": redirect, "response_type": "code", "scope": SCOPES, "resource": RESOURCE, "state": oauth_state, "nonce": nonce, "code_challenge_method": "S256", "code_challenge": base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")}
+        if state["active"]:
+            registration = state["registrations"][state["active"]]
+            params["login_hint"] = registration["email"]
+            if not self.summary()["plan_enabled"]:
+                params["prompt"] = "consent"
+        else:
+            params["agent_name_hint"] = "Another LLM Translator"
+        try:
+            opened = await asyncio.to_thread(webbrowser.open, ISSUER + "/api/accounts/authorize?" + urlencode(params))
+        except Exception:
+            opened = False
+        if not opened:
+            server.close()
+            await server.wait_closed()
+            raise UsageError("无法打开系统浏览器，请检查本机浏览器配置")
+        self.task = asyncio.create_task(self.finish_login(server, future, state["active"], nonce, verifier, redirect))
+
+    async def finish_login(self, server: asyncio.Server, future: asyncio.Future[dict[str, str]], expected: str | None, nonce: str, verifier: str, redirect: str) -> None:
+        try:
+            result = await asyncio.wait_for(future, timeout=300)
+            if "error" in result:
+                raise ExternalError("ChatGPT 登录被拒绝或取消")
+            await self.complete_login(result["code"], result.get("client_id") or expected or "", nonce, verifier, redirect, expected)
+        except TimeoutError:
+            self.error = "ChatGPT 登录超时，请重新登录"
+        except (ExternalError, ConfigError, UsageError) as exc:
+            self.error = str(exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.error = "ChatGPT 登录失败，请重新登录"
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def callback(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, future: asyncio.Future[dict[str, str]], oauth_state: str) -> None:
+        status = "400 Bad Request"
+        try:
+            headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
+            method, target, _ = headers.split(b"\r\n", 1)[0].decode("ascii").split(" ")
+            url = urlsplit(target)
+            query = parse_qs(url.query, strict_parsing=True)
+            values = {key: value[0] for key, value in query.items() if len(value) == 1}
+            if method != "GET" or url.path != "/auth/callback" or future.done() or not hmac.compare_digest(values.get("state", ""), oauth_state):
+                raise ValueError("invalid callback")
+            if not values.get("code") and not values.get("error"):
+                raise ValueError("missing result")
+            future.set_result(values)
+            status = "200 OK"
+        except (ValueError, UnicodeError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            pass
+        body = "授权回调已收到，请返回应用查看结果。" if status == "200 OK" else "授权回调无效，请返回应用重新登录。"
+        data = body.encode("utf-8")
+        writer.write(f"HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode() + data)
+        try:
+            await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            writer.close()
+
+    async def cancel(self) -> None:
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        self.task = None
