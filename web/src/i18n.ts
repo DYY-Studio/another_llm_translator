@@ -4,14 +4,6 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
-    "chatgpt.usageExperiment": "用量查询（实验）",
-    "chatgpt.usageExperimentHint": "分别显示查询端点和最近一次 Plan 推理响应头返回的用量窗口；用量桶是否适用于本应用仍待验证。",
-    "chatgpt.queryUsage": "查询端点",
-    "chatgpt.readUsageHeaders": "读取已采集用量",
-    "chatgpt.noUsage": "尚无可显示的用量窗口",
-    "chatgpt.remaining": "剩余",
-    "chatgpt.resetAt": "重置时间",
-
     "chatgpt.connection": "账户与连接",
     "chatgpt.connectionHint": "引用全局 ChatGPT 连接。",
     "chatgpt.streamingHint": "ChatGPT Plan 要求流式请求。",
@@ -1220,13 +1212,6 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
-    "chatgpt.usageExperiment": "Usage query (experimental)",
-    "chatgpt.usageExperimentHint": "Displays endpoint and latest Plan inference header windows separately. Bucket applicability to this app remains to be verified.",
-    "chatgpt.queryUsage": "Query endpoint",
-    "chatgpt.readUsageHeaders": "Read collected usage",
-    "chatgpt.noUsage": "No usage windows available",
-    "chatgpt.remaining": "Remaining",
-    "chatgpt.resetAt": "Resets at",
     "chatgpt.connection": "Account and connection",
     "chatgpt.connectionHint": "Uses the global ChatGPT connection.",
     "chatgpt.streamingHint": "ChatGPT Plan requires streaming requests.",

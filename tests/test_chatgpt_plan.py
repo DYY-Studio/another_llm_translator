@@ -53,15 +53,11 @@ async def test_plan_inference_refreshes_each_attempt_without_changing_key_identi
     seen = []
     def handler(request):
         seen.append(request)
-        response = stream_response({"type": "response.output_text.delta", "delta": "translation"}, {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
-        response.headers["x-codex-primary-used-percent"] = "25"
-        response.headers["x-codex-primary-window-minutes"] = "300"
-        return response
+        return stream_response({"type": "response.output_text.delta", "delta": "translation"}, {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
     async with oauth_server[2](transport=httpx.MockTransport(handler)) as client:
         async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
             result, _ = await llm.chat(messages=[{"role": "user", "content": "source"}], temperature=0, estimated_input_tokens=10)
             assert result.content == "translation"
-            assert connection.usage_snapshot()["headers"]["buckets"]["codex"]["primary"]["used_percent"] == 25
             key_ids = llm._key_ids
             tokens = connection.tokens("oaiapp_test")
             tokens["expires_at"] = 0
@@ -120,7 +116,6 @@ def test_models_and_lan_session_boundary(tmp_path, oauth_server):
     (root / "config.toml").write_text(dump_config(project_config))
     with TestClient(app, client=("192.168.1.20", 12345)) as client:
         assert client.get("/api/v1/chatgpt/connection").status_code == 401
-        assert client.get("/api/v1/chatgpt/usage").status_code == 401
         assert client.post("/api/v1/global/presets/openai-responses/models", json=definition).status_code == 401
         assert client.get("/api/v1/projects/demo/task-options/translation").status_code == 401
         assert client.post("/api/v1/projects/demo/tasks", json={"stage": "translation"}).status_code == 401
@@ -128,8 +123,6 @@ def test_models_and_lan_session_boundary(tmp_path, oauth_server):
         assert client.get("/api/v1/projects/demo/task-options/translation").json()["preset"]["chatgpt_plan"]
         summary = client.get("/api/v1/chatgpt/connection").json()
         assert summary["connected"] and not summary["local"]
-        assert client.get("/api/v1/chatgpt/usage").json() == {}
-        assert client.post("/api/v1/chatgpt/usage").status_code == 400
         assert client.post("/api/v1/chatgpt/connection/logout").status_code == 400
         definition["model"] = ""
         response = client.post("/api/v1/global/presets/openai-responses/models", json=definition)
