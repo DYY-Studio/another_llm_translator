@@ -8,7 +8,7 @@ import pytest
 
 from app.chatgpt_oauth import ChatGPTConnection
 from app.config import _resolve_llm_config, load_global_config
-from app.errors import ConfigError, FatalExternalError
+from app.errors import ConfigError, ExternalError, FatalExternalError
 from app.llm_adapter import load_json_adapter
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_preset import load_llm_preset
@@ -162,3 +162,25 @@ def test_plan_adapter_preview_uses_required_streaming(tmp_path):
         response = client.get("/api/v1/global/adapters/openai-compatible/preview")
         assert response.status_code == 200, response.text
         assert response.json()["body"]["stream"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", [None, "application/json"])
+async def test_plan_missing_content_type_warns_but_explicit_wrong_type_fails(tmp_path, oauth_server, content_type):
+    connection = ChatGPTConnection()
+    await connection.complete_login("code", "oaiapp_test", "nonce", "verifier", "http://127.0.0.1:1455/auth/callback", None)
+    def handler(request):
+        response = stream_response({"type": "response.output_text.delta", "delta": "OK"}, {"type": "response.completed"})
+        del response.headers["content-type"]
+        if content_type is not None:
+            response.headers["content-type"] = content_type
+        return response
+    async with oauth_server[2](transport=httpx.MockTransport(handler)) as client:
+        async with LLMClient(plan_config(tmp_path), SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
+            if content_type is None:
+                response, _ = await llm.chat(messages=[{"role": "user", "content": "test"}], temperature=0, estimated_input_tokens=1)
+                assert response.content == "OK"
+                assert any("未声明 Content-Type" in warning for warning in llm.warnings)
+            else:
+                with pytest.raises(ExternalError, match="HTTP 200，Content-Type: application/json"):
+                    await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)

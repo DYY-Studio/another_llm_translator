@@ -481,9 +481,14 @@ class LLMClient:
                     "",
                 )
             content_type = response.headers.get("content-type", "")
-            if content_type.split(";", 1)[0].strip().casefold() != "text/event-stream":
+            if not content_type and self.chatgpt is not None:
+                warning = "ChatGPT Plan 响应未声明 Content-Type；按 SSE 校验响应"
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                    self.logger.warning("%s request=%s", warning, request_id)
+            elif content_type.split(";", 1)[0].strip().casefold() != "text/event-stream":
                 raise _StreamProtocolError(
-                    "LLM 流式响应 Content-Type 不是 text/event-stream",
+                    f"LLM 流式响应 Content-Type 不是 text/event-stream（HTTP {status}，Content-Type: {content_type[:100] or '缺失'}）",
                     status=status,
                     events=[],
                     event_count=0,
