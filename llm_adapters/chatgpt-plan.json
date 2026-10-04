@@ -8,7 +8,7 @@
   "body": {
     "model": "${model}",
     "input": "${messages}",
-    "stream": "${stream}",
+    "stream": true,
     "store": false
   },
   "response_content_pointer": "/output/-1/content/-1/text",

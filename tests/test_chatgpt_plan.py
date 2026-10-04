@@ -154,3 +154,18 @@ async def test_plan_refresh_transient_errors_obey_retry_limit(tmp_path, oauth_se
                 await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)
     assert len([r for r in oauth_server[0] if b"grant_type=refresh_token" in r.content]) == 2
     assert connection.summary()["connected"]
+
+
+def test_plan_adapter_preview_uses_required_streaming(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    app = create_app(projects_root=tmp_path / "projects")
+    with TestClient(app) as client:
+        response = client.get("/api/v1/global/adapters/chatgpt-plan/preview")
+        assert response.status_code == 200, response.text
+        body = response.json()["body"]
+        assert body["stream"] is True and body["store"] is False
+        assert "temperature" not in body and "max_output_tokens" not in body
+        response = client.get("/api/v1/global/adapters/openai-compatible/preview")
+        assert response.status_code == 200, response.text
+        assert response.json()["body"]["stream"] is False
