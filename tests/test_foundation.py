@@ -250,6 +250,26 @@ def test_config_rejects_invalid_values(
         load_config(path)
 
 
+@pytest.mark.parametrize("scope", [None, "unresolved", "chunk", "invalid"])
+def test_config_unresolved_retry_scope(tmp_path: Path, scope: str | None) -> None:
+    path = tmp_path / "config.toml"
+    template = CONFIG_TEMPLATE.read_text(encoding="utf-8")
+    # Use the existing template without the new setting to exercise old configs.
+    template = template.replace('unresolved_retry_scope = "unresolved"\n', "")
+    if scope is not None:
+        template = template.replace("[retry]", f'[retry]\nunresolved_retry_scope = "{scope}"')
+    path.write_text(template, encoding="utf-8")
+    if scope == "invalid":
+        with pytest.raises(ConfigError, match="retry.unresolved_retry_scope"):
+            load_config(path)
+    else:
+        loaded = load_config(path)
+        assert loaded["retry"]["unresolved_retry_scope"] == (scope or "unresolved")
+        assert path.read_text(encoding="utf-8") == template
+        path.write_text(dump_config(loaded), encoding="utf-8")
+        assert load_config(path) == loaded
+
+
 def test_config_defaults_alias_collision_for_existing_projects(
     tmp_path: Path,
 ) -> None:

@@ -907,9 +907,13 @@ async def _localized_request_loop(
             await save_error(expected, request_id, str(exc))
             continue
         complete_id_mismatch = parsed.has_valid_end and not parsed.ids_complete
-        if complete_id_mismatch:
+        retry_whole_chunk = (
+            config["retry"]["unresolved_retry_scope"] == "chunk" and bool(unresolved)
+        )
+        if complete_id_mismatch or retry_whole_chunk:
             valid = {}
             unresolved = expected.copy()
+        if complete_id_mismatch:
             parse_errors.append("合法 end 响应的 Segment ID 与请求不一致")
         for segment_id, value in valid.items():
             try:
@@ -934,7 +938,7 @@ async def _localized_request_loop(
         if not unresolved:
             tasks.append(([], request_id, format_attempt + 1, anchor))
             continue
-        unresolved_groups = contiguous_groups(
+        unresolved_groups = [items] if retry_whole_chunk else contiguous_groups(
             (by_id[segment_id] for segment_id in unresolved),
             all_segments=segments,
             cross_boundary=stage in config["chunking"]["cross_boundary_batching"],

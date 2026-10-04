@@ -74,6 +74,7 @@ SCHEMA: dict[str, Any] = {
     "retry": {
         "http_max_attempts": None,
         "format_max_attempts": None,
+        "unresolved_retry_scope": None,
         "base_delay_seconds": None,
         "max_delay_seconds": None,
         "jitter_seconds": None,
@@ -211,6 +212,8 @@ def validate_config(config: dict[str, Any]) -> None:
         or format_attempts < 0
     ):
         raise ConfigError("retry.format_max_attempts 必须是非负整数")
+    if config["retry"]["unresolved_retry_scope"] not in ("unresolved", "chunk"):
+        raise ConfigError("retry.unresolved_retry_scope 必须是 unresolved 或 chunk")
 
     confidence = config["input"]["encoding_confidence_threshold"]
     if (
@@ -406,6 +409,9 @@ def load_config(path: Path) -> dict[str, Any]:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
+    retry = config.get("retry")
+    if isinstance(retry, dict):
+        retry.setdefault("unresolved_retry_scope", "unresolved")
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")

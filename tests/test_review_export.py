@@ -732,6 +732,93 @@ async def test_complete_id_mismatch_retries_original_batch_for_all_segment_stage
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
+@pytest.mark.parametrize(
+    ("error", "max_attempts", "succeeds"),
+    [("missing", 2, True), ("duplicate", 2, True), ("field", 2, True),
+     ("missing", 0, False), ("missing", 1, False)],
+)
+async def test_chunk_retry_discards_partial_results(
+    tmp_path: Path, stage: str, error: str, max_attempts: int, succeeds: bool,
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree")
+    calls: list[dict[str, object]] = []
+    result_path = project / "stages" / f"{stage}.jsonl"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        calls.append(payload)
+        # Check storage at the next request, after the previous response was handled.
+        assert not read_jsonl(project, result_path)
+        records = [
+            {"type": "segment", "id": item["id"], "translation": f"final:{item['source']}"}
+            if stage == "translation" else
+            {"type": "segment", "id": item["id"], "status": "accepted"}
+            for item in payload["segments"]
+        ]
+        incomplete = len(calls) == 1 or not succeeds
+        if incomplete:
+            if stage == "translation":
+                records[0]["translation"] = "discarded"
+            else:
+                records[0].update(status="suggested", suggested_text="discarded")
+            if error == "missing":
+                records.pop()
+            elif error == "duplicate":
+                records.append(records[-1].copy())
+            elif stage == "translation":
+                records[-1]["translation"] = None
+            else:
+                records[-1]["status"] = "invalid"
+            # No end: existing behavior would persist the valid rows and retry a subset.
+            content = "\n".join(json.dumps(record) for record in records)
+        else:
+            content = llm_jsonl(records)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]},
+        )
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+            if stage != "translation":
+                await run_translation(project, Scope(), http_client=client)
+            if stage == "polishing":
+                await run_review(project, "proofreading", Scope(), http_client=client)
+                run_apply(project, "proofreading", Scope(),
+                          allow_outdated_base=False, confirmed_all=True)
+        config_path = project / "config.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            .replace('unresolved_retry_scope = "unresolved"', 'unresolved_retry_scope = "chunk"')
+            .replace("format_max_attempts = 2", f"format_max_attempts = {max_attempts}"),
+            encoding="utf-8",
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            if stage == "translation":
+                summary = await run_translation(project, Scope(), http_client=client)
+            else:
+                summary = await run_review(project, stage, Scope(), http_client=client)
+    finally:
+        del os.environ["LLM_API_KEY"]
+
+    assert len(calls) == (2 if succeeds else max_attempts + 1)
+    assert [item["id"] for item in calls[0]["segments"]] == ["1", "2", "3"]
+    for payload in calls[1:]:
+        assert payload["segments"] == calls[0]["segments"]
+        assert payload["format_correction"]
+    records = read_jsonl(project, result_path)
+    assert summary["completed"] == (3 if succeeds else 0)
+    assert summary["failed"] == (0 if succeeds else 3)
+    if succeeds:
+        if stage == "translation":
+            assert [record["text"] for record in records] == ["final:one", "final:two", "final:three"]
+        else:
+            assert all(record["review_status"] == "accepted" for record in records)
+    else:
+        assert all(record["status"] == "failed" for record in records)
+
+
+@pytest.mark.asyncio
 async def test_review_format_retry_uses_abstract_guidance(
     tmp_path: Path,
 ) -> None:
