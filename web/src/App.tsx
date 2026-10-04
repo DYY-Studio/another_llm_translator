@@ -28,7 +28,6 @@ import { detectLanguage, errorMessage, translate, type Language } from "./i18n";
 import { canAutoSelectProject } from "./requestState";
 import { reconcileRecentProjectPaths } from "./recentProjectState";
 import { STORAGE_KEYS } from "./storageKeys";
-import { termsSubpageForTask } from "./summaryWorkspaceState";
 import { displayableFailureStage, isActiveTaskStatus, isTerminalTaskStatus, reconcileTaskCollection } from "./taskState";
 import { fetchOverview, fetchProjects, queryKeys } from "./queries";
 import "./styles.css";
@@ -531,17 +530,7 @@ export default function App() {
       return;
     }
     selectProject(summary);
-    const destination = next.stage === "content_summary" || next.stage === "terminology_decision"
-      ? "terminology"
-      : ["terminology", "translation", "proofreading", "polishing"].includes(next.stage)
-        ? next.stage as Stage
-        : "overview";
-    setStage(destination);
-    if (destination === "terminology") {
-      const subpage = termsSubpageForTask(next.stage, next.include_summaries);
-      setTermsSubpage(subpage);
-      openTermsSubpage(summary.project_id, subpage);
-    }
+    setStage("overview");
     setFailureFocus(null);
   }
 
@@ -637,7 +626,7 @@ export default function App() {
         stage={stage}
         task={task}
         tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}
-        onOpenTaskProject={(next) => { void openTaskProject(next); }}
+        onOpenTaskProject={openTaskProject}
         onCancelTask={cancelTask}
         onDismissTask={dismissTask}
         onStage={navigateStage}

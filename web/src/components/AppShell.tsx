@@ -240,7 +240,14 @@ export function AppShell({
                     return (
                       <article className="task-panel-item" key={next.task_id}>
                         <div className="task-panel-identity">
-                          <strong>{next.project}</strong>
+                          <button
+                            type="button"
+                            className="task-panel-project"
+                            title={`${next.project} · ${translate("nav.overview", language)}`}
+                            onClick={() => { setTaskPanelOpen(false); void onOpenTaskProject(next); }}
+                          >
+                            <strong>{next.project}</strong>
+                          </button>
                           <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
                         </div>
                         {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} taskStatus={next.status} language={language} compact /> : (
@@ -267,9 +274,6 @@ export function AppShell({
                           )}
                         </div>
                         <div className="task-panel-actions">
-                          <button className="quiet-button" onClick={() => { setTaskPanelOpen(false); void onOpenTaskProject(next); }}>
-                            {translate("run.openProject", language)}
-                          </button>
                           {canCancelTaskStatus(next.status) && (
                             <button className="danger-link" onClick={() => onCancelTask(next.task_id)}>
                               {translate("run.cancel", language)}
