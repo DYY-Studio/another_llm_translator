@@ -131,7 +131,7 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ### ChatGPT 连接
 
-- `app/chatgpt_oauth.py`：主机 OAuth 回调、身份验证、账户注册映射、钥匙串令牌及跨进程刷新、撤销；提供 Plan 请求约束与终止错误分类。
+- `app/chatgpt_oauth.py`：主机 OAuth 回调、身份验证、账户注册映射、钥匙串令牌及跨进程刷新、撤销；提供 Plan 请求约束与终止错误分类，以及实验性用量查询、按会话隔离的白名单响应头快照。
 - `web/src/components/ChatGPTSettings.tsx`：连接设置、授权状态和用量入口；登录浏览器由后端打开。
 
 ### `app/llm_adapter.py`

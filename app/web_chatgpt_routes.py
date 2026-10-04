@@ -53,6 +53,16 @@ def register_chatgpt_routes(app: FastAPI) -> None:
         value["local"] = bool(request.client and request.client.host in {"127.0.0.1", "::1", "testclient", "testserver"})
         return value
 
+    @app.get("/api/v1/chatgpt/usage")
+    async def usage(request: Request) -> dict:
+        require_plan_session(request)
+        return connection.usage_snapshot()
+
+    @app.post("/api/v1/chatgpt/usage")
+    async def query_usage(request: Request) -> dict:
+        local(request)
+        return await connection.query_usage()
+
     @app.put("/api/v1/chatgpt/connection")
     async def configure(request: Request, payload: dict) -> dict:
         local(request)

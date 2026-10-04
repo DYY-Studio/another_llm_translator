@@ -6,6 +6,8 @@ import base64
 import hashlib
 import hmac
 import json
+import math
+import re
 import secrets
 import time
 import uuid
@@ -66,6 +68,34 @@ def plan_error(data: Any, status: int, request_id: str) -> FatalExternalError | 
     error = FatalExternalError(messages[code])
     error.params = {"provider_code": code, "http_status": status, "request_id": request_id, "usage_url": USAGE_URL}
     return error
+
+
+def parse_usage_headers(headers: httpx.Headers) -> dict[str, Any]:
+    """Read server-provided metered windows; never retain arbitrary headers."""
+    buckets: dict[str, Any] = {}
+    errors: list[str] = []
+    for name, raw in headers.items():
+        match = re.fullmatch(r"x-([a-z0-9-]+)-(primary|secondary)-used-percent", name)
+        if not match:
+            continue
+        limit, window = match.groups()
+        prefix = f"x-{limit}-{window}"
+        try:
+            used = float(raw)
+            if not math.isfinite(used) or not 0 <= used <= 100:
+                raise ValueError()
+            minutes = headers.get(prefix + "-window-minutes")
+            reset = headers.get(prefix + "-reset-at")
+            value = {"used_percent": used, "window_minutes": int(minutes) if minutes is not None else None,
+                     "reset_at": int(reset) if reset is not None else None}
+            if value["window_minutes"] is not None and value["window_minutes"] <= 0:
+                raise ValueError()
+            if value["reset_at"] is not None and value["reset_at"] < 0:
+                raise ValueError()
+            buckets.setdefault(limit, {})[window] = value
+        except ValueError:
+            errors.append(f"Invalid usage header: {prefix}")
+    return {"buckets": buckets, "errors": errors}
 
 
 class ChatGPTConnection:
@@ -194,6 +224,69 @@ class ChatGPTConnection:
             error = ExternalError("ChatGPT 网络请求失败，请检查连接代理")
             error.params = {"retryable": True}
             raise error from exc
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        path = self.root / "usage-experiment.json"
+        if not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ConfigError("无法读取实验性 ChatGPT 用量快照") from exc
+        state = self.read()
+        active = state["active"]
+        identity = [active, state["registrations"].get(active, {}).get("session")]
+        return value.get("sources", {}) if value.get("identity") == identity else {}
+
+    async def record_usage(self, identity: tuple[str, str], source: str, value: dict[str, Any]) -> None:
+        async with self.locked():
+            state = self.read()
+            active = state["active"]
+            if (active, state["registrations"].get(active, {}).get("session")) != identity:
+                return
+            sources = self.usage_snapshot()
+            sources[source] = {"observed_at": time.time(), **value}
+            atomic_write_json(self.root / "usage-experiment.json", {"identity": list(identity), "sources": sources})
+
+    async def query_usage(self) -> dict[str, Any]:
+        identity = self.identity()
+        token = await self.access_token(identity)
+        response = await self.request("GET", "https://chatgpt.com/backend-api/wham/usage",
+                                      headers={"Authorization": "Bearer " + token})
+        # Do not expose response bodies, account IDs or credentials in diagnostics.
+        value: dict[str, Any] = {"http_status": response.status_code,
+                                 "request_id": response.headers.get("x-request-id", ""),
+                                 "buckets": {}, "errors": []}
+        if response.status_code != 200:
+            value["errors"] = [f"Usage query failed: HTTP {response.status_code}"]
+        else:
+            try:
+                data = response.json()
+                limits = [("codex", data.get("rate_limit"))]
+                limits.extend((item["metered_feature"], item.get("rate_limit")) for item in data.get("additional_rate_limits", []) or [])
+                for name, details in limits:
+                    if not details:
+                        continue
+                    windows = {}
+                    for key in ("primary", "secondary"):
+                        window = details.get(key + "_window")
+                        if window is None:
+                            continue
+                        used = float(window["used_percent"])
+                        seconds = int(window["limit_window_seconds"])
+                        reset = int(window["reset_at"])
+                        if not math.isfinite(used) or not 0 <= used <= 100 or seconds <= 0 or reset < 0:
+                            raise ValueError()
+                        windows[key] = {"used_percent": used, "window_minutes": seconds / 60, "reset_at": reset}
+                    if windows:
+                        value["buckets"][name] = windows
+                if not value["buckets"]:
+                    value["errors"] = ["Usage response contains no supported windows"]
+            except (ValueError, KeyError, TypeError, AttributeError):
+                value["buckets"] = {}
+                value["errors"] = ["Usage response format is not supported"]
+        await self.record_usage(identity, "endpoint", value)
+        return self.usage_snapshot()
 
     async def metadata(self) -> dict[str, Any]:
         if self._metadata is None:

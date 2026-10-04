@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 import httpx
 from .credentials import resolve_api_keys
-from .chatgpt_oauth import ChatGPTConnection, plan_error
+from .chatgpt_oauth import ChatGPTConnection, parse_usage_headers, plan_error
 from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
@@ -441,6 +441,13 @@ class LLMClient:
         async with self.client.stream(
             "POST", url, headers=headers, json=payload
         ) as response:
+            if self.chatgpt is not None:
+                try:
+                    await self.chatgpt.record_usage(self.chatgpt_identity, "headers", {
+                        "http_status": response.status_code, **parse_usage_headers(response.headers),
+                    })
+                except OSError:
+                    self.logger.warning("实验性 ChatGPT 用量快照保存失败；本次响应头未保存")
             status = response.status_code
             if not 200 <= status < 300:
                 try:

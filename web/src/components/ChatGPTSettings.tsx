@@ -8,6 +8,10 @@ export interface ChatGPTConnectionSummary {
   proxy_url: string; error: string; local: boolean; welcome_required: boolean;
 }
 
+interface UsageWindow { used_percent: number; window_minutes: number | null; reset_at: number | null }
+interface UsageObservation { observed_at: number; http_status: number; errors: string[]; buckets: Record<string, Record<string, UsageWindow>> }
+type UsageSnapshot = Record<string, UsageObservation>;
+
 export function PlanUsageLink({ language }: { language: Language }) {
   const [error, setError] = useState("");
   return <><button type="button" className="quiet-button" onClick={() => {
@@ -18,6 +22,7 @@ export function PlanUsageLink({ language }: { language: Language }) {
 
 export function ChatGPTSettings({ language }: { language: Language }) {
   const [connection, setConnection] = useState<ChatGPTConnectionSummary | null>(null);
+  const [usage, setUsage] = useState<UsageSnapshot>({});
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -40,8 +45,14 @@ export function ChatGPTSettings({ language }: { language: Language }) {
     return () => { active = false; window.clearTimeout(timer); };
   }, [connection]);
   async function action(name: string) {
-    setBusy(true); setError(""); setSaved(false);
+    setBusy(true); setError(""); setSaved(false); setUsage({});
     try { setConnection(await api<ChatGPTConnectionSummary>(`/api/v1/chatgpt/connection/${name}`, { method: "POST" })); }
+    catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setBusy(false); }
+  }
+  async function loadUsage(query: boolean) {
+    setBusy(true); setError("");
+    try { setUsage(await api<UsageSnapshot>("/api/v1/chatgpt/usage", { method: query ? "POST" : "GET" })); }
     catch (reason) { setError(errorMessage(reason, language)); }
     finally { setBusy(false); }
   }
@@ -66,6 +77,26 @@ export function ChatGPTSettings({ language }: { language: Language }) {
         {connection.email && <button className="danger-button" disabled={busy || connection.pending} onClick={() => void action("logout")}>{translate("chatgpt.logout", language)}</button>}
         {connection.can_switch_account && <button className="quiet-button" disabled={busy || connection.pending || proxy !== connection.proxy_url} onClick={() => void action("login-new")}>{translate("chatgpt.switch", language)}</button>}
       </div>}
+      </section>
+      <section className="config-section">
+        <h2>{translate("chatgpt.usageExperiment", language)}</h2>
+        <p>{translate("chatgpt.usageExperimentHint", language)}</p>
+        <div className="button-group">
+          {connection.local && <button className="quiet-button" disabled={busy || !connection.plan_enabled} onClick={() => void loadUsage(true)}>{translate("chatgpt.queryUsage", language)}</button>}
+          <button className="quiet-button" disabled={busy || !connection.plan_enabled} onClick={() => void loadUsage(false)}>{translate("chatgpt.readUsageHeaders", language)}</button>
+        </div>
+        {Object.keys(usage).length === 0 && <p className="muted">{translate("chatgpt.noUsage", language)}</p>}
+        {Object.entries(usage).map(([source, observation]) => <div key={source}>
+          <h3>{source === "endpoint" ? "wham/usage" : "Response headers"}</h3>
+          <p className="muted">{new Date(observation.observed_at * 1000).toLocaleString(language)} · HTTP {observation.http_status}</p>
+          {observation.errors.map((message) => <p key={message} role="alert">{message}</p>)}
+          {Object.keys(observation.buckets).length === 0 && <p>{translate("chatgpt.noUsage", language)}</p>}
+          {Object.entries(observation.buckets).flatMap(([bucket, windows]) => Object.entries(windows).map(([name, window]) => <p key={`${bucket}/${name}`}>
+            {bucket} / {name} · {translate("chatgpt.remaining", language)} {(100 - window.used_percent).toFixed(1)}%
+            {window.window_minutes !== null && ` · ${window.window_minutes} min`}
+            {window.reset_at !== null && ` · ${translate("chatgpt.resetAt", language)} ${new Date(window.reset_at * 1000).toLocaleString(language)}`}
+          </p>))}
+        </div>)}
       </section>
       {connection.local && connection.welcome_required && <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-label="ChatGPT Plan"><h2>ChatGPT Plan</h2><p>{translate("chatgpt.welcome", language)}</p><div className="button-group"><PlanUsageLink language={language} /><button className="primary-button" disabled={busy} onClick={() => void action("welcome-dismiss")}>{translate("chatgpt.gotIt", language)}</button></div></section></div>}
     </div>}
