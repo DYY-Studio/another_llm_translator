@@ -237,6 +237,26 @@ def register_resource_routes(
             raise UsageError("language 必须是 zh-CN 或 en")
         return str(value)
 
+    def add_draft_preview(
+        result: dict[str, Any],
+        content: str,
+        language: str,
+        translation_path: Path,
+    ) -> None:
+        if not translation_path.is_file():
+            result.setdefault("assembled_mode_errors", {})["terms+translation"] = (
+                f"缺少 {language} 翻译 Prompt：{prompt_file('translation', language)}"
+            )
+            return
+        result["assembled_modes"]["terms+translation"] = full_prompt(
+            "terminology",
+            content,
+            language,
+            response_mode="terms+translation",
+            translation_middle=translation_path.read_text(encoding="utf-8"),
+        )
+        result["assembled_mode_languages"]["terms+translation"] = language
+
     def prompt_view(
         stage: str,
         language: str,
@@ -244,6 +264,7 @@ def register_resource_routes(
         available: list[str],
         global_file_for: Callable[[str], Path] | None = None,
         fragment_summary_file_for: Callable[[str], Path] | None = None,
+        translation_file_for: Callable[[str], Path] | None = None,
     ) -> dict[str, Any]:
         if language not in available or not file_for(language).is_file():
             raise UsageError(
@@ -322,6 +343,10 @@ def register_resource_routes(
             result["assembled_mode_languages"] = assembled_mode_languages
             if mode_errors:
                 result["assembled_mode_errors"] = mode_errors
+            if translation_file_for is not None:
+                add_draft_preview(
+                    result, content, resolved, translation_file_for(resolved)
+                )
         if global_file_for is not None:
             global_path = global_file_for(resolved)
             if global_path.is_file():
@@ -455,6 +480,7 @@ def register_resource_routes(
             language,
             lambda value: global_prompt_file(stage, value),
             prompt_languages_for(app_root)[stage],
+            translation_file_for=lambda value: global_prompt_file("translation", value),
             fragment_summary_file_for=(
                 lambda value: global_prompt_file("fragment_summary", value)
             )
@@ -515,10 +541,11 @@ def register_resource_routes(
                 if (root / "prompts" / prompt_file(stage, value)).is_file()
             ],
             global_file_for=lambda value: global_prompt_file(stage, value),
+            translation_file_for=lambda value: (
+                root / "prompts" / prompt_file("translation", value)
+            ),
             fragment_summary_file_for=(
-                lambda value: root
-                / "prompts"
-                / prompt_file("fragment_summary", value)
+                lambda value: root / "prompts" / prompt_file("fragment_summary", value)
             )
             if stage == "terminology"
             else None,
@@ -646,6 +673,9 @@ def register_resource_routes(
                 }
             result["assembled_modes"] = assembled_modes
             result["assembled_mode_languages"] = assembled_mode_languages
+            add_draft_preview(
+                result, content, language, global_prompt_file("translation", language)
+            )
         return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")

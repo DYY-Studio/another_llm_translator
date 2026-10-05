@@ -980,6 +980,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const previewModes = stage === "terminology"
     ? [
       ["terms-only", translate("settings.promptModeTermsOnly", language)],
+      ["terms+translation", translate("settings.promptModeTermsAndTranslation", language)],
       ["terms+fragment-summary", translate("settings.promptModeTermsAndSummary", language)],
       ["summary-only", translate("settings.promptModeSummaryOnly", language)],
     ] as const

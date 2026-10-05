@@ -219,11 +219,13 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert set(terminology["assembled_modes"]) == {
         "terms-only",
         "terms+fragment-summary",
+        "terms+translation",
         "summary-only",
     }
     assert terminology["assembled_mode_languages"] == {
         "terms-only": "zh-CN",
         "terms+fragment-summary": "zh-CN",
+        "terms+translation": "zh-CN",
         "summary-only": "zh-CN",
     }
     assert terminology["assembled_modes"]["terms+fragment-summary"].index(
@@ -290,7 +292,10 @@ def test_project_terms_only_prompt_preview_survives_missing_fragment_prompt(
     assert response.status_code == 200
     value = response.json()
     assert "terms-only" in value["assembled_modes"]
-    assert value["assembled_mode_languages"] == {"terms-only": "zh-CN"}
+    assert value["assembled_mode_languages"] == {
+        "terms-only": "zh-CN",
+        "terms+translation": "zh-CN",
+    }
     assert "terms+fragment-summary" not in value["assembled_modes"]
     assert "summary-only" not in value["assembled_modes"]
 
@@ -409,11 +414,13 @@ def test_prompt_library_terminology_entry_previews_all_response_modes(
     assert detail.json()["assembled_mode_languages"] == {
         "terms-only": "en",
         "terms+fragment-summary": "en",
+        "terms+translation": "en",
         "summary-only": "en",
     }
     assert set(modes) == {
         "terms-only",
         "terms+fragment-summary",
+        "terms+translation",
         "summary-only",
     }
     assert "Library terminology policy." in modes["terms-only"]
@@ -450,6 +457,7 @@ def test_prompt_library_joint_preview_falls_back_to_one_language_pair(
     value = detail.json()
     assert value["assembled_mode_languages"] == {
         "terms-only": "en",
+        "terms+translation": "en",
         "terms+fragment-summary": "zh-CN",
         "summary-only": "zh-CN",
     }
@@ -620,3 +628,32 @@ def make_project(tmp_path: Path) -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_draft_prompt_preview_uses_runtime_contract_and_current_language(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    language = "en"
+    translation = project / "prompts" / "translation.en.middle.txt"
+    translation.write_text("Current project translation policy.", encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root))
+    value = client.get(
+        "/api/v1/projects/sample/prompts/terminology", params={"language": language}
+    ).json()
+    expected = full_prompt(
+        "terminology",
+        value["content"],
+        language,
+        response_mode="terms+translation",
+        translation_middle=translation.read_text(),
+    )
+    assert value["assembled_modes"]["terms+translation"] == expected
+    assert "no_terms" in expected
+    assert "Current project translation policy." in expected
+    translation.unlink()
+    value = client.get(
+        "/api/v1/projects/sample/prompts/terminology", params={"language": language}
+    ).json()
+    assert "terms+translation" not in value["assembled_modes"]
+    assert "terms+translation" in value["assembled_mode_errors"]
