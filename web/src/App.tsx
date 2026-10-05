@@ -440,14 +440,22 @@ export default function App() {
     if (!project || !taskStage) return;
     setRunOptionsLoading(true);
     try {
-      setRunOptions(await api<TaskOptions>(
-        `/api/v1/projects/${project}/task-options/${taskStage}`,
-      ));
+      let options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?language=${encodeURIComponent(language)}`);
+      if (options.running_run?.include_draft_translation) {
+        options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?include_draft_translation=true&language=${encodeURIComponent(language)}`);
+      }
+      setRunOptions(options);
     } catch (value) {
       setError(value);
     } finally {
       setRunOptionsLoading(false);
     }
+  }
+
+  async function changeDraftTranslation(enabled: boolean) {
+    if (!project || !runOptions) return;
+    const options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology?include_draft_translation=${enabled}&language=${encodeURIComponent(language)}`);
+    setRunOptions(options);
   }
 
   async function startRun(decision: RunDecision) {
@@ -463,7 +471,7 @@ export default function App() {
       setError(value);
       try {
         setRunOptions(await api<TaskOptions>(
-          `/api/v1/projects/${project}/task-options/${runOptions.stage}`,
+          `/api/v1/projects/${project}/task-options/${runOptions.stage}?include_draft_translation=${Boolean(decision.include_draft_translation)}&language=${encodeURIComponent(language)}`,
         ));
       } catch {
         setRunOptions(null);
@@ -563,7 +571,7 @@ export default function App() {
 
   function showFailures() {
     const taskTarget = task ? displayableFailureStage(task) : null;
-    const target = task?.stage === "continuous"
+    const target = task?.stage === "continuous" || task?.draft_progress
       ? taskTarget
       : runnable[stage] ?? taskTarget;
     if (!target) return;
@@ -700,11 +708,12 @@ export default function App() {
       )}
       {runOptions && (
         <RunDialog
-          key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
+          key={`${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}`}
           options={runOptions}
           language={language}
           onClose={() => setRunOptions(null)}
           onStart={startRun}
+          onDraftTranslationChange={changeDraftTranslation}
           onOpenOverview={() => { setRunOptions(null); navigateStage("overview"); }}
         />
       )}

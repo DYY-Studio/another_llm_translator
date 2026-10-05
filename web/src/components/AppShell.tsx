@@ -1,6 +1,6 @@
 import { PlanUsageLink } from "./ChatGPTSettings";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { Stage, TaskState, TaskStep, ThemeMode } from "../types";
+import type { DraftProgress, Stage, TaskState, TaskStep, ThemeMode } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
@@ -20,6 +20,10 @@ function taskStageLabelKey(stage: string): string {
   if (stage === "terminology_decision") return "stage.terminologyDecision";
   if (stage === "content_summary") return "stage.contentSummary";
   return `stage.${stage}`;
+}
+
+function DraftResultProgress({ progress, language }: { progress: DraftProgress; language: Language }) {
+  return <div className="draft-result-progress">{Object.entries(progress).map(([stage, value]) => <span key={stage}>{translate(`stage.${stage}`, language)} · {translate("run.completedCount", language, { completed: value.completed, failed: value.failed, pending: Math.max(0, value.total - value.completed - value.failed), total: value.total })}</span>)}</div>;
 }
 
 function TaskSteps({
@@ -250,6 +254,7 @@ export function AppShell({
                           </button>
                           <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
                         </div>
+                        {next.draft_progress && <DraftResultProgress progress={next.draft_progress} language={language} />}
                         {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} taskStatus={next.status} language={language} compact /> : (
                           <div className="task-panel-progress">
                             <span>{translate("run.completedCount", language, {
@@ -300,7 +305,7 @@ export function AppShell({
         <section className={`global-run-status${terminal ? " terminal" : ""}${task.stage === "continuous" ? " continuous" : ""}`} ref={runStatusRef} aria-label={translate("shell.globalTaskStatus", language)}>
           <div className="run-identity">
             <strong>{statusLabels[task.status] ?? task.status}</strong>
-            {task.stage === "continuous" ? (
+          {task.stage === "continuous" ? (
               <span className="run-identity-context">
                 <span className="run-identity-project" title={task.project}>{task.project}</span>
                 <span className="run-identity-separator" aria-hidden="true">·</span>
@@ -312,7 +317,9 @@ export function AppShell({
           </div>
           {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} taskStatus={task.status} language={language} /> : (
             <div className="run-progress">
-              <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>
+              {task.draft_progress
+                ? <DraftResultProgress progress={task.draft_progress} language={language} />
+                : <span>{translate("run.completedCount", language, { completed, failed, pending, total })}</span>}
               <div className="progress-track" role="progressbar" aria-label={translate("shell.taskProgress", language)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={processed}>
                 <span className="progress-completed" style={{ width: `${total ? completed / total * 100 : 0}%` }} />
                 <span className="progress-failed" style={{ width: `${total ? failed / total * 100 : 0}%` }} />

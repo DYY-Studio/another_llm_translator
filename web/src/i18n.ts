@@ -4,6 +4,13 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "runDialog.draftToggle": "同时生成粗翻（实验）",
+    "runDialog.draftHint": "使用术语扫描模型 {model} 生成当前翻译；完成术语决策并应用后，再运行校对。",
+    "runDialog.draftLoading": "正在重新预检…",
+    "runDialog.draftCounts": "保留 {completed} · 待处理 {pending} · 重做时共 {total}",
+    "runDialog.draftMissingPrompt": "粗翻缺少必要 Prompt：",
+    "runDialog.draftForce": "将重新扫描并粗翻全部 {total} 个 Segment，替换 {count} 条已有译文，历史保留。",
+    "workspace.draftOrigin": "来自术语扫描的实验初稿",
     "preset.fixedConnectionHint": "由 Adapter 固定。",
     "preset.connectionProxyHint": "由授权连接管理，请在连接设置中修改。",
     "preset.noProxy": "未设置代理",
@@ -1226,6 +1233,13 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
+    "runDialog.draftToggle": "Generate a first draft while scanning (experimental)",
+    "runDialog.draftHint": "Use the terminology model {model} to generate the current translation. Apply terminology decisions, then run proofreading.",
+    "runDialog.draftLoading": "Checking run options…",
+    "runDialog.draftCounts": "Keep {completed} · Pending {pending} · Redo scope {total}",
+    "runDialog.draftMissingPrompt": "Draft translation requires these Prompts:",
+    "runDialog.draftForce": "Rescan and translate all {total} Segments, replacing {count} existing translations. History is retained.",
+    "workspace.draftOrigin": "Experimental draft from terminology scanning",
     "chatgpt.connection": "Account and connection",
     "chatgpt.connectionHint": "Uses the global ChatGPT connection.",
     "chatgpt.subtitle": "Run model stages with your own ChatGPT Plan.",
