@@ -288,7 +288,36 @@ async def run_terminology(
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
     include_summaries: bool = False,
+    include_draft_translation: bool = False,
+    on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    if include_draft_translation and include_summaries:
+        raise UsageError("术语粗翻与内容概括不能同时启用")
+    if resume_run_id is not None:
+        manifest = read_json(
+            project, project / "runs" / resume_run_id / "manifest.json"
+        )
+        if (
+            bool(manifest.get("include_draft_translation", False))
+            != include_draft_translation
+        ):
+            raise UsageError("续用 Run 必须保持原有粗翻选项")
+    if include_draft_translation:
+        from .stage_translation import run_translation
+
+        return await run_translation(
+            project,
+            scope,
+            http_client=http_client,
+            limiter=limiter,
+            resume_run_id=resume_run_id,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
+            on_progress=on_progress,
+            on_usage=on_usage,
+            _draft_terminology=True,
+            _on_draft_progress=on_draft_progress,
+        )
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)

@@ -6649,3 +6649,89 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         item["code"] == "decision_resume_incompatible"
         for item in result["blocking"]
     )
+
+
+def test_draft_scan_options_and_invalid_combinations(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root, app_root=tmp_path / "app-root")
+    with TestClient(app) as client:
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["include_draft_translation"] is True
+        assert options["draft_progress"]["translation"] == {
+            "completed": 0,
+            "failed": 0,
+            "total": 2,
+        }
+        assert options["draft_prompt_preflight"]["ok"] is True
+        for payload in (
+            {"stage": "translation", "include_draft_translation": True},
+            {
+                "stage": "terminology",
+                "include_draft_translation": True,
+                "include_summaries": True,
+            },
+            {"stage": "run-all", "include_draft_translation": True},
+        ):
+            assert (
+                client.post("/api/v1/projects/sample/tasks", json=payload).status_code
+                == 400
+            )
+        (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["draft_prompt_preflight"]["ok"] is False
+        assert (
+            client.post(
+                "/api/v1/projects/sample/tasks",
+                json={"stage": "terminology", "include_draft_translation": True},
+            ).status_code
+            == 400
+        )
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_task_reports_both_result_classes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.helpers import llm_jsonl
+
+    _, project = make_project(tmp_path, "Alice entered.")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    original_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
+            for item in payload["segments"]
+        ]
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    def client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        include_draft_translation=True,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.tasks[started["task_id"]].view()
+    assert result["status"] == "completed"
+    assert result["include_draft_translation"] is True
+    assert result["draft_progress"] == {
+        stage: {"completed": 1, "failed": 0, "total": 1}
+        for stage in ("terminology", "translation")
+    }
+    assert result["completed_segments"] == 1

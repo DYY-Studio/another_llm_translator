@@ -754,6 +754,7 @@ def register_task_routes(
             replace_draft=payload.replace_draft,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
+            include_draft_translation=payload.include_draft_translation,
             final_review=payload.final_review,
             summary_selection=summary_selection,
             continuous_stages=payload.stages,
@@ -767,6 +768,7 @@ def register_task_routes(
         name: str,
         stage: str,
         include_summaries: bool = False,
+        include_draft_translation: bool = False,
         language: str | None = None,
         final_review: bool = False,
         stages: list[str] = Query(default=[]),  # noqa: B008
@@ -780,7 +782,10 @@ def register_task_routes(
             project(name),
             stage,
             include_summaries=include_summaries,
-            prompt_language=(validate_language(language) if language is not None else None),
+            include_draft_translation=include_draft_translation,
+            prompt_language=(
+                validate_language(language) if language is not None else None
+            ),
             final_review=final_review,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,

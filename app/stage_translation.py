@@ -4,7 +4,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 import httpx
@@ -27,7 +27,7 @@ from .execution import (
     stage_result_path,
 )
 from .llm_client import SlidingWindowLimiter
-from .llm_response import parse_jsonl_document
+from .llm_response import TerminologyResponseMode, parse_jsonl_document
 from .llm_keys import KeyPool
 from .logging_utils import get_logger
 from .plugins import (
@@ -294,15 +294,25 @@ async def run_translation(
     prompt_language: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+    _draft_terminology: bool = False,
+    _on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    logger = get_logger("translation")
+    run_stage = "terminology" if _draft_terminology else "translation"
+    logger = get_logger(run_stage)
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
-    context_kwargs: dict[str, object] = {"stage": "translation"}
+    context_kwargs: dict[str, object] = {"stage": run_stage}
     frozen_run_options = _frozen_run_options(project, resume_run_id)
     if frozen_run_options is not None:
         context_kwargs["frozen_run_options"] = frozen_run_options
-    config, metadata, files, segments = _project_context(project, **context_kwargs)
+    if _draft_terminology:
+        from .stage_terminology_draft import draft_run_context
+
+        config, metadata, files, segments = draft_run_context(
+            project, frozen_run_options
+        )
+    else:
+        config, metadata, files, segments = _project_context(project, **context_kwargs)
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
@@ -326,7 +336,22 @@ async def run_translation(
         prompt_middle_digests(project, "translation"),
         terms_revision=terms_revision,
     )
-    selected_segments = select_scope(segments, files, scope)
+    if _draft_terminology:
+        from .stage_terminology_draft import (
+            DraftTerminologyScan,
+            draft_translation_fingerprint,
+        )
+        from .stage_runtime import _prompt_language_for_stages
+
+        language = _prompt_language_for_stages(
+            project, prompt_language, ("terminology", "translation")
+        )
+        fingerprint = draft_translation_fingerprint(project, config, terms_revision)
+    selected_segments = (
+        [item for item in segments if not item["is_empty"]]
+        if _draft_terminology and scope.force
+        else select_scope(segments, files, scope)
+    )
     active_segment_ids = [
         str(segment["segment_id"])
         for segment in segments
@@ -342,6 +367,45 @@ async def run_translation(
         history_states,
         force=scope.force,
     )
+    draft_scan = None
+    translation_selection = selection
+    if _draft_terminology:
+        draft_scan = DraftTerminologyScan(
+            project,
+            metadata,
+            config,
+            scope,
+            resume_run_id,
+            language,
+            selected_segments,
+            {str(item["segment_id"]) for item in selection.reusable}
+            if not scope.force
+            else set(),
+        )
+        work_ids = {str(item["segment_id"]) for item in draft_scan.work}
+        selection = replace(
+            selection,
+            work=tuple(draft_scan.work),
+            reusable=tuple(
+                item
+                for item in selection.selected
+                if str(item["segment_id"]) not in work_ids
+            ),
+        )
+        prompt = draft_scan.prompt(
+            list(selection.work)
+            or [{"_draft_terms": True, "_draft_translation": True}],
+            (),
+        )
+        prompt_for_items = lambda items: draft_scan.prompt(
+            items, requirements_for_items(items)
+        )
+        adapter_partition_key = prompt_partition_key
+        prompt_partition_key = lambda item: (
+            adapter_partition_key(item),
+            bool(item.get("_draft_terms")),
+            bool(item.get("_draft_translation")),
+        )
     logger.info(
         "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
         time.perf_counter() - preparation_started_at,
@@ -359,8 +423,8 @@ async def run_translation(
         ),
         config=config,
         fingerprint=fingerprint,
-        existing_fingerprints=selection.fingerprints,
-        reusable_count=len(selection.reusable),
+        existing_fingerprints=translation_selection.fingerprints,
+        reusable_count=len(translation_selection.reusable),
         force=scope.force,
         reuse_allowed=reuse_mixed_fingerprints,
         dry_run=scope.dry_run,
@@ -370,6 +434,23 @@ async def run_translation(
             else []
         ),
     )
+    if draft_scan is not None:
+        warnings.extend(
+            _assemble_warnings(
+                stage="terminology",
+                resume_run_id=resume_run_id,
+                resume_arguments_ignored=resume_arguments_ignored,
+                resume_message="续用原始术语粗翻范围",
+                config=config,
+                fingerprint=draft_scan.term_fingerprint,
+                existing_fingerprints=draft_scan.term_fingerprints,
+                reusable_count=len(draft_scan.term_done),
+                force=scope.force,
+                reuse_allowed=reuse_mixed_fingerprints,
+                dry_run=scope.dry_run,
+                extra=[],
+            )
+        )
     latest_text = {
         segment_id: str(record["text"])
         for segment_id, record in selection.latest_completed.items()
@@ -378,7 +459,7 @@ async def run_translation(
     context_index = PreviousContextIndex(segments)
     summary_context_index = _TranslationSummaryContext.empty()
     if (
-        context_config["previous_summaries"]
+        context_config.get("previous_summaries", False)
         and "translation" not in config["chunking"]["cross_boundary_batching"]
     ):
         summary_context_index = _translation_summary_context(project, segments)
@@ -406,7 +487,7 @@ async def run_translation(
         if config["execution"]["scheduling_mode"] == "parallel":
             context = [item["source"] for item in context]
         summary_context, summary_context_relation = summary_context_index.for_items(items)
-        return {
+        payload = {
             "target_language": config["project"]["target_language"],
             "reference_context": context,
             "summary_context": summary_context,
@@ -423,9 +504,16 @@ async def run_translation(
             ],
         }
 
+        if draft_scan is not None:
+            payload["response_mode"] = draft_scan.mode(items).value
+            if draft_scan.mode(items) is TerminologyResponseMode.TERMS_ONLY:
+                payload["source_segments"] = [segment_model_source(item) for item in items]
+                payload["segments"] = [{"id": item["segment_id"]} for item in items]
+        return payload
+
     run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
         project,
-        "translation",
+        run_stage,
         scope=scope,
         config=config,
         fingerprint=fingerprint,
@@ -436,11 +524,22 @@ async def run_translation(
         reused_count=len(selection.reusable),
         details={
             "terms_revision": terms_revision,
-            "scope": _scope_record(scope),
+            "scope": _scope_record(scope, force_all=_draft_terminology and scope.force),
+            **(
+                {
+                    "include_draft_translation": True,
+                    "active_task_id": draft_scan.task_id,
+                }
+                if draft_scan
+                else {}
+            ),
             "prompt_language": language,
         },
         warnings=warnings,
     )
+
+    if draft_scan is not None and not scope.dry_run:
+        draft_scan.start()
 
     preflight = _split_oversized_preflight(
         selection.work,
@@ -477,7 +576,7 @@ async def run_translation(
             request_segments,
             all_segments=segments,
             config=config,
-            stage="translation",
+            stage=run_stage,
             prompt=prompt,
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
@@ -511,6 +610,8 @@ async def run_translation(
     advisory_repair_attempted: set[str] = set()
     failed_ids: set[str] = set()
     failure_counts: Counter[str] = Counter()
+    if draft_scan is not None:
+        draft_scan.failure_counts = failure_counts
     completed_ids: set[str] = set()
     by_id = {str(item["segment_id"]): item for item in segments}
     by_id.update(
@@ -530,6 +631,16 @@ async def run_translation(
         )
 
     def report_progress() -> None:
+        if draft_scan is not None:
+            if _on_draft_progress is not None:
+                _on_draft_progress(draft_scan.progress())
+            if on_progress is not None:
+                on_progress(
+                    len(draft_scan.completed()),
+                    len(draft_scan.failed()),
+                    len(selection.selected),
+                )
+            return
         if on_progress is not None:
             on_progress(
                 len(selection.reusable) + len(completed_ids),
@@ -566,11 +677,17 @@ async def run_translation(
                     validation_findings=findings or [],
                     stage_fingerprint=fingerprint,
                     terms_revision=terms_revision,
+                    **(
+                        {"generation_origin": "terminology_draft"} if draft_scan else {}
+                    ),
                     run_id=run_id,
                     request_id=request_id,
                 ),
             )
         completed_ids.add(segment_id)
+        if draft_scan is not None:
+            draft_scan.translation_done.add(segment_id)
+            draft_scan.translation_failed.discard(segment_id)
         report_progress()
         latest_text[segment_id] = text
 
@@ -604,10 +721,15 @@ async def run_translation(
                     error_message=message,
                     stage_fingerprint=fingerprint,
                     terms_revision=terms_revision,
+                    **(
+                        {"generation_origin": "terminology_draft"} if draft_scan else {}
+                    ),
                     run_id=run_id,
                     request_id=request_id,
                 ),
             )
+        if draft_scan is not None:
+            draft_scan.translation_failed.add(part_original.get(segment_id, segment_id))
         failed_ids.add(segment_id)
         report_progress()
         logger.warning(
@@ -660,7 +782,7 @@ async def run_translation(
 
     state = StageRunState(
         project=project,
-        stage="translation",
+        stage=run_stage,
         config=config,
         metadata=metadata,
         segments=segments,
@@ -696,6 +818,20 @@ async def run_translation(
         initial_parent_request_id: str | None = None,
     ) -> None:
         group = list(chunk.segments)
+        if draft_scan is not None:
+            await draft_scan.process(
+                group,
+                state=state,
+                payload_builder=payload_builder,
+                prompt_builder=prompt_for_items,
+                accept=accept_translation,
+                save_failed=save_failed,
+                part_original=part_original,
+                original_parts=original_parts,
+                report_progress=report_progress,
+                parent_request_id=initial_parent_request_id,
+            )
+            return
         exhausted = await _localized_request_loop(
             group,
             payload_builder=payload_builder,
@@ -730,11 +866,26 @@ async def run_translation(
         try:
             exhausted = await _localized_request_loop(
                 group,
-                payload_builder=payload_builder,
-                prompt=prompt_for_items(group),
+                payload_builder=(
+                    lambda items: payload_builder(
+                        [
+                            {**item, "_draft_terms": False, "_draft_translation": True}
+                            for item in items
+                        ]
+                    )
+                )
+                if draft_scan
+                else payload_builder,
+                prompt=(
+                    draft_scan.prompt_factories[
+                        TerminologyResponseMode.TRANSLATION_ONLY
+                    ](requirements_for_items(group))
+                    if draft_scan
+                    else prompt_for_items(group)
+                ),
                 config=config,
                 llm=state.llm,
-                stage="translation",
+                stage=run_stage,
                 accept=accept_translation,
                 save_error=save_external_error,
                 parse=_map_local_translation_response,
@@ -800,7 +951,18 @@ async def run_translation(
     async def record_preflight_failure(
         failed: list[dict[str, Any]],
     ) -> None:
+        if draft_scan is not None:
+            draft_scan.fail_terms(
+                failed,
+                run_id,
+                "PRECHECK",
+                "context_error",
+                "单 Segment 超过模型限制且内部拆分已关闭",
+                part_original,
+            )
         for segment in failed:
+            if draft_scan is not None and not segment.get("_draft_translation"):
+                continue
             await save_failed(
                 str(segment["segment_id"]),
                 f"REQ-{uuid.uuid4().hex[:12].upper()}",
@@ -811,6 +973,18 @@ async def run_translation(
     async def record_context_failure(
         items: list[dict[str, Any]],
     ) -> None:
+        if draft_scan is not None:
+            draft_scan.fail_terms(
+                items,
+                run_id,
+                "CONTEXT",
+                "context_error",
+                "模型报告上下文过长",
+                part_original,
+            )
+            if not items[0].get("_draft_translation"):
+                report_progress()
+                return
         await save_failed(
             str(items[0]["segment_id"]),
             "REQ-NONE",
@@ -943,7 +1117,15 @@ async def run_translation(
                     findings=item["findings"],
                 )
 
+        if draft_scan is not None:
+            draft_scan.publish(run_id, segments)
+            report_progress()
+
     def completed_count() -> int:
+        if draft_scan is not None:
+            return len(draft_scan.completed()) - (
+                0 if resume_run_id else len(selection.reusable)
+            )
         return (
             len(selection.reusable) + len(completed_ids)
             if resume_run_id
@@ -965,14 +1147,23 @@ async def run_translation(
         record_context_failure=record_context_failure,
         before_finalize=before_finalize,
         completed_count=completed_count,
-        failed_count=lambda: len(failed_ids),
+        failed_count=lambda: (
+            len(draft_scan.failed()) if draft_scan else len(failed_ids)
+        ),
         exception_completed=completed_count,
-        exception_failed=lambda: len(selection.work) - len(completed_ids),
+        exception_failed=lambda: (
+            len(selection.work)
+            - (
+                len(draft_scan.completed()) - len(selection.reusable)
+                if draft_scan
+                else len(completed_ids)
+            )
+        ),
         failure_counts=failure_counts,
         http_client=http_client,
         runtime_parts_kwargs={"by_id": by_id},
     )
-    failed_count = len(failed_ids)
+    failed_count = len(draft_scan.failed()) if draft_scan else len(failed_ids)
     logger.info(
         "run complete run=%s completed=%d failed=%d",
         run_id,
@@ -980,12 +1171,19 @@ async def run_translation(
         failed_count,
     )
     return {
-        "stage": "translation",
+        "stage": run_stage,
         "run_id": run_id,
+        **(
+            {"include_draft_translation": True, "draft_progress": draft_scan.progress()}
+            if draft_scan
+            else {}
+        ),
         "selected": len(selection.selected),
         "requested": len(selection.work),
         "reused": len(selection.reusable),
-        "completed": len(completed_ids),
+        "completed": len(draft_scan.completed()) - len(selection.reusable)
+        if draft_scan
+        else len(completed_ids),
         "failed": failed_count,
         "failure_counts": dict(failure_counts),
         "last_attempt_failed": len(selection.last_attempt_failed),

@@ -586,6 +586,7 @@ def full_prompt(
     phase: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
     fragment_summary_middle: str | None = None,
+    translation_middle: str | None = None,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -610,12 +611,30 @@ def full_prompt(
             raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
     else:
         mode = TerminologyResponseMode.TERMS_ONLY
-    if mode is not TerminologyResponseMode.TERMS_ONLY and fragment_summary_middle is None:
+    if (
+        mode
+        in {
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+            TerminologyResponseMode.SUMMARY_ONLY,
+        }
+        and fragment_summary_middle is None
+    ):
         raise UsageError(
             "启用术语概括响应模式时必须提供独立的片段概括 Prompt"
         )
+    draft_mode = mode in {
+        TerminologyResponseMode.TERMS_AND_TRANSLATION,
+        TerminologyResponseMode.TRANSLATION_ONLY,
+    }
+    if draft_mode and translation_middle is None:
+        raise UsageError("术语粗翻响应模式必须提供翻译 Prompt")
     effective_stage = stage
     effective_middle = middle
+    if mode is TerminologyResponseMode.TRANSLATION_ONLY:
+        effective_stage = "translation"
+        effective_middle = translation_middle or ""
+    elif mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
+        effective_middle = f"{middle.strip()}\n\n{translation_middle.strip()}"
     if mode is TerminologyResponseMode.SUMMARY_ONLY:
         effective_stage = "fragment_summary"
         assert fragment_summary_middle is not None
@@ -653,8 +672,27 @@ def full_prompt(
         )
     else:
         stage_suffix = _STAGE_SUFFIX[effective_stage][language]
-    if stage == "terminology" and mode is not TerminologyResponseMode.TERMS_ONLY:
+    if stage == "terminology" and mode in {
+        TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+        TerminologyResponseMode.SUMMARY_ONLY,
+    }:
         stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
+    if mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
+        prefix = prefix.replace("source_segments", "segments")
+        prefix += f"\n{_STAGE_PREFIX['translation'][language]}"
+        stage_suffix = " ".join(
+            (
+                _SEGMENT_TEXT_SUFFIX[language],
+                _STAGE_SUFFIX["terminology"][language],
+                _STAGE_SUFFIX["translation"][language],
+            )
+        )
+        stage_suffix = stage_suffix.replace("source_segments", "segments")
+        stage_suffix += (
+            " 本次同时返回 term 和 segment 两类记录。从 segments 提取术语，两类结果共用 segments 源文。"
+            if language == "zh-CN"
+            else " Return both term and segment records. Extract terms from segments; Both result classes share the segments sources."
+        )
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
 
@@ -698,6 +736,8 @@ def stage_fingerprint(
         }
         if stage == "terminology":
             data["terminology"] = config["terminology"]
+        if config.get("_draft_translation"):
+            data["generation_origin"] = "terminology_draft"
         if stage == "translation":
             data["validation"] = {
                 "validators": [

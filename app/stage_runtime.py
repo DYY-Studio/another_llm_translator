@@ -1132,13 +1132,23 @@ def _prompt_factory(
         stage == "terminology"
         and parsed_mode is TerminologyResponseMode.SUMMARY_ONLY
     )
+    translation_mode = parsed_mode in {
+        TerminologyResponseMode.TERMS_AND_TRANSLATION,
+        TerminologyResponseMode.TRANSLATION_ONLY,
+    }
     summary_mode = (
         stage == "terminology"
         and response_mode is not None
-        and parsed_mode is not TerminologyResponseMode.TERMS_ONLY
+        and parsed_mode
+        in {
+            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
+            TerminologyResponseMode.SUMMARY_ONLY,
+        }
     )
     required_stages = (
-        ("fragment_summary",)
+        ("terminology", "translation")
+        if translation_mode
+        else ("fragment_summary",)
         if summary_only
         else ("terminology", "fragment_summary")
         if summary_mode
@@ -1162,6 +1172,14 @@ def _prompt_factory(
         except OSError as exc:
             raise StorageError(f"无法读取 Prompt：{fragment_name}: {exc}") from exc
 
+    translation_middle = (
+        (project / "prompts" / prompt_file("translation", language)).read_text(
+            encoding="utf-8"
+        )
+        if translation_mode
+        else None
+    )
+
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(
             prompt_stage,
@@ -1170,6 +1188,7 @@ def _prompt_factory(
             document_requirements=requirements,
             response_mode=None if summary_only else response_mode,
             fragment_summary_middle=fragment_summary_middle,
+            translation_middle=translation_middle,
         )
 
     return build

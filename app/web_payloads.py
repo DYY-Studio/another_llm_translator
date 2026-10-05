@@ -75,6 +75,7 @@ class TaskStartPayload(_WebPayload):
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
+    include_draft_translation: StrictBool = False
     reuse_mixed_fingerprints: StrictBool = False
     final_review: StrictBool = False
     run_action: str | None = None
