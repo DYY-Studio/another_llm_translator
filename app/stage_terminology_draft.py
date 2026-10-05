@@ -217,7 +217,13 @@ class DraftTerminologyScan:
         if any(item["_draft_terms"] for item in self.work):
             self.active = {**self.active, "status": "active"}
         self.prompt_factories = {
-            mode: _prompt_factory(project, "terminology", language, response_mode=mode)
+            mode: _prompt_factory(
+                project,
+                "terminology",
+                language,
+                response_mode=mode,
+                require_term_declaration=True,
+            )
             for mode in (
                 TerminologyResponseMode.TERMS_ONLY,
                 TerminologyResponseMode.TERMS_AND_TRANSLATION,
@@ -412,10 +418,29 @@ class DraftTerminologyScan:
                 report_progress()
                 continue
             document = parse_jsonl_document(
-                response.content, record_type=response_record_types(mode)
+                response.content,
+                record_type=("term", "no_terms")
+                if mode is TerminologyResponseMode.TERMS_ONLY
+                else response_record_types(mode),
             )
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
+            declaration_error = None
+            if mode is not TerminologyResponseMode.TRANSLATION_ONLY:
+                term_records = document.records_by_type["term"]
+                empty_records = document.records_by_type["no_terms"]
+                if not term_records and not empty_records:
+                    declaration_error = "缺少术语响应声明：必须返回 term 或 no_terms"
+                elif empty_records and (
+                    term_records
+                    or len(empty_records) != 1
+                    or empty_records[0] != {"type": "no_terms"}
+                ):
+                    declaration_error = (
+                        "无术语声明必须是单条 no_terms，且不得与 term 并存"
+                    )
+                if declaration_error:
+                    term_errors.append(declaration_error)
             if mode is not TerminologyResponseMode.TRANSLATION_ONLY:
                 seen: set[str] = set()
                 for record in document.records_by_type["term"]:
@@ -441,7 +466,7 @@ class DraftTerminologyScan:
                     )
                     pending = [{**item, "_draft_terms": False} for item in pending]
             translation_unresolved: set[str] = set()
-            if mode is not TerminologyResponseMode.TERMS_ONLY:
+            if mode is not TerminologyResponseMode.TERMS_ONLY and not declaration_error:
                 content = "\n".join(
                     json.dumps(record, ensure_ascii=False)
                     for record in document.records_by_type["segment"]

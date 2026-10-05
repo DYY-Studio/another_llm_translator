@@ -86,7 +86,7 @@ def response_record_types(
     if normalized is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
         return ("summary", "term")
     if normalized is TerminologyResponseMode.TERMS_AND_TRANSLATION:
-        return ("term", "segment")
+        return ("term", "no_terms", "segment")
     if normalized is TerminologyResponseMode.TRANSLATION_ONLY:
         return ("segment",)
     return ("summary",)

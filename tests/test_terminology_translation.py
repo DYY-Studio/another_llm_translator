@@ -2509,7 +2509,7 @@ async def test_draft_scan_uses_translation_split_and_validation(
             records = (
                 [{"type": "term", "source": "Alice", "category": "人名"}]
                 if "Alice" in "".join(item["source"] for item in payload["segments"])
-                else []
+                else [{"type": "no_terms"}]
             )
         records.extend(
             {
@@ -2617,6 +2617,8 @@ async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
             {"type": "segment", "id": item["id"], "translation": "译文"}
             for item in payload["segments"]
         ]
+        if payload["response_mode"] != "translation-only":
+            records.insert(0, {"type": "no_terms"})
         return httpx.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
@@ -2745,7 +2747,12 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
                     {
                         "message": {
                             "content": llm_jsonl(
-                                [{"type": "segment", "id": "1", "translation": text}]
+                                (
+                                    [{"type": "no_terms"}]
+                                    if payload["response_mode"] != "translation-only"
+                                    else []
+                                )
+                                + [{"type": "segment", "id": "1", "translation": text}]
                             )
                         }
                     }
@@ -2760,3 +2767,88 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
     assert modes == ["terms+translation", "translation-only"]
     assert result["failed"] == 0
     assert load_stage_history(project, "translation")[0]["text"] == "甲 乙 丙"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "declaration", [None, {"type": "no_terms", "extra": True}, {"type": "no_terms"}]
+)
+async def test_draft_scan_requires_explicit_term_response_before_saving(
+    tmp_path: Path,
+    declaration: dict | None,
+) -> None:
+    project = await create_project(tmp_path, "The door opened.")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        # A missing or malformed declaration must not save even valid translations.
+        if len(requests) == 2:
+            assert load_stage_history(project, "translation") == []
+            assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
+        records = [declaration] if len(requests) == 1 and declaration else []
+        if len(requests) > 1:
+            records = [{"type": "no_terms"}]
+        records.extend(
+            {"type": "segment", "id": item["id"], "translation": "门开了。"}
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 0
+    assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
+    assert all(request["response_mode"] == "terms+translation" for request in requests)
+    if len(requests) == 2:
+        assert "format_correction" in requests[1]
+    assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
+
+
+@pytest.mark.asyncio
+async def test_missing_draft_term_declaration_fails_with_format_reason(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "The door opened.")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": "1",
+                                        "translation": "门开了。",
+                                    }
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 1
+    assert len(requests) == 3
+    assert all(payload["response_mode"] == "terms+translation" for payload in requests)
+    records = load_stage_history(project, "translation")
+    assert not any(record["status"] == "completed" for record in records)
+    assert records[-1]["error_class"] == "format_error"
+    assert "术语响应声明" in records[-1]["error_message"]

@@ -1118,6 +1118,7 @@ def _prompt_factory(
     stage: str,
     language: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
+    require_term_declaration: bool = False,
 ) -> Callable[[Iterable[str]], str]:
     try:
         parsed_mode = (
@@ -1189,6 +1190,7 @@ def _prompt_factory(
             response_mode=None if summary_only else response_mode,
             fragment_summary_middle=fragment_summary_middle,
             translation_middle=translation_middle,
+            require_term_declaration=require_term_declaration,
         )
 
     return build

@@ -6708,6 +6708,7 @@ async def test_draft_scan_task_reports_both_result_classes(
             {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
             for item in payload["segments"]
         ]
+        records.insert(0, {"type": "no_terms"})
         return httpx.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )

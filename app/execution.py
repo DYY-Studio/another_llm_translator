@@ -578,6 +578,45 @@ _COMMON_SUFFIX: dict[str, str] = {
     ),
 }
 
+_DRAFT_PREFIX = {
+    "zh-CN": (
+        "你同时执行术语扫描和第一次粗翻。逐项翻译 segments[].source 到 target_language，"
+        "并仅从这些源文提取术语候选。terms 是已发布的参考术语；本次新候选仅供后续决策，"
+        "不得视为已发布术语。reference_context 与 summary_context 仅供理解语境，"
+        "不得提取仅出现在参考内容中的术语或将其翻译输出。summary_context_relation "
+        "仅描述概括与当前源文的覆盖关系。"
+    ),
+    "en": (
+        "Scan terminology and produce the first draft together. Translate each segments[].source "
+        "into target_language and extract terminology only from those sources. terms contains "
+        "published reference terminology; new candidates await later decisions and are not published "
+        "terminology. reference_context and summary_context are context only: do not extract terms "
+        "found only there or translate them into the output. summary_context_relation only describes "
+        "summary coverage relative to the current sources."
+    ),
+}
+
+_DRAFT_TERM_SUFFIX = {
+    "zh-CN": (
+        '术语响应必须明确：有合格术语时每个术语一条 type="term" 记录，仅含必填非空字符串 '
+        "source、category，以及可选字符串 description、preferred_translation 和字符串数组 aliases。"
+        "source 与 aliases 必须是本次源文中同一术语的形式；目标译名仅放 preferred_translation，"
+        "人物性别仅在可靠时写入 category。没有合格术语时恰好输出一条"
+        '{"type":"no_terms"}，不得附加字段，也不得与 term 并存。end 仅表示响应结束，'
+        "不能替代术语响应声明。"
+    ),
+    "en": (
+        'Declare the terminology result explicitly. For qualifying terms, return one type="term" '
+        "record per term with required non-empty strings source and category, optional strings "
+        "description and preferred_translation, and optional string-array aliases. source and aliases "
+        "must be forms of the same term present in the request sources; put target forms only in "
+        "preferred_translation and gender in category only when reliable. If no terms qualify, return "
+        'exactly one {"type":"no_terms"} with no extra fields and no term records. end only terminates '
+        "the response and never substitutes for a terminology declaration."
+    ),
+}
+
+
 def full_prompt(
     stage: str,
     middle: str,
@@ -587,6 +626,7 @@ def full_prompt(
     response_mode: TerminologyResponseMode | str | None = None,
     fragment_summary_middle: str | None = None,
     translation_middle: str | None = None,
+    require_term_declaration: bool = False,
 ) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
@@ -634,7 +674,20 @@ def full_prompt(
         effective_stage = "translation"
         effective_middle = translation_middle or ""
     elif mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
-        effective_middle = f"{middle.strip()}\n\n{translation_middle.strip()}"
+        effective_middle = (
+            (
+                "术语扫描要求：\n"
+                if language == "zh-CN"
+                else "Terminology scanning policy:\n"
+            )
+            + middle.strip()
+            + (
+                "\n\n粗翻要求：\n"
+                if language == "zh-CN"
+                else "\n\nDraft translation policy:\n"
+            )
+            + translation_middle.strip()
+        )
     if mode is TerminologyResponseMode.SUMMARY_ONLY:
         effective_stage = "fragment_summary"
         assert fragment_summary_middle is not None
@@ -678,21 +731,16 @@ def full_prompt(
     }:
         stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
     if mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
-        prefix = prefix.replace("source_segments", "segments")
-        prefix += f"\n{_STAGE_PREFIX['translation'][language]}"
+        prefix = f"{_COMMON_PREFIX[language]}\n{_DRAFT_PREFIX[language]}"
         stage_suffix = " ".join(
             (
                 _SEGMENT_TEXT_SUFFIX[language],
-                _STAGE_SUFFIX["terminology"][language],
+                _DRAFT_TERM_SUFFIX[language],
                 _STAGE_SUFFIX["translation"][language],
             )
         )
-        stage_suffix = stage_suffix.replace("source_segments", "segments")
-        stage_suffix += (
-            " 本次同时返回 term 和 segment 两类记录。从 segments 提取术语，两类结果共用 segments 源文。"
-            if language == "zh-CN"
-            else " Return both term and segment records. Extract terms from segments; Both result classes share the segments sources."
-        )
+    elif require_term_declaration and mode is TerminologyResponseMode.TERMS_ONLY:
+        stage_suffix = _DRAFT_TERM_SUFFIX[language]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
 

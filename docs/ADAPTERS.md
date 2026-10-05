@@ -282,6 +282,10 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
+### 术语粗翻实验响应
+
+实验合并请求使用专用 Prefix 和 Suffix，包围当前语言的术语与翻译 Prompt。响应为严格 JSONL：有术语返回 `term` 记录；无合格术语必须返回唯一的 `{"type":"no_terms"}`，不能附加字段或与 `term` 并存。每个请求 Segment 返回一条完整 `segment` 译文记录，末行仍为 `{"type":"end"}`。`end` 只表示结束，不能声明术语结果为空。实验中的单独补扫请求也遵守术语声明规则；仅补译请求只返回译文。
+
 ## 2. Document Adapter（Beta）
 
 Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；官方目录插件
