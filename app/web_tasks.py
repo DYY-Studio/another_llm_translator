@@ -1325,10 +1325,20 @@ class WebTaskManager:
                 },
             )
 
-        def usage_changed(current: dict[str, Any] | None) -> None:
+        def usage_changed(
+            current: dict[str, Any] | None,
+            invocation_usage: dict[str, Any] | None = None,
+        ) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
             if self.diagnostics is not None:
-                self.diagnostics.set_usage(state.usage)
+                self.diagnostics.set_usage(
+                    state.usage,
+                    invocation_usage=(
+                        invocation_usage
+                        if invocation_usage is not None
+                        else current or unavailable_usage()
+                    ),
+                )
 
         try:
             diagnostics_context = (

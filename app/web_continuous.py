@@ -873,7 +873,7 @@ async def run_continuous(
     planned_steps: Iterable[Mapping[str, Any]] = (),
     on_stage: Callable[[str, str, Mapping[str, Any]], None] | None = None,
     on_progress: Callable[[str, int, int, int], None] | None = None,
-    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+    on_usage: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_stages(stages)
     actions = dict(run_actions or {})
@@ -908,6 +908,7 @@ async def run_continuous(
         if on_usage is None:
             return
         aggregate: dict[str, Any] | None = None
+        invocation: dict[str, Any] | None = None
         for stage_name in normalized:
             base = usage_base_by_stage.get(stage_name)
             current_value = usage_by_stage.get(stage_name)
@@ -917,7 +918,8 @@ async def run_continuous(
                 else current_value
             )
             aggregate = combine_usage(aggregate, value)
-        on_usage(aggregate or unavailable_usage())
+            invocation = combine_usage(invocation, current_value)
+        on_usage(aggregate or unavailable_usage(), invocation or unavailable_usage())
 
     def report_progress(stage: str, completed: int, failed: int, total: int) -> None:
         for step in steps:

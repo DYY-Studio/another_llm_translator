@@ -3967,11 +3967,31 @@ async def test_web_task_manager_preserves_expected_errors_and_hides_unexpected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
 async def test_web_task_exposes_live_progress_and_separate_token_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
 ) -> None:
     _, project = make_project(tmp_path)
+    if resume:
+        from app.web_tasks import read_json
+
+        monkeypatch.setattr(
+            "app.web_tasks.choose_running_run",
+            lambda *_args, **_kwargs: ("RESUMED", []),
+        )
+        manifest = {
+            "usage_invocation_count": 1,
+            "usage": {
+                "input_tokens": 1200, "output_tokens": 500, "total_tokens": 1700,
+                "available": True, "partial": False,
+            },
+        }
+        monkeypatch.setattr(
+            "app.web_tasks.read_json",
+            lambda root, path: manifest if path.name == "manifest.json" else read_json(root, path),
+        )
 
     async def fake_translation(
         _: Path,
@@ -3999,9 +4019,9 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
             "failed": 0,
             "pending": 0,
             "usage": {
-                "input_tokens": 12,
-                "output_tokens": 5,
-                "total_tokens": 17,
+                "input_tokens": 1212 if resume else 12,
+                "output_tokens": 505 if resume else 5,
+                "total_tokens": 1717 if resume else 17,
                 "available": True,
                 "partial": False,
             },
@@ -4023,10 +4043,15 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
     assert state["status"] == "completed"
     assert state["completed_segments"] == state["total_segments"] == 2
     assert state["failed_segments"] == state["pending_segments"] == 0
-    assert state["usage"]["input_tokens"] == 12
-    assert state["usage"]["output_tokens"] == 5
-    assert diagnostics.snapshot()["metrics"]["input_tokens"] == 12
-    assert diagnostics.snapshot()["metrics"]["output_tokens"] == 5
+    assert state["usage"]["input_tokens"] == (1212 if resume else 12)
+    assert state["usage"]["output_tokens"] == (505 if resume else 5)
+    diagnostics._elapsed_seconds = 2
+    metrics = diagnostics.snapshot()["metrics"]
+    assert metrics["input_tokens"] == (1212 if resume else 12)
+    assert metrics["output_tokens"] == (505 if resume else 5)
+    assert metrics["throughput_input_tokens_per_second"] == 6
+    assert metrics["throughput_output_tokens_per_second"] == 2.5
+    assert metrics["throughput_tokens_per_second"] == 8.5
 
 
 @pytest.mark.asyncio
@@ -6073,17 +6098,21 @@ async def test_continuous_resume_usage_includes_stage_manifest_usage(
         }
 
     monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    reported = []
     result = await run_continuous(
         project,
         Scope(),
         ("translation",),
         limiters=_continuous_limiter_map(project, ("translation",)),
         run_actions={"translation": "resume"},
+        on_usage=lambda total, invocation: reported.append((total, invocation)),
     )
 
     assert result["usage"]["input_tokens"] == 13
     assert result["usage"]["output_tokens"] == 6
     assert result["usage"]["total_tokens"] == 19
+    assert reported[-1][0] == result["usage"]
+    assert reported[-1][1] == current
 
 
 @pytest.mark.asyncio
