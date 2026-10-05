@@ -176,7 +176,7 @@
   .term-hits-panel { padding: 14px 14px 18px; }
   .term-secondary { grid-template-columns: 1fr; }
   .term-stats { justify-content: start; }
-  .term-actions-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .term-actions-toolbar { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; }
   .term-actions-toolbar > span:first-child { margin-right: 0; }
   .term-actions-toolbar .segment-batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .term-actions-toolbar .segment-batch-actions > button,
@@ -184,8 +184,8 @@
   .term-actions-toolbar .segment-batch-actions > button,
   .term-actions-menu > summary { min-height: 36px; }
   .term-actions-toolbar .term-actions-menu > summary { width: 100%; }
-  .term-actions-menu { grid-column: span 1; }
-  .term-actions-popover { right: 0; min-width: min(220px, calc(100vw - 36px)); }
+  .term-actions-menu { position: static; grid-column: span 1; }
+  .term-actions-popover { left: 0; right: 0; min-width: 0; }
   .editor-pane { padding: 18px 14px 50px; }
   .comparison, .context-groups { grid-template-columns: 1fr; }
   .settings-layout { display: block; }
