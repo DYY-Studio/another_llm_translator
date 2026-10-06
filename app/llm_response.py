@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+from .documents import aozora_match_views
 from .errors import (
     ExternalError,
 )
@@ -206,7 +207,9 @@ def parse_jsonl_document(
 
 
 def _term_is_in_sources(term: str, source_texts: tuple[str, ...]) -> bool:
-    return any(term in source for source in source_texts)
+    return any(
+        term in view for source in source_texts for view in aozora_match_views(source)
+    )
 
 
 def _validate_terminology_record(

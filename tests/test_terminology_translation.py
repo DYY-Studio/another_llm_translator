@@ -2852,3 +2852,62 @@ async def test_missing_draft_term_declaration_fails_with_format_reason(
     assert not any(record["status"] == "completed" for record in records)
     assert records[-1]["error_class"] == "format_error"
     assert "术语响应声明" in records[-1]["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_terminology_scan_accepts_ruby_base_and_reading_without_retry(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "｜星《せい》｜河《が》学園に入った。")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        records = [
+            {
+                "type": "term",
+                "source": "星河学園",
+                "category": "学校名",
+                "aliases": ["せいが"],
+                "preferred_translation": "星河学院",
+            }
+        ]
+        records.extend(
+            {"type": "segment", "id": item["id"], "translation": "进入了星河学院。"}
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 0
+    assert len(requests) == 1
+    assert load_terms(project)["terms"][0]["source"] == "星河学園"
+    assert load_terms(project)["terms"][0]["aliases"] == ["せいが"]
+    assert result["draft_progress"]["terminology"]["completed"] == 1
+    assert result["draft_progress"]["translation"]["completed"] == 1
+
+
+@pytest.mark.parametrize(
+    "source,term",
+    [
+        ("｜星《せい》｜河《が》", "星河せいが"),
+        ("｜星《せい》と｜河《が》", "せいが"),
+    ],
+)
+def test_terminology_validation_does_not_join_ruby_base_with_reading_or_separate_readings(
+    source: str, term: str
+) -> None:
+    from app.llm_response import _validate_terminology_record
+
+    error, _ = _validate_terminology_record(
+        {"type": "term", "source": term, "category": "名詞"},
+        source_texts=(source,),
+        seen_sources=set(),
+    )
+    assert error == "source_not_found"
