@@ -498,9 +498,7 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
 
 _TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
     "zh-CN": {
-        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["zh-CN"]
-        + " "
-        + (
+        "terms+fragment-summary": (
             '先输出一条或多条 type="summary" 记录，再输出术语记录，最后输出 end。'
             "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
             "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
@@ -508,13 +506,11 @@ _TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
         "summary-only": _STAGE_SUFFIX["fragment_summary"]["zh-CN"],
     },
     "en": {
-        "terms+fragment-summary": _STAGE_SUFFIX["terminology"]["en"]
-        + " "
-        + (
+        "terms+fragment-summary": (
             'Output one or more type="summary" records first, then term records, and end last. '
-            'A summary contains type and non-empty text. A single summary may omit refs. '
-            'If outputting multiple summaries, each must include refs; refs must not overlap '
-            'and must collectively cover all source_segments.'
+            "A summary contains type and non-empty text. A single summary may omit refs. "
+            "If outputting multiple summaries, each must include refs; refs must not overlap "
+            "and must collectively cover all source_segments."
         ),
         "summary-only": _STAGE_SUFFIX["fragment_summary"]["en"],
     },
@@ -596,7 +592,7 @@ _DRAFT_PREFIX = {
     ),
 }
 
-_DRAFT_TERM_SUFFIX = {
+_TERM_DECLARATION_SUFFIX = {
     "zh-CN": (
         '术语响应必须明确：有合格术语时每个术语一条 type="term" 记录，仅含必填非空字符串 '
         "source、category，以及可选字符串 description、preferred_translation 和字符串数组 aliases。"
@@ -730,17 +726,23 @@ def full_prompt(
         TerminologyResponseMode.SUMMARY_ONLY,
     }:
         stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
+        if mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
+            stage_suffix = f"{_TERM_DECLARATION_SUFFIX[language]} {stage_suffix}"
     if mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
         prefix = f"{_COMMON_PREFIX[language]}\n{_DRAFT_PREFIX[language]}"
         stage_suffix = " ".join(
             (
                 _SEGMENT_TEXT_SUFFIX[language],
-                _DRAFT_TERM_SUFFIX[language],
+                _TERM_DECLARATION_SUFFIX[language],
                 _STAGE_SUFFIX["translation"][language],
             )
         )
-    elif require_term_declaration and mode is TerminologyResponseMode.TERMS_ONLY:
-        stage_suffix = _DRAFT_TERM_SUFFIX[language]
+    elif (
+        stage == "terminology"
+        and require_term_declaration
+        and mode is TerminologyResponseMode.TERMS_ONLY
+    ):
+        stage_suffix = _TERM_DECLARATION_SUFFIX[language]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
     return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
 

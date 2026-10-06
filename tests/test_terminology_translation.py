@@ -2855,10 +2855,14 @@ async def test_missing_draft_term_declaration_fails_with_format_reason(
 
 
 @pytest.mark.asyncio
-async def test_terminology_scan_accepts_ruby_base_and_reading_without_retry(
+@pytest.mark.parametrize(
+    "source", ["｜星《せい》｜河《が》学園に入った。", "星河にある学園に入った。"]
+)
+async def test_draft_scan_accepts_model_merged_term_and_alias_without_retry(
     tmp_path: Path,
+    source: str,
 ) -> None:
-    project = await create_project(tmp_path, "｜星《せい》｜河《が》学園に入った。")
+    project = await create_project(tmp_path, source)
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2891,23 +2895,3 @@ async def test_terminology_scan_accepts_ruby_base_and_reading_without_retry(
     assert load_terms(project)["terms"][0]["aliases"] == ["せいが"]
     assert result["draft_progress"]["terminology"]["completed"] == 1
     assert result["draft_progress"]["translation"]["completed"] == 1
-
-
-@pytest.mark.parametrize(
-    "source,term",
-    [
-        ("｜星《せい》｜河《が》", "星河せいが"),
-        ("｜星《せい》と｜河《が》", "せいが"),
-    ],
-)
-def test_terminology_validation_does_not_join_ruby_base_with_reading_or_separate_readings(
-    source: str, term: str
-) -> None:
-    from app.llm_response import _validate_terminology_record
-
-    error, _ = _validate_terminology_record(
-        {"type": "term", "source": term, "category": "名詞"},
-        source_texts=(source,),
-        seen_sources=set(),
-    )
-    assert error == "source_not_found"

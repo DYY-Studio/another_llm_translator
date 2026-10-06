@@ -282,9 +282,13 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
 
-### 术语粗翻实验响应
+### 术语提取实验响应
 
-实验合并请求使用专用 Prefix 和 Suffix，包围当前语言的术语与翻译 Prompt。响应为严格 JSONL：有术语返回 `term` 记录；无合格术语必须返回唯一的 `{"type":"no_terms"}`，不能附加字段或与 `term` 并存。每个请求 Segment 返回一条完整 `segment` 译文记录，末行仍为 `{"type":"end"}`。`end` 只表示结束，不能声明术语结果为空。实验中的单独补扫请求也遵守术语声明规则；仅补译请求只返回译文。
+术语＋粗翻和术语＋概括均使用显式术语声明：有术语返回 `term` 记录；无合格术语必须返回唯一的 `{"type":"no_terms"}`，不能附加字段或与 `term` 并存。末行仍为 `{"type":"end"}`，只表示结束。实验中的单独补扫请求也遵守这一规则；仅补译或仅补概括请求不声明术语结果。缺少或无效的声明属于整次响应的格式错误。
+
+两个实验与标准术语扫描共用字段校验：`source`、`category` 为非空字符串，`description`、`preferred_translation` 为可选字符串，`aliases` 为字符串数组。宿主不额外检查候选及别名是否在源文中连续出现，也不额外拒绝重复候选或术语记录的未知字段。
+
+粗翻合并请求使用专用 Prefix 和 Suffix，包围当前语言的术语与翻译 Prompt；每个请求 Segment 返回一条完整 `segment` 译文记录。概括合并请求先输出覆盖请求范围的 `summary` 记录，再输出 `term` 或 `no_terms`。响应均遵循严格 JSONL。
 
 ## 2. Document Adapter（Beta）
 

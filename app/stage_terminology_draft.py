@@ -24,6 +24,7 @@ from .execution import (
 )
 from .llm_response import (
     TerminologyResponseMode,
+    _terminology_declaration_error,
     _validate_terminology_record,
     parse_jsonl_document,
     response_record_types,
@@ -419,38 +420,20 @@ class DraftTerminologyScan:
                 continue
             document = parse_jsonl_document(
                 response.content,
-                record_type=("term", "no_terms")
-                if mode is TerminologyResponseMode.TERMS_ONLY
-                else response_record_types(mode),
+                record_type=response_record_types(mode),
             )
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
-            declaration_error = None
+            declaration_error = (
+                _terminology_declaration_error(document.records_by_type)
+                if mode is not TerminologyResponseMode.TRANSLATION_ONLY
+                else None
+            )
+            if declaration_error:
+                term_errors.append(declaration_error[1])
             if mode is not TerminologyResponseMode.TRANSLATION_ONLY:
-                term_records = document.records_by_type["term"]
-                empty_records = document.records_by_type["no_terms"]
-                if not term_records and not empty_records:
-                    declaration_error = "缺少术语响应声明：必须返回 term 或 no_terms"
-                elif empty_records and (
-                    term_records
-                    or len(empty_records) != 1
-                    or empty_records[0] != {"type": "no_terms"}
-                ):
-                    declaration_error = (
-                        "无术语声明必须是单条 no_terms，且不得与 term 并存"
-                    )
-                if declaration_error:
-                    term_errors.append(declaration_error)
-            if mode is not TerminologyResponseMode.TRANSLATION_ONLY:
-                seen: set[str] = set()
                 for record in document.records_by_type["term"]:
-                    error, term = _validate_terminology_record(
-                        record,
-                        source_texts=tuple(
-                            segment_model_source(item) for item in pending
-                        ),
-                        seen_sources=seen,
-                    )
+                    error, term = _validate_terminology_record(record)
                     if error:
                         term_errors.append(error)
                     elif term is not None:

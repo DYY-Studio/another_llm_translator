@@ -34,6 +34,7 @@ from .llm_client import SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .llm_response import (
     TerminologyResponseMode,
+    _validate_terminology_record,
     parse_jsonl_document,
     parse_terminology_response,
 )
@@ -223,33 +224,17 @@ def _validate_term_items(
     terms: list[dict[str, Any]] = []
     errors = list(document.errors)
     for index, item in enumerate(document.records, start=1):
-        item_errors: list[str] = []
-        for key in ("source", "category"):
-            if not isinstance(item.get(key), str) or not item[key].strip():
-                item_errors.append(f"术语记录 {index} 缺少有效 {key}")
-        description = item.get("description")
-        if description is not None and not isinstance(description, str):
-            item_errors.append(f"术语记录 {index} 的 description 类型错误")
-        preferred = item.get("preferred_translation")
-        if preferred is not None and not isinstance(preferred, str):
-            item_errors.append(f"术语记录 {index} 的 preferred_translation 类型错误")
-        aliases = item.get("aliases", [])
-        if not isinstance(aliases, list) or not all(
-            isinstance(alias, str) for alias in aliases
-        ):
-            item_errors.append(f"术语记录 {index} 的 aliases 类型错误")
-        if item_errors:
-            errors.extend(item_errors)
-            continue
-        terms.append(
-            {
-                "source": item["source"].strip(),
-                "category": item["category"].strip(),
-                "description": description.strip() if description else None,
-                "preferred_translation": preferred.strip() if preferred else None,
-                "aliases": [alias.strip() for alias in aliases if alias.strip()],
-            }
-        )
+        error, term = _validate_terminology_record(item)
+        if error:
+            field = error.removeprefix("invalid_")
+            detail = (
+                f"缺少有效 {field}"
+                if field in {"source", "category"}
+                else f"的 {field} 类型错误"
+            )
+            errors.append(f"术语记录 {index} {detail}")
+        elif term is not None:
+            terms.append({key: value for key, value in term.items() if key != "type"})
     return terms, errors, document.complete and not errors
 
 
@@ -410,6 +395,7 @@ async def run_terminology(
                 response_mode=(
                     None if mode is TerminologyResponseMode.TERMS_ONLY else mode
                 ),
+                require_term_declaration=include_summaries,
             )
             mode_prompt_factories[mode] = factory
         return factory
@@ -1548,9 +1534,6 @@ async def run_terminology(
                     response.content,
                     mode=failed_class,
                     source_refs=source_refs,
-                    source_texts=tuple(
-                        segment_model_source(item) for item in unresolved
-                    ),
                 )
             except FatalExternalError:
                 raise
@@ -1712,14 +1695,7 @@ async def run_terminology(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> tuple[int, int]:
-        if (
-            str(
-                chunk.segments[0].get(
-                    _SUMMARY_MODE_KEY, TerminologyResponseMode.TERMS_ONLY.value
-                )
-            )
-            != TerminologyResponseMode.TERMS_ONLY.value
-        ):
+        if include_summaries:
             return await process_summary_once(chunk, initial_parent_request_id)
         unresolved = list(chunk.segments)
         parent_request_id = initial_parent_request_id

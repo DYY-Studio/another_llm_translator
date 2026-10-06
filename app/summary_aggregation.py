@@ -527,7 +527,6 @@ async def aggregate_summaries(
                     response.content,
                     mode=TerminologyResponseMode.SUMMARY_ONLY,
                     source_refs=tuple(str(index + 1) for index in range(len(children))),
-                    source_texts=tuple(str(item["text"]) for item in children),
                 )
                 if not parsed.complete or not parsed.summaries:
                     raise UsageError(
