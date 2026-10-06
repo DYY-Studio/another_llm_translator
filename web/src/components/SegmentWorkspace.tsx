@@ -123,7 +123,9 @@ export function SegmentWorkspace({
   onJumpConsumed?: () => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
-    ["all", "pending", "completed", "warning", "missing-base", "outdated", "accepted", "suggested", "applied", "error"]
+    (stage === "translation"
+      ? ["all", "pending", "completed", "warning", "error"]
+      : ["all", "pending", "missing-base", "outdated", "accepted", "suggested", "applied", "error"])
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();

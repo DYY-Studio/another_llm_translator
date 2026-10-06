@@ -54,6 +54,26 @@ from .translation_validation import (
 )
 
 REVIEW_STAGES = {"proofreading", "polishing"}
+_SEGMENT_FILTER_STATUSES = dict.fromkeys(
+    REVIEW_STAGES,
+    {
+        None,
+        "failed",
+        "pending",
+        "missing-base",
+        "outdated",
+        "accepted",
+        "suggested",
+        "applied",
+    },
+)
+_SEGMENT_FILTER_STATUSES["translation"] = {
+    None,
+    "completed",
+    "failed",
+    "pending",
+    "warning",
+}
 
 
 def _project_storage_size(project: Path) -> int:
@@ -391,7 +411,7 @@ class WebStore:
     ) -> dict[str, Any]:
         if stage not in {"translation", "proofreading", "polishing"}:
             raise UsageError("overview stage 无效")
-        if status not in {None, "completed", "failed", "pending", "warning"}:
+        if status not in _SEGMENT_FILTER_STATUSES[stage]:
             raise UsageError("overview status 无效")
         window = query_segments(
             self.project,
@@ -543,7 +563,7 @@ class WebStore:
     ) -> dict[str, Any]:
         if stage not in {"translation", "proofreading", "polishing"}:
             raise UsageError("segment index stage 无效")
-        if status not in {None, "completed", "failed", "pending", "warning"}:
+        if status not in _SEGMENT_FILTER_STATUSES[stage]:
             raise UsageError("segment index status 无效")
         values = segment_ids(
             self.project,
