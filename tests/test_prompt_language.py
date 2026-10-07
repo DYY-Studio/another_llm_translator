@@ -751,3 +751,36 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
         assert empty_group["file_count"] == 3
         assert empty_group["adapter_ids"] == ["txt", "epub"]
         assert client.get(endpoint, params={"file_id": "missing"}).status_code == 400
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+@pytest.mark.parametrize("mode", list(TerminologyResponseMode))
+def test_combined_prefix_explains_only_active_fields_once(language, mode):
+    from app.llm_response import response_record_types
+
+    types = response_record_types(mode)
+    prefix = full_prompt(
+        "terminology",
+        "term middle",
+        language,
+        response_mode=mode,
+        fragment_summary_middle="summary middle",
+        translation_middle="translation middle",
+    ).split("\n\n", 1)[0]
+    fields = {"target_language", "reference_context"}
+    if "term" in types or "summary" in types:
+        fields.add("source_segments")
+    if "segment" in types:
+        fields |= {
+            "segments[].source",
+            "terms",
+            "summary_context",
+            "summary_context_relation",
+            "validation_repair",
+        }
+    for field in fields:
+        assert prefix.count(field + ":") == 1
+    for field in {"segments[].current_text", "summaries"}:
+        assert field + ":" not in prefix
+    if "segment" not in types:
+        assert "summary_context:" not in prefix
+        assert "terms:" not in prefix
