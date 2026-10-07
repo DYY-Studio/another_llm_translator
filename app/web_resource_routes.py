@@ -310,26 +310,11 @@ def register_resource_routes(
             if mode_errors:
                 result["assembled_mode_errors"] = mode_errors
         if stage == "terminology":
-            from .stage_runtime import (
-                COMBINED_PROMPT_MODES,
-                load_prompt_wrappers,
-                prompt_wrappers_file,
-            )
-
-            wrappers_path = (
-                file_for(resolved).parent / prompt_wrappers_file(resolved)
-                if global_file_for is not None
-                else effective_path(
-                    f"prompts/{prompt_wrappers_file(resolved)}", builtin_root=app_root
-                )
-            )
-            saved_wrappers = load_prompt_wrappers(wrappers_path)
-            result["mode_wrappers"] = {
-                mode: saved_wrappers.get(mode, {"prefix": "", "suffix": ""})
-                for mode in COMBINED_PROMPT_MODES
-            }
-            result["mode_preview_parts"] = {}
-            for mode in COMBINED_PROMPT_MODES:
+            for mode in (
+                "terms+translation",
+                "terms+fragment-summary",
+                "terms+translation+fragment-summary",
+            ):
                 needs_translation = "translation" in mode
                 needs_summary = "fragment-summary" in mode
                 paths = [file_for(resolved)]
@@ -345,7 +330,6 @@ def register_resource_routes(
                     )
                     continue
                 middles = [item.read_text(encoding="utf-8") for item in paths]
-                wrapper = result["mode_wrappers"][mode]
                 result["assembled_modes"][mode] = full_prompt(
                     "terminology",
                     content,
@@ -353,49 +337,14 @@ def register_resource_routes(
                     response_mode=mode,
                     fragment_summary_middle=middles[1] if needs_summary else None,
                     translation_middle=middles[-1] if needs_translation else None,
-                    prefix=wrapper["prefix"],
-                    suffix=wrapper["suffix"],
                 )
                 result["assembled_mode_languages"][mode] = resolved
-                from .execution import prompt_sections
-
-                prefix, _, suffix = prompt_sections(
-                    "terminology",
-                    content,
-                    resolved,
-                    response_mode=mode,
-                    fragment_summary_middle=middles[1] if needs_summary else None,
-                    translation_middle=middles[-1] if needs_translation else None,
-                )
-                result["mode_preview_parts"][mode] = {
-                    "prefix": prefix,
-                    "suffix": suffix,
-                    "companion": "\n\n".join(value.strip() for value in middles[1:]),
-                }
         if global_file_for is not None:
             global_path = global_file_for(resolved)
             if global_path.is_file():
                 result["global_sync"] = {
                     "available": True,
-                    "same": path.read_bytes() == global_path.read_bytes()
-                    and (
-                        stage != "terminology"
-                        or {
-                            key: value
-                            for key, value in saved_wrappers.items()
-                            if any(value.values())
-                        }
-                        == {
-                            key: value
-                            for key, value in load_prompt_wrappers(
-                                effective_path(
-                                    f"prompts/{prompt_wrappers_file(resolved)}",
-                                    builtin_root=app_root,
-                                )
-                            ).items()
-                            if any(value.values())
-                        }
-                    ),
+                    "same": path.read_bytes() == global_path.read_bytes(),
                     "language": resolved,
                 }
             else:
@@ -541,21 +490,9 @@ def register_resource_routes(
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 必须是非空字符串")
-        from .stage_runtime import validate_prompt_wrappers, prompt_wrappers_file
-
-        wrappers = payload.get("mode_wrappers")
-        if wrappers is not None:
-            if stage != "terminology":
-                raise UsageError("只有术语 Prompt 支持组合包装配置")
-            validate_prompt_wrappers(wrappers)
         atomic_write_text(
             write_user(f"prompts/{prompt_file(stage, language)}"), content
         )
-        if wrappers is not None:
-            atomic_write_text(
-                write_user(f"prompts/{prompt_wrappers_file(language)}"),
-                json.dumps(wrappers, ensure_ascii=False, indent=2),
-            )
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/config")
@@ -617,22 +554,8 @@ def register_resource_routes(
         if not isinstance(content, str) or not content.strip():
             raise UsageError("Prompt 不能为空")
         root = project(name)
-        from .stage_runtime import validate_prompt_wrappers, prompt_wrappers_file
-
-        wrappers = payload.get("mode_wrappers")
-        if wrappers is not None:
-            if stage != "terminology":
-                raise UsageError("只有术语 Prompt 支持组合包装配置")
-            validate_prompt_wrappers(wrappers)
         with project_write_lock(root):
-            atomic_write_text(
-                root / "prompts" / prompt_file(stage, language), content
-            )
-            if wrappers is not None:
-                atomic_write_text(
-                    root / "prompts" / prompt_wrappers_file(language),
-                    json.dumps(wrappers, ensure_ascii=False, indent=2),
-                )
+            atomic_write_text(root / "prompts" / prompt_file(stage, language), content)
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")

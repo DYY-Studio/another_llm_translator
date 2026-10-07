@@ -593,7 +593,7 @@ _TERM_DECLARATION_SUFFIX = {
 }
 
 
-def prompt_sections(
+def full_prompt(
     stage: str,
     middle: str,
     language: str = "zh-CN",
@@ -603,7 +603,7 @@ def prompt_sections(
     fragment_summary_middle: str | None = None,
     translation_middle: str | None = None,
     require_term_declaration: bool = False,
-) -> tuple[str, str, str]:
+) -> str:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
     if stage not in _STAGE_PREFIX:
@@ -714,44 +714,7 @@ def prompt_sections(
     elif stage == "terminology" and require_term_declaration:
         stage_suffix = _TERM_DECLARATION_SUFFIX[language]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
-    return prefix, effective_middle.strip(), " ".join(suffix_parts)
-
-
-def full_prompt(
-    stage: str,
-    middle: str,
-    language: str = "zh-CN",
-    document_requirements: Iterable[str] = (),
-    phase: str | None = None,
-    response_mode: TerminologyResponseMode | str | None = None,
-    fragment_summary_middle: str | None = None,
-    translation_middle: str | None = None,
-    require_term_declaration: bool = False,
-    prefix: str | None = None,
-    suffix: str | None = None,
-) -> str:
-    default_prefix, assembled_middle, default_suffix = prompt_sections(
-        stage,
-        middle,
-        language,
-        document_requirements,
-        phase,
-        response_mode,
-        fragment_summary_middle,
-        translation_middle,
-        require_term_declaration,
-    )
-    return "\n\n".join(
-        part
-        for part in (
-            default_prefix,
-            prefix or "",
-            assembled_middle,
-            suffix or "",
-            default_suffix,
-        )
-        if part
-    )
+    return "\n\n".join((prefix, effective_middle.strip(), " ".join(suffix_parts)))
 
 
 def stage_fingerprint(

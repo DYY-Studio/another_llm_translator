@@ -829,8 +829,6 @@ interface PromptView {
   assembled: string;
   assembled_phases?: Record<string, string>;
   assembled_modes?: Record<string, string>;
-  mode_wrappers?: Record<string, { prefix: string; suffix: string }>;
-  mode_preview_parts?: Record<string, { prefix: string; suffix: string; companion: string }>;
   assembled_mode_languages?: Record<string, string>;
   assembled_mode_errors?: Record<string, string>;
   languages: string[];
@@ -848,9 +846,6 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [savedContent, setSavedContent] = useState("");
   const [assembled, setAssembled] = useState("");
   const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
-  const [modeWrappers, setModeWrappers] = useState<Record<string, { prefix: string; suffix: string }>>({});
-  const [savedWrappers, setSavedWrappers] = useState("");
-  const [modeParts, setModeParts] = useState<Record<string, { prefix: string; suffix: string; companion: string }>>({});
   const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
   const [assembledModeLanguages, setAssembledModeLanguages] = useState<Record<string, string>>({});
   const [assembledModeErrors, setAssembledModeErrors] = useState<Record<string, string>>({});
@@ -875,9 +870,6 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     setAssembled(value.assembled);
     setAssembledPhases(value.assembled_phases ?? {});
     setAssembledModes(value.assembled_modes ?? {});
-    setModeWrappers(value.mode_wrappers ?? {});
-    setSavedWrappers(JSON.stringify(value.mode_wrappers ?? {}));
-    setModeParts(value.mode_preview_parts ?? {});
     setAssembledModeLanguages(value.assembled_mode_languages ?? {});
     setAssembledModeErrors(value.assembled_mode_errors ?? {});
     setGlobalSync(value.global_sync);
@@ -927,7 +919,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
 
   async function save() {
     try {
-      await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content, ...(stage === "terminology" ? { mode_wrappers: modeWrappers } : {}) }) });
+      await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content }) });
       await loadPrompt();
       setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language));
     } catch (reason) { setError(errorMessage(reason, language)); }
@@ -941,8 +933,6 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       setAssembled(value.assembled);
       setAssembledPhases(value.assembled_phases ?? {});
       setAssembledModes(value.assembled_modes ?? {});
-      setModeWrappers(value.mode_wrappers ?? {});
-      setModeParts(value.mode_preview_parts ?? {});
       setAssembledModeLanguages(value.assembled_mode_languages ?? {});
       setAssembledModeErrors(value.assembled_mode_errors ?? {});
       setPromptLanguage(value.language);
@@ -1000,7 +990,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
-  const draftDirty = content !== savedContent || JSON.stringify(modeWrappers) !== savedWrappers;
+  const draftDirty = content !== savedContent;
   const showSyncCard = scope === "project" && globalSync;
   const previewModes = stage === "terminology"
     ? [
@@ -1017,11 +1007,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     ? previewMode
     : previewModes[0]?.[0] ?? "";
   const modeError = activeMode ? assembledModeErrors[activeMode] : undefined;
-  const wrapper = modeWrappers[activeMode];
-  const sections = modeParts[activeMode];
-  const modePreview = sections && wrapper
-    ? [sections.prefix, wrapper.prefix, content.trim(), sections.companion, wrapper.suffix, sections.suffix].filter(Boolean).join("\n\n")
-    : activeMode ? assembledModes[activeMode] : undefined;
+  const modePreview = activeMode ? assembledModes[activeMode] : undefined;
   return <section className="text-settings">
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
@@ -1058,12 +1044,6 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
       <h3>{translate("settings.promptAssembled", language)}</h3>
       {previewModes.length > 0 && <>
         <label className="stage-select">{translate("settings.promptPreviewMode", language)}<select value={activeMode} onChange={(event) => setPreviewMode(event.target.value)}>{previewModes.map(([mode, label]) => <option key={mode} value={mode} disabled={!assembledModes[mode] && !assembledModeErrors[mode]}>{label}</option>)}</select></label>
-        {wrapper && <>
-          <p className="prompt-preview-hint">{translate("settings.promptWrapperHint", language)}</p>
-          {(["prefix", "suffix"] as const).map((part) => <Field key={part} label={part === "prefix" ? "Prefix" : "Suffix"}>
-            <textarea rows={3} spellCheck={false} value={wrapper[part]} onChange={(event) => { setModeWrappers((current) => ({ ...current, [activeMode]: { ...current[activeMode], [part]: event.target.value } })); setMessage(""); }} />
-          </Field>)}
-        </>}
         {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}
         {modeError && <p className="error-text">{translate("settings.promptModeError", language, { error: modeError })}</p>}
       </>}

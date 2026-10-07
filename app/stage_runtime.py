@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import sys
 import uuid
 from collections import Counter
@@ -1090,19 +1089,6 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
         path = project / "prompts" / prompt_file(stage, language)
         if path.is_file():
             digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
-    if stage == "terminology":
-        for language in SUPPORTED_LANGUAGES:
-            path = project / "prompts" / prompt_wrappers_file(language)
-            if path.exists():
-                wrappers = {
-                    mode: value
-                    for mode, value in load_prompt_wrappers(path).items()
-                    if any(value.values())
-                }
-                if wrappers:
-                    digests[f"wrappers:{language}"] = hashlib.sha256(
-                        json.dumps(wrappers, sort_keys=True).encode()
-                    ).hexdigest()
     return digests
 
 
@@ -1130,39 +1116,6 @@ def prompt_preflight(
         "required_stages": list(stages),
         "missing": missing,
     }
-
-
-COMBINED_PROMPT_MODES = (
-    "terms+translation",
-    "terms+fragment-summary",
-    "terms+translation+fragment-summary",
-)
-
-
-def prompt_wrappers_file(language: str) -> str:
-    if language not in SUPPORTED_LANGUAGES:
-        raise UsageError(f"不支持的 Prompt 语言：{language}")
-    return f"terminology-wrappers.{language}.json"
-
-
-def validate_prompt_wrappers(value: Any) -> dict[str, dict[str, str]]:
-    if not isinstance(value, dict) or set(value) - set(COMBINED_PROMPT_MODES):
-        raise UsageError("组合 Prompt 包装配置包含不支持的模式")
-    for mode, wrapper in value.items():
-        if not isinstance(wrapper, dict) or set(wrapper) != {"prefix", "suffix"}:
-            raise UsageError(f"{mode} 必须包含 prefix 和 suffix")
-        if not all(isinstance(text, str) for text in wrapper.values()):
-            raise UsageError(f"{mode} 的 prefix 和 suffix 必须是字符串")
-    return value
-
-
-def load_prompt_wrappers(path: Path) -> dict[str, dict[str, str]]:
-    if not path.exists():
-        return {}
-    try:
-        return validate_prompt_wrappers(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError) as exc:
-        raise StorageError(f"无法读取组合 Prompt 包装配置：{path.name}: {exc}") from exc
 
 
 def _prompt_factory(
@@ -1227,13 +1180,6 @@ def _prompt_factory(
         else None
     )
 
-    wrappers = (
-        load_prompt_wrappers(project / "prompts" / prompt_wrappers_file(language))
-        if stage == "terminology"
-        else {}
-    )
-    wrapper = wrappers.get(parsed_mode.value, {}) if parsed_mode is not None else {}
-
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(
             prompt_stage,
@@ -1244,8 +1190,6 @@ def _prompt_factory(
             fragment_summary_middle=fragment_summary_middle,
             translation_middle=translation_middle,
             require_term_declaration=require_term_declaration,
-            prefix=wrapper.get("prefix"),
-            suffix=wrapper.get("suffix"),
         )
 
     return build

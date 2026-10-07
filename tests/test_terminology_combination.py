@@ -148,7 +148,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
         )
 
 
-def test_combined_prompt_wrappers_are_used_in_preview_and_execution(
+def test_combined_prompt_middles_are_used_in_preview_and_execution(
     tmp_path: Path,
 ) -> None:
     from fastapi.testclient import TestClient
@@ -160,25 +160,21 @@ def test_combined_prompt_wrappers_are_used_in_preview_and_execution(
     with TestClient(
         create_app(projects_root=projects, app_root=tmp_path / "app-root")
     ) as client:
-        path = "/api/v1/projects/sample/prompts/terminology"
-        view = client.get(path + "?language=zh-CN").json()
-        wrappers = view["mode_wrappers"]
-        wrappers["terms+translation+fragment-summary"] = {
-            "prefix": "联合任务开始",
-            "suffix": "逐项核对后完成",
+        middles = {
+            "terminology": "只提取作品专有名称。",
+            "translation": "保持原文叙述视角。",
+            "fragment_summary": "简洁概括本次事件。",
         }
-        saved = client.put(
-            path,
-            json={
-                "language": "zh-CN",
-                "content": view["content"],
-                "mode_wrappers": wrappers,
-            },
-        )
-        assert saved.status_code == 200
-        preview = client.get(path + "?language=zh-CN").json()["assembled_modes"][
-            "terms+translation+fragment-summary"
-        ]
+        for stage, middle in middles.items():
+            saved = client.put(
+                f"/api/v1/projects/sample/prompts/{stage}",
+                json={"language": "zh-CN", "content": middle},
+            )
+            assert saved.status_code == 200
+        view = client.get(
+            "/api/v1/projects/sample/prompts/terminology?language=zh-CN"
+        ).json()
+        preview = view["assembled_modes"]["terms+translation+fragment-summary"]
         actual = _prompt_factory(
             project,
             "terminology",
@@ -186,20 +182,8 @@ def test_combined_prompt_wrappers_are_used_in_preview_and_execution(
             response_mode="terms+translation+fragment-summary",
         )(())
         assert actual == preview
-        assert (
-            "联合任务开始" in actual
-            and "逐项核对后完成" in actual
-            and "no_terms" in actual
-        )
-        invalid = client.put(
-            path,
-            json={
-                "language": "zh-CN",
-                "content": view["content"],
-                "mode_wrappers": {"unsupported": {"prefix": "", "suffix": ""}},
-            },
-        )
-        assert invalid.status_code == 400
+        assert all(middle in actual for middle in middles.values())
+        assert "no_terms" in actual and '末行精确为{"type":"end"}' in actual
 
 
 @pytest.mark.asyncio

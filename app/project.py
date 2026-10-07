@@ -512,11 +512,6 @@ def _bundle_source(app_root: Path) -> dict[Path, Path]:
             else relative
         )
         sources[relative] = effective_path(global_relative, builtin_root=app_root)
-    for language in PROMPT_LANGUAGES:
-        relative = Path("prompts") / f"terminology-wrappers.{language}.json"
-        source = effective_path(relative, builtin_root=app_root)
-        if source.is_file():
-            sources[relative] = source
     return sources
 
 
