@@ -14,6 +14,7 @@ import httpx
 
 from .errors import (
     ContextLengthError,
+    EmptyResponseSplitError,
     ExternalError,
     FatalExternalError,
     StorageError,
@@ -1522,7 +1523,7 @@ async def run_terminology(
             estimated = _request_estimate(messages, config, request_id)
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
-                response, _ = await state.llm.chat(
+                response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1714,7 +1715,7 @@ async def run_terminology(
             estimated = _request_estimate(messages, config, request_id)
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
-                response, _ = await state.llm.chat(
+                response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1930,7 +1931,18 @@ async def run_terminology(
 
     async def record_context_failure(
         items: list[dict[str, Any]],
+        error: ContextLengthError | None = None,
     ) -> None:
+        message = (
+            str(error) + "；当前范围不能继续拆分"
+            if isinstance(error, EmptyResponseSplitError)
+            else "模型报告上下文过长"
+        )
+        category = (
+            "empty_response"
+            if isinstance(error, EmptyResponseSplitError)
+            else "context_error"
+        )
         original_id = part_original.get(
             str(items[0]["segment_id"]), str(items[0]["segment_id"])
         )
@@ -1948,18 +1960,18 @@ async def run_terminology(
                     items,
                     status="failed",
                     run_request_id=f"CONTEXT-{original_id}",
-                    error_class="context_error",
-                    error_message="模型报告上下文过长",
+                    error_class=category,
+                    error_message=message,
                 )
                 maybe_complete(original_id)
             if mode is TerminologyResponseMode.SUMMARY_ONLY:
                 failed_originals.add(original_id)
-                failure_counts["context_error"] += 1
+                failure_counts[category] += 1
                 report_progress()
                 return
             if original_id not in failed_originals:
                 failed_originals.add(original_id)
-                failure_counts["context_error"] += 1
+                failure_counts[category] += 1
                 report_progress()
                 append_jsonl(
                     project,
@@ -1974,8 +1986,8 @@ async def run_terminology(
                         request_id=None,
                         active_task_id=task_id,
                         stage_fingerprint=fingerprint,
-                        error_class="context_error",
-                        error_message="模型报告上下文过长",
+                        error_class=category,
+                        error_message=message,
                     ),
                 )
 

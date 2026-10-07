@@ -384,7 +384,7 @@ class DraftTerminologyScan:
             messages = render_messages(prompt_builder(pending), payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             try:
-                response, _ = await state.llm.chat(
+                response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=self.config["llm"]["temperature_terminology"],
                     estimated_input_tokens=_request_estimate(

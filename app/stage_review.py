@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 import httpx
 from .errors import (
+    ContextLengthError,
+    EmptyResponseSplitError,
     IncompleteError,
     UsageError,
 )
@@ -572,11 +574,17 @@ async def run_review(
 
     async def record_context_failure(
         items: list[dict[str, Any]],
+        error: ContextLengthError | None = None,
     ) -> None:
+        message = (
+            str(error) + "；当前范围不能继续拆分"
+            if isinstance(error, EmptyResponseSplitError)
+            else "模型报告上下文过长"
+        )
         await save_result(
             str(items[0]["segment_id"]),
             "REQ-NONE",
-            error="模型报告上下文过长",
+            error=message,
         )
 
     async def before_finalize() -> None:

@@ -45,6 +45,7 @@ ERROR_CATEGORIES = frozenset(
     {
         "context_error",
         "external_error",
+        "empty_response",
         "format_error",
         "validation_error",
         "stage_error",

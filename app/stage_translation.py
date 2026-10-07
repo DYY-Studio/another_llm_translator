@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from .errors import (
     ContextLengthError,
+    EmptyResponseSplitError,
 )
 from .term_library import (load_terms, term_normalization)
 from .term_matching import _TermMatchCache
@@ -26,7 +27,7 @@ from .execution import (
     stage_fingerprint,
     stage_result_path,
 )
-from .llm_client import SlidingWindowLimiter
+from .llm_client import empty_response_split_scope, SlidingWindowLimiter
 from .llm_response import TerminologyResponseMode, parse_jsonl_document
 from .llm_keys import KeyPool
 from .logging_utils import get_logger
@@ -899,52 +900,53 @@ async def run_translation(
                 repair_candidates=subset,
             )
         except ContextLengthError as exc:
-            if len(group) > 1:
-                midpoint = len(group) // 2
-                child_groups = (group[:midpoint], group[midpoint:])
-                for child_group in child_groups:
+            with empty_response_split_scope(exc):
+                if len(group) > 1:
+                    midpoint = len(group) // 2
+                    child_groups = (group[:midpoint], group[midpoint:])
+                    for child_group in child_groups:
+                        child_subset = {
+                            str(item["segment_id"]): subset[str(item["segment_id"])]
+                            for item in child_group
+                        }
+                        await repair_group(child_group, child_subset, exc.request_id)
+                    return
+                item = group[0]
+                segment_id = str(item["segment_id"])
+                if (
+                    not config["chunking"]["allow_split_oversized_segment"]
+                    or len(str(item["source"])) < 2
+                ):
+                    validation_pending[segment_id] = subset[segment_id]
+                    return
+                parts = _replace_with_runtime_parts(
+                    item,
+                    part_original=part_original,
+                    original_parts=original_parts,
+                    by_id=by_id,
+                )
+                candidate = str(subset[segment_id]["candidate"])
+                left_length = round(
+                    len(candidate)
+                    * len(str(parts[0]["source"]))
+                    / len(str(item["source"]))
+                )
+                candidate_parts = (candidate[:left_length], candidate[left_length:])
+                for part, candidate_part in zip(parts, candidate_parts, strict=True):
+                    part_id = str(part["segment_id"])
                     child_subset = {
-                        str(item["segment_id"]): subset[str(item["segment_id"])]
-                        for item in child_group
+                        part_id: {
+                            "segment": part,
+                            "candidate": candidate_part,
+                            "findings": validate_translation_text(
+                                validation_context(part_id, candidate_part),
+                                translation_validators,
+                            ),
+                            "request_id": subset[segment_id]["request_id"],
+                        }
                     }
-                    await repair_group(child_group, child_subset, exc.request_id)
+                    await repair_group([part], child_subset, exc.request_id)
                 return
-            item = group[0]
-            segment_id = str(item["segment_id"])
-            if (
-                not config["chunking"]["allow_split_oversized_segment"]
-                or len(str(item["source"])) < 2
-            ):
-                validation_pending[segment_id] = subset[segment_id]
-                return
-            parts = _replace_with_runtime_parts(
-                item,
-                part_original=part_original,
-                original_parts=original_parts,
-                by_id=by_id,
-            )
-            candidate = str(subset[segment_id]["candidate"])
-            left_length = round(
-                len(candidate)
-                * len(str(parts[0]["source"]))
-                / len(str(item["source"]))
-            )
-            candidate_parts = (candidate[:left_length], candidate[left_length:])
-            for part, candidate_part in zip(parts, candidate_parts, strict=True):
-                part_id = str(part["segment_id"])
-                child_subset = {
-                    part_id: {
-                        "segment": part,
-                        "candidate": candidate_part,
-                        "findings": validate_translation_text(
-                            validation_context(part_id, candidate_part),
-                            translation_validators,
-                        ),
-                        "request_id": subset[segment_id]["request_id"],
-                    }
-                }
-                await repair_group([part], child_subset, exc.request_id)
-            return
         for segment_id in exhausted:
             validation_pending[segment_id] = subset[segment_id]
 
@@ -972,14 +974,25 @@ async def run_translation(
 
     async def record_context_failure(
         items: list[dict[str, Any]],
+        error: ContextLengthError | None = None,
     ) -> None:
+        message = (
+            str(error) + "；当前范围不能继续拆分"
+            if isinstance(error, EmptyResponseSplitError)
+            else "模型报告上下文过长"
+        )
+        category = (
+            "empty_response"
+            if isinstance(error, EmptyResponseSplitError)
+            else "context_error"
+        )
         if draft_scan is not None:
             draft_scan.fail_terms(
                 items,
                 run_id,
                 "CONTEXT",
-                "context_error",
-                "模型报告上下文过长",
+                category,
+                message,
                 part_original,
             )
             if not items[0].get("_draft_translation"):
@@ -988,8 +1001,8 @@ async def run_translation(
         await save_failed(
             str(items[0]["segment_id"]),
             "REQ-NONE",
-            "context_error",
-            "模型报告上下文过长",
+            category,
+            message,
         )
 
     async def before_finalize() -> None:

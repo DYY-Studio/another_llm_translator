@@ -6,8 +6,10 @@ import math
 import random
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 import httpx
@@ -17,6 +19,8 @@ from .diagnostics import current_diagnostics
 from .errors import (
     ConfigError,
     ContextLengthError,
+    EmptyResponseError,
+    EmptyResponseSplitError,
     ExternalError,
     FatalExternalError,
 )
@@ -31,6 +35,23 @@ from .sqlite_storage import (
 )
 
 from .llm_response import extract_jsonl_content, normalize_llm_response
+
+_empty_response_split_depth: ContextVar[dict[str, int] | None] = ContextVar(
+    "empty_response_split_depth", default=None
+)
+
+
+@contextmanager
+def empty_response_split_scope(error: ContextLengthError | None) -> Iterator[None]:
+    depths = _empty_response_split_depth.get() or {}
+    if isinstance(error, EmptyResponseSplitError):
+        depths = {**depths, error.kind: depths.get(error.kind, 0) + 1}
+    token = _empty_response_split_depth.set(depths)
+    try:
+        yield
+    finally:
+        _empty_response_split_depth.reset(token)
+
 
 class _StreamRetryable(Exception):
     """A stream ended or reported an error before a complete response."""
@@ -498,6 +519,7 @@ class LLMClient:
                 )
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
+            finish_reason: str | None = None
             usage_values: dict[str, int] = {}
             raw_events: list[str] = []
             event_count = 0
@@ -556,6 +578,9 @@ class LLMClient:
                             retry_after=response.headers.get("Retry-After"),
                             usage_values=usage_values,
                         )
+                    finish_reason = (
+                        self.adapter.stream_finish_reason(event) or finish_reason
+                    )
                     content_parts.extend(self.adapter.stream_content_deltas(event))
                     reasoning_parts.extend(self.adapter.stream_reasoning_deltas(event))
                     if self.adapter.stream_terminal(event):
@@ -601,6 +626,12 @@ class LLMClient:
                     first_event_latency_ms=first_event_latency_ms,
                     usage_values=usage_values,
                 ) from exc
+            if not terminal and finish_reason in [
+                *self.adapter.definition.get("truncated_finish_reasons", []),
+                *self.adapter.definition.get("blocked_finish_reasons", []),
+            ]:
+                terminal = True
+                termination = "finish_reason"
             if not terminal and terminal_spec["allow_clean_eof"] and event_count > 0:
                 terminal = True
                 termination = "clean_eof"
@@ -619,6 +650,7 @@ class LLMClient:
                 normalized = normalize_llm_response(
                     LLMResponse(
                         content="".join(content_parts),
+                        finish_reason=finish_reason,
                         reasoning_content=(
                             "".join(reasoning_parts) if reasoning_parts else None
                         ),
@@ -736,6 +768,78 @@ class LLMClient:
             )
 
     async def chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float,
+        estimated_input_tokens: int,
+        request_id: str | None = None,
+        parent_request_id: str | None = None,
+        segment_id_map: dict[str, str] | None = None,
+    ) -> tuple[LLMResponse, str]:
+        retried = {"truncated": 0, "unknown": 0}
+        while True:
+            response, actual_id = await self._chat_once(
+                messages=messages,
+                temperature=temperature,
+                estimated_input_tokens=estimated_input_tokens,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                segment_id_map=segment_id_map,
+            )
+            diagnostics = current_diagnostics()
+            if response.content.strip():
+                if diagnostics is not None:
+                    diagnostics.complete_request(
+                        actual_id,
+                        content=response.content,
+                        reasoning_content=response.reasoning_content,
+                    )
+                return response, actual_id
+            if response.finish_reason in self.adapter.definition.get(
+                "blocked_finish_reasons", []
+            ):
+                message = f"模型拒绝生成正文（{response.finish_reason}）"
+                if diagnostics is not None:
+                    diagnostics.fail_request(actual_id, "response_blocked")
+                raise ExternalError(message)
+            kind = (
+                "truncated"
+                if response.finish_reason
+                in self.adapter.definition.get("truncated_finish_reasons", [])
+                else "unknown"
+            )
+            message = (
+                "正文为空：长度限制截断"
+                if kind == "truncated"
+                else "正文为空：原因未知"
+            )
+            if diagnostics is not None:
+                diagnostics.fail_request(actual_id, f"empty_response_{kind}")
+            mode = self.config["retry"][f"empty_{kind}_mode"]
+            limit = self.config["retry"][f"empty_{kind}_max_attempts"]
+            used = (
+                (_empty_response_split_depth.get() or {}).get(kind, 0)
+                if mode == "split"
+                else retried[kind]
+            )
+            if used >= limit:
+                raise EmptyResponseError(
+                    f"{message}；{mode} 重试预算已耗尽（{used}/{limit}）"
+                )
+            warning = f"{message}；{'拆分' if mode == 'split' else '原样'}重试 {used + 1}/{limit}"
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+            self.logger.warning("%s request=%s", warning, actual_id)
+            if mode == "split":
+                raise EmptyResponseSplitError(message, request_id=actual_id, kind=kind)
+            retried[kind] += 1
+            if diagnostics is not None:
+                diagnostics.retried()
+            parent_request_id = actual_id
+            request_id = None
+
+    async def _chat_once(
         self,
         *,
         messages: list[dict[str, str]],
@@ -1308,12 +1412,6 @@ class LLMClient:
                         self.send_count,
                     )
                     self._record_stream_usage(stream_usage, key_index)
-                    if diagnostics is not None:
-                        diagnostics.complete_request(
-                            request_id,
-                            content=normalized.content,
-                            reasoning_content=normalized.reasoning_content,
-                        )
                     self.logger.info(
                         "stream complete request=%s key=%d attempt=%d retry_round=%d status=%d events=%d bytes=%d termination=%s elapsed=%.2fs",
                         request_id,
@@ -1393,12 +1491,6 @@ class LLMClient:
                     if diagnostics is not None:
                         diagnostics.fail_request(request_id, "response_parse_error")
                     raise
-                if diagnostics is not None:
-                    diagnostics.complete_request(
-                        request_id,
-                        content=normalized.content,
-                        reasoning_content=normalized.reasoning_content,
-                    )
                 if self.on_usage is not None:
                     self.on_usage(self.usage_summary())
                 self.logger.info(
@@ -1708,7 +1800,9 @@ def _apply_debug_content_injections(
         and debug["inject_invalid_json_every"]
         and send_count % debug["inject_invalid_json_every"] == 0
     ):
-        return LLMResponse("{invalid json", response.reasoning_content)
+        return LLMResponse(
+            "{invalid json", response.reasoning_content, response.finish_reason
+        )
     if not (
         debug["enabled"]
         and debug["inject_missing_segment_every"]
@@ -1724,7 +1818,9 @@ def _apply_debug_content_injections(
                 segment_indexes.append(index)
         if segment_indexes:
             lines.pop(segment_indexes[-1])
-            return LLMResponse("\n".join(lines), response.reasoning_content)
+            return LLMResponse(
+                "\n".join(lines), response.reasoning_content, response.finish_reason
+            )
     except (
         KeyError,
         IndexError,

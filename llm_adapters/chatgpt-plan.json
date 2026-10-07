@@ -12,6 +12,9 @@
     "store": false
   },
   "response_content_pointer": "/output/-1/content/-1/text",
+  "response_finish_reason_pointer": "/incomplete_details/reason",
+  "truncated_finish_reasons": ["max_output_tokens"],
+  "blocked_finish_reasons": ["content_filter"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/models",
@@ -37,6 +40,7 @@
       }
     ],
     "reasoning_events": [],
+    "finish_reason_events": [{"pointer": "/response/incomplete_details/reason"}],
     "terminal": {
       "when": {
         "pointer": "/type",

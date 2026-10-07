@@ -807,13 +807,14 @@ async def _request_batch(
             estimate = estimate_messages(
                 messages, float(config["execution"]["token_safety_factor"])
             )
-            response, _ = await llm.chat(
+            response, request_id = await llm.chat(
                 messages=messages,
                 temperature=float(config["llm"]["temperature_terminology_decision"]),
                 estimated_input_tokens=estimate,
                 request_id=request_id,
                 parent_request_id=parent_request_id,
             )
+            last_request_id = request_id
             (
                 decisions,
                 ignored_read_only,

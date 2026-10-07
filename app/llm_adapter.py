@@ -30,6 +30,9 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
     {
         "messages_format",
         "models",
+        "response_finish_reason_pointer",
+        "truncated_finish_reasons",
+        "blocked_finish_reasons",
         "response_reasoning_content_pointer",
         "response_reasoning_content_pointers",
         "usage",
@@ -60,6 +63,7 @@ _STREAMING_KEYS = frozenset(
         "request_body",
         "content_events",
         "reasoning_events",
+        "finish_reason_events",
         "terminal",
         "allow_clean_eof",
         "error_events",
@@ -77,6 +81,7 @@ _STREAM_USAGE_KEYS = frozenset(
 class LLMResponse:
     content: str
     reasoning_content: str | None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +276,14 @@ class JSONLLMAdapter:
             )
         return None
 
+    def stream_finish_reason(self, event: dict[str, Any]) -> str | None:
+        if self.streaming_spec is None:
+            raise ExternalError("LLM Adapter 未声明 streaming 规则")
+        values = _stream_deltas(
+            event, self.streaming_spec["finish_reason_events"], label="结束原因"
+        )
+        return values[-1] if values else None
+
     def stream_terminal(self, event: dict[str, Any]) -> bool:
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
@@ -303,15 +316,28 @@ class JSONLLMAdapter:
         return values
 
     def parse_response(self, response: Any) -> LLMResponse:
+        finish_reason = None
+        reason_pointer = self.definition.get("response_finish_reason_pointer")
+        if reason_pointer:
+            try:
+                finish_reason = _resolve_json_pointer(response, reason_pointer)
+            except ExternalError:
+                pass
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                raise ExternalError("LLM 结束原因不是字符串或 null")
         try:
-            content = _resolve_json_pointer(
-                response, self.response_content_pointer
-            )
+            content = _resolve_json_pointer(response, self.response_content_pointer)
         except ExternalError as exc:
-            raise ExternalError(
-                "LLM 响应缺少正文路径："
-                f"{self.response_content_pointer}"
-            ) from exc
+            if finish_reason in self.definition.get(
+                "truncated_finish_reasons", []
+            ) or finish_reason in self.definition.get("blocked_finish_reasons", []):
+                content = ""
+            else:
+                raise ExternalError(
+                    "LLM 响应缺少正文路径：" + self.response_content_pointer
+                ) from exc
+        if content is None:
+            content = ""
         if not isinstance(content, str):
             raise ExternalError("LLM 响应正文不是字符串")
         reasoning_content = None
@@ -329,6 +355,7 @@ class JSONLLMAdapter:
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
+            finish_reason=finish_reason,
         )
 
     def replace_content(self, response: Any, content: str) -> None:
@@ -492,6 +519,19 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         reasoning_pointers = None
     models_spec = _validate_models_spec(value.get("models"))
     usage_pointers = _validate_usage_mapping(value.get("usage"))
+    reason_pointer = value.get("response_finish_reason_pointer")
+    if reason_pointer is not None:
+        _validate_stream_pointer(reason_pointer, "response_finish_reason_pointer")
+    for key in ("truncated_finish_reasons", "blocked_finish_reasons"):
+        reasons = value.get(key, [])
+        if not isinstance(reasons, list) or not all(
+            isinstance(reason, str) and reason for reason in reasons
+        ):
+            raise ConfigError(f"LLM Adapter {key} 必须是非空字符串数组")
+    if set(value.get("truncated_finish_reasons", [])) & set(
+        value.get("blocked_finish_reasons", [])
+    ):
+        raise ConfigError("LLM Adapter 截断与拒绝的结束原因不能重叠")
     streaming_spec = _validate_streaming_spec(value.get("streaming"))
     connection = value.get("connection")
     if connection is not None:
@@ -681,6 +721,11 @@ def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
         "request_body": deepcopy(request_body),
         "content_events": content_events,
         "reasoning_events": reasoning_events,
+        "finish_reason_events": _validate_stream_events(
+            value.get("finish_reason_events", []),
+            "finish_reason_events",
+            allow_empty=True,
+        ),
         "terminal": terminal,
         "allow_clean_eof": allow_clean_eof,
         "error_events": error_events,

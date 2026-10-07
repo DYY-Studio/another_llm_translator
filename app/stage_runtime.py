@@ -19,6 +19,7 @@ from .documents import (
 from .errors import (
     ConfigError,
     ContextLengthError,
+    EmptyResponseSplitError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
@@ -49,7 +50,7 @@ from .execution import (
     segment_model_text,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
-from .llm_client import LLMClient, SlidingWindowLimiter
+from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .llm_response import TerminologyResponseMode
 from .logging_utils import get_logger
@@ -579,7 +580,7 @@ async def _execute_stage_run(
     prompt_partition_key: Callable[[dict[str, Any]], object],
     process_once: Callable[..., Awaitable[None]],
     record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
-    record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    record_context_failure: Callable[..., Awaitable[None]],
     before_finalize: Callable[[], Awaitable[None]],
     completed_count: Callable[[], int],
     failed_count: Callable[[], int],
@@ -700,20 +701,24 @@ async def _execute_stage_run(
             else:
                 groups = ()
             if not groups:
-                await record_context_failure(items)
+                if isinstance(exc, EmptyResponseSplitError):
+                    await record_context_failure(items, exc)
+                else:
+                    await record_context_failure(items)
                 return
             if runtime_split_observer is not None:
                 runtime_split_observer(list(items), [list(group) for group in groups])
             for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
+                with empty_response_split_scope(exc):
+                    await process(
+                        ChunkPlan(
+                            file_id=str(group[0]["file_id"]),
+                            segments=tuple(group),
+                            payload={},
+                            estimated_input_tokens=0,
+                        ),
+                        exc.request_id,
+                    )
 
     usage: dict[str, Any] | None = None
 
@@ -884,7 +889,7 @@ async def _localized_request_loop(
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
         estimated = _request_estimate(messages, config, request_id)
         try:
-            response, _ = await llm.chat(
+            response, request_id = await llm.chat(
                 messages=messages,
                 temperature=config["llm"][f"temperature_{stage}"],
                 estimated_input_tokens=estimated,

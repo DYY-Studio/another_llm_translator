@@ -97,6 +97,7 @@ def normalize_llm_response(response: LLMResponse) -> LLMResponse:
         raise ExternalError("LLM 响应同时包含结构化和 content 内嵌思考正文")
     return LLMResponse(
         content=embedded.content,
+        finish_reason=response.finish_reason,
         reasoning_content=(response.reasoning_content or embedded.reasoning_content),
     )
 

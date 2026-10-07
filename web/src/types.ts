@@ -936,6 +936,10 @@ export interface ProjectConfig {
   retry: {
     http_max_attempts: number;
     format_max_attempts: number;
+    empty_truncated_mode: "retry" | "split";
+    empty_truncated_max_attempts: number;
+    empty_unknown_mode: "retry" | "split";
+    empty_unknown_max_attempts: number;
     unresolved_retry_scope: "unresolved" | "chunk";
     base_delay_seconds: number;
     max_delay_seconds: number;
