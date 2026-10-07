@@ -176,17 +176,25 @@ schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 
 普通日志和诊断摘要不包含增量正文，debug 模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
 
-内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他供应商字段作为隐式终止标记。
+内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；Responses、Gemini、Anthropic 使用各自声明的终止事件。声明的截断或拒绝结束原因也允许在自然 EOF 时完成传输判定。宿主不识别 `cost` 或其他供应商字段作为隐式终止标记。
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
+`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。未命中已声明的截断或拒绝结束原因时，越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
 
 也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
 
-Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一严格规则，
+可选的 `response_finish_reason_pointer` 提取字符串或 null 的结束原因；路径缺失时无结束原因。
+`truncated_finish_reasons` 与 `blocked_finish_reasons` 分别声明长度限制与拒绝生成的结束原因字符串列表，
+缺省为空，两个列表不得重叠。宿主只按这些明确声明分类空正文，不推断供应商或思考预算。
+
+流式 `streaming.finish_reason_events` 使用与 `content_events` 相同的 `pointer`、可选 `when` 结构，
+缺省为空；保留最后一个匹配的结束原因。自然 EOF 前明确收到声明的截断或拒绝结束原因时，
+可结束传输并交由宿主处理空正文；读取或协议错误仍按原规则处理。
+
+Adapter 规范化返回 `content`、可空的 `reasoning_content` 和可空的 `finish_reason`。宿主随后按统一严格规则，
 从 content 开头剥离一个完整已知思考 Tag。若结构化字段与内嵌块同时非空则快速失败，
 不猜测拼接顺序。
 

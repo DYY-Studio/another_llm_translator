@@ -147,7 +147,7 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ### `app/llm_client.py`
 
-宿主 HTTP Client、普通/流式传输、超时、重试、取消、诊断与请求审计。Adapter 只描述 wire
+宿主 HTTP Client、普通/流式传输、超时、重试、取消、诊断与请求审计；按 Adapter 结束原因分类空正文，执行原样重试并维护拆分路径预算。实际拆分沿用阶段及概括聚合逻辑。Adapter 只描述 wire
 转换，不能自行发送请求或绕过本模块。
 
 ### `app/llm_response.py`
