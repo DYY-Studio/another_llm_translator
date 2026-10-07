@@ -971,11 +971,18 @@ def test_epub_markers_render_only_for_the_frozen_file_options(
 
 def test_epub_model_prompt_requirements_follow_format_state() -> None:
     adapter = get_document_adapter("epub")
+    aozora = adapter.model_prompt_requirements(
+        stage="translation",
+        language="zh-CN",
+        opaque_state={},
+        run_options={"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"},
+    )
+    assert aozora is not None and "｜已译base《" in aozora
     assert adapter.model_prompt_requirements(
         stage="translation",
         language="zh-CN",
-        opaque_state={"inline_format_mode": "plain"},
-        run_options={"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"},
+        opaque_state={},
+        run_options={"ruby_mode": "base_only", "inline_format_mode": "plain", "inline_format_policy": "tiered"},
     ) is None
     strict = adapter.model_prompt_requirements(
         stage="translation",

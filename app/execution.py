@@ -267,7 +267,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-PROMPT_RULES_VERSION = 16
+PROMPT_RULES_VERSION = 17
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -395,22 +395,6 @@ _STAGE_PREFIX: dict[str, dict[str, str]] = {
             "target_language is the text's language."
         ),
     },
-}
-
-_SEGMENT_TEXT_SUFFIX: dict[str, str] = {
-    "zh-CN": (
-        "Ruby base（｜与《之间）是正文，必须翻译，不得因标记照抄。可删标记/"
-        "reading，仅输出已译 base；保留须为｜已译base《目标语言适用reading》，"
-        "reading 也须翻译或转写；无法适配则仅输出已译 base。"
-    ),
-    "en": (
-        "An Aozora Ruby base (between ｜ and 《) is source text and must be "
-        "translated, not copied because of its markup. You may drop the markup "
-        "and reading and return only the translated base. If kept, use "
-        "｜translated base《target-appropriate reading》; translate or "
-        "transliterate the reading, otherwise drop Ruby and return only the "
-        "translated base."
-    ),
 }
 
 _REVIEW_SUFFIX: dict[str, str] = {
@@ -650,13 +634,6 @@ def full_prompt(
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
     suffix_parts = []
-    if effective_stage not in {
-        "terminology",
-        "terminology_decision",
-        "content_summary",
-        "fragment_summary",
-    }:
-        suffix_parts.append(_SEGMENT_TEXT_SUFFIX[language])
     suffix_parts.extend(
         requirement.strip()
         for requirement in document_requirements
@@ -701,9 +678,7 @@ def full_prompt(
         if has_terms:
             protocols.append(_TERM_DECLARATION_SUFFIX[language])
         if has_translation:
-            protocols.extend(
-                (_SEGMENT_TEXT_SUFFIX[language], _STAGE_SUFFIX["translation"][language])
-            )
+            protocols.append(_STAGE_SUFFIX["translation"][language])
         if has_summary and has_terms:
             protocols.append(
                 "概括记录必须在术语记录之前。"
