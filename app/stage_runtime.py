@@ -14,6 +14,7 @@ import httpx
 
 from .config import load_project_config
 from .documents import (
+    DocumentAdapter,
     aozora_safe_split_positions,
 )
 from .errors import (
@@ -117,6 +118,68 @@ def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str
     return result
 
 
+def document_prompt_context(
+    project: Path,
+    file_record: dict[str, Any],
+    frozen_run_options: dict[str, dict[str, str]] | None = None,
+) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
+    file_id = str(file_record["file_id"])
+    state_path = file_record.get("document_adapter_state")
+    state_record = (
+        read_json(project, project / state_path)
+        if isinstance(state_path, str)
+        else None
+    )
+    state = state_record.get("state") if isinstance(state_record, dict) else None
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+    if frozen_run_options is not None:
+        raw_run_options = frozen_run_options.get(file_id)
+        if raw_run_options is None:
+            raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
+    elif state_record is None:
+        raw_run_options = {}
+    else:
+        raw_run_options = state_record.get("run_options")
+        if raw_run_options is None:
+            if adapter.run_options:
+                raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
+            raw_run_options = {}
+    try:
+        run_options = validate_document_run_options(
+            adapter, raw_run_options, use_defaults=False
+        )
+    except UsageError as exc:
+        raise ConfigError(f"Document Adapter run_options 无效：{file_id}") from exc
+    if state is not None and not isinstance(state, dict):
+        raise ConfigError(
+            f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
+        )
+    return adapter, state, run_options
+
+
+def document_prompt_requirements(
+    adapter: DocumentAdapter,
+    state: dict[str, Any] | None,
+    run_options: dict[str, str],
+    stage: str,
+) -> dict[str, str]:
+    requirements: dict[str, str] = {}
+    for language in PROMPT_LANGUAGES:
+        requirement = adapter.model_prompt_requirements(
+            stage=stage,
+            language=language,
+            opaque_state=state,
+            run_options=run_options,
+        )
+        if requirement is not None and not isinstance(requirement, str):
+            raise ConfigError(
+                f"Document Adapter 返回了无效的模型 Prompt 要求：{adapter.adapter_id}"
+            )
+        if requirement:
+            requirements[language] = requirement
+    return requirements
+
+
 def _project_context(
     project: Path,
     *,
@@ -147,40 +210,9 @@ def _project_context(
             "adapter_id": str(file_record["document_adapter_id"]),
             "version": str(file_record["document_adapter_version"]),
         }
-        state_path = file_record.get("document_adapter_state")
-        state_record = (
-            read_json(project, project / state_path)
-            if isinstance(state_path, str)
-            else None
+        adapter, state, run_options = document_prompt_context(
+            project, file_record, frozen_run_options
         )
-        state = state_record.get("state") if isinstance(state_record, dict) else None
-        if stage is not None and state is not None and not isinstance(state, dict):
-            raise ConfigError(
-                f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
-            )
-        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-        if frozen_run_options is not None:
-            raw_run_options = frozen_run_options.get(file_id)
-            if raw_run_options is None:
-                raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
-        elif state_record is None:
-            raw_run_options = {}
-        else:
-            raw_run_options = state_record.get("run_options")
-            if raw_run_options is None:
-                if adapter.run_options:
-                    raise ConfigError(
-                        f"Document Adapter 状态缺少 run_options：{file_id}"
-                    )
-                raw_run_options = {}
-        try:
-            run_options = validate_document_run_options(
-                adapter, raw_run_options, use_defaults=False
-            )
-        except UsageError as exc:
-            raise ConfigError(
-                f"Document Adapter run_options 无效：{file_id}"
-            ) from exc
         adapter_options[file_id] = run_options
         for segment in (item for item in segments if str(item["file_id"]) == file_id):
             segment["_adapter_state"] = state
@@ -196,22 +228,9 @@ def _project_context(
                     )
                 segment["model_source"] = rendered_model_source
         if stage is not None:
-            requirements: dict[str, str] = {}
-            for language in PROMPT_LANGUAGES:
-                requirement = adapter.model_prompt_requirements(
-                    stage=stage,
-                    language=language,
-                    opaque_state=state,
-                    run_options=run_options,
-                )
-                if requirement is not None and not isinstance(requirement, str):
-                    raise ConfigError(
-                        "Document Adapter 返回了无效的模型 Prompt 要求："
-                        f"{file_record['document_adapter_id']}"
-                    )
-                if requirement:
-                    requirements[language] = requirement
-            adapter_prompt_requirements[file_id] = requirements
+            adapter_prompt_requirements[file_id] = document_prompt_requirements(
+                adapter, state, run_options, stage
+            )
     if frozen_run_options is not None:
         expected_file_ids = {str(item["file_id"]) for item in files}
         unknown_file_ids = sorted(set(frozen_run_options) - expected_file_ids)

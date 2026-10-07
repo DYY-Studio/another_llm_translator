@@ -53,6 +53,7 @@ from .plugins import (
 from .project import (
     PROMPT_LANGUAGES,
     PROMPT_RESOURCE_STAGES,
+    load_source_files,
     prompt_file,
 )
 from .prompt_library import (
@@ -265,24 +266,37 @@ def register_resource_routes(
         global_file_for: Callable[[str], Path] | None = None,
         fragment_summary_file_for: Callable[[str], Path] | None = None,
         translation_file_for: Callable[[str], Path] | None = None,
+        document_requirements: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if language not in available or not file_for(language).is_file():
             raise UsageError(
                 f"缺少 {language} Prompt：{prompt_file(stage, language)}",
                 reason="prompt_language_missing",
             )
+
+        def requirements_for(*stages: str) -> tuple[str, ...]:
+            values = dict.fromkeys(
+                (document_requirements or {}).get(name, "") for name in stages
+            )
+            requirements = tuple(value for value in values if value)
+            if "terminology" in stages and "translation" in stages:
+                return ("\n".join(requirements),) if requirements else ()
+            return requirements
+
         resolved = language
         path = file_for(resolved)
         content = path.read_text(encoding="utf-8")
         result: dict[str, Any] = {
             "content": content,
             "language": resolved,
-            "assembled": full_prompt(stage, content, resolved),
+            "assembled": full_prompt(stage, content, resolved, requirements_for(stage)),
             "languages": available,
         }
         if stage == "terminology_decision":
             assembled_phases = {
-                phase: full_prompt(stage, content, resolved, phase=phase)
+                phase: full_prompt(
+                    stage, content, resolved, requirements_for(stage), phase=phase
+                )
                 for phase in ("adjudication", "consistency", "final_review")
             }
             result["assembled_phases"] = assembled_phases
@@ -301,6 +315,7 @@ def register_resource_routes(
                         "fragment_summary",
                         fragment_path.read_text(encoding="utf-8"),
                         resolved,
+                        requirements_for("fragment_summary"),
                     )
                     assembled_mode_languages["summary-only"] = resolved
                 else:
@@ -334,6 +349,11 @@ def register_resource_routes(
                     "terminology",
                     content,
                     resolved,
+                    document_requirements=requirements_for(
+                        "terminology",
+                        *(("translation",) if needs_translation else ()),
+                        *(("fragment_summary",) if needs_summary else ()),
+                    ),
                     response_mode=mode,
                     fragment_summary_middle=middles[1] if needs_summary else None,
                     translation_middle=middles[-1] if needs_translation else None,
@@ -517,13 +537,34 @@ def register_resource_routes(
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
     async def get_project_prompt(
-        name: str, stage: str, language: str = "zh-CN"
+        name: str, stage: str, language: str = "zh-CN", file_id: str | None = None
     ) -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
-        return prompt_view(
+        from .stage_runtime import document_prompt_context, document_prompt_requirements
+
+        files = load_source_files(root)
+        selected = (
+            next((item for item in files if item["file_id"] == file_id), None)
+            if file_id
+            else next(iter(files), None)
+        )
+        if file_id and selected is None:
+            raise UsageError(f"项目文件不存在：{file_id}")
+        requirements: dict[str, str] = {}
+        if selected is not None:
+            adapter, state, run_options = document_prompt_context(root, selected)
+            for resource in (
+                ("terminology", "translation", "fragment_summary")
+                if stage == "terminology"
+                else (stage,)
+            ):
+                requirements[resource] = document_prompt_requirements(
+                    adapter, state, run_options, resource
+                ).get(language, "")
+        result = prompt_view(
             stage,
             language,
             lambda value: root / "prompts" / prompt_file(stage, value),
@@ -541,7 +582,21 @@ def register_resource_routes(
             )
             if stage == "terminology"
             else None,
+            document_requirements=requirements,
         )
+
+        result["document_context"] = {
+            "file_id": selected["file_id"] if selected else None,
+            "files": [
+                {
+                    "file_id": item["file_id"],
+                    "name": item["original_name"],
+                    "adapter_id": item["document_adapter_id"],
+                }
+                for item in files
+            ],
+        }
+        return result
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
     async def put_project_prompt(

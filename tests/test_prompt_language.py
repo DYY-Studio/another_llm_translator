@@ -659,3 +659,67 @@ def test_draft_prompt_preview_uses_runtime_contract_and_current_language(
     ).json()
     assert "terms+translation" not in value["assembled_modes"]
     assert "terms+translation" in value["assembled_mode_errors"]
+
+
+def test_project_prompt_preview_includes_selected_adapter_requirements(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import make_epub
+    from app.project import load_source_files, update_file_run_options
+    from app.stage_runtime import (
+        _project_context,
+        _prompt_factory,
+        _document_prompt_requirement_helpers,
+    )
+    from app.stage_terminology_draft import draft_run_context
+
+    app_root = make_app_root(tmp_path)
+    txt = tmp_path / "plain.txt"
+    txt.write_text("one", encoding="utf-8")
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub)
+    projects = tmp_path / "projects"
+    project, _ = init_project(
+        [str(txt), str(epub)], document_adapter_id=None, name="preview", app_root=app_root, projects_root=projects
+    )
+    assert project is not None
+    files = load_source_files(project)
+    txt_id = next(
+        item["file_id"] for item in files if item["document_adapter_id"] == "txt"
+    )
+    epub_id = next(
+        item["file_id"] for item in files if item["document_adapter_id"] == "epub"
+    )
+    with TestClient(create_app(projects_root=projects, app_root=app_root)) as client:
+        endpoint = "/api/v1/projects/preview/prompts/translation"
+        txt_view = client.get(endpoint, params={"file_id": txt_id}).json()
+        epub_view = client.get(endpoint, params={"file_id": epub_id}).json()
+        assert "Ruby" not in txt_view["assembled"]
+        assert "｜已译base《" in epub_view["assembled"]
+        assert epub_view["document_context"]["file_id"] == epub_id
+        config, _, _, segments = _project_context(project, stage="translation")
+        selected = [item for item in segments if item["file_id"] == epub_id]
+        requirements = _document_prompt_requirement_helpers(config, "zh-CN")[0](
+            selected
+        )
+        assert epub_view["assembled"] == _prompt_factory(project, "translation")(
+            requirements
+        )
+        combo = client.get(
+            "/api/v1/projects/preview/prompts/terminology", params={"file_id": epub_id}
+        ).json()
+        draft_config, _, _, draft_segments = draft_run_context(
+            project, include_summaries=True
+        )
+        draft_requirements = _document_prompt_requirement_helpers(
+            draft_config, "zh-CN"
+        )[0]([item for item in draft_segments if item["file_id"] == epub_id])
+        assert combo["assembled_modes"][
+            "terms+translation+fragment-summary"
+        ] == _prompt_factory(
+            project, "terminology", response_mode="terms+translation+fragment-summary"
+        )(draft_requirements)
+        update_file_run_options(project, epub_id, {"ruby_mode": "base_only"})
+        plain = client.get(endpoint, params={"file_id": epub_id}).json()
+        assert "Ruby" not in plain["assembled"]
+        assert client.get(endpoint, params={"file_id": "missing"}).status_code == 400

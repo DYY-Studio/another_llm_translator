@@ -831,6 +831,10 @@ interface PromptView {
   assembled_modes?: Record<string, string>;
   assembled_mode_languages?: Record<string, string>;
   assembled_mode_errors?: Record<string, string>;
+  document_context?: {
+    file_id: string | null;
+    files: Array<{ file_id: string; name: string; adapter_id: string }>;
+  };
   languages: string[];
   global_sync?: {
     available: boolean;
@@ -849,6 +853,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
   const [assembledModeLanguages, setAssembledModeLanguages] = useState<Record<string, string>>({});
   const [assembledModeErrors, setAssembledModeErrors] = useState<Record<string, string>>({});
+  const [documentContext, setDocumentContext] = useState<PromptView["document_context"]>();
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [previewMode, setPreviewMode] = useState("terms-only");
   const [previewPhase, setPreviewPhase] = useState("adjudication");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
@@ -864,22 +870,37 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
 
-  function applyPromptView(value: PromptView) {
-    setContent(value.content);
-    setSavedContent(value.content);
+  function applyPromptPreview(value: PromptView) {
+    setDocumentContext(value.document_context);
     setAssembled(value.assembled);
     setAssembledPhases(value.assembled_phases ?? {});
     setAssembledModes(value.assembled_modes ?? {});
     setAssembledModeLanguages(value.assembled_mode_languages ?? {});
     setAssembledModeErrors(value.assembled_mode_errors ?? {});
+  }
+
+  function applyPromptView(value: PromptView) {
+    setContent(value.content);
+    setSavedContent(value.content);
+    applyPromptPreview(value);
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
     setLanguages(value.languages);
     setPromptLanguage(value.language);
   }
 
+  async function changePreviewFile(fileId: string) {
+    setPreviewLoading(true);
+    setError("");
+    try {
+      const value = await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}&file_id=${encodeURIComponent(fileId)}`);
+      applyPromptPreview(value);
+    } catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setPreviewLoading(false); }
+  }
+
   async function loadPrompt() {
-    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`));
+    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}${documentContext?.file_id ? `&file_id=${encodeURIComponent(documentContext.file_id)}` : ""}`));
   }
 
   useEffect(() => {
@@ -930,11 +951,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     try {
       const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
       setContent(value.content);
-      setAssembled(value.assembled);
-      setAssembledPhases(value.assembled_phases ?? {});
-      setAssembledModes(value.assembled_modes ?? {});
-      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
-      setAssembledModeErrors(value.assembled_mode_errors ?? {});
+      applyPromptPreview(value);
       setPromptLanguage(value.language);
       setLoadedGlobalDraft(true);
       setMessage(translate("settings.promptGlobalLoaded", language));
@@ -946,11 +963,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     try {
       const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
       setContent(value.content);
-      setAssembled(value.assembled);
-      setAssembledPhases(value.assembled_phases ?? {});
-      setAssembledModes(value.assembled_modes ?? {});
-      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
-      setAssembledModeErrors(value.assembled_mode_errors ?? {});
+      applyPromptPreview(value);
       setSelectedLibraryEntry(promptId);
       setLoadedGlobalDraft(false);
       setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
@@ -1042,6 +1055,10 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>
+      {documentContext && documentContext.files.length > 0 ? <>
+        <label className="stage-select">{translate("settings.promptDocument", language)}<select value={documentContext.file_id ?? ""} disabled={previewLoading} onChange={(event) => void changePreviewFile(event.target.value)}>{documentContext.files.map((file) => <option key={file.file_id} value={file.file_id}>{file.file_id} · {file.name} · {file.adapter_id}</option>)}</select></label>
+        <p className="prompt-preview-hint">{translate("settings.promptDocumentHint", language)}</p>
+      </> : <p className="prompt-preview-hint">{translate("settings.promptTemplateHint", language)}</p>}
       {previewModes.length > 0 && <>
         <label className="stage-select">{translate("settings.promptPreviewMode", language)}<select value={activeMode} onChange={(event) => setPreviewMode(event.target.value)}>{previewModes.map(([mode, label]) => <option key={mode} value={mode} disabled={!assembledModes[mode] && !assembledModeErrors[mode]}>{label}</option>)}</select></label>
         {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}
