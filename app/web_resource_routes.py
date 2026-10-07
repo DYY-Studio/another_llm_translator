@@ -546,24 +546,42 @@ def register_resource_routes(
         from .stage_runtime import document_prompt_context, document_prompt_requirements
 
         files = load_source_files(root)
-        selected = (
-            next((item for item in files if item["file_id"] == file_id), None)
-            if file_id
-            else next(iter(files), None)
+        resources = (
+            ("terminology", "translation", "fragment_summary")
+            if stage == "terminology"
+            else (stage,)
         )
-        if file_id and selected is None:
-            raise UsageError(f"项目文件不存在：{file_id}")
-        requirements: dict[str, str] = {}
-        if selected is not None:
-            adapter, state, run_options = document_prompt_context(root, selected)
-            for resource in (
-                ("terminology", "translation", "fragment_summary")
-                if stage == "terminology"
-                else (stage,)
-            ):
-                requirements[resource] = document_prompt_requirements(
+        groups: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
+        selected_key = None
+        for file in files:
+            adapter, state, run_options = document_prompt_context(root, file)
+            requirements = {
+                resource: document_prompt_requirements(
                     adapter, state, run_options, resource
                 ).get(language, "")
+                for resource in resources
+            }
+            key = tuple(requirements.items())
+            group = groups.setdefault(
+                key,
+                {
+                    "file_id": file["file_id"],
+                    "adapter_ids": [],
+                    "file_count": 0,
+                    "has_requirements": any(requirements.values()),
+                },
+            )
+            if adapter.adapter_id not in group["adapter_ids"]:
+                group["adapter_ids"].append(adapter.adapter_id)
+            group["file_count"] += 1
+            if file["file_id"] == file_id:
+                selected_key = key
+        if file_id and selected_key is None:
+            raise UsageError(f"项目文件不存在：{file_id}")
+        if selected_key is None:
+            selected_key = next(iter(groups), None)
+        selected = groups[selected_key] if selected_key is not None else None
+        requirements = dict(selected_key) if selected_key is not None else {}
         result = prompt_view(
             stage,
             language,
@@ -587,14 +605,7 @@ def register_resource_routes(
 
         result["document_context"] = {
             "file_id": selected["file_id"] if selected else None,
-            "files": [
-                {
-                    "file_id": item["file_id"],
-                    "name": item["original_name"],
-                    "adapter_id": item["document_adapter_id"],
-                }
-                for item in files
-            ],
+            "groups": list(groups.values()),
         }
         return result
 

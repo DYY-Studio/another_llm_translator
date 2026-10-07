@@ -833,7 +833,7 @@ interface PromptView {
   assembled_mode_errors?: Record<string, string>;
   document_context?: {
     file_id: string | null;
-    files: Array<{ file_id: string; name: string; adapter_id: string }>;
+    groups: Array<{ file_id: string; adapter_ids: string[]; file_count: number; has_requirements: boolean }>;
   };
   languages: string[];
   global_sync?: {
@@ -889,7 +889,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     setPromptLanguage(value.language);
   }
 
-  async function changePreviewFile(fileId: string) {
+  async function changePreviewRequirements(fileId: string) {
     setPreviewLoading(true);
     setError("");
     try {
@@ -1055,8 +1055,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>
-      {documentContext && documentContext.files.length > 0 ? <>
-        <label className="stage-select">{translate("settings.promptDocument", language)}<select value={documentContext.file_id ?? ""} disabled={previewLoading} onChange={(event) => void changePreviewFile(event.target.value)}>{documentContext.files.map((file) => <option key={file.file_id} value={file.file_id}>{file.file_id} · {file.name} · {file.adapter_id}</option>)}</select></label>
+      {documentContext && documentContext.groups.length > 0 ? <>
+        <label className="stage-select">{translate("settings.promptDocument", language)}<select value={documentContext.file_id ?? ""} disabled={previewLoading} onChange={(event) => void changePreviewRequirements(event.target.value)}>{documentContext.groups.map((group, index) => <option key={group.file_id} value={group.file_id}>{group.adapter_ids.join(" / ")} · {group.has_requirements ? translate("settings.promptRequirementSet", language, { number: index + 1 }) : translate("settings.promptNoRequirements", language)} · {translate("settings.promptFileCount", language, { count: group.file_count })}</option>)}</select></label>
         <p className="prompt-preview-hint">{translate("settings.promptDocumentHint", language)}</p>
       </> : <p className="prompt-preview-hint">{translate("settings.promptTemplateHint", language)}</p>}
       {previewModes.length > 0 && <>

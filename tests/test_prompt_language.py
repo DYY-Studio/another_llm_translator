@@ -678,9 +678,17 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
     txt.write_text("one", encoding="utf-8")
     epub = tmp_path / "ruby.epub"
     make_epub(epub)
+    second_txt = tmp_path / "second.txt"
+    second_txt.write_text("two", encoding="utf-8")
+    second_epub = tmp_path / "second.epub"
+    make_epub(second_epub)
     projects = tmp_path / "projects"
     project, _ = init_project(
-        [str(txt), str(epub)], document_adapter_id=None, name="preview", app_root=app_root, projects_root=projects
+        [str(txt), str(second_txt), str(epub), str(second_epub)],
+        document_adapter_id=None,
+        name="preview",
+        app_root=app_root,
+        projects_root=projects,
     )
     assert project is not None
     files = load_source_files(project)
@@ -690,6 +698,9 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
     epub_id = next(
         item["file_id"] for item in files if item["document_adapter_id"] == "epub"
     )
+    second_epub_id = next(
+        item["file_id"] for item in files if item["original_name"] == "second.epub"
+    )
     with TestClient(create_app(projects_root=projects, app_root=app_root)) as client:
         endpoint = "/api/v1/projects/preview/prompts/translation"
         txt_view = client.get(endpoint, params={"file_id": txt_id}).json()
@@ -697,6 +708,15 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
         assert "Ruby" not in txt_view["assembled"]
         assert "｜已译base《" in epub_view["assembled"]
         assert epub_view["document_context"]["file_id"] == epub_id
+        groups = epub_view["document_context"]["groups"]
+        assert len(groups) == 2
+        assert [group["file_count"] for group in groups] == [2, 2]
+        assert [group["has_requirements"] for group in groups] == [False, True]
+        update_file_run_options(project, second_epub_id, {"ruby_mode": "compact"})
+        compact = client.get(endpoint, params={"file_id": second_epub_id}).json()
+        assert len(compact["document_context"]["groups"]) == 3
+        assert "⟦R:base|Y:reading⟧" in compact["assembled"]
+        assert "｜已译base《" not in compact["assembled"]
         config, _, _, segments = _project_context(project, stage="translation")
         selected = [item for item in segments if item["file_id"] == epub_id]
         requirements = _document_prompt_requirement_helpers(config, "zh-CN")[0](
@@ -722,4 +742,12 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
         update_file_run_options(project, epub_id, {"ruby_mode": "base_only"})
         plain = client.get(endpoint, params={"file_id": epub_id}).json()
         assert "Ruby" not in plain["assembled"]
+        assert len(plain["document_context"]["groups"]) == 2
+        empty_group = next(
+            group
+            for group in plain["document_context"]["groups"]
+            if not group["has_requirements"]
+        )
+        assert empty_group["file_count"] == 3
+        assert empty_group["adapter_ids"] == ["txt", "epub"]
         assert client.get(endpoint, params={"file_id": "missing"}).status_code == 400
