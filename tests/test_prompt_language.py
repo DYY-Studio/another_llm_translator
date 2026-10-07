@@ -784,3 +784,29 @@ def test_combined_prefix_explains_only_active_fields_once(language, mode):
     if "segment" not in types:
         assert "summary_context:" not in prefix
         assert "terms:" not in prefix
+
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+@pytest.mark.parametrize("mode", list(TerminologyResponseMode))
+def test_result_protocols_share_one_end_rule(language, mode):
+    from app.llm_response import response_record_types
+
+    prompt = full_prompt(
+        "terminology",
+        "term middle",
+        language,
+        response_mode=mode,
+        fragment_summary_middle="summary middle",
+        translation_middle="translation middle",
+    )
+    assert prompt.count('{"type":"end"}') == 1
+    assert ('{"type":"no_terms"}' in prompt) == (
+        "term" in response_record_types(mode)
+        and mode != TerminologyResponseMode.TERMS_ONLY
+    )
+    if "summary" in response_record_types(mode):
+        assert (
+            'one or more type="summary"' in prompt
+            if language == "en"
+            else '一条或多条 type="summary"' in prompt
+        )
