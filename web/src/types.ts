@@ -592,9 +592,11 @@ export interface ModelRow {
   display: string;
 }
 
-export type DraftProgress = Record<"terminology" | "translation", { completed: number; failed: number; total: number }>;
+export type DraftProgress = Record<"terminology" | "translation", { completed: number; failed: number; total: number }> & { content_summary?: { completed: number; failed: number; total: number } };
 
 export interface TaskOptions {
+  summary_progress?: { completed: number; total: number };
+  include_summaries?: boolean;
   include_draft_translation?: boolean;
   draft_progress?: DraftProgress;
   draft_prompt_preflight?: { ok: boolean; language: string; missing: string[] };
@@ -649,6 +651,7 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  include_summaries?: boolean;
   include_draft_translation?: boolean;
   run_id: string;
   started_at: string | null;
@@ -696,6 +699,7 @@ export interface ContinuousRunDecision {
 }
 
 export interface RunDecision {
+  include_summaries?: boolean;
   include_draft_translation?: boolean;
   force: boolean;
   reuse_mixed_fingerprints: boolean;

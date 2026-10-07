@@ -18,6 +18,7 @@ export function RunDialog({
   onStart,
   onOpenOverview,
   onDraftTranslationChange,
+  onSummariesChange,
   language,
 }: {
   options: TaskOptions;
@@ -25,6 +26,7 @@ export function RunDialog({
   onStart: (decision: RunDecision) => void;
   onOpenOverview?: () => void;
   onDraftTranslationChange?: (enabled: boolean) => Promise<void>;
+  onSummariesChange?: (enabled: boolean) => Promise<void>;
   language: Language;
 }) {
   const [draftLoading, setDraftLoading] = useState(false);
@@ -45,12 +47,12 @@ export function RunDialog({
         ? "force"
         : options.mismatched_fingerprint_completed ? null : "pending");
     }
-  }, [options.include_draft_translation, options.mismatched_fingerprint_completed]);
+  }, [options.include_draft_translation, options.include_summaries, options.mismatched_fingerprint_completed]);
   const decisionMode = options.stage === "terminology_decision";
   const [finalReview, setFinalReview] = useState(
     options.running_run?.final_review ?? options.final_review ?? false,
   );
-  const hybridSummary = options.stage === "terminology" && options.summary_selected_boundaries !== undefined;
+  const hybridSummary = options.stage === "terminology" && Boolean(options.include_summaries);
   const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
   const summaryConfigurationBlocked = hybridSummary && (
     !options.summary_selected_boundaries
@@ -65,12 +67,13 @@ export function RunDialog({
     ? !options.running_run || resuming || resultPolicy === "force"
     : resuming || resultPolicy !== null;
 
-  async function changeDraft(enabled: boolean) {
-    if (!onDraftTranslationChange) return;
+  async function changeDraft(enabled: boolean, summaries = false) {
+    const change = summaries ? onSummariesChange : onDraftTranslationChange;
+    if (!change) return;
     setDraftLoading(true);
     setDraftError("");
     try {
-      await onDraftTranslationChange(enabled);
+      await change(enabled);
     } catch (error) {
       setDraftError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -95,7 +98,7 @@ export function RunDialog({
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
       final_review: decisionMode && finalReview,
-      ...(options.stage === "terminology" && !hybridSummary ? { include_draft_translation: draftEnabled } : {}),
+      ...(options.stage === "terminology" ? { include_draft_translation: draftEnabled, include_summaries: hybridSummary } : {}),
     });
   }
 
@@ -166,19 +169,25 @@ export function RunDialog({
           </label>
         </div>}
 
-        {options.stage === "terminology" && !hybridSummary && onDraftTranslationChange && <div className="run-decision-info">
+        {options.stage === "terminology" && onDraftTranslationChange && <div className="run-decision-info">
           <label className="config-toggle">
             <span><input type="checkbox" checked={draftEnabled} disabled={draftLoading || Boolean(options.running_run && resuming)} onChange={(event) => { void changeDraft(event.target.checked); }} />{translate("runDialog.draftToggle", language)}</span>
             <small>{translate("runDialog.draftHint", language, { model: options.preset.model })}</small>
           </label>
+          {onSummariesChange && <label className="config-toggle">
+            <span><input type="checkbox" checked={hybridSummary} disabled={draftLoading || Boolean(options.running_run && resuming)} onChange={(event) => { void changeDraft(event.target.checked, true); }} />{translate("runDialog.summaryToggle", language)}</span>
+            <small>{translate("runDialog.summaryHint", language)}</small>
+          </label>}
           {draftLoading && <small>{translate("runDialog.draftLoading", language)}</small>}
           {draftError && <p className="error-text">{draftError}</p>}
-          {draftEnabled && options.draft_progress && Object.entries(options.draft_progress).map(([stage, value]) => <span key={stage}>{translate(`stage.${stage}`, language)} · {translate("runDialog.draftCounts", language, { completed: value.completed, pending: value.total - value.completed, total: value.total })}</span>)}
+          {options.draft_progress && Object.entries(options.draft_progress).map(([stage, value]) => <span key={stage}>{translate(stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`, language)} · {translate("runDialog.draftCounts", language, { completed: value.completed, pending: value.total - value.completed, total: value.total })}</span>)}
           {draftBlocked && <p className="error-text">{translate("runDialog.draftMissingPrompt", language)} {options.draft_prompt_preflight?.missing.join(", ")}</p>}
+          {hybridSummary && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.summaryForce", language, { count: options.summary_selected_boundaries ?? 0 })}</div>}
           {draftEnabled && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.draftForce", language, { total: options.selected, count: options.draft_progress?.translation.completed ?? 0 })}</div>}
         </div>}
 
         {hybridSummary && <div className="run-decision-info">
+          {options.summary_progress && <span>{translate("stage.contentSummary", language)} · {translate("runDialog.draftCounts", language, { completed: options.summary_progress.completed, pending: options.summary_progress.total - options.summary_progress.completed, total: options.summary_progress.total })}</span>}
           <span>{translate("runDialog.summaryScope", language, { count: options.summary_selected_boundaries ?? 0 })}</span>
           {options.summary_only_work && <div className="warning-banner run-warning">{translate("terms.summaryPreflightConflict", language)}</div>}
           {summaryPromptBlocked && <div className="error-text summary-message">
