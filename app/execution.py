@@ -261,7 +261,7 @@ def _make_stage_selection(
     return StageSelection(
         selected=tuple(selected_list),
         work=tuple(work),
-        reusable=tuple(reusable),
+        reusable=() if force else tuple(reusable),
         latest_completed=completed,
         last_attempt_failed=last_failed,
         fingerprints=fingerprints,
