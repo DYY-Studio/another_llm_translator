@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sys
 import uuid
 from collections import Counter
@@ -52,7 +53,7 @@ from .execution import (
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
 from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
-from .llm_response import TerminologyResponseMode
+from .llm_response import TerminologyResponseMode, response_record_types
 from .logging_utils import get_logger
 from .plugins import (
     get_document_adapter,
@@ -1089,6 +1090,19 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
         path = project / "prompts" / prompt_file(stage, language)
         if path.is_file():
             digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if stage == "terminology":
+        for language in SUPPORTED_LANGUAGES:
+            path = project / "prompts" / prompt_wrappers_file(language)
+            if path.exists():
+                wrappers = {
+                    mode: value
+                    for mode, value in load_prompt_wrappers(path).items()
+                    if any(value.values())
+                }
+                if wrappers:
+                    digests[f"wrappers:{language}"] = hashlib.sha256(
+                        json.dumps(wrappers, sort_keys=True).encode()
+                    ).hexdigest()
     return digests
 
 
@@ -1118,6 +1132,39 @@ def prompt_preflight(
     }
 
 
+COMBINED_PROMPT_MODES = (
+    "terms+translation",
+    "terms+fragment-summary",
+    "terms+translation+fragment-summary",
+)
+
+
+def prompt_wrappers_file(language: str) -> str:
+    if language not in SUPPORTED_LANGUAGES:
+        raise UsageError(f"不支持的 Prompt 语言：{language}")
+    return f"terminology-wrappers.{language}.json"
+
+
+def validate_prompt_wrappers(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict) or set(value) - set(COMBINED_PROMPT_MODES):
+        raise UsageError("组合 Prompt 包装配置包含不支持的模式")
+    for mode, wrapper in value.items():
+        if not isinstance(wrapper, dict) or set(wrapper) != {"prefix", "suffix"}:
+            raise UsageError(f"{mode} 必须包含 prefix 和 suffix")
+        if not all(isinstance(text, str) for text in wrapper.values()):
+            raise UsageError(f"{mode} 的 prefix 和 suffix 必须是字符串")
+    return value
+
+
+def load_prompt_wrappers(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    try:
+        return validate_prompt_wrappers(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise StorageError(f"无法读取组合 Prompt 包装配置：{path.name}: {exc}") from exc
+
+
 def _prompt_factory(
     project: Path,
     stage: str,
@@ -1138,26 +1185,20 @@ def _prompt_factory(
         stage == "terminology"
         and parsed_mode is TerminologyResponseMode.SUMMARY_ONLY
     )
-    translation_mode = parsed_mode in {
-        TerminologyResponseMode.TERMS_AND_TRANSLATION,
-        TerminologyResponseMode.TRANSLATION_ONLY,
-    }
-    summary_mode = (
-        stage == "terminology"
-        and response_mode is not None
-        and parsed_mode
-        in {
-            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-            TerminologyResponseMode.SUMMARY_ONLY,
-        }
-    )
+    types = response_record_types(parsed_mode) if parsed_mode is not None else ()
+    translation_mode = "segment" in types
+    summary_mode = "summary" in types
     required_stages = (
-        ("terminology", "translation")
-        if translation_mode
-        else ("fragment_summary",)
-        if summary_only
-        else ("terminology", "fragment_summary")
-        if summary_mode
+        tuple(
+            name
+            for name, enabled in (
+                ("terminology", not parsed_mode or "term" in types),
+                ("fragment_summary", summary_mode),
+                ("translation", translation_mode),
+            )
+            if enabled
+        )
+        if stage == "terminology"
         else (stage,)
     )
     language = _prompt_language_for_stages(project, language, required_stages)
@@ -1186,6 +1227,13 @@ def _prompt_factory(
         else None
     )
 
+    wrappers = (
+        load_prompt_wrappers(project / "prompts" / prompt_wrappers_file(language))
+        if stage == "terminology"
+        else {}
+    )
+    wrapper = wrappers.get(parsed_mode.value, {}) if parsed_mode is not None else {}
+
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(
             prompt_stage,
@@ -1196,6 +1244,8 @@ def _prompt_factory(
             fragment_summary_middle=fragment_summary_middle,
             translation_middle=translation_middle,
             require_term_declaration=require_term_declaration,
+            prefix=wrapper.get("prefix"),
+            suffix=wrapper.get("suffix"),
         )
 
     return build

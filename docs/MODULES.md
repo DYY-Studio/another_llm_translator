@@ -118,13 +118,13 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 - `stage_translation.py`：翻译 payload、结果校验、翻译校验与修复。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布。
-- `stage_terminology_draft.py`：实验粗翻的扫描状态、合并请求与独立结果恢复；复用翻译执行器进行译文校验和保存。
+- `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复；复用翻译执行器进行译文校验和保存。
 - `stages.py`：跨阶段公共入口、成功校验、完整状态检查和 `run-all` 编排；不承载各阶段算法。
 
 ### 内容概括
 
 - `summary_aggregation.py`：按内容边界聚合片段、递归压缩和独立发布完整结果。
-- `summary_provenance.py`：概括依赖构建与校验、过期原因和翻译上下文可用性判定。
+- `summary_provenance.py`：概括依赖构建与校验、过期原因和翻译上下文可用性判定，以及普通联合扫描与粗翻联合扫描共享的片段保存和整段采用。
 
 内容概括复用阶段执行、LLM、存储和 Document Adapter 边界，不建立另一套项目或请求框架。
 

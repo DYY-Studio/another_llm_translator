@@ -143,6 +143,7 @@ def _running_run(
         "current": _endpoint_summary(current_config),
     }
     if stage == "terminology":
+        result["include_summaries"] = bool(manifest.get("include_summaries", False))
         result["include_draft_translation"] = bool(
             manifest.get("include_draft_translation", False)
         )
@@ -167,8 +168,8 @@ def task_options(
     continuous_stages: Iterable[object] = (),
     apply_terminology_decision: bool = False,
 ) -> dict[str, Any]:
-    if include_draft_translation and (stage != "terminology" or include_summaries):
-        raise UsageError("粗翻开关仅支持普通术语扫描，与内容概括互斥")
+    if include_draft_translation and stage != "terminology":
+        raise UsageError("粗翻开关仅支持术语扫描")
     if final_review and stage not in {
         TERMINOLOGY_DECISION_STAGE,
         CONTINUOUS_STAGE,
@@ -347,8 +348,22 @@ def task_options(
         "running_run": _running_run(project, stage, config),
         "document_adapter_run_options": _document_adapter_run_option_summary(project),
     }
+    result["include_summaries"] = include_summaries
     if stage == "terminology" and include_summaries:
         participation = read_summary_participation(project)
+        running = result["running_run"]
+        if (
+            running
+            and running.get("include_summaries")
+            and bool(running.get("include_draft_translation"))
+            == include_draft_translation
+        ):
+            manifest = read_json(
+                project, project / "runs" / str(running["run_id"]) / "manifest.json"
+            )
+            participation = [
+                {**item, "selected": True} for item in manifest["summary_selection"]
+            ]
         selected_boundaries = sum(
             1 for item in participation if bool(item["selected"])
         )
@@ -363,10 +378,52 @@ def task_options(
             if selected_boundaries
             else ("terminology",),
         )
+    if stage == "terminology" and include_summaries and not include_draft_translation:
+        from .stage_terminology import _summary_participation, _summary_covered_segments
+        from .stage_runtime import (
+            _project_context,
+            _prompt_factory,
+            _document_prompt_requirement_helpers,
+        )
+        from .summary_provenance import digest
+
+        summary_ids = _summary_participation(project, nonempty)
+        summary_segments = [
+            item
+            for item in nonempty
+            if (str(item["file_id"]), str(item["part_id"])) in summary_ids
+        ]
+        covered: set[str] = set()
+        if summary_segments and result["summary_prompt_preflight"]["ok"]:
+            context, _, _, _ = _project_context(project, stage="fragment_summary")
+            language = str(result["summary_prompt_preflight"]["language"])
+            factory = _prompt_factory(project, "fragment_summary", language)
+            requirements, _ = _document_prompt_requirement_helpers(context, language)
+            covered = _summary_covered_segments(
+                project,
+                summary_segments,
+                prompt_digests=lambda items: {digest(factory(requirements(items)))},
+                model=str(config["llm"]["model"]),
+                target_language=str(config["project"]["target_language"]),
+            )
+        result["summary_progress"] = {
+            "completed": len(covered),
+            "total": len(summary_segments),
+        }
     if include_draft_translation:
         from .stage_terminology_draft import draft_scan_options
 
-        result.update(draft_scan_options(project, prompt_language))
+        running = result["running_run"]
+        resume_id = (
+            str(running["run_id"])
+            if running
+            and running.get("include_draft_translation")
+            and bool(running.get("include_summaries")) == include_summaries
+            else None
+        )
+        result.update(
+            draft_scan_options(project, prompt_language, include_summaries, resume_id)
+        )
     return result
 
 
@@ -823,11 +880,11 @@ class WebTaskManager:
             CONTINUOUS_STAGE,
         }:
             raise UsageError(f"未知后台阶段：{stage}")
-        if include_draft_translation and (stage != "terminology" or include_summaries):
-            raise UsageError("粗翻开关仅支持普通术语扫描，与内容概括互斥")
+        if include_draft_translation and stage != "terminology":
+            raise UsageError("粗翻开关仅支持术语扫描")
         if include_summaries and stage != "terminology":
             raise UsageError(
-                "include_summaries 只允许术语阶段的摘要子页面入口",
+                "include_summaries 只允许术语阶段",
                 reason="include_summaries_outside_terminology",
             )
         if include_summaries and any(
@@ -1000,6 +1057,7 @@ class WebTaskManager:
                     project,
                     stage,
                     include_draft_translation=True,
+                    include_summaries=include_summaries,
                     prompt_language=prompt_language,
                 )
                 if include_draft_translation
@@ -1055,6 +1113,12 @@ class WebTaskManager:
                     != include_draft_translation
                 ):
                     raise UsageError("续用 Run 必须保持原有粗翻选项")
+                if (
+                    stage == "terminology"
+                    and bool(running_run.get("include_summaries", False))
+                    != include_summaries
+                ):
+                    raise UsageError("续用 Run 必须保持原有概括选项")
             else:
                 if running_run is not None and run_action != "decline":
                     raise UsageError(
@@ -1133,7 +1197,9 @@ class WebTaskManager:
                     draft_translation_fingerprint,
                 )
 
-                draft_config, _, _, _ = draft_run_context(project)
+                draft_config, _, _, _ = draft_run_context(
+                    project, include_summaries=include_summaries
+                )
                 library = load_terms(project)
                 fingerprints += (
                     (

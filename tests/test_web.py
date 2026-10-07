@@ -6667,11 +6667,6 @@ def test_draft_scan_options_and_invalid_combinations(tmp_path: Path) -> None:
         assert options["draft_prompt_preflight"]["ok"] is True
         for payload in (
             {"stage": "translation", "include_draft_translation": True},
-            {
-                "stage": "terminology",
-                "include_draft_translation": True,
-                "include_summaries": True,
-            },
             {"stage": "run-all", "include_draft_translation": True},
         ):
             assert (

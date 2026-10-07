@@ -221,12 +221,14 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
         "terms+fragment-summary",
         "terms+translation",
         "summary-only",
+        "terms+translation+fragment-summary",
     }
     assert terminology["assembled_mode_languages"] == {
         "terms-only": "zh-CN",
         "terms+fragment-summary": "zh-CN",
         "terms+translation": "zh-CN",
         "summary-only": "zh-CN",
+        "terms+translation+fragment-summary": "zh-CN",
     }
     assert terminology["assembled_modes"]["terms+fragment-summary"].index(
         (tmp_path / "app-root" / "prompts" / "terminology.zh-CN.middle.txt")

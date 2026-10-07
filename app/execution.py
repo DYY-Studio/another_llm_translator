@@ -267,7 +267,7 @@ def _make_stage_selection(
         fingerprints=fingerprints,
     )
 
-PROMPT_RULES_VERSION = 15
+PROMPT_RULES_VERSION = 16
 
 _COMMON_PREFIX: dict[str, str] = {
     "zh-CN": (
@@ -496,26 +496,6 @@ _STAGE_SUFFIX: dict[str, dict[str, str]] = {
     },
 }
 
-_TERMINOLOGY_SUMMARY_SUFFIX: dict[str, dict[str, str]] = {
-    "zh-CN": {
-        "terms+fragment-summary": (
-            '先输出一条或多条 type="summary" 记录，再输出术语记录，最后输出 end。'
-            "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
-            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments。"
-        ),
-        "summary-only": _STAGE_SUFFIX["fragment_summary"]["zh-CN"],
-    },
-    "en": {
-        "terms+fragment-summary": (
-            'Output one or more type="summary" records first, then term records, and end last. '
-            "A summary contains type and non-empty text. A single summary may omit refs. "
-            "If outputting multiple summaries, each must include refs; refs must not overlap "
-            "and must collectively cover all source_segments."
-        ),
-        "summary-only": _STAGE_SUFFIX["fragment_summary"]["en"],
-    },
-}
-
 _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
     "adjudication": {
         "zh-CN": (
@@ -613,7 +593,7 @@ _TERM_DECLARATION_SUFFIX = {
 }
 
 
-def full_prompt(
+def prompt_sections(
     stage: str,
     middle: str,
     language: str = "zh-CN",
@@ -623,7 +603,7 @@ def full_prompt(
     fragment_summary_middle: str | None = None,
     translation_middle: str | None = None,
     require_term_declaration: bool = False,
-) -> str:
+) -> tuple[str, str, str]:
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}")
     if stage not in _STAGE_PREFIX:
@@ -647,56 +627,25 @@ def full_prompt(
             raise UsageError(f"不支持的术语响应模式：{response_mode}") from exc
     else:
         mode = TerminologyResponseMode.TERMS_ONLY
-    if (
-        mode
-        in {
-            TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-            TerminologyResponseMode.SUMMARY_ONLY,
-        }
-        and fragment_summary_middle is None
-    ):
-        raise UsageError(
-            "启用术语概括响应模式时必须提供独立的片段概括 Prompt"
-        )
-    draft_mode = mode in {
-        TerminologyResponseMode.TERMS_AND_TRANSLATION,
-        TerminologyResponseMode.TRANSLATION_ONLY,
-    }
-    if draft_mode and translation_middle is None:
-        raise UsageError("术语粗翻响应模式必须提供翻译 Prompt")
+    types = response_record_types(mode)
+    has_summary = stage == "terminology" and "summary" in types
+    has_translation = stage == "terminology" and "segment" in types
+    has_terms = "term" in types
+    if has_summary and fragment_summary_middle is None:
+        raise UsageError("启用概括响应模式时必须提供独立的片段概括 Prompt")
+    if has_translation and translation_middle is None:
+        raise UsageError("启用粗翻响应模式时必须提供翻译 Prompt")
     effective_stage = stage
-    effective_middle = middle
-    if mode is TerminologyResponseMode.TRANSLATION_ONLY:
-        effective_stage = "translation"
-        effective_middle = translation_middle or ""
-    elif mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
-        effective_middle = (
-            (
-                "术语扫描要求：\n"
-                if language == "zh-CN"
-                else "Terminology scanning policy:\n"
-            )
-            + middle.strip()
-            + (
-                "\n\n粗翻要求：\n"
-                if language == "zh-CN"
-                else "\n\nDraft translation policy:\n"
-            )
-            + translation_middle.strip()
-        )
-    if mode is TerminologyResponseMode.SUMMARY_ONLY:
-        effective_stage = "fragment_summary"
-        assert fragment_summary_middle is not None
-        effective_middle = fragment_summary_middle
-    elif (
-        mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
-        and fragment_summary_middle is not None
-    ):
-        effective_middle = "\n\n".join(
-            value.strip()
-            for value in (middle, fragment_summary_middle)
-            if value.strip()
-        )
+    if stage == "terminology" and not has_terms:
+        effective_stage = "translation" if has_translation else "fragment_summary"
+    pieces = []
+    if has_terms or stage != "terminology":
+        pieces.append(middle.strip())
+    if has_summary:
+        pieces.append(fragment_summary_middle.strip())
+    if has_translation:
+        pieces.append(translation_middle.strip())
+    effective_middle = "\n\n".join(pieces)
     prefix = f"{_COMMON_PREFIX[language]}\n{_STAGE_PREFIX[effective_stage][language]}"
     if phase is not None:
         prefix = f"{prefix}\n{_TERMINOLOGY_DECISION_PHASE_PREFIX[phase][language]}"
@@ -721,30 +670,89 @@ def full_prompt(
         )
     else:
         stage_suffix = _STAGE_SUFFIX[effective_stage][language]
-    if stage == "terminology" and mode in {
-        TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-        TerminologyResponseMode.SUMMARY_ONLY,
-    }:
-        stage_suffix = _TERMINOLOGY_SUMMARY_SUFFIX[language][mode.value]
-        if mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
-            stage_suffix = f"{_TERM_DECLARATION_SUFFIX[language]} {stage_suffix}"
-    if mode is TerminologyResponseMode.TERMS_AND_TRANSLATION:
-        prefix = f"{_COMMON_PREFIX[language]}\n{_DRAFT_PREFIX[language]}"
-        stage_suffix = " ".join(
-            (
-                _SEGMENT_TEXT_SUFFIX[language],
-                _TERM_DECLARATION_SUFFIX[language],
-                _STAGE_SUFFIX["translation"][language],
+    if stage == "terminology" and (has_translation or has_summary):
+        prefix_stages = [
+            name
+            for name, enabled in (
+                ("terminology", has_terms),
+                ("fragment_summary", has_summary),
+                ("translation", has_translation),
             )
+            if enabled
+        ]
+        prefix = "\n".join(
+            [
+                _COMMON_PREFIX[language],
+                *[
+                    _DRAFT_PREFIX[language]
+                    if name == "terminology" and has_translation
+                    else _STAGE_PREFIX[name][language]
+                    for name in prefix_stages
+                ],
+            ]
         )
-    elif (
-        stage == "terminology"
-        and require_term_declaration
-        and mode is TerminologyResponseMode.TERMS_ONLY
-    ):
+        protocols = []
+        if has_summary:
+            protocols.append(
+                '每条 type="summary" 必须有非空 text。单条可省略 refs；多条时 refs 必须互不重叠且合并覆盖全部 source_refs。'
+                if language == "zh-CN"
+                else 'Each type="summary" requires non-empty text. A single summary may omit refs; multiple summaries require non-overlapping refs collectively covering source_refs.'
+            )
+        if has_terms:
+            protocols.append(_TERM_DECLARATION_SUFFIX[language])
+        if has_translation:
+            protocols.extend(
+                (_SEGMENT_TEXT_SUFFIX[language], _STAGE_SUFFIX["translation"][language])
+            )
+        if has_summary and has_terms:
+            protocols.append(
+                "概括记录必须在术语记录之前。"
+                if language == "zh-CN"
+                else "Summary records must precede terminology records."
+            )
+        stage_suffix = " ".join(protocols)
+    elif stage == "terminology" and require_term_declaration:
         stage_suffix = _TERM_DECLARATION_SUFFIX[language]
     suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
-    return f"{prefix}\n\n{effective_middle.strip()}\n\n{' '.join(suffix_parts)}"
+    return prefix, effective_middle.strip(), " ".join(suffix_parts)
+
+
+def full_prompt(
+    stage: str,
+    middle: str,
+    language: str = "zh-CN",
+    document_requirements: Iterable[str] = (),
+    phase: str | None = None,
+    response_mode: TerminologyResponseMode | str | None = None,
+    fragment_summary_middle: str | None = None,
+    translation_middle: str | None = None,
+    require_term_declaration: bool = False,
+    prefix: str | None = None,
+    suffix: str | None = None,
+) -> str:
+    default_prefix, assembled_middle, default_suffix = prompt_sections(
+        stage,
+        middle,
+        language,
+        document_requirements,
+        phase,
+        response_mode,
+        fragment_summary_middle,
+        translation_middle,
+        require_term_declaration,
+    )
+    return "\n\n".join(
+        part
+        for part in (
+            default_prefix,
+            prefix or "",
+            assembled_middle,
+            suffix or "",
+            default_suffix,
+        )
+        if part
+    )
+
 
 def stage_fingerprint(
     config: dict[str, Any],

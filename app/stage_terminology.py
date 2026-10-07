@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from .config import load_project_config
 
 from .errors import (
     ContextLengthError,
@@ -44,7 +45,6 @@ from .sqlite_storage import (
     append_jsonl,
     atomic_write_json,
     mark_content_summary_fragments_stale,
-    publish_content_summary_fulls,
     read_content_summaries,
     read_json,
     read_jsonl,
@@ -77,7 +77,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
-from .summary_provenance import build_provenance
+from .summary_provenance import write_fragment_summary
 from .term_library import _merge_and_publish_terms, load_terms
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
@@ -277,8 +277,6 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    if include_draft_translation and include_summaries:
-        raise UsageError("术语粗翻与内容概括不能同时启用")
     if resume_run_id is not None:
         manifest = read_json(
             project, project / "runs" / resume_run_id / "manifest.json"
@@ -288,6 +286,20 @@ async def run_terminology(
             != include_draft_translation
         ):
             raise UsageError("续用 Run 必须保持原有粗翻选项")
+    if include_draft_translation and include_summaries:
+        if any(
+            value is not None
+            for value in (
+                scope.from_file,
+                scope.only_file,
+                scope.only_segment,
+                scope.segment_ids,
+            )
+        ):
+            raise UsageError("同时生成概括要求完整项目范围")
+        summary_config = load_project_config(project, stage="terminology")
+        if "terminology" in summary_config["chunking"]["cross_boundary_batching"]:
+            raise UsageError("同时生成概括要求关闭术语跨边界合并")
     if include_draft_translation:
         from .stage_translation import run_translation
 
@@ -302,6 +314,7 @@ async def run_terminology(
             on_progress=on_progress,
             on_usage=on_usage,
             _draft_terminology=True,
+            _include_summaries=include_summaries,
             _on_draft_progress=on_draft_progress,
         )
     logger = get_logger("terminology")
@@ -1358,127 +1371,24 @@ async def run_terminology(
         error_class: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
-        values: list[dict[str, Any]] = []
-        for item in items:
-            values.append(summary_slice_provenance(item))
-        boundaries = {(str(item["file_id"]), str(item["part_id"])) for item in items}
-        if len(boundaries) != 1:
-            raise StorageError("内容概括请求不能跨越 file_id/part_id 边界")
-        file_id, part_id = next(iter(boundaries))
-        source_digest = _digest(values)
-        input_digest = _digest(
-            [
-                {"segment_id": value["segment_id"], "model_text": value["model_text"]}
-                for value in values
-            ]
-        )
-        prompt_digest = summary_prompt_digest_for(items)
-        fragment_prompt_digest = fragment_prompt_digest_for(items)
-        source_range = {
-            "file_id": file_id,
-            "part_id": part_id,
-            "segment_ids": list(dict.fromkeys(value["segment_id"] for value in values)),
-            "segments": values,
-        }
-        summary_id = (
-            "SUMMARY-FRAGMENT-"
-            + _digest(
-                [
-                    file_id,
-                    part_id,
-                    source_digest,
-                    input_digest,
-                    prompt_digest,
-                    config["llm"]["model"],
-                    config["project"]["target_language"],
-                    str(run_id),
-                ]
-            )[7:31].upper()
-        )
-        record = record_header(
-            "content_summary",
-            str(metadata["project_id"]),
-            record_id=summary_id,
-            kind="fragment",
-            file_id=file_id,
-            part_id=part_id,
+        return write_fragment_summary(
+            project,
+            project_id=str(metadata["project_id"]),
+            config=config,
+            items=items,
+            values=[summary_slice_provenance(item) for item in items],
+            run_id=str(run_id),
+            request_id=run_request_id,
+            prompt_digest=summary_prompt_digest_for(items),
+            fragment_prompt_digest=fragment_prompt_digest_for(items),
+            segments=segments,
+            warnings=warnings,
             status=status,
             text=text,
-            source_range=source_range,
-            source_digest=source_digest,
-            input_digest=input_digest,
-            prompt_digest=prompt_digest,
-            fragment_prompt_digest=fragment_prompt_digest,
-            model=str(config["llm"]["model"]),
-            target_language=str(config["project"]["target_language"]),
-            run_id=run_id,
-            refs=list(refs or []),
-            request_id=run_request_id,
+            refs=refs,
             error_class=error_class,
             error_message=error_message,
         )
-        write_content_summary(project, record)
-        if status == "completed":
-            current_fragments = [
-                item
-                for item in read_content_summaries(
-                    project,
-                    file_id=file_id,
-                    part_id=part_id,
-                    kind="fragment",
-                    status="completed",
-                )
-                if not bool(item.get("source_changed", False))
-            ]
-            current_segment_ids = {
-                str(item["segment_id"])
-                for item in segments
-                if not item["is_empty"]
-                and str(item["file_id"]) == file_id
-                and str(item["part_id"]) == part_id
-            }
-            source_segment_ids = list(
-                dict.fromkeys(
-                    str(value.get("original_segment_id") or value.get("segment_id"))
-                    for value in values
-                    if value.get("original_segment_id") or value.get("segment_id")
-                )
-            )
-            if (
-                len(current_fragments) == 1
-                and current_fragments[0].get("record_id") == record["record_id"]
-                and set(source_segment_ids) == current_segment_ids
-            ):
-                provenance, input_digest = build_provenance(
-                    "adopted_fragment", [record]
-                )
-                full_record = {
-                    **record,
-                    "record_id": (
-                        "SUMMARY-FULL-"
-                        + _digest(
-                            [
-                                file_id,
-                                part_id,
-                                record["record_id"],
-                                record.get("text"),
-                            ]
-                        )[7:31].upper()
-                    ),
-                    "kind": "full",
-                    "refs": source_segment_ids,
-                    "input_digest": input_digest,
-                    "provenance": provenance,
-                }
-                cleanup_report = publish_content_summary_fulls(project, [full_record])
-                for skipped in cleanup_report["skipped"]:
-                    warning = (
-                        "内容概括历史清理已跳过："
-                        f"{skipped['file_id']}/{skipped['part_id']} 的 provenance 无法验证"
-                    )
-                    if warning not in warnings:
-                        warnings.append(warning)
-        return record
 
     def mark_failed(
         items: list[dict[str, Any]],

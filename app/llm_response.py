@@ -41,6 +41,8 @@ class TerminologyResponseMode(str, Enum):
     SUMMARY_ONLY = "summary-only"
     TERMS_AND_TRANSLATION = "terms+translation"
     TRANSLATION_ONLY = "translation-only"
+    TERMS_TRANSLATION_SUMMARY = "terms+translation+fragment-summary"
+    TRANSLATION_SUMMARY = "translation+fragment-summary"
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,10 @@ def response_record_types(
         return ("summary", "term", "no_terms")
     if normalized is TerminologyResponseMode.TERMS_AND_TRANSLATION:
         return ("term", "no_terms", "segment")
+    if normalized is TerminologyResponseMode.TERMS_TRANSLATION_SUMMARY:
+        return ("summary", "term", "no_terms", "segment")
+    if normalized is TerminologyResponseMode.TRANSLATION_SUMMARY:
+        return ("summary", "segment")
     if normalized is TerminologyResponseMode.TRANSLATION_ONLY:
         return ("segment",)
     return ("summary",)
