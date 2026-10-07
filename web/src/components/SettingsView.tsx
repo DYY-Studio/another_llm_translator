@@ -1,4 +1,4 @@
-import { useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
@@ -330,6 +330,21 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.baseDelay", language)} value={config.retry.base_delay_seconds} min={0} step={0.1} help={translate("settings.baseDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.base_delay_seconds = value; })} />
           <NumberField label={translate("settings.maxDelay", language)} value={config.retry.max_delay_seconds} min={0} step={0.1} help={translate("settings.maxDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.max_delay_seconds = value; })} />
           <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} help={translate("settings.jitterHint", language)} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
+        </ConfigSection>
+        <ConfigSection title={translate("settings.emptyResponseRetry", language)} description={translate("settings.emptyResponseRetryHint", language)}>
+          {(["truncated", "unknown"] as const).map((kind) => {
+            const modeKey = `empty_${kind}_mode` as const;
+            const countKey = `empty_${kind}_max_attempts` as const;
+            return <Fragment key={kind}>
+              <Field label={translate(kind === "truncated" ? "settings.emptyTruncatedMode" : "settings.emptyUnknownMode", language)}>
+                <select value={config.retry[modeKey]} onChange={(event) => update((draft) => { draft.retry[modeKey] = event.target.value as "retry" | "split"; })}>
+                  <option value="retry">{translate("settings.emptyRetryOriginal", language)}</option>
+                  <option value="split">{translate("settings.emptyRetrySplit", language)}</option>
+                </select>
+              </Field>
+              <NumberField label={translate(kind === "truncated" ? "settings.emptyTruncatedAttempts" : "settings.emptyUnknownAttempts", language)} value={config.retry[countKey]} min={0} step={1} help={translate(config.retry[modeKey] === "split" ? "settings.emptySplitAttemptsHint" : "settings.emptyRetryAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry[countKey] = value; })} />
+            </Fragment>;
+          })}
         </ConfigSection>
         <ConfigSection title={translate("settings.debug", language)} description={translate("settings.debugHint", language)} warning>
           <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
