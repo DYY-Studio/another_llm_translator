@@ -64,7 +64,9 @@
 .run-identity-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-identity-separator, .run-identity-stage { flex: 0 0 auto; white-space: nowrap; }
 .run-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(80px, 1fr); align-items: center; gap: 10px; }
-.draft-result-progress { min-width: 0; display: grid; gap: 2px; color: var(--muted); }
+.draft-result-progress { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; color: var(--muted); }
+.draft-result-progress-item { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.draft-result-progress-item strong { color: var(--text); font-weight: 550; font-variant-numeric: tabular-nums; }
 .progress-track { display: flex; height: 7px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .progress-track > span { display: block; height: 100%; transition: width .2s ease; }
 .progress-completed { background: var(--status-success); }

@@ -23,7 +23,15 @@ function taskStageLabelKey(stage: string): string {
 }
 
 function DraftResultProgress({ progress, language }: { progress: DraftProgress; language: Language }) {
-  return <div className="draft-result-progress">{Object.entries(progress).map(([stage, value]) => <span key={stage}>{translate(`stage.${stage}`, language)} · {translate("run.completedCount", language, { completed: value.completed, failed: value.failed, pending: Math.max(0, value.total - value.completed - value.failed), total: value.total })}</span>)}</div>;
+  return <div className="draft-result-progress">{Object.entries(progress).map(([stage, value]) => {
+    const label = translate(stage === "translation" ? "stage.draftTranslation" : taskStageLabelKey(stage), language);
+    const details = `${label} · ${translate("run.completedCount", language, { completed: value.completed, failed: value.failed, pending: Math.max(0, value.total - value.completed - value.failed), total: value.total })}`;
+    return <span className="draft-result-progress-item" key={stage} title={details} aria-label={details}>
+      <span>{label}</span>
+      <strong>{translate("run.stepProgressCompact", language, { completed: value.completed, total: value.total })}</strong>
+      {value.failed > 0 && <span className="error-text">{translate("run.failed", language)} {value.failed}</span>}
+    </span>;
+  })}</div>;
 }
 
 function TaskSteps({

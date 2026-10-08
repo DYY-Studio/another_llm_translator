@@ -103,6 +103,7 @@
   .warning-banner-sticky { top: calc(58px + var(--mobile-run-status-height)); z-index: 2; }
   .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }
+  .run-progress:has(.draft-result-progress) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .run-tokens { min-width: 0; gap: 12px; white-space: normal; }
   .overview-page { width: auto; height: auto; max-width: none; min-height: 0; display: block; overflow: visible; padding-bottom: 76px; }
   .overview-page .overview-project-bar { margin-bottom: 18px; }
