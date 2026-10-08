@@ -336,6 +336,7 @@ export interface TaskState {
 export interface TaskStep {
   stage: string;
   status: string;
+  reason?: string;
   selected: number;
   completed: number;
   failed: number;
