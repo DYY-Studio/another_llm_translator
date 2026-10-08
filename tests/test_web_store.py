@@ -1675,3 +1675,19 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
     assert added["terms"][0]["aliases"] == ["alice"]
     spec = TermNormalization("NFKC", False)
     assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]
+
+
+def test_detail_reuses_adapter_context_only_within_operation(tmp_path: Path, monkeypatch) -> None:
+    import app.web_store as module
+    project = create_web_store_project(tmp_path, "one\ntwo")
+    store = WebStore(project)
+    calls = []
+    original = module._read_adapter_context
+    def read(*args):
+        calls.append(args[1]["file_id"])
+        return original(*args)
+    monkeypatch.setattr(module, "_read_adapter_context", read)
+    store.segment_detail("F0001-S000001")
+    assert len(calls) == 1
+    store.segment_detail("F0001-S000001")
+    assert len(calls) == 2
