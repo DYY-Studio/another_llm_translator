@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError, UsageError
+from .stage_result_retention import prune_stage_results
 
 SCHEMA_VERSION = 5
 
@@ -208,6 +209,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS stage_results_stage_segment
             ON stage_results(stage, segment_id, sequence);
+        CREATE INDEX IF NOT EXISTS stage_results_base_reference
+            ON stage_results(json_extract(payload_json, '$.base_result_id'));
+        CREATE INDEX IF NOT EXISTS stage_results_suggestion_reference
+            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'));
         CREATE TABLE IF NOT EXISTS terminology_scans (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             record_id TEXT NOT NULL UNIQUE,
@@ -1622,7 +1627,7 @@ def replace_source(
     try:
         with connection:
             old_rows = connection.execute(
-                """SELECT file_id, part_id, line_index, source, model_source
+                """SELECT segment_id, file_id, part_id, line_index, source, model_source
                    FROM segments"""
             ).fetchall()
             old_orders = {
@@ -1728,6 +1733,9 @@ def replace_source(
                 "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
                 [(key, _json(item)) for key, item in metadata.items()],
             )
+            removed_ids = {str(row["segment_id"]) for row in old_rows} - {str(item["segment_id"]) for item in segment_values}
+            from .stage_result_retention import STAGES as retained_stages
+            prune_stage_results(connection, ((stage, sid) for stage in retained_stages for sid in removed_ids))
             for file_id, part_id in affected_boundaries:
                 connection.execute(
                     """UPDATE content_summaries
@@ -2164,6 +2172,7 @@ def append_jsonl(project: Path, path: Path, value: dict[str, Any]) -> None:
         with connection:
             if kind == "stage":
                 _insert_stage(connection, [value])
+                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id"))])
             elif kind == "scans":
                 _insert_scans(connection, [value])
             elif kind == "candidates":
@@ -2189,6 +2198,7 @@ def append_stage_results(
     try:
         with connection:
             _insert_stage(connection, values)
+            prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id")) for value in values])
     except sqlite3.Error as exc:
         raise StorageError(f"无法批量追加 SQLite 阶段记录：{project}: {exc}") from exc
     finally:
@@ -2675,11 +2685,11 @@ def latest_stage_summary(
         rows = connection.execute(
             f"""
             SELECT agg.segment_id,
-                   agg.last_completed > COALESCE(agg.last_reset, 0) AS completed,
+                   COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0) AS completed,
                    agg.last_failed IS NOT NULL
-                       AND NOT (agg.last_completed > COALESCE(agg.last_reset, 0)) AS failed,
+                       AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
                    CASE
-                       WHEN agg.last_completed > COALESCE(agg.last_reset, 0)
+                       WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
                        THEN json_extract(completed.payload_json, '$.stage_fingerprint')
                    END AS fingerprint
             FROM (

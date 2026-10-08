@@ -1274,7 +1274,7 @@ def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path
 
     history = load_stage_history(project, "translation")
     latest = latest_completed_by_segment(history)["F0001-S000001"]
-    assert len(history) == 2
+    assert len(history) == 1
     assert first["record_id"] != second["record_id"]
     assert latest["text"] == "第二版"
     assert latest["origin"] == "web"

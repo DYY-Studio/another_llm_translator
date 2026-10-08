@@ -1128,5 +1128,5 @@ async def test_force_redo_counts_only_current_results(
     assert manifest["requested_segment_count"] == 2
     assert manifest["reused_segment_count"] == 0
     history = read_jsonl(project, project / "stages" / f"{stage}.jsonl")
-    assert sum(item.get("run_id") == first["run_id"] for item in history) == 1
+    assert sum(item.get("run_id") == first["run_id"] for item in history) == 0
     assert sum(item.get("run_id") == redo["run_id"] for item in history) == 2

@@ -1565,3 +1565,37 @@ def test_read_jsonl_filters_terminology_records_by_task(tmp_path: Path) -> None:
     assert len(scans_a) == 2
     assert {item["active_task_id"] for item in scans_a} == {"TASK-A"}
     assert len(read_jsonl(project, scans_path)) == 4
+
+
+def test_stage_retention_dependencies_reset_and_orphan_parent(tmp_path: Path) -> None:
+    from app.sqlite_storage import append_stage_results
+
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    sid = "F0001-S000001"
+
+    def result(key: str, stage: str, status: str = "completed", **fields: object):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+                             segment_id=sid, status=status, **fields)
+
+    def save(*records):
+        append_stage_results(project, records)
+
+    def ids(stage):
+        return {r["record_id"] for r in read_jsonl(project, stage_result_path(project, stage))}
+
+    save(result("t1", "translation", text="one"))
+    save(result("a1", "proofreading_applied", base_result_id="t1", text="one"))
+    save(result("reset", "translation", "reset"))
+    save(result("f1", "translation", "failed"))
+    save(result("f2", "translation", "failed"))
+    assert ids("translation") == {"t1", "reset", "f2"}
+    assert not latest_stage_summary(project, "translation", [sid])[sid]["completed"]
+    save(result("t2", "translation", text="two"))
+    assert ids("translation") == {"t1", "t2"}
+    save(result("a2", "proofreading_applied", base_result_id="t2", text="two"))
+    assert ids("translation") == {"t2"}
+    assert ids("proofreading_applied") == {"a2"}
+    with pytest.raises(StorageError, match="引用"):
+        save(result("broken", "proofreading_applied", base_result_id="missing"))
+    assert ids("proofreading_applied") == {"a2"}
