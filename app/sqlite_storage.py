@@ -2639,28 +2639,27 @@ def latest_stage_results(
 ) -> dict[str, dict[str, Any]]:
     connection = _with_db(project)
     try:
-        params: list[Any] = [stage]
-        filter_sql = ""
         values = list(segment_ids) if segment_ids is not None else None
         if values == []:
             return {}
-        if values:
-            placeholders = ",".join("?" for _ in values)
-            filter_sql = f" AND segment_id IN ({placeholders})"
-            params.extend(values)
-        rows = connection.execute(
-            f"""
-            SELECT record_id, stage, segment_id, status, payload_json FROM (
-                SELECT record_id, stage, status, payload_json, segment_id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY segment_id ORDER BY sequence DESC
-                       ) AS rank
-                FROM stage_results
-                WHERE stage = ?{filter_sql}
-            ) WHERE rank = 1
-            """,
-            params,
-        ).fetchall()
+        batches = [values[start:start + 500] for start in range(0, len(values), 500)] if values is not None else [None]
+        rows = []
+        for batch in batches:
+            filter_sql = f" AND segment_id IN ({','.join('?' for _ in batch)})" if batch is not None else ""
+            params = [stage, *batch] if batch is not None else [stage]
+            rows.extend(connection.execute(
+                f"""
+                SELECT record_id, stage, segment_id, status, payload_json FROM (
+                    SELECT record_id, stage, status, payload_json, segment_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY segment_id ORDER BY sequence DESC
+                           ) AS rank
+                    FROM stage_results
+                    WHERE stage = ?{filter_sql}
+                ) WHERE rank = 1
+                """,
+                params,
+            ).fetchall())
         project_id = _project_id(connection)
         values_by_id = [_hydrate_stage(row, project_id) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
@@ -2678,34 +2677,36 @@ def latest_stage_summary(
     values = list(segment_ids)
     if not values:
         return {}
-    placeholders = ",".join("?" for _ in values)
-    params: list[Any] = [stage, *values]
     connection = _with_db(project)
     try:
-        rows = connection.execute(
-            f"""
-            SELECT agg.segment_id,
-                   COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0) AS completed,
-                   agg.last_failed IS NOT NULL
-                       AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
-                   CASE
-                       WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
-                       THEN json_extract(completed.payload_json, '$.stage_fingerprint')
-                   END AS fingerprint
-            FROM (
-                SELECT segment_id,
-                       MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
-                       MAX(CASE WHEN status = 'reset' THEN sequence END) AS last_reset,
-                       MAX(CASE WHEN status = 'failed' THEN sequence END) AS last_failed
-                FROM stage_results
-                WHERE stage = ? AND segment_id IN ({placeholders})
-                GROUP BY segment_id
-            ) AS agg
-            LEFT JOIN stage_results AS completed
-              ON completed.sequence = agg.last_completed
-            """,
-            params,
-        ).fetchall()
+        rows = []
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                f"""
+                SELECT agg.segment_id,
+                       COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0) AS completed,
+                       agg.last_failed IS NOT NULL
+                           AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
+                       CASE
+                           WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
+                           THEN json_extract(completed.payload_json, '$.stage_fingerprint')
+                       END AS fingerprint
+                FROM (
+                    SELECT segment_id,
+                           MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
+                           MAX(CASE WHEN status = 'reset' THEN sequence END) AS last_reset,
+                           MAX(CASE WHEN status = 'failed' THEN sequence END) AS last_failed
+                    FROM stage_results
+                    WHERE stage = ? AND segment_id IN ({placeholders})
+                    GROUP BY segment_id
+                ) AS agg
+                LEFT JOIN stage_results AS completed
+                  ON completed.sequence = agg.last_completed
+                """,
+                [stage, *batch],
+            ).fetchall())
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
@@ -3018,13 +3019,16 @@ def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: se
                for row in connection.execute(
                    "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
                    "WHERE stage IN ('proofreading_applied','polishing_applied') "
-                   "AND status='completed' AND json_type(payload_json,'$.text') IS NOT NULL")
+                   "AND status='completed'")
                if row["record_id"] not in obsolete]
     lineage = _stage_result_lineage(connection, records)
     cache: dict[str, str] = {}
     eligible = []
     for record in records:
         key = str(record["record_id"])
+        if "text" not in record:
+            _stage_result_text(record, lineage, cache, set())
+            continue
         without_text = {field: value for field, value in record.items() if field != "text"}
         cache.pop(key, None)
         if record["text"] == _stage_result_text(without_text, lineage, cache, set()):

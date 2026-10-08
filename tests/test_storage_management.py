@@ -499,3 +499,33 @@ def test_database_maintenance_deduplicates_kept_applications_atomically(tmp_path
     assert [r["text"] for r in storage.resolve_stage_result_texts(project, [*applied, *polished])] == ["body", "different", "body"]
     assert manager.scan_project(project)["database_maintenance"]["deduplicatable_applied_records"] == 0
     assert manager.maintain_database(project, confirm=True)["deduplicated_applied_records"] == 0
+
+
+@pytest.mark.parametrize("broken", ["status", "cycle"])
+def test_maintenance_validates_reference_only_applications_before_pruning(tmp_path: Path, monkeypatch, broken: str) -> None:
+    import sqlite3
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def record(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        storage.append_stage_results(project, [
+            record("old", "translation", text="obsolete"),
+            record("base", "translation", text="body"),
+            record("review", "proofreading", review_status="accepted", base_result_id="base"),
+            record("applied", "proofreading_applied", base_result_id="base", suggestion_result_id="review"),
+        ])
+    with sqlite3.connect(project / "project.sqlite") as db:
+        if broken == "status":
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.review_status',NULL) WHERE record_id='review'")
+        else:
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.base_result_id','applied') WHERE record_id='applied'")
+    assert not manager.scan_project(project)["database_maintenance"]["can_maintain"]
+    with pytest.raises(StorageError, match="无法提供正文|循环"):
+        manager.maintain_database(project, confirm=True)
+    with sqlite3.connect(project / "project.sqlite") as db:
+        assert db.execute("SELECT count(*) FROM stage_results").fetchone()[0] == 4

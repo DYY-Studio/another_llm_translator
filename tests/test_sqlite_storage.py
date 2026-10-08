@@ -1639,6 +1639,10 @@ def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, 
     states = storage.latest_stage_states(project, "translation", [row["segment_id"] for row in segments])
     assert len(states) == 1200
     assert all(state["completed"] for state in states.values())
+    summary = storage.latest_stage_summary(project, "translation", [row["segment_id"] for row in segments])
+    assert len(summary) == 1200 and all(state["completed"] for state in summary.values())
+    latest = storage.latest_stage_results(project, "translation", [row["segment_id"] for row in segments])
+    assert len(latest) == 1200
 
 
 def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path: Path) -> None:
