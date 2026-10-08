@@ -1173,3 +1173,25 @@ async def test_apply_batch_failure_marks_run_failed_and_rolls_back(tmp_path: Pat
     assert read_jsonl(project, project / "stages" / "proofreading_applied.jsonl") == []
     run = list_runs(project, stage="proofreading_applied")[0]
     assert run["status"] == "failed" and run["completed_segment_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path) -> None:
+    from app.web_store import WebStore
+    from app.stage_runtime import _base_results
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
+    store = WebStore(project)
+    before_detail = store.segment_detail("F0001-S000001")
+    before_base = _base_results(project, "polishing")
+    exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
+    before_bytes = [(project / path).read_bytes() for path in exported["written"]]
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_remove(payload_json,'$.text') WHERE stage='proofreading_applied' AND segment_id='F0001-S000001'")
+    assert store.segment_detail("F0001-S000001") == before_detail
+    assert _base_results(project, "polishing") == before_base
+    exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
+    assert [(project / path).read_bytes() for path in exported["written"]] == before_bytes

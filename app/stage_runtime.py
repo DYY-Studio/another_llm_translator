@@ -67,6 +67,7 @@ from .project import (
 )
 from .sqlite_storage import (
     latest_stage_states,
+    resolve_stage_result_texts,
     read_json,
 )
 
@@ -1374,7 +1375,8 @@ def _base_results(
             ).items()
             if isinstance(state.get("completed"), dict)
         }
-        return {**translations, **applied}
+        return {**translations, **{str(record["segment_id"]): record for record
+            in resolve_stage_result_texts(project, applied.values())}}
     translations = {
         str(key): value
         for key, value in classify_stage(
@@ -1390,4 +1392,5 @@ def _base_results(
         load_stage_history(project, "proofreading_applied"),
         force=False,
     ).latest_completed
-    return {**translations, **{str(key): value for key, value in applied.items()}}
+    return {**translations, **{str(record["segment_id"]): record for record
+        in resolve_stage_result_texts(project, applied.values())}}

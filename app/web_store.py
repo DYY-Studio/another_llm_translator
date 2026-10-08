@@ -23,6 +23,7 @@ from .sqlite_storage import (
     database_path,
     get_segment,
     latest_stage_results,
+    resolve_stage_result_texts,
     list_runs,
     new_record_id,
     query_segment_neighbors,
@@ -163,7 +164,8 @@ class WebStore:
                 continue
             item = dict(record)
             result[segment_id] = item
-        return result
+        return {str(record["segment_id"]): record for record
+                in resolve_stage_result_texts(self.project, result.values())}
 
     def _terms_revision(self) -> int | None:
         library = load_terms(self.project)

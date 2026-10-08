@@ -1639,3 +1639,37 @@ def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, 
     states = storage.latest_stage_states(project, "translation", [row["segment_id"] for row in segments])
     assert len(states) == 1200
     assert all(state["completed"] for state in states.values())
+
+
+def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path: Path) -> None:
+    from app.sqlite_storage import append_stage_results, resolve_stage_result_texts
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def result(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    records = [
+        result("base", "translation", text="original"),
+        result("review", "proofreading", review_status="accepted", base_result_id="base"),
+        result("applied", "proofreading_applied", base_result_id="base", suggestion_result_id="review"),
+        result("polish", "polishing", review_status="accepted", base_result_id="applied"),
+        result("polished", "polishing_applied", base_result_id="applied", suggestion_result_id="polish"),
+    ]
+    append_stage_results(project, records)
+    append_stage_results(project, [result("new-base", "translation", text="new")])
+    resolved = resolve_stage_result_texts(project, records[2:])
+    assert resolved[0]["text"] == resolved[2]["text"] == "original"
+    assert "text" not in records[2] and "text" not in records[4]
+    assert "text" not in read_jsonl(project, stage_result_path(project, "polishing_applied"))[0]
+    suggested = result("suggested", "proofreading", review_status="suggested", suggested_text="revision", base_result_id="base")
+    application = result("application", "proofreading_applied", base_result_id="base", suggestion_result_id="suggested")
+    lineage = {r["record_id"]: r for r in [*records, suggested, application]}
+    assert resolve_stage_result_texts(project, [application], records_by_id=lineage)[0]["text"] == "revision"
+    assert resolve_stage_result_texts(project, [{**application, "text": " override"}], records_by_id=lineage)[0]["text"] == " override"
+    lineage["suggested"]["review_status"] = "accepted"
+    lineage["application"]["base_result_id"] = "application"
+    with pytest.raises(StorageError, match="循环"):
+        resolve_stage_result_texts(project, [application], records_by_id=lineage)
+    application["base_result_id"] = "missing"
+    with pytest.raises(StorageError, match="引用"):
+        resolve_stage_result_texts(project, [application], records_by_id=lineage)

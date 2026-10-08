@@ -13,7 +13,7 @@ from .config import load_project_config
 from .project import load_source_files, load_segments
 from .logging_utils import get_logger
 from .plugins import get_document_adapter
-from .sqlite_storage import read_json, latest_stage_states, stage_result_lineage
+from .sqlite_storage import read_json, latest_stage_states, stage_result_lineage, resolve_stage_result_texts
 from .stage_runtime import (
     document_prompt_context,
     _require_nonempty_segments,
@@ -80,6 +80,12 @@ def export_project(
     translation_ids = [key for key in missing_ids if key not in proofread]
     translation = current("translation", translation_ids) if export_stage != "translated" else {}
     records_by_id = stage_result_lineage(project, [*primary.values(), *proofread.values(), *translation.values()])
+    records_by_id = {str(record["record_id"]): record for record in
+                     resolve_stage_result_texts(project, records_by_id.values(), records_by_id=records_by_id)}
+    primary = {key: records_by_id[value["record_id"]] for key, value in primary.items()}
+    proofread = {key: records_by_id[value["record_id"]] for key, value in proofread.items()}
+    translation = {key: records_by_id[value["record_id"]] for key, value in translation.items()}
+
 
     def result_lineage(record: dict[str, Any]) -> list[dict[str, Any]]:
         lineage: list[dict[str, Any]] = []

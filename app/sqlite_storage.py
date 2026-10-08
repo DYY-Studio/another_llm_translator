@@ -2891,6 +2891,62 @@ def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> di
         connection.close()
 
 
+def _stage_result_text(
+    record: dict[str, Any], records_by_id: dict[str, dict[str, Any]],
+    cache: dict[str, str], visiting: set[str],
+) -> str:
+    key = str(record["record_id"])
+    if key in visiting:
+        raise StorageError(f"阶段正文引用循环：{key}")
+    if key in cache:
+        return cache[key]
+    if "text" in record:
+        text = record["text"]
+        if not isinstance(text, str):
+            raise StorageError(f"阶段正文无效：{key}")
+    else:
+        if record.get("stage") not in {"proofreading_applied", "polishing_applied"} or record.get("status") != "completed":
+            raise StorageError(f"阶段结果无法提供正文：{key}")
+        suggestion = records_by_id.get(str(record.get("suggestion_result_id", "")))
+        if suggestion is None or suggestion.get("status") != "completed":
+            raise StorageError(f"必要建议引用无效：{key}")
+        if suggestion.get("review_status") == "suggested":
+            text = suggestion.get("suggested_text")
+            if not isinstance(text, str):
+                raise StorageError(f"建议无法提供正文：{key}")
+        elif suggestion.get("review_status") == "accepted":
+            base = records_by_id.get(str(record.get("base_result_id", "")))
+            if base is None or base.get("status") != "completed":
+                raise StorageError(f"必要基准引用无效：{key}")
+            visiting.add(key)
+            try:
+                text = _stage_result_text(base, records_by_id, cache, visiting)
+            finally:
+                visiting.remove(key)
+        else:
+            raise StorageError(f"建议状态无法提供正文：{key}")
+    cache[key] = text
+    return text
+
+
+def resolve_stage_result_texts(
+    project: Path, records: Iterable[dict[str, Any]], *,
+    records_by_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return business copies with applied text; never hydrate persistent payloads."""
+    values = list(records)
+    unresolved = [record for record in values if record.get("stage") in
+                  {"proofreading_applied", "polishing_applied"} and
+                  record.get("status") == "completed" and "text" not in record]
+    lineage = records_by_id if records_by_id is not None else (
+        stage_result_lineage(project, unresolved) if unresolved else {})
+    cache: dict[str, str] = {}
+    return [dict(record, text=_stage_result_text(record, lineage, cache, set()))
+            if record.get("stage") in {"proofreading_applied", "polishing_applied"}
+            and record.get("status") == "completed" else dict(record)
+            for record in values]
+
+
 def segment_page_counts(
     project: Path, *, file_id: str | None = None, part_id: str | None = None,
     status: str | None = None, search: str | None = None, stage: str = "translation",
