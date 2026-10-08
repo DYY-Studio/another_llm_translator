@@ -48,9 +48,10 @@
 .task-step-track-connector-failed { background: var(--danger); }
 .status-skipped .task-step-track-connector-completed { background: var(--status-warning); }
 .task-step-track-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.task-step-track-progress:has(.draft-result-progress) { grid-template-columns: minmax(0, auto) minmax(60px, 1fr); }
 .task-step-track-progress-bar { display: flex; min-width: 0; height: 5px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .task-step-track-progress-bar > span { display: block; height: 100%; transition: width .2s ease; }
-.task-step-track-progress strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }
+.task-step-track-progress > strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }
 .global-run-status > .task-step-track { min-width: 0; }
 .global-run-status.continuous { grid-template-columns: max-content minmax(0, 1fr) max-content max-content max-content; }
 .global-run-status.continuous > .task-step-track { min-width: 0; }

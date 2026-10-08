@@ -183,7 +183,7 @@ export function RunDialog({
           {options.draft_progress && Object.entries(options.draft_progress).map(([stage, value]) => <span key={stage}>{translate(stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`, language)} · {translate("runDialog.draftCounts", language, { completed: value.completed, pending: value.total - value.completed, total: value.total })}</span>)}
           {draftBlocked && <p className="error-text">{translate("runDialog.draftMissingPrompt", language)} {options.draft_prompt_preflight?.missing.join(", ")}</p>}
           {hybridSummary && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.summaryForce", language, { count: options.summary_selected_boundaries ?? 0 })}</div>}
-          {draftEnabled && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.draftForce", language, { total: options.selected, count: options.draft_progress?.translation.completed ?? 0 })}</div>}
+          {draftEnabled && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.draftForce", language, { total: options.selected, count: options.draft_progress?.translation?.completed ?? 0 })}</div>}
         </div>}
 
         {hybridSummary && <div className="run-decision-info">

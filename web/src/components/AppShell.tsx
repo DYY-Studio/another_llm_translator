@@ -40,12 +40,14 @@ function TaskSteps({
   taskStatus,
   language,
   compact = false,
+  draftProgress,
 }: {
   steps: TaskStep[];
   currentStage?: string | null;
   taskStatus: string;
   language: Language;
   compact?: boolean;
+  draftProgress?: DraftProgress | null;
 }) {
   if (!compact) {
     const currentStep = currentStage ? steps.find((step) => step.stage === currentStage) : undefined;
@@ -68,7 +70,7 @@ function TaskSteps({
             const completedPercent = status === "completed" || status === "skipped"
               ? 100 - failedPercent
               : status === "queued" || !step.selected ? 0 : step.completed / step.selected * 100;
-            const label = translate(taskStageLabelKey(step.stage), language);
+            const label = translate(step.reason === "joint_draft_translation" ? "stage.draftTranslation" : taskStageLabelKey(step.stage), language);
             const statusLabel = translate(`run.${status}`, language);
             const progress = translate("run.stepProgressCompact", language, {
               completed: step.completed,
@@ -81,7 +83,7 @@ function TaskSteps({
                 role="listitem"
                 aria-current={current ? "step" : undefined}
                 aria-label={`${label}: ${statusLabel}${current ? `, ${progress}` : ""}`}
-                title={label}
+                title={step.reason === "joint_draft_translation" ? translate("continuousRun.jointDraftSkipped", language) : label}
               >
                 <span className="task-step-track-node" aria-hidden="true" />
                 <span className="task-step-track-label">{label}</span>
@@ -102,7 +104,9 @@ function TaskSteps({
             aria-valuemax={currentTotal}
             aria-valuenow={currentCompleted + currentFailed}
           >
-            <strong>{currentProgress}</strong>
+            {currentStage === "terminology" && draftProgress
+              ? <DraftResultProgress progress={draftProgress} language={language} />
+              : <strong>{currentProgress}</strong>}
             <div className="task-step-track-progress-bar">
               <span className="progress-completed" style={{ width: `${currentTotal ? currentCompleted / currentTotal * 100 : 0}%` }} />
               <span className="progress-failed" style={{ width: `${currentTotal ? currentFailed / currentTotal * 100 : 0}%` }} />
@@ -119,6 +123,7 @@ function TaskSteps({
           <span>{translate(taskStageLabelKey(step.stage), language)}</span>
           <strong>{translate(`run.${displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus })}`, language)}</strong>
           <small>{translate("run.stepProgress", language, { completed: step.completed, failed: step.failed, pending: step.pending, total: step.selected })}</small>
+          {step.reason === "joint_draft_translation" && <small>{translate("continuousRun.jointDraftSkipped", language)}</small>}
         </div>
       ))}
     </div>
@@ -262,7 +267,7 @@ export function AppShell({
                           </button>
                           <span>{translate(nextStage, language)} · {statusLabels[next.status] ?? next.status}</span>
                         </div>
-                        {next.draft_progress && <DraftResultProgress progress={next.draft_progress} language={language} />}
+                        {next.draft_progress && (next.stage !== "continuous" || next.current_stage === "terminology") && <DraftResultProgress progress={next.draft_progress} language={language} />}
                         {next.stage === "continuous" ? <TaskSteps steps={next.steps ?? []} currentStage={next.current_stage} taskStatus={next.status} language={language} compact /> : (
                           <div className="task-panel-progress">
                             <span>{translate("run.completedCount", language, {
@@ -323,7 +328,7 @@ export function AppShell({
               <span>{task.project} · {translate(taskStageLabelKey(task.stage), language)}</span>
             )}
           </div>
-          {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} taskStatus={task.status} language={language} /> : (
+          {task.stage === "continuous" ? <TaskSteps steps={task.steps ?? []} currentStage={task.current_stage} taskStatus={task.status} language={language} draftProgress={task.draft_progress} /> : (
             <div className="run-progress">
               {task.draft_progress
                 ? <DraftResultProgress progress={task.draft_progress} language={language} />

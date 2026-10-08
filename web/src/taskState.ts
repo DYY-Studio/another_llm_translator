@@ -24,7 +24,7 @@ export function canCancelTaskStatus(status: string): boolean {
 export function displayableFailureStage(
   task: Pick<TaskState, "stage" | "current_stage" | "draft_progress">,
 ): LLMStage | null {
-  if (task.stage === "terminology" && task.draft_progress?.translation.failed) return "translation";
+  if ((task.stage === "terminology" || (task.stage === "continuous" && task.current_stage === "terminology")) && task.draft_progress?.translation?.failed) return "translation";
   const candidate = task.stage === "continuous"
     ? task.current_stage
     : task.stage;
