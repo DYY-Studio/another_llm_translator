@@ -299,22 +299,20 @@ export function ContinuousRunDialog({
             </p>
           )}
 
-          <section className="continuous-run-section">
-            <h3>{translate("continuousRun.resultPolicy", language)}</h3>
-            <div className="continuous-run-policy">
-              {(["pending", "reuse", "force"] as const).map((policy) => (
-                <label className="radio-option decision-option" key={policy}>
-                  <input
-                    type="radio"
-                    checked={resultPolicy === policy}
-                    disabled={submitting || (hasResume && policy !== "pending")}
-                    onChange={() => setResultPolicy(policy)}
-                  />
-                  <span><strong>{translate(`continuousRun.policy.${policy}`, language)}</strong><small>{translate(`continuousRun.policy.${policy}Hint`, language)}</small></span>
-                </label>
-              ))}
-            </div>
-          </section>
+          <fieldset className="decision-group">
+            <legend>{translate("continuousRun.resultPolicy", language)}</legend>
+            {(["pending", "reuse", "force"] as const).map((policy) => (
+              <label className="radio-option decision-option" key={policy}>
+                <input
+                  type="radio"
+                  checked={resultPolicy === policy}
+                  disabled={submitting || (hasResume && policy !== "pending")}
+                  onChange={() => setResultPolicy(policy)}
+                />
+                <span><strong>{translate(`continuousRun.policy.${policy}`, language)}</strong><small>{translate(`continuousRun.policy.${policy}Hint`, language)}</small></span>
+              </label>
+            ))}
+          </fieldset>
 
           {runningSteps.length > 0 && (
             <section className="continuous-run-section">
