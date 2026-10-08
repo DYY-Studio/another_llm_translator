@@ -2889,3 +2889,35 @@ def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> di
         return result
     finally:
         connection.close()
+
+
+def segment_page_counts(
+    project: Path, *, file_id: str | None = None, part_id: str | None = None,
+    status: str | None = None, search: str | None = None, stage: str = "translation",
+) -> tuple[int, int]:
+    """Return matching total and completed count from one aggregation."""
+    if bool(file_id) != bool(part_id):
+        raise ProjectError("file_id 与 part_id 必须同时提供")
+    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage)
+    if status is None:
+        match = "1"
+        params.pop()  # The unused completed predicate parameter.
+    else:
+        match = filters[0]
+        # SELECT placeholders precede JOIN placeholders.
+        if "?" in match:
+            params = [params[-1], *params[:-1]]
+    clauses = ["segments.is_empty = 0"]
+    if search:
+        clauses.append("(instr(lower(segments.source), lower(?)) > 0 OR instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)")
+        params.extend([search, search])
+    if file_id and part_id:
+        clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
+        params.extend([file_id, part_id])
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            f"SELECT COALESCE(SUM(CASE WHEN {match} THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN latest_stage.status = 'completed' THEN 1 ELSE 0 END),0) FROM segments {join} WHERE {' AND '.join(clauses)}", params).fetchone()
+        return int(row[0]), int(row[1])
+    finally:
+        connection.close()

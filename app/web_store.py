@@ -34,6 +34,7 @@ from .sqlite_storage import (
     record_exists,
     record_header,
     segment_count,
+    segment_page_counts,
     segment_ids,
     segment_part_ids,
     utc_now,
@@ -482,23 +483,13 @@ class WebStore:
                     },
                 }
             )
+        total, completed = segment_page_counts(
+            self.project, file_id=file_id, part_id=part_id,
+            status=status, search=search, stage=stage,
+        )
         return {
-            "completed_segments": segment_count(
-                self.project,
-                file_id=file_id,
-                part_id=part_id,
-                status="completed",
-                search=search,
-                stage=stage,
-            ),
-            "total_segments": segment_count(
-                self.project,
-                file_id=file_id,
-                part_id=part_id,
-                status=status,
-                search=search,
-                stage=stage,
-            ),
+            "completed_segments": completed,
+            "total_segments": total,
             "offset": offset,
             "limit": limit,
             "stage": stage,
