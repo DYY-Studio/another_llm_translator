@@ -1378,6 +1378,20 @@ async def run_terminology(
     )
 
     def report_progress() -> None:
+        if include_summaries and on_draft_progress is not None:
+            progress = {}
+            for kind, name, total, reused in (
+                ("term", "terminology", len(selected), len(selected) - sum("term" in modes for modes in required_modes.values())),
+                ("summary", "content_summary", len(summary_candidates), len(covered_summary_ids)),
+            ):
+                completed = sum(
+                    set(parts) <= class_success_parts[kind].get(owner, set())
+                    and owner not in class_failed_originals[kind]
+                    for owner, parts in class_parts[kind].items()
+                    if kind in required_modes[owner]
+                )
+                progress[name] = {"completed": reused + completed, "failed": len(class_failed_originals[kind]), "total": total}
+            on_draft_progress(progress)
         if on_progress is not None:
             on_progress(
                 len(selected) - len(work) + len(completed_original_ids),

@@ -725,6 +725,10 @@ def register_task_routes(
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
         stages = (payload.stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        if stage == "continuous":
+            stages = tuple(value for value in stages if not (value == "translation" and payload.include_draft_translation))
+            if payload.aggregate_full_summaries:
+                stages = (*stages, "content_summary")
         require_project_plan_session(request, project(name), stages)
         scope = Scope(
             from_file=payload.from_file,
@@ -755,6 +759,7 @@ def register_task_routes(
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
             include_draft_translation=payload.include_draft_translation,
+            aggregate_full_summaries=payload.aggregate_full_summaries,
             final_review=payload.final_review,
             summary_selection=summary_selection,
             continuous_stages=payload.stages,
@@ -769,6 +774,7 @@ def register_task_routes(
         stage: str,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
+        aggregate_full_summaries: bool = False,
         language: str | None = None,
         final_review: bool = False,
         stages: list[str] = Query(default=[]),  # noqa: B008
@@ -777,12 +783,17 @@ def register_task_routes(
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
         checked_stages = (stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        if stage == "continuous":
+            checked_stages = tuple(value for value in checked_stages if not (value == "translation" and include_draft_translation))
+            if aggregate_full_summaries:
+                checked_stages = (*checked_stages, "content_summary")
         require_project_plan_session(request, project(name), checked_stages)
         return task_options(
             project(name),
             stage,
             include_summaries=include_summaries,
             include_draft_translation=include_draft_translation,
+            aggregate_full_summaries=aggregate_full_summaries,
             prompt_language=(
                 validate_language(language) if language is not None else None
             ),
