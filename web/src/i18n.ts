@@ -5,7 +5,7 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "runDialog.summaryToggle": "同时生成概括（实验）",
-    "runDialog.summaryHint": "使用术语模型，概括范围沿用概括页面的参与选择。",
+    "runDialog.summaryHint": "概括范围沿用概括页面的参与选择。",
     "runDialog.summaryForce": "将重做 {count} 个参与内容边界的概括，并保留历史。",
     "settings.promptRequirementSet": "要求 {number}",
     "settings.promptNoRequirements": "无附加要求",
@@ -15,7 +15,7 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.promptTemplateHint": "模板预览不包含文件专属的 Document Adapter 要求。",
     "settings.promptModeAll": "术语＋粗翻＋片段概括",
     "runDialog.draftToggle": "同时生成粗翻（实验）",
-    "runDialog.draftHint": "使用术语扫描模型 {model} 生成当前翻译；完成术语决策并应用后，再运行校对。",
+    "runDialog.jointModelHint": "使用术语模型 {model}。",
     "runDialog.draftLoading": "正在重新预检…",
     "runDialog.draftCounts": "保留 {completed} · 待处理 {pending} · 重做时共 {total}",
     "runDialog.draftMissingPrompt": "粗翻缺少必要 Prompt：",
@@ -1255,7 +1255,7 @@ const messages: Record<Language, Record<string, string>> = {
   },
   en: {
     "runDialog.summaryToggle": "Generate summaries while scanning (experimental)",
-    "runDialog.summaryHint": "Uses the terminology model and the participation selection on the summaries page.",
+    "runDialog.summaryHint": "Uses the participation selection on the summaries page.",
     "runDialog.summaryForce": "Regenerate summaries for {count} participating boundaries and retain history.",
     "settings.promptRequirementSet": "Requirements {number}",
     "settings.promptNoRequirements": "No additional requirements",
@@ -1265,7 +1265,7 @@ const messages: Record<Language, Record<string, string>> = {
     "settings.promptTemplateHint": "Template preview excludes file-specific Document Adapter requirements.",
     "settings.promptModeAll": "Terminology + draft + fragment summaries",
     "runDialog.draftToggle": "Generate a first draft while scanning (experimental)",
-    "runDialog.draftHint": "Use the terminology model {model} to generate the current translation. Apply terminology decisions, then run proofreading.",
+    "runDialog.jointModelHint": "Uses the terminology model {model}.",
     "runDialog.draftLoading": "Checking run options…",
     "runDialog.draftCounts": "Keep {completed} · Pending {pending} · Redo scope {total}",
     "runDialog.draftMissingPrompt": "Draft translation requires these Prompts:",

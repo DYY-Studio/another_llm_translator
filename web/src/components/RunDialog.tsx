@@ -169,10 +169,10 @@ export function RunDialog({
           </label>
         </div>}
 
-        {options.stage === "terminology" && onDraftTranslationChange && <div className="run-decision-info">
+        {options.stage === "terminology" && onDraftTranslationChange && <div className="run-decision-info run-generation-options">
+          <small>{translate("runDialog.jointModelHint", language, { model: options.preset.model })}</small>
           <label className="config-toggle">
             <span><input type="checkbox" checked={draftEnabled} disabled={draftLoading || Boolean(options.running_run && resuming)} onChange={(event) => { void changeDraft(event.target.checked); }} />{translate("runDialog.draftToggle", language)}</span>
-            <small>{translate("runDialog.draftHint", language, { model: options.preset.model })}</small>
           </label>
           {onSummariesChange && <label className="config-toggle">
             <span><input type="checkbox" checked={hybridSummary} disabled={draftLoading || Boolean(options.running_run && resuming)} onChange={(event) => { void changeDraft(event.target.checked, true); }} />{translate("runDialog.summaryToggle", language)}</span>
