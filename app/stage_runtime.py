@@ -122,10 +122,11 @@ def document_prompt_context(
     project: Path,
     file_record: dict[str, Any],
     frozen_run_options: dict[str, dict[str, str]] | None = None,
+    *, state_record: dict[str, Any] | None = None,
 ) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
     file_id = str(file_record["file_id"])
     state_path = file_record.get("document_adapter_state")
-    state_record = (
+    state_record = state_record if state_record is not None else (
         read_json(project, project / state_path)
         if isinstance(state_path, str)
         else None

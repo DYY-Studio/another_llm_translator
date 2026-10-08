@@ -277,7 +277,7 @@ def add_translations(project: Path) -> list[dict[str, object]]:
 
 
 def test_epub_round_trip_preserves_resources_and_exports_both_modes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     project = init_epub(tmp_path)
     file_record = read_files(project)[0]
@@ -288,6 +288,16 @@ def test_epub_round_trip_preserves_resources_and_exports_both_modes(
         "Chapter One",
         "Hello world.",
     ]
+
+    import copy
+    adapter = get_document_adapter("epub")
+    original_export = type(adapter).export_sources
+    def export_unchanged(self, **kwargs):
+        before = copy.deepcopy(kwargs["opaque_state"])
+        output = original_export(self, **kwargs)
+        assert kwargs["opaque_state"] == before
+        return output
+    monkeypatch.setattr(type(adapter), "export_sources", export_unchanged)
 
     translated = export_project(
         project, "translated", bilingual=False, allow_missing=False
@@ -729,7 +739,7 @@ def test_epub_export_rejects_empty_target_language_without_output(
     config = load_config(config_path)
     config["project"]["target_language"] = ""
     monkeypatch.setattr(
-        "app.stage_runtime.load_project_config",
+        "app.project_export.load_project_config",
         lambda *_args, **_kwargs: config,
     )
 

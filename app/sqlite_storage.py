@@ -2859,3 +2859,33 @@ def compact_project_database(project: Path) -> dict[str, int]:
         "after_bytes": after_bytes,
         "reclaimed_bytes": max(0, before_bytes - after_bytes),
     }
+
+
+def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Load only exact parents used by selected export results."""
+    result = {str(record["record_id"]): record for record in records}
+    pending = set(result)
+    connection = _with_db(project)
+    try:
+        project_id = _project_id(connection)
+        while pending:
+            parents = {str(result[key][field]) for key in pending
+                       for field in ("base_result_id", "suggestion_result_id")
+                       if result[key].get(field) is not None} - result.keys()
+            pending = set()
+            values = list(parents)
+            for start in range(0, len(values), 500):
+                batch = values[start:start + 500]
+                rows = connection.execute(
+                    f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
+                for row in rows:
+                    record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
+                    key = str(record["record_id"])
+                    result[key] = record
+                    pending.add(key)
+            missing = parents - result.keys()
+            if missing:
+                raise StorageError(f"必要阶段结果引用不存在：{next(iter(missing))}")
+        return result
+    finally:
+        connection.close()

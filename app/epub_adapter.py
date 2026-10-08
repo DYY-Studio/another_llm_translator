@@ -4,7 +4,6 @@ import posixpath
 import re
 import stat
 import zipfile
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -574,7 +573,7 @@ class EPUBDocumentAdapter:
                 adapter_id="epub",
                 file_id=str(file.get("file_id", "")),
             )
-        state = deepcopy(opaque_state)
+        state = opaque_state
         locators = state.get("locators")
         if not isinstance(locators, list) or len(locators) != len(segments):
             raise IncompleteError("EPUB Segment 定位状态与项目不一致")
