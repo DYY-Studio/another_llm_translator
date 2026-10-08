@@ -11,7 +11,7 @@ STAGES = frozenset({"translation", "proofreading", "proofreading_applied", "poli
 _COLUMNS = "sequence,record_id,stage,segment_id,status,json_extract(payload_json,'$.base_result_id') AS base,json_extract(payload_json,'$.suggestion_result_id') AS suggestion"
 
 
-def _batches(values: Iterable[str], size: int = 500):
+def _batches(values: Iterable[str], size: int = 400):
     values = list(values)
     for start in range(0, len(values), size):
         yield values[start:start + size]
@@ -42,7 +42,7 @@ def _roots(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row]) -> set[
         completed = max((row for row in group if row["status"] == "completed"), key=lambda row: row["sequence"], default=None)
         if completed is not None and (reset is None or completed["sequence"] > reset["sequence"]):
             roots.add(completed["record_id"])
-        elif reset is not None:
+        elif reset is not None and completed is not None:
             roots.add(reset["record_id"])
     return roots
 

@@ -683,6 +683,8 @@ async def test_review_resume_reuses_completed_segments(
                 request_id="BASE",
             ),
         )
+    from app.sqlite_storage import latest_stage_states
+    base_id = latest_stage_states(project, "translation", ["F0001-S000001"])["F0001-S000001"]["completed"]["record_id"]
     run_id = _new_running_run(project, stage)
     append_jsonl(
         project,
@@ -696,7 +698,7 @@ async def test_review_resume_reuses_completed_segments(
             review_status="accepted",
             suggested_text=None,
             reason=None,
-            base_result_id="BASE",
+            base_result_id=base_id,
             terms_revision=None,
             stage_fingerprint="old",
             run_id=run_id,

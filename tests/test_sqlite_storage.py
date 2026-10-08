@@ -1599,3 +1599,43 @@ def test_stage_retention_dependencies_reset_and_orphan_parent(tmp_path: Path) ->
     with pytest.raises(StorageError, match="引用"):
         save(result("broken", "proofreading_applied", base_result_id="missing"))
     assert ids("proofreading_applied") == {"a2"}
+
+
+def test_removed_segment_keeps_referenced_parent_then_reclaims_it(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    from app.sqlite_storage import append_stage_results
+    append_stage_results(project, [
+        record_header("stage_result", pid, record_id="parent", stage="translation",
+                      segment_id="F0001-S000001", status="completed", text="old"),
+        record_header("stage_result", pid, record_id="child", stage="proofreading",
+                      segment_id="F0001-S000003", status="completed", base_result_id="parent"),
+    ])
+    # Preserve only the second nonempty Segment, simulating a source replacement.
+    segments = [r for r in read_segments(project) if r["segment_id"] == "F0001-S000003"]
+    replace_source(project, read_files(project), segments, read_json(project, project / "project.json"))
+    assert len(read_jsonl(project, stage_result_path(project, "translation"))) == 1
+    append_stage_results(project, [record_header("stage_result", pid, stage="proofreading",
+        segment_id="F0001-S000003", status="completed")])
+    assert read_jsonl(project, stage_result_path(project, "translation")) == []
+    replace_source(project, [], [], read_json(project, project / "project.json"))
+    assert read_jsonl(project, stage_result_path(project, "proofreading")) == []
+
+
+def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    project = create_project(tmp_path, "\n".join(["fixture"] * 1200))
+    segments = read_segments(project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    original = storage._connect
+    def connect(path):
+        connection = original(path)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return connection
+    monkeypatch.setattr(storage, "_connect", connect)
+    storage.append_stage_results(project, [record_header("stage_result", pid,
+        stage="translation", segment_id=row["segment_id"], status="completed", text="fixture")
+        for row in segments])
+    states = storage.latest_stage_states(project, "translation", [row["segment_id"] for row in segments])
+    assert len(states) == 1200
+    assert all(state["completed"] for state in states.values())

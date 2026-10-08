@@ -1153,3 +1153,23 @@ async def test_apply_reuses_identical_results_and_counts_run(tmp_path: Path, sta
     assert manifest["completed_segment_count"] == 0
     assert manifest["requested_segment_count"] == 0
     assert manifest["reused_segment_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_failure_marks_run_failed_and_rolls_back(tmp_path: Path, monkeypatch) -> None:
+    import app.stage_review as module
+    from app.errors import StorageError
+    from app.sqlite_storage import append_stage_results, list_runs
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    def broken_batch(project, records):
+        records[-1]["base_result_id"] = "missing"
+        append_stage_results(project, records)
+    monkeypatch.setattr(module, "append_stage_results", broken_batch)
+    with pytest.raises(StorageError, match="引用"):
+        run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert read_jsonl(project, project / "stages" / "proofreading_applied.jsonl") == []
+    run = list_runs(project, stage="proofreading_applied")[0]
+    assert run["status"] == "failed" and run["completed_segment_count"] == 0

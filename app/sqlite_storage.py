@@ -2735,38 +2735,38 @@ def latest_stage_states(
             batch = values[start:start + 500]
             placeholders = ",".join("?" for _ in batch)
             rows.extend(connection.execute(
-            f"""
-            WITH aggregate AS (
-                SELECT segment_id,
-                       MAX(CASE WHEN status = 'completed' THEN sequence END)
-                           AS completed_sequence,
-                       MAX(CASE WHEN status = 'reset' THEN sequence END)
-                           AS reset_sequence,
-                       MAX(sequence) AS latest_sequence
-                FROM stage_results
-                WHERE stage = ? AND segment_id IN ({placeholders})
-                GROUP BY segment_id
-            )
-            SELECT aggregate.segment_id,
-                   CASE
-                       WHEN aggregate.completed_sequence IS NOT NULL
-                        AND aggregate.completed_sequence
-                            > COALESCE(aggregate.reset_sequence, 0)
-                       THEN completed.payload_json
-                   END AS completed_payload,
-                   completed.record_id AS completed_record_id,
-                   completed.stage AS completed_stage,
-                   completed.segment_id AS completed_segment_id,
-                   completed.status AS completed_status,
-                   latest.status AS latest_status
-            FROM aggregate
-            LEFT JOIN stage_results AS completed
-              ON completed.sequence = aggregate.completed_sequence
-            LEFT JOIN stage_results AS latest
-              ON latest.sequence = aggregate.latest_sequence
-            """,
-            [stage, *batch],
-        ).fetchall())
+                f"""
+                WITH aggregate AS (
+                    SELECT segment_id,
+                           MAX(CASE WHEN status = 'completed' THEN sequence END)
+                               AS completed_sequence,
+                           MAX(CASE WHEN status = 'reset' THEN sequence END)
+                               AS reset_sequence,
+                           MAX(sequence) AS latest_sequence
+                    FROM stage_results
+                    WHERE stage = ? AND segment_id IN ({placeholders})
+                    GROUP BY segment_id
+                )
+                SELECT aggregate.segment_id,
+                       CASE
+                           WHEN aggregate.completed_sequence IS NOT NULL
+                            AND aggregate.completed_sequence
+                                > COALESCE(aggregate.reset_sequence, 0)
+                           THEN completed.payload_json
+                       END AS completed_payload,
+                       completed.record_id AS completed_record_id,
+                       completed.stage AS completed_stage,
+                       completed.segment_id AS completed_segment_id,
+                       completed.status AS completed_status,
+                       latest.status AS latest_status
+                FROM aggregate
+                LEFT JOIN stage_results AS completed
+                  ON completed.sequence = aggregate.completed_sequence
+                LEFT JOIN stage_results AS latest
+                  ON latest.sequence = aggregate.latest_sequence
+                """,
+                [stage, *batch],
+            ).fetchall())
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             completed_payload = row["completed_payload"]
@@ -2898,6 +2898,9 @@ def segment_page_counts(
     """Return matching total and completed count from one aggregation."""
     if bool(file_id) != bool(part_id):
         raise ProjectError("file_id 与 part_id 必须同时提供")
+    if status == "completed":
+        count = segment_count(project, file_id=file_id, part_id=part_id, status=status, search=search, stage=stage)
+        return count, count
     if status is None and not search:
         # Avoid materializing a LEFT JOIN for the unfiltered first page.
         join, params = _stage_cte(stage)

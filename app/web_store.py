@@ -208,7 +208,7 @@ class WebStore:
         segment_id: object,
         *,
         files: list[dict[str, Any]] | None = None,
-        contexts: dict[str, tuple] | None = None,
+        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(segment_id, str):
             raise UsageError(f"未知或空 Segment：{segment_id}")
@@ -239,7 +239,7 @@ class WebStore:
 
     def _format_counts(
         self, segments: list[dict[str, Any]], *,
-        files: list[dict[str, Any]] | None = None, contexts: dict[str, tuple] | None = None,
+        files: list[dict[str, Any]] | None = None, contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] | None = None,
     ) -> dict[str, int]:
         current_files = files if files is not None else load_source_files(self.project)
         files_by_id = {str(item["file_id"]): item for item in current_files}
@@ -577,7 +577,7 @@ class WebStore:
 
     def segment_detail(self, segment_id: str) -> dict[str, Any]:
         files = load_source_files(self.project)
-        contexts: dict[str, tuple] = {}
+        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] = {}
         segment = self._require_segment(segment_id, files=files, contexts=contexts)
         before_segments, after_segments = query_segment_neighbors(
             self.project,

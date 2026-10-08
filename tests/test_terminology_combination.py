@@ -147,7 +147,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
             include_draft_translation=True,
         )
         assert result["failed"] == 0
-        assert len(load_stage_history(project, "translation")) == 4
+        assert len(load_stage_history(project, "translation")) == 2
         assert (
             len(read_content_summaries(project, kind="fragment", status="completed"))
             == 1
