@@ -47,9 +47,11 @@ from .stage_runtime import (
     _prompt_factory,
     _request_estimate,
     _project_context,
+    _replace_with_runtime_parts,
     prompt_preflight,
     prompt_middle_digests,
 )
+from .llm_client import empty_response_split_scope
 from .summary_provenance import digest, write_fragment_summary
 from .term_library import _merge_and_publish_terms, load_terms
 
@@ -681,6 +683,8 @@ class DraftTerminologyScan:
         original_parts: dict[str, list[str]],
         report_progress: Any,
         parent_request_id: str | None,
+        by_id: dict[str, dict[str, Any]],
+        record_context_failure: Any,
     ) -> None:
         from .stage_translation import _map_local_translation_response
 
@@ -715,8 +719,43 @@ class DraftTerminologyScan:
             except FatalExternalError:
                 raise
             except ContextLengthError as exc:
-                exc.segment_ids = tuple(str(item["segment_id"]) for item in pending)
-                raise
+                # Keep the pending task flags and the remaining supplement queue.
+                if len(pending) > 1:
+                    midpoint = len(pending) // 2
+                    groups = (pending[:midpoint], pending[midpoint:])
+                elif (
+                    self.config["chunking"]["allow_split_oversized_segment"]
+                    and len(str(pending[0]["source"])) > 1
+                ):
+                    groups = tuple(
+                        [part]
+                        for part in _replace_with_runtime_parts(
+                            pending[0],
+                            part_original=part_original,
+                            original_parts=original_parts,
+                            by_id=by_id,
+                        )
+                    )
+                else:
+                    await record_context_failure(pending, exc)
+                    continue
+                for child in groups:
+                    with empty_response_split_scope(exc):
+                        await self.process(
+                            child,
+                            state=state,
+                            payload_builder=payload_builder,
+                            prompt_builder=prompt_builder,
+                            accept=accept,
+                            save_failed=save_failed,
+                            part_original=part_original,
+                            original_parts=original_parts,
+                            report_progress=report_progress,
+                            parent_request_id=exc.request_id,
+                            by_id=by_id,
+                            record_context_failure=record_context_failure,
+                        )
+                continue
             except ExternalError as exc:
                 self.fail_terms(
                     pending,

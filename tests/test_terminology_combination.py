@@ -475,3 +475,137 @@ async def test_summary_supplement_records_unsplittable_failure(
     assert failures[0]["error_class"] == (
         "context_error" if error_kind == "context" else "empty_response"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["context", "empty"])
+async def test_summary_supplement_split_preserves_successful_draft(
+    tmp_path: Path, error_kind: str
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.\nBob left.")
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    )
+    modes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        modes.append(payload["response_mode"])
+        if len(modes) == 2:
+            if error_kind == "context":
+                return httpx.Response(
+                    400, text="context_length_exceeded: maximum context tokens"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "length", "message": {"content": ""}}]
+                },
+            )
+        records = []
+        kinds = response_record_types(payload["response_mode"])
+        if "summary" in kinds and len(modes) > 2:
+            records.append({"type": "summary", "text": "人物进出。"})
+        if "term" in kinds:
+            records.append({"type": "no_terms"})
+        if "segment" in kinds:
+            records.extend(
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": f"译文{len(modes)}",
+                }
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+            include_draft_translation=True,
+        )
+    assert modes == [
+        "terms+translation+fragment-summary",
+        "summary-only",
+        "summary-only",
+        "summary-only",
+    ]
+    translations = load_stage_history(project, "translation")
+    assert len(translations) == 2
+    assert {item["text"] for item in translations} == {"译文1"}
+    assert result["failed"] == 0
+    assert all(
+        value["completed"] == value["total"]
+        for value in result["draft_progress"].values()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["context", "empty"])
+async def test_supplement_split_continues_remaining_groups(
+    tmp_path: Path, error_kind: str
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.\nBob left.")
+    modes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        modes.append(payload["response_mode"])
+        if len(modes) == 1:
+            records = [
+                {"type": "no_terms"},
+                {"type": "segment", "id": "1", "translation": "爱丽丝进来了。"},
+            ]
+            content = "\n".join(
+                json.dumps(item, ensure_ascii=False) for item in records
+            )
+        elif len(modes) == 2:
+            if error_kind == "context":
+                return httpx.Response(
+                    400, text="context_length_exceeded: maximum context tokens"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "length", "message": {"content": ""}}]
+                },
+            )
+        else:
+            records = [{"type": "no_terms"}]
+            if "segment" in response_record_types(payload["response_mode"]):
+                records.extend(
+                    {"type": "segment", "id": item["id"], "translation": "鲍勃离开了。"}
+                    for item in payload["segments"]
+                )
+            content = llm_jsonl(records)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_draft_translation=True,
+        )
+    assert modes == [
+        "terms+translation",
+        "terms-only",
+        "terms-only",
+        "terms-only",
+        "terms+translation",
+    ]
+    translations = load_stage_history(project, "translation")
+    assert len(translations) == 2
+    assert translations[0]["text"] == "爱丽丝进来了。"
+    assert result["failed"] == 0
+    assert all(
+        value["completed"] == value["total"]
+        for value in result["draft_progress"].values()
+    )

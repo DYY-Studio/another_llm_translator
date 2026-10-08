@@ -850,6 +850,8 @@ async def run_translation(
                 original_parts=original_parts,
                 report_progress=report_progress,
                 parent_request_id=initial_parent_request_id,
+                by_id=by_id,
+                record_context_failure=record_context_failure,
             )
             return
         exhausted = await _localized_request_loop(
