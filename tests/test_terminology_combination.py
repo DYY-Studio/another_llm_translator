@@ -178,6 +178,13 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
         mode = payload["response_mode"]
         kinds = response_record_types(mode)
         seen.append((mode, body["messages"][0]["content"]))
+        if "summary" in kinds:
+            assert payload["source_segments"] == [{"id": "1", "text": "A"}]
+            assert payload["source_refs"] == [
+                item["id"] for item in payload["source_segments"]
+            ]
+        else:
+            assert payload["source_segments"] == ["A"]
         records = []
         if "summary" in kinds:
             records.append(
