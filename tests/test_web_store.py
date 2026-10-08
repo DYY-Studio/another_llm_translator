@@ -1422,7 +1422,8 @@ def test_web_store_saves_and_applies_review_results_with_current_lineage(
     applied = latest_completed_by_segment(
         load_stage_history(project, "proofreading_applied")
     )["F0001-S000001"]
-    assert applied["text"] == "译文二"
+    assert "text" not in applied
+    assert store.segment_detail("F0001-S000001")["reviews"]["proofreading"]["applied"]["text"] == "译文二"
     current = store.overview()["segments"][0]["reviews"]["proofreading"]
     assert current["outdated"] is False
     assert current["applied_current"] is True

@@ -79,7 +79,7 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引和内容概括记录。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
+Run 索引和内容概括记录；批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
 ### `app/file_replacement.py`
 

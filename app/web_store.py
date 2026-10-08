@@ -768,7 +768,6 @@ class WebStore:
                 stage=applied_stage,
                 segment_id=segment_id,
                 status="completed",
-                text=text,
                 suggestion_result_id=suggestion["record_id"],
                 base_result_id=base["record_id"],
                 allowed_outdated_base=False,
@@ -780,7 +779,7 @@ class WebStore:
             append_jsonl(self.project, stage_result_path(self.project, applied_stage), applied)
         return {
             "suggestion": self._result_view(suggestion),
-            "applied": self._result_view(applied),
+            "applied": self._result_view({**applied, "text": text}) if applied is not None else None,
         }
 
     def reset_results(self, payload: dict[str, Any]) -> dict[str, Any]:

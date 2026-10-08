@@ -707,18 +707,21 @@ def run_apply(
         segment_id = str(segment["segment_id"])
         suggestion = suggestions[segment_id]
         base = bases[segment_id]
-        text = suggestion["suggested_text"] if suggestion["review_status"] == "suggested" else base["text"]
+        reference_text = suggestion["suggested_text"] if suggestion["review_status"] == "suggested" else base["text"]
+        text = _restore_leading_whitespace(str(segment["source"]), str(reference_text))
         fields = {
-            "text": _restore_leading_whitespace(str(segment["source"]), str(text)),
             "suggestion_result_id": suggestion["record_id"],
             "base_result_id": base["record_id"],
             "allowed_outdated_base": allow_outdated_base,
             "stage_fingerprint": fingerprint,
         }
         current = existing.get(segment_id, {}).get("completed")
-        if current is not None and all(current.get(key) == value for key, value in fields.items()):
+        if (current is not None and all(current.get(key) == value for key, value in fields.items())
+                and current.get("text", reference_text) == text):
             reused += 1
             continue
+        if text != reference_text:
+            fields["text"] = text
         records.append(record_header(
             "stage_result", str(metadata["project_id"]), stage=applied_stage,
             segment_id=segment_id, status="completed", request_id=None, **fields,

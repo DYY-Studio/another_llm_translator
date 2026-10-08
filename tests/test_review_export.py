@@ -188,7 +188,9 @@ async def test_review_apply_and_export_restore_source_indentation(
     )
     applied_path = project / "stages" / "proofreading_applied.jsonl"
     applied = read_jsonl(project, applied_path)
-    assert applied[-1]["text"] == " \t\u3000fixed  \t"
+    from app.sqlite_storage import resolve_stage_result_texts
+    assert "text" not in applied[-1]
+    assert resolve_stage_result_texts(project, applied)[-1]["text"] == " \t\u3000fixed  \t"
 
     # Simulate a result written before local whitespace protection existed.
     applied[-1]["text"] = "\tlegacy  \t"
@@ -1195,3 +1197,32 @@ async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path
     assert _base_results(project, "polishing") == before_base
     exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
     assert [(project / path).read_bytes() for path in exported["written"]] == before_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+async def test_application_writers_omit_duplicate_text_and_keep_whitespace_override(tmp_path: Path, stage: str) -> None:
+    from app.web_store import WebStore
+    project = await create_project(tmp_path, "one\n\u3000two", encoding="utf-8-sig")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+    store = WebStore(project)
+    manual = store.save_review(dict(stage=stage, segment_id="F0001-S000001", review_status="accepted", apply=True))
+    assert manual["applied"]["text"] == store.segment_detail("F0001-S000001")["translation"]["text"]
+    path = project / "stages" / f"{stage}_applied.jsonl"
+    assert "text" not in read_jsonl(project, path)[0]
+    store.save_review(dict(stage=stage, segment_id="F0001-S000002", review_status="suggested", suggested_text="revision"))
+    # Legacy suggestion predates leading-whitespace normalization.
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.suggested_text','revision') WHERE stage=? AND segment_id='F0001-S000002'", (stage,))
+    applied = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert applied["reused"] == 1
+    records = read_jsonl(project, path)
+    assert "text" not in records[0]
+    assert records[1]["text"] == "\u3000revision"
+    repeated = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert repeated["reused"] == 2
+    assert len(read_jsonl(project, path)) == 2
+    manual = store.save_review(dict(stage=stage, segment_id="F0001-S000001", review_status="suggested", suggested_text="manual", apply=True))
+    assert manual["applied"]["text"] == "manual"
+    assert "text" not in read_jsonl(project, path)[-1]
