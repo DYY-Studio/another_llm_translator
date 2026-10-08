@@ -16,7 +16,7 @@ from .locking import project_write_lock
 from .logging_utils import LOGGER_NAME
 from .sqlite_storage import (
     database_path,
-    obsolete_stage_result_count,
+    database_maintenance_info,
     maintain_project_database,
     list_run_index,
     read_project_meta_read_only,
@@ -818,11 +818,11 @@ class StorageManager:
                     "blocked_reason": blocked,
                 }
             )
-        maintenance = {"obsolete_stage_records": None, "can_maintain": False,
+        maintenance = {"obsolete_stage_records": None, "deduplicatable_applied_records": None, "can_maintain": False,
                        "blocked_reason": busy_reason if scan.complete else _PROJECT_SCAN_BLOCKED_REASON}
         if scan.complete:
             try:
-                maintenance["obsolete_stage_records"] = obsolete_stage_result_count(root)
+                maintenance.update(database_maintenance_info(root))
                 maintenance["can_maintain"] = busy_reason is None
             except (AppError, OSError, sqlite3.Error) as exc:
                 maintenance["blocked_reason"] = str(exc)

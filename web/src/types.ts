@@ -251,6 +251,7 @@ export interface StorageLogGroup {
 
 export interface DatabaseMaintenanceResult {
   deleted_records: number;
+  deduplicated_applied_records: number;
   before_bytes: number;
   after_bytes: number;
   reclaimed_bytes: number;
@@ -259,6 +260,7 @@ export interface DatabaseMaintenanceResult {
 export interface StorageProjectDetail {
   database_maintenance: {
     obsolete_stage_records: number | null;
+    deduplicatable_applied_records: number | null;
     can_maintain: boolean;
     blocked_reason: string | null;
   };

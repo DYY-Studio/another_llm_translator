@@ -83,7 +83,7 @@
 .storage-detail-actions { flex: none; display: flex; align-items: center; gap: 12px; }
 .storage-detail-total { flex: none; color: var(--accent-text); font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .storage-detail-body { min-width: 0; min-height: 0; flex: 1; overflow: auto; padding-bottom: 20px; }
-.storage-detail-body > .muted, .storage-detail-body > .error-banner, .storage-detail-body > .warning-banner { margin: 16px 20px 0; }
+.storage-detail-body > .muted, .storage-detail-body > .error-banner, .storage-detail-body > .warning-banner { margin: 16px 20px 0; width: auto; }
 .storage-detail-body > .storage-message { margin: 16px 20px 0; }
 .storage-detail-categories { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 16px 20px 2px; border: 1px solid var(--border); background: var(--border); }
 .storage-detail-categories div { min-width: 0; display: grid; gap: 3px; padding: 10px 12px; background: var(--surface-soft); }

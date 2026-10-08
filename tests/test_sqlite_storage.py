@@ -1661,6 +1661,9 @@ def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path
     assert resolved[0]["text"] == resolved[2]["text"] == "original"
     assert "text" not in records[2] and "text" not in records[4]
     assert "text" not in read_jsonl(project, stage_result_path(project, "polishing_applied"))[0]
+    append_stage_results(project, [record_header("stage_result", pid, stage="translation",
+        segment_id="F0001-S000001", status="reset")])
+    assert resolve_stage_result_texts(project, [records[4]])[0]["text"] == "original"
     suggested = result("suggested", "proofreading", review_status="suggested", suggested_text="revision", base_result_id="base")
     application = result("application", "proofreading_applied", base_result_id="base", suggestion_result_id="suggested")
     lineage = {r["record_id"]: r for r in [*records, suggested, application]}

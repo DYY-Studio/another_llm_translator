@@ -2861,32 +2861,38 @@ def compact_project_database(project: Path) -> dict[str, int]:
     }
 
 
-def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Load only exact parents used by selected export results."""
+def _stage_result_lineage(
+    connection: sqlite3.Connection, records: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     result = {str(record["record_id"]): record for record in records}
     pending = set(result)
+    project_id = _project_id(connection)
+    while pending:
+        parents = {str(result[key][field]) for key in pending
+                   for field in ("base_result_id", "suggestion_result_id")
+                   if result[key].get(field) is not None} - result.keys()
+        pending = set()
+        values = list(parents)
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            rows = connection.execute(
+                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
+            for row in rows:
+                record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
+                key = str(record["record_id"])
+                result[key] = record
+                pending.add(key)
+        missing = parents - result.keys()
+        if missing:
+            raise StorageError(f"必要阶段结果引用不存在：{next(iter(missing))}")
+    return result
+
+
+def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Load exact parents in batches for business reads."""
     connection = _with_db(project)
     try:
-        project_id = _project_id(connection)
-        while pending:
-            parents = {str(result[key][field]) for key in pending
-                       for field in ("base_result_id", "suggestion_result_id")
-                       if result[key].get(field) is not None} - result.keys()
-            pending = set()
-            values = list(parents)
-            for start in range(0, len(values), 500):
-                batch = values[start:start + 500]
-                rows = connection.execute(
-                    f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
-                for row in rows:
-                    record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
-                    key = str(record["record_id"])
-                    result[key] = record
-                    pending.add(key)
-            missing = parents - result.keys()
-            if missing:
-                raise StorageError(f"必要阶段结果引用不存在：{next(iter(missing))}")
-        return result
+        return _stage_result_lineage(connection, records)
     finally:
         connection.close()
 
@@ -3006,6 +3012,44 @@ def obsolete_stage_result_count(project: Path) -> int:
         connection.close()
 
 
+def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: set[str]) -> list[str]:
+    project_id = _project_id(connection)
+    records = [_validate_record(_hydrate_stage(row, project_id), "applied text maintenance")
+               for row in connection.execute(
+                   "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
+                   "WHERE stage IN ('proofreading_applied','polishing_applied') "
+                   "AND status='completed' AND json_type(payload_json,'$.text') IS NOT NULL")
+               if row["record_id"] not in obsolete]
+    lineage = _stage_result_lineage(connection, records)
+    cache: dict[str, str] = {}
+    eligible = []
+    for record in records:
+        key = str(record["record_id"])
+        without_text = {field: value for field, value in record.items() if field != "text"}
+        cache.pop(key, None)
+        if record["text"] == _stage_result_text(without_text, lineage, cache, set()):
+            eligible.append(key)
+    # Validate the final representation, including chains of removed overrides.
+    for key in eligible:
+        lineage[key] = {field: value for field, value in lineage[key].items() if field != "text"}
+    cache.clear()
+    for key in eligible:
+        _stage_result_text(lineage[key], lineage, cache, set())
+    return eligible
+
+
+def database_maintenance_info(project: Path) -> dict[str, int]:
+    from .stage_result_retention import obsolete_stage_results
+    connection = _read_only_connection(project)
+    try:
+        with connection:
+            obsolete = obsolete_stage_results(connection)
+            return {"obsolete_stage_records": len(obsolete),
+                    "deduplicatable_applied_records": len(_deduplicatable_applied_results(connection, obsolete))}
+    finally:
+        connection.close()
+
+
 def maintain_project_database(project: Path) -> dict[str, int]:
     """Caller holds the project lock; pruning commits before VACUUM."""
     from .stage_result_retention import maintain_stage_results
@@ -3016,13 +3060,18 @@ def maintain_project_database(project: Path) -> dict[str, int]:
     try:
         with connection:
             deleted = maintain_stage_results(connection)
+            deduplicated = _deduplicatable_applied_results(connection, set())
+            connection.executemany("UPDATE stage_results SET payload_json=json_remove(payload_json,'$.text') WHERE record_id=?",
+                                   ((key,) for key in deduplicated))
     except sqlite3.Error as exc:
         raise StorageError(f"无法整理阶段结果：{exc}") from exc
     finally:
         connection.close()
     try:
-        return {"deleted_records": deleted, **compact_project_database(project)}
+        return {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
+                **compact_project_database(project)}
     except (StorageError, OSError) as exc:
-        error = StorageError(f"已删除 {deleted} 条旧阶段记录，但数据库压缩失败；可重试压缩：{exc}")
-        error.params = {"deleted_records": deleted, "pruning_completed": True}
+        error = StorageError(f"已删除 {deleted} 条旧阶段记录，去重 {len(deduplicated)} 条应用正文，但数据库压缩失败；可重试压缩：{exc}")
+        error.params = {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
+                        "pruning_completed": True}
         raise error from exc

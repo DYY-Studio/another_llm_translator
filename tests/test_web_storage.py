@@ -258,4 +258,5 @@ def test_database_maintenance_confirmation_busy_guard_and_result(tmp_path: Path,
     response = client.post(endpoint, json={"confirm": True})
     assert response.status_code == 200, response.text
     assert response.json()["deleted_records"] == 0
+    assert response.json()["deduplicated_applied_records"] == 0
     assert response.json()["reclaimed_bytes"] >= 0

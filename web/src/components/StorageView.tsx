@@ -357,7 +357,7 @@ export function StorageView({ language }: { language: Language }) {
     try {
       const result = await maintainProjectDatabase(selectedProject);
       setMessage(translate("storage.databaseDone", language, {
-        records: result.deleted_records, size: formatSize(result.reclaimed_bytes),
+        records: result.deleted_records, deduplicated: result.deduplicated_applied_records, size: formatSize(result.reclaimed_bytes),
       }));
     } catch (reason) {
       setError(errorMessage(reason, language));
@@ -556,13 +556,18 @@ export function StorageView({ language }: { language: Language }) {
                       <div key={category.id}><span>{categoryLabel(category.id, language)}</span><strong>{formatSize(category.bytes)}</strong></div>
                     ))}
                   </div>
-                  <section className="storage-section">
-                    <h3>{translate("storage.databaseTitle", language)}</h3>
-                    <p>{translate("storage.databaseObsolete", language, { records: detail.database_maintenance.obsolete_stage_records ?? "—" })}</p>
-                    <button type="button" disabled={busyAction !== null || !detail.database_maintenance.can_maintain} onClick={() => setDatabaseConfirm(true)}>
-                      {translate(busyAction === "database" ? "storage.databaseBusy" : "storage.databaseMaintain", language)}
-                    </button>
-                    {!detail.database_maintenance.can_maintain && <p className="muted">{blockedLabel(detail.database_maintenance.blocked_reason, language)}</p>}
+                  <section className="storage-detail-section">
+                    <div className="storage-section-heading settings-action-heading">
+                      <div>
+                        <h3>{translate("storage.databaseTitle", language)}</h3>
+                        <p>{translate("storage.databaseObsolete", language, { records: detail.database_maintenance.obsolete_stage_records ?? "—" })}</p>
+                        <p>{translate("storage.databaseDeduplicatable", language, { records: detail.database_maintenance.deduplicatable_applied_records ?? "—" })}</p>
+                        {!detail.database_maintenance.can_maintain && <p>{blockedLabel(detail.database_maintenance.blocked_reason, language)}</p>}
+                      </div>
+                      <button className="danger-button" type="button" disabled={busyAction !== null || !detail.database_maintenance.can_maintain} onClick={() => setDatabaseConfirm(true)}>
+                        {translate(busyAction === "database" ? "storage.databaseBusy" : "storage.databaseMaintain", language)}
+                      </button>
+                    </div>
                   </section>
                   <StorageDebugSection language={language} runs={detail.debug_runs} busyAction={busyAction} onClear={clearDebugRun} />
                   <StorageOutputSection language={language} files={detail.output_files} busyAction={busyAction} onClear={clearOutput} />
