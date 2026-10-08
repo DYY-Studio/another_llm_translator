@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .errors import ProjectError, StorageError, UsageError
+from .stage_result_retention import prune_stage_results
 
 SCHEMA_VERSION = 5
 
@@ -208,6 +209,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS stage_results_stage_segment
             ON stage_results(stage, segment_id, sequence);
+        CREATE INDEX IF NOT EXISTS stage_results_base_reference
+            ON stage_results(json_extract(payload_json, '$.base_result_id'));
+        CREATE INDEX IF NOT EXISTS stage_results_suggestion_reference
+            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'));
         CREATE TABLE IF NOT EXISTS terminology_scans (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             record_id TEXT NOT NULL UNIQUE,
@@ -1622,7 +1627,7 @@ def replace_source(
     try:
         with connection:
             old_rows = connection.execute(
-                """SELECT file_id, part_id, line_index, source, model_source
+                """SELECT segment_id, file_id, part_id, line_index, source, model_source
                    FROM segments"""
             ).fetchall()
             old_orders = {
@@ -1728,6 +1733,9 @@ def replace_source(
                 "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
                 [(key, _json(item)) for key, item in metadata.items()],
             )
+            removed_ids = {str(row["segment_id"]) for row in old_rows} - {str(item["segment_id"]) for item in segment_values}
+            from .stage_result_retention import STAGES as retained_stages
+            prune_stage_results(connection, ((stage, sid) for stage in retained_stages for sid in removed_ids))
             for file_id, part_id in affected_boundaries:
                 connection.execute(
                     """UPDATE content_summaries
@@ -2164,6 +2172,7 @@ def append_jsonl(project: Path, path: Path, value: dict[str, Any]) -> None:
         with connection:
             if kind == "stage":
                 _insert_stage(connection, [value])
+                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id"))])
             elif kind == "scans":
                 _insert_scans(connection, [value])
             elif kind == "candidates":
@@ -2189,6 +2198,7 @@ def append_stage_results(
     try:
         with connection:
             _insert_stage(connection, values)
+            prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id")) for value in values])
     except sqlite3.Error as exc:
         raise StorageError(f"无法批量追加 SQLite 阶段记录：{project}: {exc}") from exc
     finally:
@@ -2629,28 +2639,27 @@ def latest_stage_results(
 ) -> dict[str, dict[str, Any]]:
     connection = _with_db(project)
     try:
-        params: list[Any] = [stage]
-        filter_sql = ""
         values = list(segment_ids) if segment_ids is not None else None
         if values == []:
             return {}
-        if values:
-            placeholders = ",".join("?" for _ in values)
-            filter_sql = f" AND segment_id IN ({placeholders})"
-            params.extend(values)
-        rows = connection.execute(
-            f"""
-            SELECT record_id, stage, segment_id, status, payload_json FROM (
-                SELECT record_id, stage, status, payload_json, segment_id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY segment_id ORDER BY sequence DESC
-                       ) AS rank
-                FROM stage_results
-                WHERE stage = ?{filter_sql}
-            ) WHERE rank = 1
-            """,
-            params,
-        ).fetchall()
+        batches = [values[start:start + 500] for start in range(0, len(values), 500)] if values is not None else [None]
+        rows = []
+        for batch in batches:
+            filter_sql = f" AND segment_id IN ({','.join('?' for _ in batch)})" if batch is not None else ""
+            params = [stage, *batch] if batch is not None else [stage]
+            rows.extend(connection.execute(
+                f"""
+                SELECT record_id, stage, segment_id, status, payload_json FROM (
+                    SELECT record_id, stage, status, payload_json, segment_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY segment_id ORDER BY sequence DESC
+                           ) AS rank
+                    FROM stage_results
+                    WHERE stage = ?{filter_sql}
+                ) WHERE rank = 1
+                """,
+                params,
+            ).fetchall())
         project_id = _project_id(connection)
         values_by_id = [_hydrate_stage(row, project_id) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
@@ -2668,34 +2677,36 @@ def latest_stage_summary(
     values = list(segment_ids)
     if not values:
         return {}
-    placeholders = ",".join("?" for _ in values)
-    params: list[Any] = [stage, *values]
     connection = _with_db(project)
     try:
-        rows = connection.execute(
-            f"""
-            SELECT agg.segment_id,
-                   agg.last_completed > COALESCE(agg.last_reset, 0) AS completed,
-                   agg.last_failed IS NOT NULL
-                       AND NOT (agg.last_completed > COALESCE(agg.last_reset, 0)) AS failed,
-                   CASE
-                       WHEN agg.last_completed > COALESCE(agg.last_reset, 0)
-                       THEN json_extract(completed.payload_json, '$.stage_fingerprint')
-                   END AS fingerprint
-            FROM (
-                SELECT segment_id,
-                       MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
-                       MAX(CASE WHEN status = 'reset' THEN sequence END) AS last_reset,
-                       MAX(CASE WHEN status = 'failed' THEN sequence END) AS last_failed
-                FROM stage_results
-                WHERE stage = ? AND segment_id IN ({placeholders})
-                GROUP BY segment_id
-            ) AS agg
-            LEFT JOIN stage_results AS completed
-              ON completed.sequence = agg.last_completed
-            """,
-            params,
-        ).fetchall()
+        rows = []
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                f"""
+                SELECT agg.segment_id,
+                       COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0) AS completed,
+                       agg.last_failed IS NOT NULL
+                           AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
+                       CASE
+                           WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
+                           THEN json_extract(completed.payload_json, '$.stage_fingerprint')
+                       END AS fingerprint
+                FROM (
+                    SELECT segment_id,
+                           MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
+                           MAX(CASE WHEN status = 'reset' THEN sequence END) AS last_reset,
+                           MAX(CASE WHEN status = 'failed' THEN sequence END) AS last_failed
+                    FROM stage_results
+                    WHERE stage = ? AND segment_id IN ({placeholders})
+                    GROUP BY segment_id
+                ) AS agg
+                LEFT JOIN stage_results AS completed
+                  ON completed.sequence = agg.last_completed
+                """,
+                [stage, *batch],
+            ).fetchall())
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
@@ -2717,42 +2728,46 @@ def latest_stage_states(
     values = [str(value) for value in segment_ids]
     if not values:
         return {}
-    placeholders = ",".join("?" for _ in values)
     connection = _with_db(project)
     try:
-        rows = connection.execute(
-            f"""
-            WITH aggregate AS (
-                SELECT segment_id,
-                       MAX(CASE WHEN status = 'completed' THEN sequence END)
-                           AS completed_sequence,
-                       MAX(CASE WHEN status = 'reset' THEN sequence END)
-                           AS reset_sequence,
-                       MAX(sequence) AS latest_sequence
-                FROM stage_results
-                WHERE stage = ? AND segment_id IN ({placeholders})
-                GROUP BY segment_id
-            )
-            SELECT aggregate.segment_id,
-                   CASE
-                       WHEN aggregate.completed_sequence IS NOT NULL
-                        AND aggregate.completed_sequence
-                            > COALESCE(aggregate.reset_sequence, 0)
-                       THEN completed.payload_json
-                   END AS completed_payload,
-                   completed.record_id AS completed_record_id,
-                   completed.stage AS completed_stage,
-                   completed.segment_id AS completed_segment_id,
-                   completed.status AS completed_status,
-                   latest.status AS latest_status
-            FROM aggregate
-            LEFT JOIN stage_results AS completed
-              ON completed.sequence = aggregate.completed_sequence
-            LEFT JOIN stage_results AS latest
-              ON latest.sequence = aggregate.latest_sequence
-            """,
-            [stage, *values],
-        ).fetchall()
+        rows = []
+        project_id = _project_id(connection)
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                f"""
+                WITH aggregate AS (
+                    SELECT segment_id,
+                           MAX(CASE WHEN status = 'completed' THEN sequence END)
+                               AS completed_sequence,
+                           MAX(CASE WHEN status = 'reset' THEN sequence END)
+                               AS reset_sequence,
+                           MAX(sequence) AS latest_sequence
+                    FROM stage_results
+                    WHERE stage = ? AND segment_id IN ({placeholders})
+                    GROUP BY segment_id
+                )
+                SELECT aggregate.segment_id,
+                       CASE
+                           WHEN aggregate.completed_sequence IS NOT NULL
+                            AND aggregate.completed_sequence
+                                > COALESCE(aggregate.reset_sequence, 0)
+                           THEN completed.payload_json
+                       END AS completed_payload,
+                       completed.record_id AS completed_record_id,
+                       completed.stage AS completed_stage,
+                       completed.segment_id AS completed_segment_id,
+                       completed.status AS completed_status,
+                       latest.status AS latest_status
+                FROM aggregate
+                LEFT JOIN stage_results AS completed
+                  ON completed.sequence = aggregate.completed_sequence
+                LEFT JOIN stage_results AS latest
+                  ON latest.sequence = aggregate.latest_sequence
+                """,
+                [stage, *batch],
+            ).fetchall())
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             completed_payload = row["completed_payload"]
@@ -2767,7 +2782,7 @@ def latest_stage_states(
                             "status": row["completed_status"],
                             "payload_json": completed_payload,
                         },
-                        _project_id(connection),
+                        project_id,
                     ),
                     f"stage={stage} segment={row['segment_id']}",
                 )
@@ -2845,3 +2860,225 @@ def compact_project_database(project: Path) -> dict[str, int]:
         "after_bytes": after_bytes,
         "reclaimed_bytes": max(0, before_bytes - after_bytes),
     }
+
+
+def _stage_result_lineage(
+    connection: sqlite3.Connection, records: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    result = {str(record["record_id"]): record for record in records}
+    pending = set(result)
+    project_id = _project_id(connection)
+    while pending:
+        parents = {str(result[key][field]) for key in pending
+                   for field in ("base_result_id", "suggestion_result_id")
+                   if result[key].get(field) is not None} - result.keys()
+        pending = set()
+        values = list(parents)
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            rows = connection.execute(
+                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
+            for row in rows:
+                record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
+                key = str(record["record_id"])
+                result[key] = record
+                pending.add(key)
+        missing = parents - result.keys()
+        if missing:
+            raise StorageError(f"必要阶段结果引用不存在：{next(iter(missing))}")
+    return result
+
+
+def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Load exact parents in batches for business reads."""
+    connection = _with_db(project)
+    try:
+        return _stage_result_lineage(connection, records)
+    finally:
+        connection.close()
+
+
+def _stage_result_text(
+    record: dict[str, Any], records_by_id: dict[str, dict[str, Any]],
+    cache: dict[str, str], visiting: set[str],
+) -> str:
+    key = str(record["record_id"])
+    if key in visiting:
+        raise StorageError(f"阶段正文引用循环：{key}")
+    if key in cache:
+        return cache[key]
+    if "text" in record:
+        text = record["text"]
+        if not isinstance(text, str):
+            raise StorageError(f"阶段正文无效：{key}")
+    else:
+        if record.get("stage") not in {"proofreading_applied", "polishing_applied"} or record.get("status") != "completed":
+            raise StorageError(f"阶段结果无法提供正文：{key}")
+        suggestion = records_by_id.get(str(record.get("suggestion_result_id", "")))
+        if suggestion is None or suggestion.get("status") != "completed":
+            raise StorageError(f"必要建议引用无效：{key}")
+        if suggestion.get("review_status") == "suggested":
+            text = suggestion.get("suggested_text")
+            if not isinstance(text, str):
+                raise StorageError(f"建议无法提供正文：{key}")
+        elif suggestion.get("review_status") == "accepted":
+            base = records_by_id.get(str(record.get("base_result_id", "")))
+            if base is None or base.get("status") != "completed":
+                raise StorageError(f"必要基准引用无效：{key}")
+            visiting.add(key)
+            try:
+                text = _stage_result_text(base, records_by_id, cache, visiting)
+            finally:
+                visiting.remove(key)
+        else:
+            raise StorageError(f"建议状态无法提供正文：{key}")
+    cache[key] = text
+    return text
+
+
+def resolve_stage_result_texts(
+    project: Path, records: Iterable[dict[str, Any]], *,
+    records_by_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return business copies with applied text; never hydrate persistent payloads."""
+    values = list(records)
+    unresolved = [record for record in values if record.get("stage") in
+                  {"proofreading_applied", "polishing_applied"} and
+                  record.get("status") == "completed" and "text" not in record]
+    lineage = records_by_id if records_by_id is not None else (
+        stage_result_lineage(project, unresolved) if unresolved else {})
+    cache: dict[str, str] = {}
+    return [dict(record, text=_stage_result_text(record, lineage, cache, set()))
+            if record.get("stage") in {"proofreading_applied", "polishing_applied"}
+            and record.get("status") == "completed" else dict(record)
+            for record in values]
+
+
+def segment_page_counts(
+    project: Path, *, file_id: str | None = None, part_id: str | None = None,
+    status: str | None = None, search: str | None = None, stage: str = "translation",
+) -> tuple[int, int]:
+    """Return matching total and completed count from one aggregation."""
+    if bool(file_id) != bool(part_id):
+        raise ProjectError("file_id 与 part_id 必须同时提供")
+    if status == "completed":
+        count = segment_count(project, file_id=file_id, part_id=part_id, status=status, search=search, stage=stage)
+        return count, count
+    if status is None and not search:
+        # Avoid materializing a LEFT JOIN for the unfiltered first page.
+        join, params = _stage_cte(stage)
+        boundary = " AND segments.file_id = ? AND segments.part_id = ?" if file_id else ""
+        bounds = [file_id, part_id] if file_id else []
+        connection = _with_db(project)
+        try:
+            row = connection.execute(
+                f"SELECT (SELECT COUNT(*) FROM segments WHERE segments.is_empty = 0{boundary}), "
+                f"(SELECT COUNT(*) FROM segments {join} WHERE segments.is_empty = 0 AND latest_stage.status = 'completed'{boundary})",
+                [*bounds, *params, *bounds],
+            ).fetchone()
+            return int(row[0]), int(row[1])
+        finally:
+            connection.close()
+    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage)
+    if status is None:
+        match = "1"
+        params.pop()  # The unused completed predicate parameter.
+    else:
+        match = filters[0]
+        # SELECT placeholders precede JOIN placeholders.
+        if "?" in match:
+            params = [params[-1], *params[:-1]]
+    clauses = ["segments.is_empty = 0"]
+    if search:
+        clauses.append("(instr(lower(segments.source), lower(?)) > 0 OR instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)")
+        params.extend([search, search])
+    if file_id and part_id:
+        clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
+        params.extend([file_id, part_id])
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            f"SELECT COALESCE(SUM(CASE WHEN {match} THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN latest_stage.status = 'completed' THEN 1 ELSE 0 END),0) FROM segments {join} WHERE {' AND '.join(clauses)}", params).fetchone()
+        return int(row[0]), int(row[1])
+    finally:
+        connection.close()
+
+def obsolete_stage_result_count(project: Path) -> int:
+    from .stage_result_retention import obsolete_stage_results
+    connection = _read_only_connection(project)
+    try:
+        with connection:
+            return len(obsolete_stage_results(connection))
+    finally:
+        connection.close()
+
+
+def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: set[str]) -> list[str]:
+    project_id = _project_id(connection)
+    records = [_validate_record(_hydrate_stage(row, project_id), "applied text maintenance")
+               for row in connection.execute(
+                   "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
+                   "WHERE stage IN ('proofreading_applied','polishing_applied') "
+                   "AND status='completed'")
+               if row["record_id"] not in obsolete]
+    lineage = _stage_result_lineage(connection, records)
+    cache: dict[str, str] = {}
+    eligible = []
+    for record in records:
+        key = str(record["record_id"])
+        if "text" not in record:
+            _stage_result_text(record, lineage, cache, set())
+            continue
+        without_text = {field: value for field, value in record.items() if field != "text"}
+        cache.pop(key, None)
+        if record["text"] == _stage_result_text(without_text, lineage, cache, set()):
+            eligible.append(key)
+        # Downstream comparisons must see the persistent override, not this trial body.
+        cache.pop(key, None)
+        _stage_result_text(record, lineage, cache, set())
+    # Validate the final representation, including chains of removed overrides.
+    for key in eligible:
+        lineage[key] = {field: value for field, value in lineage[key].items() if field != "text"}
+    cache.clear()
+    for key in eligible:
+        _stage_result_text(lineage[key], lineage, cache, set())
+    return eligible
+
+
+def database_maintenance_info(project: Path) -> dict[str, int]:
+    from .stage_result_retention import obsolete_stage_results
+    connection = _read_only_connection(project)
+    try:
+        with connection:
+            obsolete = obsolete_stage_results(connection)
+            return {"obsolete_stage_records": len(obsolete),
+                    "deduplicatable_applied_records": len(_deduplicatable_applied_results(connection, obsolete))}
+    finally:
+        connection.close()
+
+
+def maintain_project_database(project: Path) -> dict[str, int]:
+    """Caller holds the project lock; pruning commits before VACUUM."""
+    from .stage_result_retention import maintain_stage_results
+    path = database_path(project)
+    if shutil.disk_usage(path.parent).free < path.stat().st_size:
+        raise StorageError("磁盘空间不足，无法整理并压缩项目 SQLite")
+    connection = _with_db(project)
+    try:
+        with connection:
+            deleted = maintain_stage_results(connection)
+            deduplicated = _deduplicatable_applied_results(connection, set())
+            connection.executemany("UPDATE stage_results SET payload_json=json_remove(payload_json,'$.text') WHERE record_id=?",
+                                   ((key,) for key in deduplicated))
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法整理阶段结果：{exc}") from exc
+    finally:
+        connection.close()
+    try:
+        return {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
+                **compact_project_database(project)}
+    except (StorageError, OSError) as exc:
+        error = StorageError(f"已删除 {deleted} 条旧阶段记录，去重 {len(deduplicated)} 条应用正文，但数据库压缩失败；可重试压缩：{exc}")
+        error.params = {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
+                        "pruning_completed": True}
+        raise error from exc

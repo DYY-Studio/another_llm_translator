@@ -79,12 +79,16 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引和内容概括记录。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
+Run 索引和内容概括记录；批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
 ### `app/file_replacement.py`
 
 单 File 替换的预览、保守内容对应和提交输入。它只判断哪些既有 Segment 身份可以安全保留；
 实际事务写入仍由项目和存储模块完成。
+
+### `app/stage_result_retention.py`
+
+在存储事务内整理受影响阶段记录，维护当前结果、重置屏障和必要父链；提供显式项目整理的完整保留闭包。
 
 ### `app/project_export.py`
 

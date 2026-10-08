@@ -188,7 +188,9 @@ async def test_review_apply_and_export_restore_source_indentation(
     )
     applied_path = project / "stages" / "proofreading_applied.jsonl"
     applied = read_jsonl(project, applied_path)
-    assert applied[-1]["text"] == " \t\u3000fixed  \t"
+    from app.sqlite_storage import resolve_stage_result_texts
+    assert "text" not in applied[-1]
+    assert resolve_stage_result_texts(project, applied)[-1]["text"] == " \t\u3000fixed  \t"
 
     # Simulate a result written before local whitespace protection existed.
     applied[-1]["text"] = "\tlegacy  \t"
@@ -1128,5 +1130,108 @@ async def test_force_redo_counts_only_current_results(
     assert manifest["requested_segment_count"] == 2
     assert manifest["reused_segment_count"] == 0
     history = read_jsonl(project, project / "stages" / f"{stage}.jsonl")
-    assert sum(item.get("run_id") == first["run_id"] for item in history) == 1
+    assert sum(item.get("run_id") == first["run_id"] for item in history) == 0
     assert sum(item.get("run_id") == redo["run_id"] for item in history) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+async def test_apply_reuses_identical_results_and_counts_run(tmp_path: Path, stage: str) -> None:
+    from app.sqlite_storage import read_json
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, stage, Scope(), http_client=client)
+    first = run_apply(project, stage, Scope(only_segment="F0001-S000001"),
+                      allow_outdated_base=False, confirmed_all=True)
+    second = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    third = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert first["reused"] == 0
+    assert second["completed"] == 2 and second["reused"] == 1
+    assert third["completed"] == 2 and third["reused"] == 2
+    assert len(read_jsonl(project, project / "stages" / f"{stage}_applied.jsonl")) == 2
+    manifest = read_json(project, project / "runs" / third["run_id"] / "manifest.json")
+    assert manifest["status"] == "completed"
+    assert manifest["completed_segment_count"] == 0
+    assert manifest["requested_segment_count"] == 0
+    assert manifest["reused_segment_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_failure_marks_run_failed_and_rolls_back(tmp_path: Path, monkeypatch) -> None:
+    import app.stage_review as module
+    from app.errors import StorageError
+    from app.sqlite_storage import append_stage_results, list_runs
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    def broken_batch(project, records):
+        records[-1]["base_result_id"] = "missing"
+        append_stage_results(project, records)
+    monkeypatch.setattr(module, "append_stage_results", broken_batch)
+    with pytest.raises(StorageError, match="引用"):
+        run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert read_jsonl(project, project / "stages" / "proofreading_applied.jsonl") == []
+    run = list_runs(project, stage="proofreading_applied")[0]
+    assert run["status"] == "failed" and run["completed_segment_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path) -> None:
+    from app.web_store import WebStore
+    from app.stage_runtime import _base_results
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, "proofreading", Scope(), http_client=client)
+    run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
+    store = WebStore(project)
+    # Keep one legacy inline application beside a new reference application.
+    inline_text = store.segment_detail("F0001-S000001")["reviews"]["proofreading"]["applied"]["text"]
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.text',?) WHERE stage='proofreading_applied' AND segment_id='F0001-S000001'", (inline_text,))
+    before_detail = store.segment_detail("F0001-S000001")
+    before_base = _base_results(project, "polishing")
+    exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
+    before_bytes = [(project / path).read_bytes() for path in exported["written"]]
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_remove(payload_json,'$.text') WHERE stage='proofreading_applied' AND segment_id='F0001-S000001'")
+    assert store.segment_detail("F0001-S000001") == before_detail
+    assert _base_results(project, "polishing") == before_base
+    exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
+    assert [(project / path).read_bytes() for path in exported["written"]] == before_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+async def test_application_writers_omit_duplicate_text_and_keep_whitespace_override(tmp_path: Path, stage: str) -> None:
+    from app.web_store import WebStore
+    project = await create_project(tmp_path, "one\n\u3000two", encoding="utf-8-sig")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+    store = WebStore(project)
+    manual = store.save_review(dict(stage=stage, segment_id="F0001-S000001", review_status="accepted", apply=True))
+    assert manual["applied"]["text"] == store.segment_detail("F0001-S000001")["translation"]["text"]
+    path = project / "stages" / f"{stage}_applied.jsonl"
+    assert "text" not in read_jsonl(project, path)[0]
+    store.save_review(dict(stage=stage, segment_id="F0001-S000002", review_status="suggested", suggested_text="revision"))
+    # Legacy suggestion predates leading-whitespace normalization.
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.suggested_text','revision') WHERE stage=? AND segment_id='F0001-S000002'", (stage,))
+    applied = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert applied["reused"] == 1
+    records = read_jsonl(project, path)
+    assert "text" not in records[0]
+    assert records[1]["text"] == "\u3000revision"
+    repeated = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert repeated["reused"] == 2
+    assert len(read_jsonl(project, path)) == 2
+    store.save_translation(dict(segment_id="F0001-S000001", text="new base"))
+    with pytest.raises(IncompleteError, match="旧上游"):
+        run_apply(project, stage, Scope(only_segment="F0001-S000001"), allow_outdated_base=False, confirmed_all=True)
+    run_apply(project, stage, Scope(only_segment="F0001-S000001"), allow_outdated_base=True, confirmed_all=True)
+    assert store.segment_detail("F0001-S000001")["reviews"][stage]["applied"]["text"] == "new base"
+    manual = store.save_review(dict(stage=stage, segment_id="F0001-S000001", review_status="suggested", suggested_text="manual", apply=True))
+    assert manual["applied"]["text"] == "manual"
+    assert "text" not in read_jsonl(project, path)[-1]

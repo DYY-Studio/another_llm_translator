@@ -6765,10 +6765,12 @@ def test_review_filters_match_visible_states_and_page_index(
             suggestion = save(
                 stage,
                 index,
-                base_result_id="old-base" if index == 3 else base,
+                base_result_id=base,
                 review_status="accepted" if index == 4 else "suggested",
                 suggested_text="建议",
             )
+            if index == 3:
+                save("proofreading_applied" if stage == "polishing" else "translation", index, text="新基准")
             if index in [4, 6]:
                 save(
                     f"{stage}_applied",

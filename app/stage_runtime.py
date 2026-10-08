@@ -67,6 +67,7 @@ from .project import (
 )
 from .sqlite_storage import (
     latest_stage_states,
+    resolve_stage_result_texts,
     read_json,
 )
 
@@ -122,10 +123,11 @@ def document_prompt_context(
     project: Path,
     file_record: dict[str, Any],
     frozen_run_options: dict[str, dict[str, str]] | None = None,
+    *, state_record: dict[str, Any] | None = None,
 ) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
     file_id = str(file_record["file_id"])
     state_path = file_record.get("document_adapter_state")
-    state_record = (
+    state_record = state_record if state_record is not None else (
         read_json(project, project / state_path)
         if isinstance(state_path, str)
         else None
@@ -1373,7 +1375,8 @@ def _base_results(
             ).items()
             if isinstance(state.get("completed"), dict)
         }
-        return {**translations, **applied}
+        return {**translations, **{str(record["segment_id"]): record for record
+            in resolve_stage_result_texts(project, applied.values())}}
     translations = {
         str(key): value
         for key, value in classify_stage(
@@ -1389,4 +1392,5 @@ def _base_results(
         load_stage_history(project, "proofreading_applied"),
         force=False,
     ).latest_completed
-    return {**translations, **{str(key): value for key, value in applied.items()}}
+    return {**translations, **{str(record["segment_id"]): record for record
+        in resolve_stage_result_texts(project, applied.values())}}

@@ -193,6 +193,10 @@ def test_single_segment_preflight_falls_back_when_upper_bound_is_uncertain() -> 
 
 def test_latest_stage_states_preserve_classification_semantics(tmp_path: Path) -> None:
     project = _finalize_project(tmp_path)
+    from app.project import add_project_files
+    source = tmp_path / "states.txt"
+    source.write_text("one\ntwo\nthree\nfour")
+    add_project_files(project, [str(source)])
     selected = [
         {"segment_id": "F0001-S000001"},
         {"segment_id": "F0001-S000002"},

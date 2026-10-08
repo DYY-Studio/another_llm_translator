@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
 import { applyDataRootRelocation, nativeBridgeAvailable, pickNativeFolder } from "../native";
+import { ConfirmDialog } from "./TermDialogs";
 import { DirectoryPicker } from "./DirectoryPicker";
 import {
   cancelDataRootRelocation,
@@ -11,6 +12,7 @@ import {
   fetchDataRoot,
   fetchStorage,
   fetchStorageProject,
+  maintainProjectDatabase,
   requestDataRootRelocation,
 } from "../queries";
 import type {
@@ -105,6 +107,7 @@ export function StorageView({ language }: { language: Language }) {
   const [dataRoot, setDataRoot] = useState<DataRootStatus | null>(null);
   const [directoryPicker, setDirectoryPicker] = useState(false);
   const [rootBusy, setRootBusy] = useState(false);
+  const [databaseConfirm, setDatabaseConfirm] = useState(false);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [detail, setDetail] = useState<StorageProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -188,6 +191,7 @@ export function StorageView({ language }: { language: Language }) {
   function closeProjectDetail() {
     if (busyAction !== null) return;
     setSelectedProject(null);
+    setDatabaseConfirm(false);
     setDetail(null);
     setDetailError("");
     setError("");
@@ -197,11 +201,14 @@ export function StorageView({ language }: { language: Language }) {
   useEffect(() => {
     if (!selectedProject) return;
     function closeOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape" && busyAction === null) closeProjectDetail();
+      if (event.key === "Escape" && busyAction === null) {
+        if (databaseConfirm) setDatabaseConfirm(false);
+        else closeProjectDetail();
+      }
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [busyAction, selectedProject]);
+  }, [busyAction, selectedProject, databaseConfirm]);
 
   async function refresh() {
     setRefreshing(true);
@@ -337,6 +344,31 @@ export function StorageView({ language }: { language: Language }) {
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function maintainDatabase() {
+    if (!selectedProject || !detail?.database_maintenance.can_maintain) return;
+    setDatabaseConfirm(false);
+    setBusyAction("database");
+    setError("");
+    setMessage("");
+    try {
+      const result = await maintainProjectDatabase(selectedProject);
+      setMessage(translate("storage.databaseDone", language, {
+        records: result.deleted_records, deduplicated: result.deduplicated_applied_records, size: formatSize(result.reclaimed_bytes),
+      }));
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+    } finally {
+      try {
+        await loadSummary();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
+      setDetailRevision((current) => current + 1);
       setBusyAction(null);
     }
   }
@@ -529,6 +561,19 @@ export function StorageView({ language }: { language: Language }) {
                       <div key={category.id}><span>{categoryLabel(category.id, language)}</span><strong>{formatSize(category.bytes)}</strong></div>
                     ))}
                   </div>
+                  <section className="storage-detail-section">
+                    <div className="storage-section-heading settings-action-heading">
+                      <div>
+                        <h3>{translate("storage.databaseTitle", language)}</h3>
+                        <p>{translate("storage.databaseObsolete", language, { records: detail.database_maintenance.obsolete_stage_records ?? "—" })}</p>
+                        <p>{translate("storage.databaseDeduplicatable", language, { records: detail.database_maintenance.deduplicatable_applied_records ?? "—" })}</p>
+                        {!detail.database_maintenance.can_maintain && <p>{blockedLabel(detail.database_maintenance.blocked_reason, language)}</p>}
+                      </div>
+                      <button className="danger-button" type="button" disabled={busyAction !== null || !detail.database_maintenance.can_maintain} onClick={() => setDatabaseConfirm(true)}>
+                        {translate(busyAction === "database" ? "storage.databaseBusy" : "storage.databaseMaintain", language)}
+                      </button>
+                    </div>
+                  </section>
                   <StorageDebugSection language={language} runs={detail.debug_runs} busyAction={busyAction} onClear={clearDebugRun} />
                   <StorageOutputSection language={language} files={detail.output_files} busyAction={busyAction} onClear={clearOutput} />
                   <StorageLogsSection language={language} logs={detail.logs} busyAction={busyAction} onClear={clearProjectLog} />
@@ -538,6 +583,13 @@ export function StorageView({ language }: { language: Language }) {
           </section>
         </div>
       )}
+      {databaseConfirm && <ConfirmDialog
+        language={language} title={translate("storage.databaseMaintain", language)}
+        text={translate("storage.confirmDatabase", language)}
+        confirmLabel={translate("storage.databaseMaintain", language)}
+        confirming={busyAction !== null} onCancel={() => setDatabaseConfirm(false)}
+        onConfirm={() => void maintainDatabase()}
+      />}
       {directoryPicker && dataRoot && <DirectoryPicker
         initialPath={pathParent(dataRoot.active_root)}
         language={language}

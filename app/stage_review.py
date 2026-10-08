@@ -39,6 +39,7 @@ from .plugins import (
 )
 from .sqlite_storage import (
     append_jsonl,
+    append_stage_results,
     latest_stage_states,
     record_header,
 )
@@ -654,12 +655,13 @@ def run_apply(
     config, metadata, files, segments = _project_context(project)
     _require_nonempty_segments(segments)
     selected = select_scope(segments, files, scope)
-    suggestions = classify_stage(
-        selected,
-        load_stage_history(project, review_stage),
-        force=False,
-    ).latest_completed
-    bases = _base_results(project, review_stage)
+    selected_ids = [str(item["segment_id"]) for item in selected]
+    suggestions = {
+        key: state["completed"]
+        for key, state in latest_stage_states(project, review_stage, selected_ids).items()
+        if state["completed"] is not None
+    }
+    bases = _base_results(project, review_stage, segment_ids=selected_ids)
     missing = [
         str(item["segment_id"])
         for item in selected
@@ -698,64 +700,51 @@ def run_apply(
             "outdated_base": len(outdated),
             "warnings": ["存在旧基准建议"] if outdated else [],
         }
-    run_id, run_dir = create_run(
-        project,
-        config=config,
-        stage=applied_stage,
-        fingerprint=fingerprint,
-        prompt=None,
-        selected_count=len(selected),
-        requested_count=len(selected),
-        reused_count=0,
-        details={
-            "review_stage": review_stage,
-            "scope": _scope_record(scope),
-        },
-    )
-    logger.info(
-        "run start run=%s review_stage=%s selected=%d",
-        run_id,
-        review_stage,
-        len(selected),
-    )
-    result_path = stage_result_path(project, applied_stage)
+    existing = latest_stage_states(project, applied_stage, selected_ids)
+    records = []
+    reused = 0
     for segment in selected:
         segment_id = str(segment["segment_id"])
         suggestion = suggestions[segment_id]
         base = bases[segment_id]
-        text = (
-            suggestion["suggested_text"]
-            if suggestion["review_status"] == "suggested"
-            else base["text"]
-        )
-        text = _restore_leading_whitespace(
-            str(segment["source"]),
-            str(text),
-        )
-        append_jsonl(
-            project,
-            result_path,
-            record_header(
-                "stage_result",
-                str(metadata["project_id"]),
-                stage=applied_stage,
-                segment_id=segment_id,
-                status="completed",
-                text=text,
-                suggestion_result_id=suggestion["record_id"],
-                base_result_id=base["record_id"],
-                allowed_outdated_base=allow_outdated_base,
-                stage_fingerprint=fingerprint,
-                run_id=run_id,
-                request_id=None,
-            ),
-        )
+        reference_text = suggestion["suggested_text"] if suggestion["review_status"] == "suggested" else base["text"]
+        text = _restore_leading_whitespace(str(segment["source"]), str(reference_text))
+        fields = {
+            "suggestion_result_id": suggestion["record_id"],
+            "base_result_id": base["record_id"],
+            "allowed_outdated_base": allow_outdated_base,
+            "stage_fingerprint": fingerprint,
+        }
+        current = existing.get(segment_id, {}).get("completed")
+        if (current is not None and all(current.get(key) == value for key, value in fields.items())
+                and current.get("text", reference_text) == text):
+            reused += 1
+            continue
+        if text != reference_text:
+            fields["text"] = text
+        records.append(record_header(
+            "stage_result", str(metadata["project_id"]), stage=applied_stage,
+            segment_id=segment_id, status="completed", request_id=None, **fields,
+        ))
+    run_id, run_dir = create_run(
+        project, config=config, stage=applied_stage, fingerprint=fingerprint,
+        prompt=None, selected_count=len(selected), requested_count=len(records),
+        reused_count=reused, details={"review_stage": review_stage, "scope": _scope_record(scope)},
+    )
+    for record in records:
+        record["run_id"] = run_id
+    try:
+        append_stage_results(project, records)
+    except Exception as exc:
+        finalize_run(project, run_dir, status="failed", completed=0,
+                     failed=len(records), warnings=[str(exc)])
+        raise
     warnings = ["已强制应用旧基准建议"] if outdated else []
     finalize_run(
         project,
         run_dir,
         status="completed",
-        completed=len(selected),
+        completed=len(records),
         failed=0,
         warnings=warnings,
     )
@@ -769,6 +758,7 @@ def run_apply(
         "stage": applied_stage,
         "run_id": run_id,
         "completed": len(selected),
+        "reused": reused,
         "failed": 0,
         "warnings": warnings,
     }

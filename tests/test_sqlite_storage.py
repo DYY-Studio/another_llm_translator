@@ -1565,3 +1565,118 @@ def test_read_jsonl_filters_terminology_records_by_task(tmp_path: Path) -> None:
     assert len(scans_a) == 2
     assert {item["active_task_id"] for item in scans_a} == {"TASK-A"}
     assert len(read_jsonl(project, scans_path)) == 4
+
+
+def test_stage_retention_dependencies_reset_and_orphan_parent(tmp_path: Path) -> None:
+    from app.sqlite_storage import append_stage_results
+
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    sid = "F0001-S000001"
+
+    def result(key: str, stage: str, status: str = "completed", **fields: object):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+                             segment_id=sid, status=status, **fields)
+
+    def save(*records):
+        append_stage_results(project, records)
+
+    def ids(stage):
+        return {r["record_id"] for r in read_jsonl(project, stage_result_path(project, stage))}
+
+    save(result("t1", "translation", text="one"))
+    save(result("a1", "proofreading_applied", base_result_id="t1", text="one"))
+    save(result("reset", "translation", "reset"))
+    save(result("f1", "translation", "failed"))
+    save(result("f2", "translation", "failed"))
+    assert ids("translation") == {"t1", "reset", "f2"}
+    assert not latest_stage_summary(project, "translation", [sid])[sid]["completed"]
+    save(result("t2", "translation", text="two"))
+    assert ids("translation") == {"t1", "t2"}
+    save(result("a2", "proofreading_applied", base_result_id="t2", text="two"))
+    assert ids("translation") == {"t2"}
+    assert ids("proofreading_applied") == {"a2"}
+    with pytest.raises(StorageError, match="引用"):
+        save(result("broken", "proofreading_applied", base_result_id="missing"))
+    assert ids("proofreading_applied") == {"a2"}
+
+
+def test_removed_segment_keeps_referenced_parent_then_reclaims_it(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    from app.sqlite_storage import append_stage_results
+    append_stage_results(project, [
+        record_header("stage_result", pid, record_id="parent", stage="translation",
+                      segment_id="F0001-S000001", status="completed", text="old"),
+        record_header("stage_result", pid, record_id="child", stage="proofreading",
+                      segment_id="F0001-S000003", status="completed", base_result_id="parent"),
+    ])
+    # Preserve only the second nonempty Segment, simulating a source replacement.
+    segments = [r for r in read_segments(project) if r["segment_id"] == "F0001-S000003"]
+    replace_source(project, read_files(project), segments, read_json(project, project / "project.json"))
+    assert len(read_jsonl(project, stage_result_path(project, "translation"))) == 1
+    append_stage_results(project, [record_header("stage_result", pid, stage="proofreading",
+        segment_id="F0001-S000003", status="completed")])
+    assert read_jsonl(project, stage_result_path(project, "translation")) == []
+    replace_source(project, [], [], read_json(project, project / "project.json"))
+    assert read_jsonl(project, stage_result_path(project, "proofreading")) == []
+
+
+def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    project = create_project(tmp_path, "\n".join(["fixture"] * 1200))
+    segments = read_segments(project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    original = storage._connect
+    def connect(path):
+        connection = original(path)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return connection
+    monkeypatch.setattr(storage, "_connect", connect)
+    storage.append_stage_results(project, [record_header("stage_result", pid,
+        stage="translation", segment_id=row["segment_id"], status="completed", text="fixture")
+        for row in segments])
+    states = storage.latest_stage_states(project, "translation", [row["segment_id"] for row in segments])
+    assert len(states) == 1200
+    assert all(state["completed"] for state in states.values())
+    summary = storage.latest_stage_summary(project, "translation", [row["segment_id"] for row in segments])
+    assert len(summary) == 1200 and all(state["completed"] for state in summary.values())
+    latest = storage.latest_stage_results(project, "translation", [row["segment_id"] for row in segments])
+    assert len(latest) == 1200
+
+
+def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path: Path) -> None:
+    from app.sqlite_storage import append_stage_results, resolve_stage_result_texts
+    project = create_project(tmp_path)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def result(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    records = [
+        result("base", "translation", text="original"),
+        result("review", "proofreading", review_status="accepted", base_result_id="base"),
+        result("applied", "proofreading_applied", base_result_id="base", suggestion_result_id="review"),
+        result("polish", "polishing", review_status="accepted", base_result_id="applied"),
+        result("polished", "polishing_applied", base_result_id="applied", suggestion_result_id="polish"),
+    ]
+    append_stage_results(project, records)
+    append_stage_results(project, [result("new-base", "translation", text="new")])
+    resolved = resolve_stage_result_texts(project, records[2:])
+    assert resolved[0]["text"] == resolved[2]["text"] == "original"
+    assert "text" not in records[2] and "text" not in records[4]
+    assert "text" not in read_jsonl(project, stage_result_path(project, "polishing_applied"))[0]
+    append_stage_results(project, [record_header("stage_result", pid, stage="translation",
+        segment_id="F0001-S000001", status="reset")])
+    assert resolve_stage_result_texts(project, [records[4]])[0]["text"] == "original"
+    suggested = result("suggested", "proofreading", review_status="suggested", suggested_text="revision", base_result_id="base")
+    application = result("application", "proofreading_applied", base_result_id="base", suggestion_result_id="suggested")
+    lineage = {r["record_id"]: r for r in [*records, suggested, application]}
+    assert resolve_stage_result_texts(project, [application], records_by_id=lineage)[0]["text"] == "revision"
+    assert resolve_stage_result_texts(project, [{**application, "text": " override"}], records_by_id=lineage)[0]["text"] == " override"
+    lineage["suggested"]["review_status"] = "accepted"
+    lineage["application"]["base_result_id"] = "application"
+    with pytest.raises(StorageError, match="循环"):
+        resolve_stage_result_texts(project, [application], records_by_id=lineage)
+    application["base_result_id"] = "missing"
+    with pytest.raises(StorageError, match="引用"):
+        resolve_stage_result_texts(project, [application], records_by_id=lineage)

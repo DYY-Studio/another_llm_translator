@@ -2591,7 +2591,7 @@ async def test_draft_scan_preserves_existing_translation_until_force(
     assert modes == ["translation-only", "terms-only", "terms+translation"]
     assert [
         record["text"] for record in load_stage_history(project, "translation")
-    ] == ["原译", "新译"]
+    ] == ["新译"]
     assert result["completed"] == 1
 
 

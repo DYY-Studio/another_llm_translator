@@ -401,3 +401,159 @@ def test_incomplete_project_scan_blocks_all_project_cleanup_targets(
     assert all(item["blocked_reason"] == reason for item in detail["output_files"])
     with pytest.raises(UsageError, match="项目存储扫描未完成，无法安全清理"):
         manager.clear_project_logs(project, confirm=True)
+
+
+def test_database_maintenance_preserves_current_results_and_reports_partial_failure(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    from app.execution import latest_completed_by_segment
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    path = project / "stages" / "translation.jsonl"
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        for index in range(3):
+            append_jsonl(project, path, record_header("stage_result", pid,
+                stage="translation", segment_id="F0001-S000001", status="completed", text=str(index)))
+    before = latest_completed_by_segment(storage.read_jsonl(project, path))
+    assert manager.scan_project(project)["database_maintenance"]["obsolete_stage_records"] == 2
+    with pytest.raises(UsageError):
+        manager.maintain_database(project, confirm=False)
+    with monkeypatch.context() as patch:
+        def fail(_):
+            raise StorageError("test vacuum failure")
+        patch.setattr(storage, "compact_project_database", fail)
+        with pytest.raises(StorageError, match="已删除 2 条") as raised:
+            manager.maintain_database(project, confirm=True)
+        assert raised.value.params["pruning_completed"] is True
+    assert latest_completed_by_segment(storage.read_jsonl(project, path)) == before
+    assert manager.scan_project(project)["database_maintenance"]["obsolete_stage_records"] == 0
+    result = manager.maintain_database(project, confirm=True)
+    assert result["deleted_records"] == 0
+    assert result["after_bytes"] <= result["before_bytes"]
+
+
+def test_database_maintenance_rejects_broken_dependency_without_deleting(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    path = project / "stages" / "translation.jsonl"
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        for key in ["old", "new"]:
+            append_jsonl(project, path, record_header("stage_result", pid,
+                stage="translation", segment_id="F0001-S000001", status="completed",
+                base_result_id="missing" if key == "new" else None, text=key))
+    assert not manager.scan_project(project)["database_maintenance"]["can_maintain"]
+    with pytest.raises(StorageError, match="引用"):
+        manager.maintain_database(project, confirm=True)
+    assert len(storage.read_jsonl(project, path)) == 2
+
+
+@pytest.mark.parametrize("broken", ["status", "cycle"])
+def test_database_maintenance_deduplicates_kept_applications_atomically(tmp_path: Path, monkeypatch, broken: str) -> None:
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def record(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    records = [record("old", "translation", text="obsolete"), record("base", "translation", text="body"),
+        record("review", "proofreading", review_status="accepted", base_result_id="base"),
+        record("applied", "proofreading_applied", text="body", base_result_id="base", suggestion_result_id="review"),
+        record("polish", "polishing", review_status="accepted", base_result_id="applied"),
+        record("polished", "polishing_applied", text="body", base_result_id="applied", suggestion_result_id="polish"),
+        record("override", "proofreading_applied", text="different", base_result_id="base", suggestion_result_id="review")]
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        storage.append_stage_results(project, records)
+    detail = manager.scan_project(project)["database_maintenance"]
+    assert detail["obsolete_stage_records"] == 1
+    assert detail["deduplicatable_applied_records"] == 2
+    # A reference can exist yet fail to provide a reconstructible body.
+    import sqlite3
+    with sqlite3.connect(project / "project.sqlite") as db:
+        if broken == "status":
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.review_status',NULL) WHERE record_id='polish'")
+        else:
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.base_result_id','applied') WHERE record_id='applied'")
+    with pytest.raises(StorageError, match="无法提供正文|循环"):
+        manager.maintain_database(project, confirm=True)
+    with sqlite3.connect(project / "project.sqlite") as db:
+        assert db.execute("SELECT count(*) FROM stage_results").fetchone()[0] == 7
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.review_status','accepted') WHERE record_id='polish'")
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.base_result_id','base') WHERE record_id='applied'")
+    with monkeypatch.context() as patch:
+        def fail(_):
+            raise StorageError("fixture vacuum failure")
+        patch.setattr(storage, "compact_project_database", fail)
+        with pytest.raises(StorageError, match="去重 2 条") as raised:
+            manager.maintain_database(project, confirm=True)
+        assert raised.value.params["deduplicated_applied_records"] == 2
+    applied = storage.read_jsonl(project, project / "stages" / "proofreading_applied.jsonl")
+    polished = storage.read_jsonl(project, project / "stages" / "polishing_applied.jsonl")
+    assert "text" not in applied[0] and "text" not in polished[0]
+    assert applied[1]["text"] == "different"
+    assert [r["text"] for r in storage.resolve_stage_result_texts(project, [*applied, *polished])] == ["body", "different", "body"]
+    assert manager.scan_project(project)["database_maintenance"]["deduplicatable_applied_records"] == 0
+    assert manager.maintain_database(project, confirm=True)["deduplicated_applied_records"] == 0
+
+
+@pytest.mark.parametrize("broken", ["status", "cycle"])
+def test_maintenance_validates_reference_only_applications_before_pruning(tmp_path: Path, monkeypatch, broken: str) -> None:
+    import sqlite3
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def record(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        storage.append_stage_results(project, [
+            record("old", "translation", text="obsolete"),
+            record("base", "translation", text="body"),
+            record("review", "proofreading", review_status="accepted", base_result_id="base"),
+            record("applied", "proofreading_applied", base_result_id="base", suggestion_result_id="review"),
+        ])
+    with sqlite3.connect(project / "project.sqlite") as db:
+        if broken == "status":
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.review_status',NULL) WHERE record_id='review'")
+        else:
+            db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.base_result_id','applied') WHERE record_id='applied'")
+    assert not manager.scan_project(project)["database_maintenance"]["can_maintain"]
+    with pytest.raises(StorageError, match="无法提供正文|循环"):
+        manager.maintain_database(project, confirm=True)
+    with sqlite3.connect(project / "project.sqlite") as db:
+        assert db.execute("SELECT count(*) FROM stage_results").fetchone()[0] == 4
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_maintenance_preserves_overrides_independent_of_record_order(tmp_path: Path, monkeypatch, reverse: bool) -> None:
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def record(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    storage.append_stage_results(project, [
+        record("base", "translation", text="body"),
+        record("review", "proofreading", review_status="accepted", base_result_id="base"),
+        record("applied", "proofreading_applied", text="override", base_result_id="base", suggestion_result_id="review"),
+        record("polish", "polishing", review_status="accepted", base_result_id="applied"),
+        record("polished", "polishing_applied", text="body", base_result_id="applied", suggestion_result_id="polish"),
+    ])
+    original = storage._connect
+    def connect(path):
+        connection = original(path)
+        connection.execute(f"PRAGMA reverse_unordered_selects = {int(reverse)}")
+        return connection
+    monkeypatch.setattr(storage, "_connect", connect)
+    assert manager.maintain_database(project, confirm=True)["deduplicated_applied_records"] == 0
+    applied = storage.read_jsonl(project, project / "stages" / "proofreading_applied.jsonl")
+    polished = storage.read_jsonl(project, project / "stages" / "polishing_applied.jsonl")
+    assert [r["text"] for r in storage.resolve_stage_result_texts(project, [*applied, *polished])] == ["override", "body"]
