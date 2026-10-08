@@ -546,6 +546,7 @@ def _split_oversized_preflight(
                 if cleanup_probe is not None:
                     cleanup_probe(f"{segment['segment_id']}-PROBE")
         part_ids: list[str] = []
+        source_offset = 0
         for index, part in enumerate(accepted_parts, start=1):
             part_id = f"{segment['segment_id']}-P{index:03d}"
             try:
@@ -553,6 +554,8 @@ def _split_oversized_preflight(
             except ConfigError as exc:
                 fail_planning(exc)
                 raise
+            accepted["_source_offset"] = source_offset
+            source_offset += len(str(accepted["source"]))
             request_segments.append(accepted)
             part_original[part_id] = str(segment["segment_id"])
             part_ids.append(part_id)
@@ -1310,6 +1313,9 @@ def _replace_with_runtime_parts(
         _split_segment_source(segment, part_ids[0], left_source),
         _split_segment_source(segment, part_ids[1], right_source),
     ]
+    source_offset = int(segment.get("_source_offset", 0))
+    parts[0]["_source_offset"] = source_offset
+    parts[1]["_source_offset"] = source_offset + len(left_source)
     expected = original_parts.setdefault(original_id, [segment_id])
     index = expected.index(segment_id)
     expected[index : index + 1] = part_ids

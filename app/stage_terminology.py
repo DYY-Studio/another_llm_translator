@@ -39,6 +39,7 @@ from .llm_response import (
     _validate_terminology_record,
     parse_jsonl_document,
     parse_terminology_response,
+    response_record_types,
 )
 from .logging_utils import get_logger
 from .sqlite_storage import (
@@ -208,13 +209,17 @@ def _summary_covered_segments(
         if current is None:
             continue
         ordered = sorted(values.values(), key=lambda value: int(value["slice_index"]))
-        if [int(value["slice_index"]) for value in ordered] != list(
-            range(len(ordered))
-        ):
-            continue
-        if "".join(str(value["source"]) for value in ordered) != str(current["source"]):
-            continue
-        covered.add(segment_id)
+        source = str(current["source"])
+        covered_positions = {0}
+        for value in ordered:
+            piece = str(value["source"])
+            covered_positions |= {
+                position + len(piece)
+                for position in covered_positions
+                if source.startswith(piece, position)
+            }
+        if len(source) in covered_positions:
+            covered.add(segment_id)
     return covered
 
 
@@ -995,13 +1000,7 @@ async def run_terminology(
         source_digest = _digest(source)
         model_text = segment_model_source(item)
         model_text_digest = _digest(model_text)
-        expected = original_parts.get(stable_id, [request_segment_id])
-        try:
-            slice_index = expected.index(request_segment_id)
-        except ValueError:
-            raise StorageError(
-                f"概括请求切片不在稳定 Segment 范围内：{request_segment_id}"
-            ) from None
+        slice_index = int(item.get("_source_offset", 0))
         return {
             "segment_id": stable_id,
             "original_segment_id": stable_id,
@@ -1155,6 +1154,17 @@ async def run_terminology(
         "term": {},
         "summary": {},
     }
+    class_parts = (
+        {
+            kind: {
+                owner: list(original_parts.get(owner, [owner]))
+                for owner in required_modes
+            }
+            for kind in ("term", "summary")
+        }
+        if include_summaries
+        else {}
+    )
     class_failed_originals: dict[str, set[str]] = {"term": set(), "summary": set()}
     term_scan_recorded: set[str] = set()
     summary_run_record: dict[str, Any] | None = None
@@ -1289,6 +1299,24 @@ async def run_terminology(
     def observe_summary_split(
         items: list[dict[str, Any]], _groups: list[list[dict[str, Any]]]
     ) -> None:
+        for item in items:
+            part_id = str(item["segment_id"])
+            owner = original_id(item)
+            children = [
+                str(child["segment_id"])
+                for group in _groups
+                for child in group
+                if original_id(child) == owner
+            ]
+            if part_id in children:
+                continue
+            mode = mode_for_item(item, default=TerminologyResponseMode.TERMS_ONLY)
+            for kind in response_record_types(mode):
+                if kind not in class_parts:
+                    continue
+                expected = class_parts[kind][owner]
+                index = expected.index(part_id)
+                expected[index : index + 1] = children
         if summary_run_record is None:
             return
         for item in items:
@@ -1305,9 +1333,6 @@ async def run_terminology(
     def original_id(segment: dict[str, Any]) -> str:
         return part_original.get(str(segment["segment_id"]), str(segment["segment_id"]))
 
-    def expected_part_ids(segment_id: str) -> list[str]:
-        return original_parts.get(segment_id, [segment_id])
-
     def mark_class_success(items: list[dict[str, Any]], result_class: str) -> list[str]:
         by_original = class_success_parts[result_class]
         for item in items:
@@ -1317,7 +1342,7 @@ async def run_terminology(
         completed: list[str] = []
         for item in items:
             owner = original_id(item)
-            if set(expected_part_ids(owner)) <= by_original.get(owner, set()):
+            if set(class_parts[result_class][owner]) <= by_original.get(owner, set()):
                 if owner not in completed:
                     completed.append(owner)
                 class_failed_originals[result_class].discard(owner)
@@ -1328,7 +1353,8 @@ async def run_terminology(
         if not required:
             return
         if all(
-            original in class_success_parts[result_class]
+            set(class_parts[result_class][original])
+            <= class_success_parts[result_class].get(original, set())
             and not class_failed_originals[result_class].__contains__(original)
             for result_class in required
         ):

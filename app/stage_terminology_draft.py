@@ -217,6 +217,7 @@ class DraftTerminologyScan:
         self.include_summaries = bool(config.get("_include_summaries"))
         self.summary_failed: set[str] = set()
         self.summary_part_done: dict[str, set[str]] = {}
+        self.summary_parts: dict[str, list[str]] = {}
         boundaries = (
             {
                 (str(row["file_id"]), str(row["part_id"]))
@@ -264,6 +265,7 @@ class DraftTerminologyScan:
         self.term_failed: set[str] = set()
         self.failure_counts: Counter[str] = Counter()
         self.part_done: dict[str, set[str]] = {}
+        self.term_parts: dict[str, list[str]] = {}
         self.active_path = project / "terminology" / "active_task.json"
         active = (
             read_json(project, self.active_path)
@@ -498,7 +500,7 @@ class DraftTerminologyScan:
             source = str(item["source"])
             model_text = segment_model_source(item)
             original = self.selected_items[owner]
-            index = original_parts.get(owner, [part_id]).index(part_id)
+            index = int(item.get("_source_offset", 0))
             values.append(
                 {
                     "segment_id": owner,
@@ -565,7 +567,11 @@ class DraftTerminologyScan:
             else:
                 self.summary_part_done.setdefault(owner, set()).add(part_id)
                 if (
-                    set(original_parts.get(owner, [part_id]))
+                    set(
+                        self.summary_parts.get(
+                            owner, original_parts.get(owner, [part_id])
+                        )
+                    )
                     <= self.summary_part_done[owner]
                 ):
                     self.summary_done.add(owner)
@@ -613,7 +619,9 @@ class DraftTerminologyScan:
             self.part_done.setdefault(owner, set()).add(part_id)
             if (
                 owner in self.term_done
-                or not set(original_parts.get(owner, [part_id]))
+                or not set(
+                    self.term_parts.get(owner, original_parts.get(owner, [part_id]))
+                )
                 <= self.part_done[owner]
             ):
                 continue
@@ -688,6 +696,12 @@ class DraftTerminologyScan:
     ) -> None:
         from .stage_translation import _map_local_translation_response
 
+        for item in group:
+            part_id = str(item["segment_id"])
+            owner = part_original.get(part_id, part_id)
+            parts = original_parts.get(owner, [part_id])
+            self.term_parts.setdefault(owner, list(parts))
+            self.summary_parts.setdefault(owner, list(parts))
         queue = [(list(group), 0, parent_request_id)]
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
@@ -727,15 +741,28 @@ class DraftTerminologyScan:
                     self.config["chunking"]["allow_split_oversized_segment"]
                     and len(str(pending[0]["source"])) > 1
                 ):
-                    groups = tuple(
-                        [part]
-                        for part in _replace_with_runtime_parts(
-                            pending[0],
-                            part_original=part_original,
-                            original_parts=original_parts,
-                            by_id=by_id,
-                        )
+                    item = pending[0]
+                    part_id = str(item["segment_id"])
+                    owner = part_original.get(part_id, part_id)
+                    parts = _replace_with_runtime_parts(
+                        item,
+                        part_original=part_original,
+                        original_parts={owner: [part_id]},
+                        by_id=by_id,
                     )
+                    # A completed task keeps its own source partition intact.
+                    for flag, partitions in (
+                        ("_draft_terms", self.term_parts),
+                        ("_draft_translation", original_parts),
+                        ("_draft_summary", self.summary_parts),
+                    ):
+                        if item.get(flag):
+                            expected = partitions.setdefault(owner, [part_id])
+                            index = expected.index(part_id)
+                            expected[index : index + 1] = [
+                                str(part["segment_id"]) for part in parts
+                            ]
+                    groups = tuple([part] for part in parts)
                 else:
                     await record_context_failure(pending, exc)
                     continue

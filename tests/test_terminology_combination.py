@@ -609,3 +609,243 @@ async def test_supplement_split_continues_remaining_groups(
         value["completed"] == value["total"]
         for value in result["draft_progress"].values()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pending_kind,include_draft",
+    [
+        ("term", True),
+        ("segment", True),
+        ("summary", True),
+        ("term", False),
+        ("summary", False),
+    ],
+)
+@pytest.mark.parametrize("error_kind", ["context", "empty"])
+async def test_nested_supplement_split_keeps_other_results_complete_and_reusable(
+    tmp_path: Path, pending_kind: str, include_draft: bool, error_kind: str
+) -> None:
+    from app.sqlite_storage import read_json, terminology_scan_state
+
+    project = await create_project(tmp_path, "ABCD")
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    )
+    modes = []
+    only_mode = {
+        "term": "terms-only",
+        "segment": "translation-only",
+        "summary": "summary-only",
+    }[pending_kind]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        modes.append(
+            payload.get(
+                "response_mode",
+                only_mode if len(modes) in (2, 3, 4) else "terms+fragment-summary",
+            )
+        )
+        if len(modes) in (1, 3):
+            if error_kind == "context":
+                return httpx.Response(
+                    400, text="context_length_exceeded: maximum context tokens"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "length", "message": {"content": ""}}]
+                },
+            )
+        kinds = response_record_types(modes[-1])
+        records = []
+        if "summary" in kinds and not (len(modes) == 2 and pending_kind == "summary"):
+            records.append({"type": "summary", "text": "内容概括。"})
+        if "term" in kinds:
+            records.append(
+                {"type": "term", "source": "AB", "category": 1}
+                if len(modes) == 2 and pending_kind == "term"
+                else {"type": "no_terms"}
+            )
+        if "segment" in kinds and not (len(modes) == 2 and pending_kind == "segment"):
+            records.extend(
+                {"type": "segment", "id": item["id"], "translation": "译文"}
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert result["failed"] == 0
+        assert result["completed"] == 1
+        if include_draft:
+            assert all(
+                value["completed"] == value["total"] == 1
+                for value in result["draft_progress"].values()
+            )
+        active = read_json(project, project / "terminology" / "active_task.json")
+        scanned, _ = terminology_scan_state(
+            project, active["active_task_id"], {"F0001-S000001"}
+        )
+        assert scanned == {"F0001-S000001"}
+        assert modes[2:5] == [only_mode] * 3
+        modes.clear()
+        repeated = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert modes == []
+        assert repeated["failed"] == 0
+        if include_draft:
+            assert repeated["requested"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_parallel_summary_split_keeps_saved_slices_reusable(
+    tmp_path: Path, include_draft: bool
+) -> None:
+    import asyncio
+    from tests.helpers import use_llm_preset
+
+    project = await create_project(tmp_path, "A" * 8000 + "B" * 8000)
+    path = project / "config.toml"
+    path.write_text(
+        path.read_text().replace(
+            'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"'
+        )
+    )
+    use_llm_preset(
+        tmp_path,
+        context_window_tokens=3000,
+        context_safety_margin_tokens=100,
+        target_chunk_input_tokens=1,
+        max_output_tokens=200,
+    )
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    )
+    seen = []
+    repeat = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert not repeat, "完整概括不应在再次补缺时重新请求"
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.append(payload)
+        if len(seen) == 1:
+            # Let later preflight slices finish before the first slice subdivides.
+            await asyncio.sleep(0.03)
+            return httpx.Response(
+                400, text="context_length_exceeded: maximum context tokens"
+            )
+        records = [{"type": "summary", "text": "概括"}, {"type": "no_terms"}]
+        if include_draft:
+            records.extend(
+                {"type": "segment", "id": item["id"], "translation": "译"}
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert result["completed"] == 1
+        assert result["failed"] == 0
+        assert len(seen) > 3
+        repeat = True
+        repeated = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert repeated["failed"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_complete_summary_recovery_ignores_old_partial_partition(
+    tmp_path: Path, include_draft: bool
+) -> None:
+    from app.errors import FatalExternalError
+
+    project = await create_project(tmp_path, "ABCD")
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    )
+    phase = 0
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert phase != 2, "补缺成功后应复用完整概括"
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.append(payload)
+        if phase == 0 and len(seen) == 1:
+            return httpx.Response(
+                400, text="context_length_exceeded: maximum context tokens"
+            )
+        if phase == 0 and len(seen) == 3:
+            return httpx.Response(400, text="bad request")
+        records = [{"type": "summary", "text": "概括"}, {"type": "no_terms"}]
+        if include_draft:
+            records.extend(
+                {"type": "segment", "id": item["id"], "translation": "译"}
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(FatalExternalError):
+            await run_terminology(
+                project,
+                Scope(),
+                http_client=client,
+                include_summaries=True,
+                include_draft_translation=include_draft,
+            )
+        phase = 1
+        seen.clear()
+        recovered = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert recovered["completed"] == 1
+        assert recovered["failed"] == 0
+        assert len(seen) == 1
+        phase = 2
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+            include_summaries=True,
+            include_draft_translation=include_draft,
+        )
