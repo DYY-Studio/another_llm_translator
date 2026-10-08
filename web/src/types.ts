@@ -249,7 +249,19 @@ export interface StorageLogGroup {
   blocked_reason: string | null;
 }
 
+export interface DatabaseMaintenanceResult {
+  deleted_records: number;
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+}
+
 export interface StorageProjectDetail {
+  database_maintenance: {
+    obsolete_stage_records: number | null;
+    can_maintain: boolean;
+    blocked_reason: string | null;
+  };
   complete: boolean;
   project: StorageProjectSummary;
   debug_runs: StorageDebugRun[];

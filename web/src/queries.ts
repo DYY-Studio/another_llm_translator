@@ -7,6 +7,7 @@ import type {
   HistoricalRunSummary,
   RelatedTermsResponse,
   StorageCleanupResult,
+  DatabaseMaintenanceResult,
   StorageProjectDetail,
   StorageSummary,
   DataRootStatus,
@@ -224,4 +225,10 @@ export function fetchHistoricalRequest(
     `/api/v1/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(runId)}/requests/${encodeURIComponent(requestId)}${suffix}`,
     { signal },
   );
+}
+
+export function maintainProjectDatabase(project: string): Promise<DatabaseMaintenanceResult> {
+  return api<DatabaseMaintenanceResult>(`/api/v1/projects/${encodeURIComponent(project)}/storage/database/maintain`, {
+    method: "POST", body: JSON.stringify({ confirm: true }),
+  });
 }

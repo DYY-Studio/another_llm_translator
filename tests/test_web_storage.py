@@ -243,3 +243,19 @@ def test_web_data_root_relocation_rejects_active_tasks_and_environment_override(
     )
     assert env_override.status_code == 400
     assert not pending_path().exists()
+
+
+def test_database_maintenance_confirmation_busy_guard_and_result(tmp_path: Path, monkeypatch) -> None:
+    projects_root, _ = make_project(tmp_path)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    endpoint = "/api/v1/projects/sample/storage/database/maintain"
+    assert client.post(endpoint, json={"confirm": False}).status_code == 400
+    with monkeypatch.context() as patch:
+        patch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+        assert not client.get("/api/v1/storage/projects/sample").json()["database_maintenance"]["can_maintain"]
+        assert client.post(endpoint, json={"confirm": True}).status_code == 400
+    response = client.post(endpoint, json={"confirm": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["deleted_records"] == 0
+    assert response.json()["reclaimed_bytes"] >= 0

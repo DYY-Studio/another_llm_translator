@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from .locking import project_write_lock
 from .logging_utils import LOGGER_NAME
 from .sqlite_storage import (
     database_path,
+    obsolete_stage_result_count,
+    maintain_project_database,
     list_run_index,
     read_project_meta_read_only,
 )
@@ -815,7 +818,16 @@ class StorageManager:
                     "blocked_reason": blocked,
                 }
             )
+        maintenance = {"obsolete_stage_records": None, "can_maintain": False,
+                       "blocked_reason": busy_reason if scan.complete else _PROJECT_SCAN_BLOCKED_REASON}
+        if scan.complete:
+            try:
+                maintenance["obsolete_stage_records"] = obsolete_stage_result_count(root)
+                maintenance["can_maintain"] = busy_reason is None
+            except (AppError, OSError, sqlite3.Error) as exc:
+                maintenance["blocked_reason"] = str(exc)
         return {
+            "database_maintenance": maintenance,
             "complete": scan.complete,
             "project": descriptor,
             "debug_runs": debug_runs,
@@ -841,6 +853,13 @@ class StorageManager:
         with _global_log_lock:
             affected, reclaimed = _clear_log_group(root)
         return {"affected_files": affected, "reclaimed_bytes": reclaimed}
+
+    def maintain_database(self, project: Path, *, confirm: object) -> dict[str, int]:
+        _require_confirm(confirm)
+        root = _safe_resolve(project)
+        with project_write_lock(root):
+            self._assert_project_cleanable(root)
+            return maintain_project_database(root)
 
     def clear_project_logs(self, project: Path, *, confirm: object) -> dict[str, int]:
         _require_confirm(confirm)

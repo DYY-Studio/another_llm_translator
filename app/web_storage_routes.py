@@ -4,6 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI
+from starlette.concurrency import run_in_threadpool
 
 from . import data_root
 from .errors import UsageError
@@ -71,7 +72,7 @@ def register_storage_routes(
 
     @app.get("/api/v1/storage/projects/{selector}")
     async def storage_project_detail(selector: str) -> dict[str, object]:
-        return storage_manager.scan_project(project(selector))
+        return await run_in_threadpool(storage_manager.scan_project, project(selector))
 
     @app.post("/api/v1/storage/logs/clear")
     async def clear_global_logs(payload: StorageConfirmPayload) -> dict[str, int]:
@@ -102,3 +103,7 @@ def register_storage_routes(
         return storage_manager.clear_project_logs(
             project(name), confirm=payload.confirm
         )
+
+    @app.post("/api/v1/projects/{name}/storage/database/maintain")
+    async def maintain_database(name: str, payload: StorageConfirmPayload) -> dict[str, int]:
+        return await run_in_threadpool(storage_manager.maintain_database, project(name), confirm=payload.confirm)

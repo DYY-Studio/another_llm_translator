@@ -2937,3 +2937,33 @@ def segment_page_counts(
     finally:
         connection.close()
 
+def obsolete_stage_result_count(project: Path) -> int:
+    from .stage_result_retention import obsolete_stage_results
+    connection = _read_only_connection(project)
+    try:
+        with connection:
+            return len(obsolete_stage_results(connection))
+    finally:
+        connection.close()
+
+
+def maintain_project_database(project: Path) -> dict[str, int]:
+    """Caller holds the project lock; pruning commits before VACUUM."""
+    from .stage_result_retention import maintain_stage_results
+    path = database_path(project)
+    if shutil.disk_usage(path.parent).free < path.stat().st_size:
+        raise StorageError("磁盘空间不足，无法整理并压缩项目 SQLite")
+    connection = _with_db(project)
+    try:
+        with connection:
+            deleted = maintain_stage_results(connection)
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法整理阶段结果：{exc}") from exc
+    finally:
+        connection.close()
+    try:
+        return {"deleted_records": deleted, **compact_project_database(project)}
+    except (StorageError, OSError) as exc:
+        error = StorageError(f"已删除 {deleted} 条旧阶段记录，但数据库压缩失败；可重试压缩：{exc}")
+        error.params = {"deleted_records": deleted, "pruning_completed": True}
+        raise error from exc

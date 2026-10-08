@@ -401,3 +401,51 @@ def test_incomplete_project_scan_blocks_all_project_cleanup_targets(
     assert all(item["blocked_reason"] == reason for item in detail["output_files"])
     with pytest.raises(UsageError, match="项目存储扫描未完成，无法安全清理"):
         manager.clear_project_logs(project, confirm=True)
+
+
+def test_database_maintenance_preserves_current_results_and_reports_partial_failure(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    from app.execution import latest_completed_by_segment
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    path = project / "stages" / "translation.jsonl"
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        for index in range(3):
+            append_jsonl(project, path, record_header("stage_result", pid,
+                stage="translation", segment_id="F0001-S000001", status="completed", text=str(index)))
+    before = latest_completed_by_segment(storage.read_jsonl(project, path))
+    assert manager.scan_project(project)["database_maintenance"]["obsolete_stage_records"] == 2
+    with pytest.raises(UsageError):
+        manager.maintain_database(project, confirm=False)
+    with monkeypatch.context() as patch:
+        def fail(_):
+            raise StorageError("test vacuum failure")
+        patch.setattr(storage, "compact_project_database", fail)
+        with pytest.raises(StorageError, match="已删除 2 条") as raised:
+            manager.maintain_database(project, confirm=True)
+        assert raised.value.params["pruning_completed"] is True
+    assert latest_completed_by_segment(storage.read_jsonl(project, path)) == before
+    assert manager.scan_project(project)["database_maintenance"]["obsolete_stage_records"] == 0
+    result = manager.maintain_database(project, confirm=True)
+    assert result["deleted_records"] == 0
+    assert result["after_bytes"] <= result["before_bytes"]
+
+
+def test_database_maintenance_rejects_broken_dependency_without_deleting(tmp_path: Path, monkeypatch) -> None:
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    path = project / "stages" / "translation.jsonl"
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "prune_stage_results", lambda *_: 0)
+        for key in ["old", "new"]:
+            append_jsonl(project, path, record_header("stage_result", pid,
+                stage="translation", segment_id="F0001-S000001", status="completed",
+                base_result_id="missing" if key == "new" else None, text=key))
+    assert not manager.scan_project(project)["database_maintenance"]["can_maintain"]
+    with pytest.raises(StorageError, match="引用"):
+        manager.maintain_database(project, confirm=True)
+    assert len(storage.read_jsonl(project, path)) == 2
