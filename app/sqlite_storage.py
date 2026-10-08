@@ -3033,6 +3033,9 @@ def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: se
         cache.pop(key, None)
         if record["text"] == _stage_result_text(without_text, lineage, cache, set()):
             eligible.append(key)
+        # Downstream comparisons must see the persistent override, not this trial body.
+        cache.pop(key, None)
+        _stage_result_text(record, lineage, cache, set())
     # Validate the final representation, including chains of removed overrides.
     for key in eligible:
         lineage[key] = {field: value for field, value in lineage[key].items() if field != "text"}

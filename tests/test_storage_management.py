@@ -529,3 +529,31 @@ def test_maintenance_validates_reference_only_applications_before_pruning(tmp_pa
         manager.maintain_database(project, confirm=True)
     with sqlite3.connect(project / "project.sqlite") as db:
         assert db.execute("SELECT count(*) FROM stage_results").fetchone()[0] == 4
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_maintenance_preserves_overrides_independent_of_record_order(tmp_path: Path, monkeypatch, reverse: bool) -> None:
+    import app.sqlite_storage as storage
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    pid = str(read_json(project, project / "project.json")["project_id"])
+    def record(key, stage, **fields):
+        return record_header("stage_result", pid, record_id=key, stage=stage,
+            segment_id="F0001-S000001", status="completed", **fields)
+    storage.append_stage_results(project, [
+        record("base", "translation", text="body"),
+        record("review", "proofreading", review_status="accepted", base_result_id="base"),
+        record("applied", "proofreading_applied", text="override", base_result_id="base", suggestion_result_id="review"),
+        record("polish", "polishing", review_status="accepted", base_result_id="applied"),
+        record("polished", "polishing_applied", text="body", base_result_id="applied", suggestion_result_id="polish"),
+    ])
+    original = storage._connect
+    def connect(path):
+        connection = original(path)
+        connection.execute(f"PRAGMA reverse_unordered_selects = {int(reverse)}")
+        return connection
+    monkeypatch.setattr(storage, "_connect", connect)
+    assert manager.maintain_database(project, confirm=True)["deduplicated_applied_records"] == 0
+    applied = storage.read_jsonl(project, project / "stages" / "proofreading_applied.jsonl")
+    polished = storage.read_jsonl(project, project / "stages" / "polishing_applied.jsonl")
+    assert [r["text"] for r in storage.resolve_stage_result_texts(project, [*applied, *polished])] == ["override", "body"]
