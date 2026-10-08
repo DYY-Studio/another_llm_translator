@@ -2727,10 +2727,14 @@ def latest_stage_states(
     values = [str(value) for value in segment_ids]
     if not values:
         return {}
-    placeholders = ",".join("?" for _ in values)
     connection = _with_db(project)
     try:
-        rows = connection.execute(
+        rows = []
+        project_id = _project_id(connection)
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
             f"""
             WITH aggregate AS (
                 SELECT segment_id,
@@ -2761,8 +2765,8 @@ def latest_stage_states(
             LEFT JOIN stage_results AS latest
               ON latest.sequence = aggregate.latest_sequence
             """,
-            [stage, *values],
-        ).fetchall()
+            [stage, *batch],
+        ).fetchall())
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             completed_payload = row["completed_payload"]
@@ -2777,7 +2781,7 @@ def latest_stage_states(
                             "status": row["completed_status"],
                             "payload_json": completed_payload,
                         },
-                        _project_id(connection),
+                        project_id,
                     ),
                     f"stage={stage} segment={row['segment_id']}",
                 )

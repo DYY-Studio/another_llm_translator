@@ -1130,3 +1130,26 @@ async def test_force_redo_counts_only_current_results(
     history = read_jsonl(project, project / "stages" / f"{stage}.jsonl")
     assert sum(item.get("run_id") == first["run_id"] for item in history) == 0
     assert sum(item.get("run_id") == redo["run_id"] for item in history) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+async def test_apply_reuses_identical_results_and_counts_run(tmp_path: Path, stage: str) -> None:
+    from app.sqlite_storage import read_json
+    project = await create_project(tmp_path, "one\ntwo")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_review(project, stage, Scope(), http_client=client)
+    first = run_apply(project, stage, Scope(only_segment="F0001-S000001"),
+                      allow_outdated_base=False, confirmed_all=True)
+    second = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    third = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
+    assert first["reused"] == 0
+    assert second["completed"] == 2 and second["reused"] == 1
+    assert third["completed"] == 2 and third["reused"] == 2
+    assert len(read_jsonl(project, project / "stages" / f"{stage}_applied.jsonl")) == 2
+    manifest = read_json(project, project / "runs" / third["run_id"] / "manifest.json")
+    assert manifest["status"] == "completed"
+    assert manifest["completed_segment_count"] == 0
+    assert manifest["requested_segment_count"] == 0
+    assert manifest["reused_segment_count"] == 2
