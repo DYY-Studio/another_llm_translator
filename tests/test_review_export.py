@@ -1187,6 +1187,10 @@ async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path
         await run_review(project, "proofreading", Scope(), http_client=client)
     run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
     store = WebStore(project)
+    # Keep one legacy inline application beside a new reference application.
+    inline_text = store.segment_detail("F0001-S000001")["reviews"]["proofreading"]["applied"]["text"]
+    with sqlite3.connect(project / "project.sqlite") as db:
+        db.execute("UPDATE stage_results SET payload_json=json_set(payload_json,'$.text',?) WHERE stage='proofreading_applied' AND segment_id='F0001-S000001'", (inline_text,))
     before_detail = store.segment_detail("F0001-S000001")
     before_base = _base_results(project, "polishing")
     exported = export_project(project, "proofread", bilingual=True, allow_missing=False, output_format="txt")
