@@ -1,4 +1,4 @@
-import { useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
@@ -330,6 +330,21 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.baseDelay", language)} value={config.retry.base_delay_seconds} min={0} step={0.1} help={translate("settings.baseDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.base_delay_seconds = value; })} />
           <NumberField label={translate("settings.maxDelay", language)} value={config.retry.max_delay_seconds} min={0} step={0.1} help={translate("settings.maxDelayHint", language)} onChange={(value) => update((draft) => { draft.retry.max_delay_seconds = value; })} />
           <NumberField label={translate("settings.jitter", language)} value={config.retry.jitter_seconds} min={0} step={0.1} help={translate("settings.jitterHint", language)} onChange={(value) => update((draft) => { draft.retry.jitter_seconds = value; })} />
+        </ConfigSection>
+        <ConfigSection title={translate("settings.emptyResponseRetry", language)} description={translate("settings.emptyResponseRetryHint", language)}>
+          {(["truncated", "unknown"] as const).map((kind) => {
+            const modeKey = `empty_${kind}_mode` as const;
+            const countKey = `empty_${kind}_max_attempts` as const;
+            return <Fragment key={kind}>
+              <Field label={translate(kind === "truncated" ? "settings.emptyTruncatedMode" : "settings.emptyUnknownMode", language)}>
+                <select value={config.retry[modeKey]} onChange={(event) => update((draft) => { draft.retry[modeKey] = event.target.value as "retry" | "split"; })}>
+                  <option value="retry">{translate("settings.emptyRetryOriginal", language)}</option>
+                  <option value="split">{translate("settings.emptyRetrySplit", language)}</option>
+                </select>
+              </Field>
+              <NumberField label={translate(kind === "truncated" ? "settings.emptyTruncatedAttempts" : "settings.emptyUnknownAttempts", language)} value={config.retry[countKey]} min={0} step={1} help={translate(config.retry[modeKey] === "split" ? "settings.emptySplitAttemptsHint" : "settings.emptyRetryAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry[countKey] = value; })} />
+            </Fragment>;
+          })}
         </ConfigSection>
         <ConfigSection title={translate("settings.debug", language)} description={translate("settings.debugHint", language)} warning>
           <ToggleField label={translate("settings.enableDebug", language)} checked={config.debug.enabled} onChange={(value) => update((draft) => { draft.debug.enabled = value; })} />
@@ -816,6 +831,10 @@ interface PromptView {
   assembled_modes?: Record<string, string>;
   assembled_mode_languages?: Record<string, string>;
   assembled_mode_errors?: Record<string, string>;
+  document_context?: {
+    file_id: string | null;
+    groups: Array<{ file_id: string; adapter_ids: string[]; file_count: number; has_requirements: boolean }>;
+  };
   languages: string[];
   global_sync?: {
     available: boolean;
@@ -834,6 +853,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
   const [assembledModeLanguages, setAssembledModeLanguages] = useState<Record<string, string>>({});
   const [assembledModeErrors, setAssembledModeErrors] = useState<Record<string, string>>({});
+  const [documentContext, setDocumentContext] = useState<PromptView["document_context"]>();
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [previewMode, setPreviewMode] = useState("terms-only");
   const [previewPhase, setPreviewPhase] = useState("adjudication");
   const [languages, setLanguages] = useState<string[]>(["zh-CN"]);
@@ -849,22 +870,37 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [error, setError] = useState("");
   const path = scope === "global" ? `/api/v1/global/prompts/${stage}` : `/api/v1/projects/${project}/prompts/${stage}`;
 
-  function applyPromptView(value: PromptView) {
-    setContent(value.content);
-    setSavedContent(value.content);
+  function applyPromptPreview(value: PromptView) {
+    setDocumentContext(value.document_context);
     setAssembled(value.assembled);
     setAssembledPhases(value.assembled_phases ?? {});
     setAssembledModes(value.assembled_modes ?? {});
     setAssembledModeLanguages(value.assembled_mode_languages ?? {});
     setAssembledModeErrors(value.assembled_mode_errors ?? {});
+  }
+
+  function applyPromptView(value: PromptView) {
+    setContent(value.content);
+    setSavedContent(value.content);
+    applyPromptPreview(value);
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
     setLanguages(value.languages);
     setPromptLanguage(value.language);
   }
 
+  async function changePreviewRequirements(fileId: string) {
+    setPreviewLoading(true);
+    setError("");
+    try {
+      const value = await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}&file_id=${encodeURIComponent(fileId)}`);
+      applyPromptPreview(value);
+    } catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setPreviewLoading(false); }
+  }
+
   async function loadPrompt() {
-    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}`));
+    applyPromptView(await api<PromptView>(`${path}?language=${encodeURIComponent(promptLanguage)}${documentContext?.file_id ? `&file_id=${encodeURIComponent(documentContext.file_id)}` : ""}`));
   }
 
   useEffect(() => {
@@ -915,11 +951,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     try {
       const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
       setContent(value.content);
-      setAssembled(value.assembled);
-      setAssembledPhases(value.assembled_phases ?? {});
-      setAssembledModes(value.assembled_modes ?? {});
-      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
-      setAssembledModeErrors(value.assembled_mode_errors ?? {});
+      applyPromptPreview(value);
       setPromptLanguage(value.language);
       setLoadedGlobalDraft(true);
       setMessage(translate("settings.promptGlobalLoaded", language));
@@ -931,11 +963,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     try {
       const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
       setContent(value.content);
-      setAssembled(value.assembled);
-      setAssembledPhases(value.assembled_phases ?? {});
-      setAssembledModes(value.assembled_modes ?? {});
-      setAssembledModeLanguages(value.assembled_mode_languages ?? {});
-      setAssembledModeErrors(value.assembled_mode_errors ?? {});
+      applyPromptPreview(value);
       setSelectedLibraryEntry(promptId);
       setLoadedGlobalDraft(false);
       setMessage(translate("settings.promptLibraryLoaded", language, { id: promptId }));
@@ -980,6 +1008,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const previewModes = stage === "terminology"
     ? [
       ["terms-only", translate("settings.promptModeTermsOnly", language)],
+      ["terms+translation", translate("settings.promptModeTermsAndTranslation", language)],
+      ["terms+translation+fragment-summary", translate("settings.promptModeAll", language)],
       ["terms+fragment-summary", translate("settings.promptModeTermsAndSummary", language)],
       ["summary-only", translate("settings.promptModeSummaryOnly", language)],
     ] as const
@@ -1025,6 +1055,10 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>
+      {documentContext && documentContext.groups.length > 0 ? <>
+        <label className="stage-select">{translate("settings.promptDocument", language)}<select value={documentContext.file_id ?? ""} disabled={previewLoading} onChange={(event) => void changePreviewRequirements(event.target.value)}>{documentContext.groups.map((group, index) => <option key={group.file_id} value={group.file_id}>{group.adapter_ids.join(" / ")} · {group.has_requirements ? translate("settings.promptRequirementSet", language, { number: index + 1 }) : translate("settings.promptNoRequirements", language)} · {translate("settings.promptFileCount", language, { count: group.file_count })}</option>)}</select></label>
+        <p className="prompt-preview-hint">{translate("settings.promptDocumentHint", language)}</p>
+      </> : <p className="prompt-preview-hint">{translate("settings.promptTemplateHint", language)}</p>}
       {previewModes.length > 0 && <>
         <label className="stage-select">{translate("settings.promptPreviewMode", language)}<select value={activeMode} onChange={(event) => setPreviewMode(event.target.value)}>{previewModes.map(([mode, label]) => <option key={mode} value={mode} disabled={!assembledModes[mode] && !assembledModeErrors[mode]}>{label}</option>)}</select></label>
         {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}

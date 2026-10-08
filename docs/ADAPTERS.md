@@ -176,17 +176,25 @@ schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 
 普通日志和诊断摘要不包含增量正文，debug 模式才保存原始 SSE `data` 事件。流式 timeout 是连接及连续读取的空闲超时，不限制完整生成时间。
 
-内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；Responses、Gemini、Anthropic 仍要求各自声明的终止事件。宿主不识别 `cost` 或其他供应商字段作为隐式终止标记。
+内置 `openai-compatible` 同时接受 `[DONE]` 和显式启用的 clean EOF；Responses、Gemini、Anthropic 使用各自声明的终止事件。声明的截断或拒绝结束原因也允许在自然 EOF 时完成传输判定。宿主不识别 `cost` 或其他供应商字段作为隐式终止标记。
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
+`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。未命中已声明的截断或拒绝结束原因时，越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
 
 也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
 
-Adapter 规范化返回 `content` 和可空的 `reasoning_content`。宿主随后按统一严格规则，
+可选的 `response_finish_reason_pointer` 提取字符串或 null 的结束原因；路径缺失时无结束原因。
+`truncated_finish_reasons` 与 `blocked_finish_reasons` 分别声明长度限制与拒绝生成的结束原因字符串列表，
+缺省为空，两个列表不得重叠。宿主只按这些明确声明分类空正文，不推断供应商或思考预算。
+
+流式 `streaming.finish_reason_events` 使用与 `content_events` 相同的 `pointer`、可选 `when` 结构，
+缺省为空；保留最后一个匹配的结束原因。自然 EOF 前明确收到声明的截断或拒绝结束原因时，
+可结束传输并交由宿主处理空正文；读取或协议错误仍按原规则处理。
+
+Adapter 规范化返回 `content`、可空的 `reasoning_content` 和可空的 `finish_reason`。宿主随后按统一严格规则，
 从 content 开头剥离一个完整已知思考 Tag。若结构化字段与内嵌块同时非空则快速失败，
 不猜测拼接顺序。
 
@@ -281,6 +289,14 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
 
 Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+
+### 术语提取实验响应
+
+术语＋粗翻、术语＋概括和术语＋粗翻＋概括均使用显式术语声明：有术语返回 `term` 记录；无合格术语必须返回唯一的 `{"type":"no_terms"}`，不能附加字段或与 `term` 并存。末行仍为 `{"type":"end"}`，只表示结束。实验中的单独补扫请求也遵守这一规则；仅补译或仅补概括请求不声明术语结果。缺少或无效的声明属于整次响应的格式错误。
+
+组合实验与标准术语扫描共用字段校验：`source`、`category` 为非空字符串，`description`、`preferred_translation` 为可选字符串，`aliases` 为字符串数组。宿主不额外检查候选及别名是否在源文中连续出现，也不额外拒绝重复候选或术语记录的未知字段。
+
+合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_segments` 中 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
 
 ## 2. Document Adapter（Beta）
 

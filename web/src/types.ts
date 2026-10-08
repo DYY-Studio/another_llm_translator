@@ -90,6 +90,7 @@ export interface ResultView {
   suggested_text?: string | null;
   reason?: string | null;
   validation_status?: "passed" | "warning";
+  generation_origin?: "terminology_draft" | null;
 }
 
 export interface ReviewView {
@@ -303,6 +304,8 @@ export interface TaskState {
   final_review?: boolean;
   status: string;
   include_summaries?: boolean;
+  include_draft_translation?: boolean;
+  draft_progress?: DraftProgress | null;
   summary_selection?: Array<{ file_id: string; part_id: string }>;
   error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
@@ -589,7 +592,14 @@ export interface ModelRow {
   display: string;
 }
 
+export type DraftProgress = Record<"terminology" | "translation", { completed: number; failed: number; total: number }> & { content_summary?: { completed: number; failed: number; total: number } };
+
 export interface TaskOptions {
+  summary_progress?: { completed: number; total: number };
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
+  draft_progress?: DraftProgress;
+  draft_prompt_preflight?: { ok: boolean; language: string; missing: string[] };
   stage: RunStage;
   final_review?: boolean;
   preset: {
@@ -641,6 +651,8 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
   run_id: string;
   started_at: string | null;
   scope: Record<string, unknown> | null;
@@ -687,6 +699,8 @@ export interface ContinuousRunDecision {
 }
 
 export interface RunDecision {
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
@@ -926,6 +940,10 @@ export interface ProjectConfig {
   retry: {
     http_max_attempts: number;
     format_max_attempts: number;
+    empty_truncated_mode: "retry" | "split";
+    empty_truncated_max_attempts: number;
+    empty_unknown_mode: "retry" | "split";
+    empty_unknown_max_attempts: number;
     unresolved_retry_scope: "unresolved" | "chunk";
     base_delay_seconds: number;
     max_delay_seconds: number;

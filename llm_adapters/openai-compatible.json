@@ -17,6 +17,9 @@
     "/choices/0/message/reasoning_content",
     "/choices/0/message/reasoning"
   ],
+  "response_finish_reason_pointer": "/choices/0/finish_reason",
+  "truncated_finish_reasons": ["length"],
+  "blocked_finish_reasons": ["content_filter"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",
@@ -42,6 +45,7 @@
       {"pointer": "/choices/0/delta/reasoning_content"},
       {"pointer": "/choices/0/delta/reasoning"}
     ],
+    "finish_reason_events": [{"pointer": "/choices/0/finish_reason"}],
     "terminal": {"sentinel": "[DONE]"},
     "allow_clean_eof": true,
     "error_events": [

@@ -6649,3 +6649,210 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         item["code"] == "decision_resume_incompatible"
         for item in result["blocking"]
     )
+
+
+def test_draft_scan_options_and_invalid_combinations(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root, app_root=tmp_path / "app-root")
+    with TestClient(app) as client:
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["include_draft_translation"] is True
+        assert options["draft_progress"]["translation"] == {
+            "completed": 0,
+            "failed": 0,
+            "total": 2,
+        }
+        assert options["draft_prompt_preflight"]["ok"] is True
+        for payload in (
+            {"stage": "translation", "include_draft_translation": True},
+            {"stage": "run-all", "include_draft_translation": True},
+        ):
+            assert (
+                client.post("/api/v1/projects/sample/tasks", json=payload).status_code
+                == 400
+            )
+        (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["draft_prompt_preflight"]["ok"] is False
+        assert (
+            client.post(
+                "/api/v1/projects/sample/tasks",
+                json={"stage": "terminology", "include_draft_translation": True},
+            ).status_code
+            == 400
+        )
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_task_reports_both_result_classes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.helpers import llm_jsonl
+
+    _, project = make_project(tmp_path, "Alice entered.")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    original_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
+            for item in payload["segments"]
+        ]
+        records.insert(0, {"type": "no_terms"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    def client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        include_draft_translation=True,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.tasks[started["task_id"]].view()
+    assert result["status"] == "completed"
+    assert result["include_draft_translation"] is True
+    assert result["draft_progress"] == {
+        stage: {"completed": 1, "failed": 0, "total": 1}
+        for stage in ("terminology", "translation")
+    }
+    assert result["completed_segments"] == 1
+
+
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+def test_review_filters_match_visible_states_and_page_index(
+    tmp_path: Path, stage: str
+) -> None:
+    projects_root, project = make_project(
+        tmp_path,
+        "pending\nmissing-base\noutdated\naccepted\nsuggested\napplied\nfailed\nreset",
+    )
+    store = WebStore(project)
+
+    def save(
+        target: str, index: int, status: str = "completed", **fields: object
+    ) -> str:
+        record = record_header(
+            "stage_result",
+            store.project_id,
+            stage=target,
+            segment_id=f"F0001-S{index:06d}",
+            status=status,
+            **fields,
+        )
+        append_jsonl(project, project / "stages" / f"{target}.jsonl", record)
+        return record["record_id"]
+
+    for index in [1, 3, 4, 5, 6, 8]:
+        base = save("translation", index, text="译文")
+        if stage == "polishing" and index == 3:
+            base = save("proofreading_applied", index, text="校对译文")
+        if index in [3, 4, 5, 6, 8]:
+            suggestion = save(
+                stage,
+                index,
+                base_result_id="old-base" if index == 3 else base,
+                review_status="accepted" if index == 4 else "suggested",
+                suggested_text="建议",
+            )
+            if index in [4, 6]:
+                save(
+                    f"{stage}_applied",
+                    index,
+                    suggestion_result_id=suggestion,
+                    text="应用后",
+                )
+        if index == 8:
+            save(stage, index, "reset")
+    save(stage, 7, "failed", error_message="模拟失败")
+
+    with TestClient(create_app(projects_root=projects_root)) as client:
+        for status, indexes in {
+            "pending": [1, 8],
+            "missing-base": [2],
+            "outdated": [3],
+            "accepted": [4],
+            "suggested": [5],
+            "applied": [6],
+            "failed": [7],
+        }.items():
+            payload = {"stage": stage, "status": status}
+            index = client.post("/api/v1/projects/sample/segments/ids", json=payload)
+            page = client.post("/api/v1/projects/sample/segments/query", json=payload)
+            assert index.status_code == page.status_code == 200, (index.text, page.text)
+            expected = [f"F0001-S{value:06d}" for value in indexes]
+            assert index.json()["segment_ids"] == expected
+            assert [item["segment_id"] for item in page.json()["segments"]] == expected
+            assert page.json()["total_segments"] == len(expected)
+
+        scoped = {
+            "stage": stage,
+            "status": "applied",
+            "q": "applied",
+            "file_id": "F0001",
+            "part_id": "document",
+        }
+        assert client.post("/api/v1/projects/sample/segments/ids", json=scoped).json()[
+            "segment_ids"
+        ] == ["F0001-S000006"]
+        assert (
+            client.post("/api/v1/projects/sample/segments/query", json=scoped).json()[
+                "total_segments"
+            ]
+            == 1
+        )
+
+
+def test_translation_filters_keep_warnings_failures_and_resets(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path, "completed\nwarning\nfailed\npending\nreset"
+    )
+    project_id = WebStore(project).project_id
+    for index, status in [
+        (1, "completed"),
+        (2, "completed"),
+        (3, "failed"),
+        (5, "completed"),
+        (5, "reset"),
+    ]:
+        append_jsonl(
+            project,
+            project / "stages" / "translation.jsonl",
+            record_header(
+                "stage_result",
+                project_id,
+                stage="translation",
+                segment_id=f"F0001-S{index:06d}",
+                status=status,
+                text="译文",
+                validation_status="warning" if index == 2 else "passed",
+            ),
+        )
+    with TestClient(create_app(projects_root=projects_root)) as client:
+        for status, indexes in {
+            "completed": [1, 2],
+            "warning": [2],
+            "failed": [3],
+            "pending": [4, 5],
+        }.items():
+            payload = {"stage": "translation", "status": status}
+            index = client.post("/api/v1/projects/sample/segments/ids", json=payload)
+            page = client.post("/api/v1/projects/sample/segments/query", json=payload)
+            expected = [f"F0001-S{value:06d}" for value in indexes]
+            assert index.json()["segment_ids"] == expected
+            assert [item["segment_id"] for item in page.json()["segments"]] == expected
+            assert page.json()["total_segments"] == len(expected)

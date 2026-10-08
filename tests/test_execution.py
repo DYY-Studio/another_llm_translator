@@ -439,6 +439,10 @@ def test_scope_and_result_selection_preserve_old_success() -> None:
     }
     forced = classify_stage(selected, history, force=True)
     assert len(forced.work) == 4
+    assert forced.reusable == ()
+    assert forced.latest_completed == result.latest_completed
+    assert forced.fingerprints == result.fingerprints
+    assert forced.last_attempt_failed == result.last_attempt_failed
 
 
 def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:

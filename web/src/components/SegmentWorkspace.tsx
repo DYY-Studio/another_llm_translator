@@ -123,7 +123,9 @@ export function SegmentWorkspace({
   onJumpConsumed?: () => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
-    ["all", "pending", "completed", "warning", "missing-base", "outdated", "accepted", "suggested", "applied", "error"]
+    (stage === "translation"
+      ? ["all", "pending", "completed", "warning", "error"]
+      : ["all", "pending", "missing-base", "outdated", "accepted", "suggested", "applied", "error"])
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
@@ -668,6 +670,7 @@ export function SegmentWorkspace({
             {selected.model_source && selected.model_source !== selected.source && (
               <details className="source-model-preview"><summary>{translate("workspace.modelText", language)}</summary><div className="source-box">{selected.model_source}</div></details>
             )}
+            {stage === "translation" && selected.translation?.generation_origin === "terminology_draft" && <small>{translate("workspace.draftOrigin", language)}</small>}
             {review?.outdated && <div className="warning-banner">{translate("workspace.baseChanged", language)}</div>}
             <div className={stage === "translation" ? "comparison single" : "comparison"}>
               {stage !== "translation" && (

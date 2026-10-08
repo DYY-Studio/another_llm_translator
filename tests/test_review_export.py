@@ -1082,3 +1082,51 @@ async def test_export_fails_when_output_encoding_cannot_represent_text(
             )
     finally:
         del os.environ["LLM_API_KEY"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
+async def test_force_redo_counts_only_current_results(
+    tmp_path: Path, stage: str
+) -> None:
+    from app.sqlite_storage import read_json
+
+    project = await create_project(tmp_path, "one\ntwo")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content)["messages"][1])
+        return workflow_handler(request)
+
+    async def execute(scope: Scope, progress=None):
+        kwargs = {"http_client": client, "on_progress": progress}
+        if stage == "translation":
+            return await run_translation(project, scope, **kwargs)
+        return await run_review(project, stage, scope, **kwargs)
+
+    progress: list[tuple[int, int, int]] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        if stage != "translation":
+            await run_translation(project, Scope(), http_client=client)
+        if stage == "polishing":
+            await run_review(project, "proofreading", Scope(), http_client=client)
+            run_apply(
+                project,
+                "proofreading",
+                Scope(),
+                allow_outdated_base=False,
+                confirmed_all=True,
+            )
+        first = await execute(Scope(only_segment="F0001-S000001"))
+        requests.clear()
+        redo = await execute(Scope(force=True), lambda *counts: progress.append(counts))
+    assert progress[0] == (0, 0, 2)
+    assert progress[-1] == (2, 0, 2)
+    assert all(0 <= completed <= total for completed, failed, total in progress)
+    assert sum(len(json.loads(item["content"])["segments"]) for item in requests) == 2
+    manifest = read_json(project, project / "runs" / redo["run_id"] / "manifest.json")
+    assert manifest["requested_segment_count"] == 2
+    assert manifest["reused_segment_count"] == 0
+    history = read_jsonl(project, project / "stages" / f"{stage}.jsonl")
+    assert sum(item.get("run_id") == first["run_id"] for item in history) == 1
+    assert sum(item.get("run_id") == redo["run_id"] for item in history) == 2

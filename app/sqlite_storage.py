@@ -45,6 +45,7 @@ ERROR_CATEGORIES = frozenset(
     {
         "context_error",
         "external_error",
+        "empty_response",
         "format_error",
         "validation_error",
         "stage_error",
@@ -2341,13 +2342,13 @@ def read_run_record(project: Path, run_id: str) -> dict[str, Any] | None:
         connection.close()
 
 
-def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
+def _stage_cte(stage: str | None, alias: str = "latest_stage") -> tuple[str, list[Any]]:
     if not stage:
         return "", []
     return (
-        """
+        f"""
         LEFT JOIN (
-            SELECT sr2.segment_id, sr2.status, sr2.payload_json
+            SELECT sr2.segment_id, sr2.record_id, sr2.status, sr2.payload_json
             FROM stage_results sr2
             JOIN (
                 SELECT segment_id, MAX(sequence) AS seq
@@ -2355,8 +2356,9 @@ def _stage_cte(stage: str | None) -> tuple[str, list[Any]]:
                 WHERE stage = ?
                 GROUP BY segment_id
             ) AS latest ON latest.seq = sr2.sequence
-        ) AS latest_stage
-          ON latest_stage.segment_id = segments.segment_id
+            WHERE sr2.status != 'reset'
+        ) AS {alias}
+          ON {alias}.segment_id = segments.segment_id
         """,
         [stage],
     )
@@ -2370,14 +2372,49 @@ def _stage_filters(
         return "", [], []
     join, params = _stage_cte(stage)
     clauses = []
+    if status:
+        if stage in {"proofreading", "polishing"} and status not in {
+            "completed",
+            "failed",
+            "warning",
+        }:
+            base_join, base_params = _stage_cte("translation", "review_translation")
+            applied_join, applied_params = _stage_cte(
+                f"{stage}_applied", "review_applied"
+            )
+            join += base_join + applied_join
+            params.extend([*base_params, *applied_params])
+            base_id = "review_translation.record_id"
+            if stage == "polishing":
+                proof_join, proof_params = _stage_cte(
+                    "proofreading_applied", "review_proofreading"
+                )
+                join += proof_join
+                params.extend(proof_params)
+                base_id = "COALESCE(review_proofreading.record_id, review_translation.record_id)"
+            # Same precedence as the workspace badges and review view.
+            clauses.append(f"""
+                CASE
+                    WHEN latest_stage.status = 'failed' THEN 'failed'
+                    WHEN {base_id} IS NULL THEN 'missing-base'
+                    WHEN latest_stage.record_id IS NOT NULL AND
+                         json_extract(latest_stage.payload_json, '$.base_result_id') IS NOT {base_id}
+                         THEN 'outdated'
+                    WHEN latest_stage.record_id IS NULL THEN 'pending'
+                    WHEN json_extract(latest_stage.payload_json, '$.review_status') = 'accepted' THEN 'accepted'
+                    WHEN json_extract(review_applied.payload_json, '$.suggestion_result_id') = latest_stage.record_id THEN 'applied'
+                    ELSE 'suggested'
+                END = ?
+            """)
+            params.append(status)
+        else:
+            _append_stage_status_filter(clauses, params, status)
     if search:
         clauses.append(
             "(instr(lower(segments.source), lower(?)) > 0 OR "
             "instr(lower(COALESCE(latest_stage.payload_json, '')), lower(?)) > 0)"
         )
         params.extend([search, search])
-    if status:
-        _append_stage_status_filter(clauses, params, status)
     return join, params, clauses
 
 
@@ -2385,7 +2422,7 @@ def _append_stage_status_filter(
     clauses: list[str], params: list[Any], status: str
 ) -> None:
     if status == "pending":
-        clauses.append("(latest_stage.status IS NULL OR latest_stage.status = 'reset')")
+        clauses.append("latest_stage.status IS NULL")
     elif status == "warning":
         clauses.append(
             "latest_stage.status = 'completed' AND ("

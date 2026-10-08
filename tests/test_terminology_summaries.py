@@ -322,8 +322,10 @@ async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_declaration", [False, True])
 async def test_joint_partitioned_summaries_persist_separate_fragments(
     tmp_path: Path,
+    missing_declaration: bool,
 ) -> None:
     project = _project(tmp_path)
     write_summary_participation(
@@ -331,11 +333,27 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        if len(requests) == 2:
+            assert payload["source_segments"] == requests[0]["source_segments"]
+            prompt = json.loads(request.content)["messages"][0]["content"]
+            assert 'type="summary"' in prompt and 'type="term"' in prompt
+            assert "format_correction" in payload
+            assert not read_content_summaries(
+                project, kind="fragment", status="completed"
+            )
+            assert not read_jsonl(project, project / "terminology" / "scans.jsonl")
         records = [
             {"type": "summary", "text": "Alice 进入。", "refs": ["1"]},
             {"type": "summary", "text": "Bob 挥手。", "refs": ["2"]},
+            {"type": "no_terms"},
         ]
+        if missing_declaration and len(requests) == 1:
+            records.pop()
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
@@ -353,6 +371,7 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
 
+    assert len(requests) == (2 if missing_declaration else 1)
     assert result["failed"] == 0
     summaries = read_content_summaries(project, kind="fragment", status="completed")
     summaries.sort(key=lambda item: item["source_range"]["segment_ids"][0])
@@ -1833,7 +1852,7 @@ async def test_joint_response_retries_failed_class_and_tracks_prompt_digest(
             records = (
                 [
                     {"type": "summary", "text": "Alice 进入。"},
-                    {"type": "term", "source": "Missing", "category": "无效"},
+                    {"type": "term", "source": "Missing", "category": ""},
                 ]
                 if failed_class == "term"
                 else [{"type": "term", "source": "Alice", "category": "人物"}]
@@ -2213,7 +2232,14 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
                     {
                         "message": {
                             "content": llm_jsonl(
-                                [{"type": "summary", "text": "片段。", "refs": ["1"]}]
+                                [
+                                    {
+                                        "type": "summary",
+                                        "text": "片段。",
+                                        "refs": ["1"],
+                                    },
+                                    {"type": "no_terms"},
+                                ]
                             )
                         }
                     }
@@ -2382,6 +2408,12 @@ async def test_summary_prompt_digest_changes_when_adapter_requirements_change(
                                         ],
                                     }
                                 ]
+                                + (
+                                    [{"type": "no_terms"}]
+                                    if 'type="term"'
+                                    in payload["messages"][0]["content"]
+                                    else []
+                                )
                             )
                         }
                     }

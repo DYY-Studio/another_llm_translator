@@ -53,6 +53,7 @@ from .plugins import (
 from .project import (
     PROMPT_LANGUAGES,
     PROMPT_RESOURCE_STAGES,
+    load_source_files,
     prompt_file,
 )
 from .prompt_library import (
@@ -237,6 +238,26 @@ def register_resource_routes(
             raise UsageError("language 必须是 zh-CN 或 en")
         return str(value)
 
+    def add_draft_preview(
+        result: dict[str, Any],
+        content: str,
+        language: str,
+        translation_path: Path,
+    ) -> None:
+        if not translation_path.is_file():
+            result.setdefault("assembled_mode_errors", {})["terms+translation"] = (
+                f"缺少 {language} 翻译 Prompt：{prompt_file('translation', language)}"
+            )
+            return
+        result["assembled_modes"]["terms+translation"] = full_prompt(
+            "terminology",
+            content,
+            language,
+            response_mode="terms+translation",
+            translation_middle=translation_path.read_text(encoding="utf-8"),
+        )
+        result["assembled_mode_languages"]["terms+translation"] = language
+
     def prompt_view(
         stage: str,
         language: str,
@@ -244,24 +265,36 @@ def register_resource_routes(
         available: list[str],
         global_file_for: Callable[[str], Path] | None = None,
         fragment_summary_file_for: Callable[[str], Path] | None = None,
+        translation_file_for: Callable[[str], Path] | None = None,
+        document_requirements: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if language not in available or not file_for(language).is_file():
             raise UsageError(
                 f"缺少 {language} Prompt：{prompt_file(stage, language)}",
                 reason="prompt_language_missing",
             )
+
+        def requirements_for(*stages: str) -> tuple[str, ...]:
+            values = dict.fromkeys(
+                (document_requirements or {}).get(name, "") for name in stages
+            )
+            requirements = tuple(value for value in values if value)
+            return requirements
+
         resolved = language
         path = file_for(resolved)
         content = path.read_text(encoding="utf-8")
         result: dict[str, Any] = {
             "content": content,
             "language": resolved,
-            "assembled": full_prompt(stage, content, resolved),
+            "assembled": full_prompt(stage, content, resolved, requirements_for(stage)),
             "languages": available,
         }
         if stage == "terminology_decision":
             assembled_phases = {
-                phase: full_prompt(stage, content, resolved, phase=phase)
+                phase: full_prompt(
+                    stage, content, resolved, requirements_for(stage), phase=phase
+                )
                 for phase in ("adjudication", "consistency", "final_review")
             }
             result["assembled_phases"] = assembled_phases
@@ -274,54 +307,56 @@ def register_resource_routes(
             assembled_mode_languages = {"terms-only": resolved}
             mode_errors: dict[str, str] = {}
             if fragment_summary_file_for is not None:
-                def mode_language(required_stages: tuple[str, ...]) -> str | None:
-                    for candidate in (language,):
-                        paths = {
-                            "terminology": file_for(candidate),
-                            "fragment_summary": fragment_summary_file_for(candidate),
-                        }
-                        if all(paths[name].is_file() for name in required_stages):
-                            return candidate
-                    return None
-
-                joint_language = mode_language(
-                    ("terminology", "fragment_summary")
-                )
-                if joint_language is None:
-                    mode_errors["terms+fragment-summary"] = (
-                        "缺少同一语言的术语和片段概括 Prompt"
-                    )
-                else:
-                    joint_content = file_for(joint_language).read_text(
-                        encoding="utf-8"
-                    )
-                    fragment_content = fragment_summary_file_for(
-                        joint_language
-                    ).read_text(encoding="utf-8")
-                    assembled_modes["terms+fragment-summary"] = full_prompt(
-                        "terminology",
-                        joint_content,
-                        joint_language,
-                        response_mode="terms+fragment-summary",
-                        fragment_summary_middle=fragment_content,
-                    )
-                    assembled_mode_languages["terms+fragment-summary"] = joint_language
-
-                summary_language = mode_language(("fragment_summary",))
-                if summary_language is None:
-                    mode_errors["summary-only"] = "缺少片段概括 Prompt"
-                else:
-                    summary_content = fragment_summary_file_for(
-                        summary_language
-                    ).read_text(encoding="utf-8")
+                fragment_path = fragment_summary_file_for(resolved)
+                if fragment_path.is_file():
                     assembled_modes["summary-only"] = full_prompt(
-                        "fragment_summary", summary_content, summary_language
+                        "fragment_summary",
+                        fragment_path.read_text(encoding="utf-8"),
+                        resolved,
+                        requirements_for("fragment_summary"),
                     )
-                    assembled_mode_languages["summary-only"] = summary_language
+                    assembled_mode_languages["summary-only"] = resolved
+                else:
+                    mode_errors["summary-only"] = "缺少片段概括 Prompt"
             result["assembled_modes"] = assembled_modes
             result["assembled_mode_languages"] = assembled_mode_languages
             if mode_errors:
                 result["assembled_mode_errors"] = mode_errors
+        if stage == "terminology":
+            for mode in (
+                "terms+translation",
+                "terms+fragment-summary",
+                "terms+translation+fragment-summary",
+            ):
+                needs_translation = "translation" in mode
+                needs_summary = "fragment-summary" in mode
+                paths = [file_for(resolved)]
+                if needs_summary and fragment_summary_file_for is not None:
+                    paths.append(fragment_summary_file_for(resolved))
+                if needs_translation and translation_file_for is not None:
+                    paths.append(translation_file_for(resolved))
+                if len(paths) != 1 + needs_summary + needs_translation or any(
+                    not item.is_file() for item in paths
+                ):
+                    result.setdefault("assembled_mode_errors", {})[mode] = (
+                        "缺少同一语言的必要 Prompt"
+                    )
+                    continue
+                middles = [item.read_text(encoding="utf-8") for item in paths]
+                result["assembled_modes"][mode] = full_prompt(
+                    "terminology",
+                    content,
+                    resolved,
+                    document_requirements=requirements_for(
+                        "terminology",
+                        *(("translation",) if needs_translation else ()),
+                        *(("fragment_summary",) if needs_summary else ()),
+                    ),
+                    response_mode=mode,
+                    fragment_summary_middle=middles[1] if needs_summary else None,
+                    translation_middle=middles[-1] if needs_translation else None,
+                )
+                result["assembled_mode_languages"][mode] = resolved
         if global_file_for is not None:
             global_path = global_file_for(resolved)
             if global_path.is_file():
@@ -455,6 +490,7 @@ def register_resource_routes(
             language,
             lambda value: global_prompt_file(stage, value),
             prompt_languages_for(app_root)[stage],
+            translation_file_for=lambda value: global_prompt_file("translation", value),
             fragment_summary_file_for=(
                 lambda value: global_prompt_file("fragment_summary", value)
             )
@@ -499,13 +535,52 @@ def register_resource_routes(
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
     async def get_project_prompt(
-        name: str, stage: str, language: str = "zh-CN"
+        name: str, stage: str, language: str = "zh-CN", file_id: str | None = None
     ) -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
-        return prompt_view(
+        from .stage_runtime import document_prompt_context, document_prompt_requirements
+
+        files = load_source_files(root)
+        resources = (
+            ("terminology", "translation", "fragment_summary")
+            if stage == "terminology"
+            else (stage,)
+        )
+        groups: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
+        selected_key = None
+        for file in files:
+            adapter, state, run_options = document_prompt_context(root, file)
+            requirements = {
+                resource: document_prompt_requirements(
+                    adapter, state, run_options, resource
+                ).get(language, "")
+                for resource in resources
+            }
+            key = tuple(requirements.items())
+            group = groups.setdefault(
+                key,
+                {
+                    "file_id": file["file_id"],
+                    "adapter_ids": [],
+                    "file_count": 0,
+                    "has_requirements": any(requirements.values()),
+                },
+            )
+            if adapter.adapter_id not in group["adapter_ids"]:
+                group["adapter_ids"].append(adapter.adapter_id)
+            group["file_count"] += 1
+            if file["file_id"] == file_id:
+                selected_key = key
+        if file_id and selected_key is None:
+            raise UsageError(f"项目文件不存在：{file_id}")
+        if selected_key is None:
+            selected_key = next(iter(groups), None)
+        selected = groups[selected_key] if selected_key is not None else None
+        requirements = dict(selected_key) if selected_key is not None else {}
+        result = prompt_view(
             stage,
             language,
             lambda value: root / "prompts" / prompt_file(stage, value),
@@ -515,14 +590,22 @@ def register_resource_routes(
                 if (root / "prompts" / prompt_file(stage, value)).is_file()
             ],
             global_file_for=lambda value: global_prompt_file(stage, value),
+            translation_file_for=lambda value: (
+                root / "prompts" / prompt_file("translation", value)
+            ),
             fragment_summary_file_for=(
-                lambda value: root
-                / "prompts"
-                / prompt_file("fragment_summary", value)
+                lambda value: root / "prompts" / prompt_file("fragment_summary", value)
             )
             if stage == "terminology"
             else None,
+            document_requirements=requirements,
         )
+
+        result["document_context"] = {
+            "file_id": selected["file_id"] if selected else None,
+            "groups": list(groups.values()),
+        }
+        return result
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
     async def put_project_prompt(
@@ -536,9 +619,7 @@ def register_resource_routes(
             raise UsageError("Prompt 不能为空")
         root = project(name)
         with project_write_lock(root):
-            atomic_write_text(
-                root / "prompts" / prompt_file(stage, language), content
-            )
+            atomic_write_text(root / "prompts" / prompt_file(stage, language), content)
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")
@@ -646,6 +727,9 @@ def register_resource_routes(
                 }
             result["assembled_modes"] = assembled_modes
             result["assembled_mode_languages"] = assembled_mode_languages
+            add_draft_preview(
+                result, content, language, global_prompt_file("translation", language)
+            )
         return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")

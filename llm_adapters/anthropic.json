@@ -16,6 +16,9 @@
     "stream": "${stream}"
   },
   "response_content_pointer": "/content/-1/text",
+  "response_finish_reason_pointer": "/stop_reason",
+  "truncated_finish_reasons": ["max_tokens"],
+  "blocked_finish_reasons": ["refusal"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",
@@ -37,6 +40,7 @@
       }
     ],
     "reasoning_events": [],
+    "finish_reason_events": [{"pointer": "/delta/stop_reason"}],
     "terminal": {
       "when": {"pointer": "/type", "equals": "message_stop"}
     },

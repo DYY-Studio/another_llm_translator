@@ -39,6 +39,10 @@ class TerminologyResponseMode(str, Enum):
     TERMS_ONLY = "terms-only"
     TERMS_AND_FRAGMENT_SUMMARY = "terms+fragment-summary"
     SUMMARY_ONLY = "summary-only"
+    TERMS_AND_TRANSLATION = "terms+translation"
+    TRANSLATION_ONLY = "translation-only"
+    TERMS_TRANSLATION_SUMMARY = "terms+translation+fragment-summary"
+    TRANSLATION_SUMMARY = "translation+fragment-summary"
 
 
 @dataclass(frozen=True)
@@ -80,9 +84,17 @@ def response_record_types(
     except (TypeError, ValueError) as exc:
         raise ValueError(f"不支持的术语响应模式：{mode}") from exc
     if normalized is TerminologyResponseMode.TERMS_ONLY:
-        return ("term",)
+        return ("term", "no_terms")
     if normalized is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
-        return ("summary", "term")
+        return ("summary", "term", "no_terms")
+    if normalized is TerminologyResponseMode.TERMS_AND_TRANSLATION:
+        return ("term", "no_terms", "segment")
+    if normalized is TerminologyResponseMode.TERMS_TRANSLATION_SUMMARY:
+        return ("summary", "term", "no_terms", "segment")
+    if normalized is TerminologyResponseMode.TRANSLATION_SUMMARY:
+        return ("summary", "segment")
+    if normalized is TerminologyResponseMode.TRANSLATION_ONLY:
+        return ("segment",)
     return ("summary",)
 
 def normalize_llm_response(response: LLMResponse) -> LLMResponse:
@@ -91,6 +103,7 @@ def normalize_llm_response(response: LLMResponse) -> LLMResponse:
         raise ExternalError("LLM 响应同时包含结构化和 content 内嵌思考正文")
     return LLMResponse(
         content=embedded.content,
+        finish_reason=response.finish_reason,
         reasoning_content=(response.reasoning_content or embedded.reasoning_content),
     )
 
@@ -199,37 +212,27 @@ def parse_jsonl_document(
     )
 
 
-def _term_is_in_sources(term: str, source_texts: tuple[str, ...]) -> bool:
-    return any(term in source for source in source_texts)
+def _terminology_declaration_error(
+    records: dict[str, tuple[dict[str, Any], ...]],
+) -> tuple[str, str] | None:
+    terms = records.get("term", ())
+    empty = records.get("no_terms", ())
+    if not terms and not empty:
+        return "missing_terms", "缺少术语响应声明：必须返回 term 或 no_terms"
+    if empty and (terms or len(empty) != 1 or empty[0] != {"type": "no_terms"}):
+        return "invalid_no_terms", "无术语声明必须是单条 no_terms，且不得与 term 并存"
+    return None
 
 
 def _validate_terminology_record(
     record: dict[str, Any],
-    *,
-    source_texts: tuple[str, ...],
-    seen_sources: set[str] | None,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    allowed = {
-        "type",
-        "source",
-        "category",
-        "description",
-        "preferred_translation",
-        "aliases",
-    }
     source = record.get("source")
     category = record.get("category")
-    if set(record) - allowed:
-        return "unknown_field", None
     if not isinstance(source, str) or not source.strip():
         return "invalid_source", None
-    source = source.strip()
     if not isinstance(category, str) or not category.strip():
         return "invalid_category", None
-    if not _term_is_in_sources(source, source_texts):
-        return "source_not_found", None
-    if seen_sources is not None and source in seen_sources:
-        return "duplicate_term", None
     description = record.get("description")
     preferred = record.get("preferred_translation")
     aliases = record.get("aliases", [])
@@ -238,20 +241,16 @@ def _validate_terminology_record(
     if preferred is not None and not isinstance(preferred, str):
         return "invalid_preferred_translation", None
     if not isinstance(aliases, list) or not all(
-        isinstance(alias, str) and alias.strip() for alias in aliases
+        isinstance(alias, str) for alias in aliases
     ):
         return "invalid_aliases", None
-    if any(not _term_is_in_sources(alias.strip(), source_texts) for alias in aliases):
-        return "alias_not_found", None
-    if seen_sources is not None:
-        seen_sources.add(source)
     return None, {
         "type": "term",
-        "source": source,
+        "source": source.strip(),
         "category": category.strip(),
         "description": description.strip() if description else None,
         "preferred_translation": preferred.strip() if preferred else None,
-        "aliases": [alias.strip() for alias in aliases],
+        "aliases": [alias.strip() for alias in aliases if alias.strip()],
     }
 
 
@@ -289,19 +288,15 @@ def parse_terminology_response(
     *,
     mode: TerminologyResponseMode | str,
     source_refs: tuple[str, ...] | list[str] = (),
-    source_texts: tuple[str, ...] | list[str] = (),
 ) -> TerminologyResponse:
     """Validate one terminology response according to its explicit mode.
 
-    ``source_refs`` are request-local stable references (usually mapped by the
-    host to durable ``(file_id, part_id, segment_id)`` ranges).  Term sources
-    and aliases are checked against the source text array so context-only text
-    cannot create a candidate.
+    ``source_refs`` identify the requested summary range. Term records use
+    the same field validation as ordinary scans; empty results are explicit.
     """
 
     allowed_types = response_record_types(mode)
     expected_refs = tuple(source_refs)
-    source_values = tuple(source_texts)
     document = parse_jsonl_document(content, record_type=allowed_types)
     global_errors = document.errors
     global_codes = document.error_codes
@@ -311,12 +306,6 @@ def parse_terminology_response(
     }
     terms: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-    # The existing terms-only parser accepts repeated source rows.  The
-    # combined experimental response may opt into duplicate detection because
-    # it has a class-level completion boundary to report.
-    seen_sources: set[str] | None = (
-        set() if allowed_types == ("summary", "term") else None
-    )
     raw_by_type = document.records_by_type or {}
 
     if "summary" in allowed_types:
@@ -361,26 +350,27 @@ def parse_terminology_response(
 
     if "term" in allowed_types:
         for row in raw_by_type.get("term", ()):
-            error, validated = _validate_terminology_record(
-                row,
-                source_texts=source_values,
-                seen_sources=seen_sources,
-            )
+            error, validated = _validate_terminology_record(row)
             if error is not None or validated is None:
                 errors_by_type["term"].append(
-                    f"term 记录字段或来源无效：{error or 'invalid_term'}"
+                    f"term 记录字段无效：{error or 'invalid_term'}"
                 )
                 error_codes_by_type["term"].append(error or "invalid_term")
             else:
                 terms.append(validated)
+        declaration_error = _terminology_declaration_error(raw_by_type)
+        if declaration_error:
+            code, message = declaration_error
+            global_errors = (*global_errors, message)
+            global_codes = (*global_codes, code)
 
     # A joint response is ordered summary, then terms.  This is a protocol
     # error because callers cannot safely assign a later summary to an earlier
     # batch once records have been persisted.
-    if allowed_types == ("summary", "term"):
+    if "summary" in allowed_types and "term" in allowed_types:
         saw_term = False
         for row in document.records:
-            if row.get("type") == "term":
+            if row.get("type") in {"term", "no_terms"}:
                 saw_term = True
             elif row.get("type") == "summary" and saw_term:
                 global_errors = (*global_errors, "summary 必须出现在 term 之前")

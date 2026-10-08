@@ -21,6 +21,9 @@
     }
   },
   "response_content_pointer": "/candidates/0/content/parts/-1/text",
+  "response_finish_reason_pointer": "/candidates/0/finishReason",
+  "truncated_finish_reasons": ["MAX_TOKENS"],
+  "blocked_finish_reasons": ["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/models",
@@ -41,6 +44,7 @@
       {"pointer": "/candidates/0/content/parts/-1/text"}
     ],
     "reasoning_events": [],
+    "finish_reason_events": [{"pointer": "/candidates/0/finishReason"}],
     "terminal": {
       "when": {"pointer": "/candidates/0/finishReason", "exists": true}
     },

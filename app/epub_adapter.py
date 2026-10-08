@@ -196,6 +196,19 @@ class EPUBDocumentAdapter:
                     "\\|, \\⟦, and \\⟧."
                 )
             )
+        elif ruby_mode == "aozora":
+            requirements.append(
+                "Ruby base（｜与《之间）是正文，必须翻译，不得因标记照抄。可删标记/"
+                "reading，仅输出已译 base；保留须为｜已译base《目标语言适用reading》，"
+                "reading 也须翻译或转写；无法适配则仅输出已译 base。"
+                if language == "zh-CN"
+                else "An Aozora Ruby base (between ｜ and 《) is source text and must be "
+                "translated, not copied because of its markup. You may drop the markup "
+                "and reading and return only the translated base. If kept, use "
+                "｜translated base《target-appropriate reading》; translate or "
+                "transliterate the reading, otherwise drop Ruby and return only the "
+                "translated base."
+            )
         policy = run_options["inline_format_policy"]
         if policy not in {"tiered", "strict"}:
             raise ConfigError(f"EPUB 内联格式策略无效：{policy}")

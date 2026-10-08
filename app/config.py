@@ -74,6 +74,10 @@ SCHEMA: dict[str, Any] = {
     "retry": {
         "http_max_attempts": None,
         "format_max_attempts": None,
+        "empty_truncated_mode": None,
+        "empty_truncated_max_attempts": None,
+        "empty_unknown_mode": None,
+        "empty_unknown_max_attempts": None,
         "unresolved_retry_scope": None,
         "base_delay_seconds": None,
         "max_delay_seconds": None,
@@ -205,6 +209,14 @@ def validate_config(config: dict[str, Any]) -> None:
             or value <= 0
         ):
             raise ConfigError(f"{section}.{key} 必须是正整数")
+    for kind in ("truncated", "unknown"):
+        mode_key = f"empty_{kind}_mode"
+        count_key = f"empty_{kind}_max_attempts"
+        if config["retry"][mode_key] not in ("retry", "split"):
+            raise ConfigError(f"retry.{mode_key} 必须是 retry 或 split")
+        count = config["retry"][count_key]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ConfigError(f"retry.{count_key} 必须是非负整数")
     format_attempts = config["retry"]["format_max_attempts"]
     if (
         not isinstance(format_attempts, int)
@@ -412,6 +424,10 @@ def load_config(path: Path) -> dict[str, Any]:
     retry = config.get("retry")
     if isinstance(retry, dict):
         retry.setdefault("unresolved_retry_scope", "unresolved")
+        retry.setdefault("empty_truncated_mode", "split")
+        retry.setdefault("empty_truncated_max_attempts", 2)
+        retry.setdefault("empty_unknown_mode", "retry")
+        retry.setdefault("empty_unknown_max_attempts", 1)
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
